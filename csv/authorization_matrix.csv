@@ -1,0 +1,8 @@
+action,owner,admin,host,cohost,participant,observer,auditor
+View workspace metadata,yes,yes,yes,yes,limited,limited,yes
+Manage workspace settings,yes,yes,no,no,no,no,no
+Create session,yes,yes,yes,yes,no,no,no
+View host-only content,yes,yes,yes,yes,no,no,audit-only
+Execute reveal,yes,yes,yes,yes,no,no,no
+View own visible feed,no,no,preview,preview,yes,no,no
+View audit log,yes,yes,optional,no,no,no,yes

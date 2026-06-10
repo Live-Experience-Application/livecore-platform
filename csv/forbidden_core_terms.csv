@@ -1,0 +1,22 @@
+term,allowed_location,replacement
+campaign,docs explaining boundaries only,use generic Core language
+dungeon,docs explaining boundaries only,use generic Core language
+dungeon_master,docs explaining boundaries only,use generic Core language
+dm,docs explaining boundaries only,use generic Core language
+gm,docs explaining boundaries only,use generic Core language
+game_master,docs explaining boundaries only,use generic Core language
+player,docs explaining boundaries only,use generic Core language
+party,docs explaining boundaries only,use generic Core language
+npc,docs explaining boundaries only,use generic Core language
+quest,docs explaining boundaries only,use generic Core language
+monster,docs explaining boundaries only,use generic Core language
+spell,docs explaining boundaries only,use generic Core language
+character_sheet,docs explaining boundaries only,use generic Core language
+encounter,docs explaining boundaries only,use generic Core language
+initiative,docs explaining boundaries only,use generic Core language
+facilitator,docs explaining boundaries only,use generic Core language
+trainee,docs explaining boundaries only,use generic Core language
+training,docs explaining boundaries only,use generic Core language
+incident,docs explaining boundaries only,use generic Core language
+debrief,docs explaining boundaries only,use generic Core language
+department,docs explaining boundaries only,use generic Core language

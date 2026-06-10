@@ -1,0 +1,14 @@
+event,emitter,visible_to,persisted,notes
+SessionCreated,Host/Admin,Host/Admin/CoHost,yes,Preparation event
+SessionStarted,Host/CoHost,authorized session audience,yes,Starts live run
+SessionEnded,Host/CoHost,authorized session audience,yes,Ends live run
+ParticipantJoined,Participant/System,Host/CoHost and configured audience,yes,Connection event
+ParticipantLeft,System,Host/CoHost,yes,Connection event
+SceneActivated,Host/CoHost,authorized session audience,yes,Scene switch
+ContentBlockCreated,Host/CoHost,Host/CoHost,yes,Prep event
+VisibilityRuleChanged,Host/CoHost,Host/CoHost/Auditor,yes,Security relevant
+ContentRevealed,Host/CoHost,selected recipients,yes,Central reveal event
+PrivateMessageSent,Host/CoHost,selected recipients,yes,Recipient-specific projection
+AssetRevealed,Host/CoHost,selected recipients,yes,Asset metadata only; URL separate
+SessionNoteCreated,Host/CoHost,Host/CoHost,yes,Host-only by default
+RecapGenerated,System/Host,Host/CoHost/Admin,yes,Participant-visible only after separate reveal
