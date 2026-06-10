@@ -54,3 +54,11 @@ Read in order:
 7. `csv/core_epics_stories.csv`
 
 Do not implement code until the first story is selected.
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 or later.
+
+Commercial dual licensing may be offered in the future for organizations that require proprietary use, embedding, hosting, or distribution without AGPL obligations.
+
+For commercial licensing inquiries, contact: singh.harwinder@outlook.copm
