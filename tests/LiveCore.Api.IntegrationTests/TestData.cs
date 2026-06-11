@@ -1,6 +1,7 @@
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -76,5 +77,38 @@ internal static class TestData
         context.WorkspaceMembers.Add(member);
         await context.SaveChangesAsync();
         return member;
+    }
+
+    /// <summary>
+    /// Creates and persists a session in the given lifecycle status by driving the
+    /// real aggregate state machine (Create, then Start/End as required), so the
+    /// seeded session has exactly the timestamps and status the production
+    /// transitions would produce. A <see cref="SessionStatus.Prepared"/> session is
+    /// just created; a <see cref="SessionStatus.Live"/> session is created and
+    /// started; an <see cref="SessionStatus.Ended"/> session is created, started and
+    /// ended.
+    /// </summary>
+    public static async Task<Session> AddSessionAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        string title,
+        SessionStatus status)
+    {
+        var session = Session.Create(organizationId, workspaceId, title, SeedTime);
+
+        if (status is SessionStatus.Live or SessionStatus.Ended)
+        {
+            session.Start(SeedTime);
+        }
+
+        if (status is SessionStatus.Ended)
+        {
+            session.End(SeedTime);
+        }
+
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        return session;
     }
 }

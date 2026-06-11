@@ -318,6 +318,29 @@ single-use. It is a one-time join grant, not an authentication credential and
 not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Invite acceptance,
 delivery and revocation endpoints are follow-up stories.
 
+### Session lifecycle commands
+
+Two by-session-id commands drive the session lifecycle state machine
+(`Prepared` → `Live` → `Ended`):
+
+| Method | Route                                | Authorized callers                             |
+| ------ | ------------------------------------ | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/start` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/sessions/{sessionId}/end`   | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The route path carries only the session id, so the target organization is
+supplied as a required `?organizationSlug=` query parameter (resolved by the
+same token-claim-and-membership tenant check as the workspace by-id routes).
+The caller is then authorized by their role in the session's own workspace; a
+caller who cannot see the tenant, or who is not a member of the session's
+workspace, is hidden as `404` (never `403`). `start` requires the session to be
+`Prepared` and `end` requires it to be `Live`; any other current state is a
+`409 Conflict` that leaves the session unchanged.
+
+These commands persist the session status transition (the authoritative state).
+The durable `SessionStarted` / `SessionEnded` events and their realtime delivery
+belong to the later realtime event stream and are not emitted yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

@@ -57,6 +57,40 @@ internal sealed class SessionRepository : ISessionRepository
     }
 
     /// <inheritdoc />
+    public async Task<Session?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored session (ids are generated
+        // non-empty), so the lookup fails fast instead of returning an arbitrary
+        // row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(id));
+        }
+
+        // The predicate LEADS with the tenant column, so the lookup is exactly
+        // tenant-scoped: a session under another organization is never returned
+        // even when the surrogate id matches (threat T5/T1). The workspace is not
+        // part of the predicate because the by-session-id routes do not know it up
+        // front; it is read off the returned row (Session.WorkspaceId) so the
+        // caller can authorize against workspace membership AFTER the tenant
+        // boundary has been enforced.
+        return await _dbContext.Sessions
+            .FirstOrDefaultAsync(
+                session => session.OrganizationId == organizationId
+                    && session.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<SessionAddResult> AddAsync(Session session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);

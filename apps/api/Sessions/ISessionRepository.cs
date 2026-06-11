@@ -50,6 +50,45 @@ public interface ISessionRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Finds the session with exactly the given id WITHIN the given organization
+    /// (tenant) ALONE — without a workspace boundary — or <see langword="null"/>
+    /// when no such session exists in that organization (CORE-SES-004).
+    ///
+    /// This lookup exists because the lifecycle command routes
+    /// (<c>POST /api/v1/sessions/{sessionId}/start</c> and <c>.../end</c>) address
+    /// a session by id within a query-supplied organization only: the route path
+    /// carries no workspace, so the workspace boundary is not known up front. The
+    /// session's own <see cref="Session.WorkspaceId"/> is DISCOVERED from the
+    /// returned row AFTER the tenant boundary has been enforced, and the caller
+    /// then authorizes against WORKSPACE membership in exactly that workspace. The
+    /// lookup is still tenant-safe: the predicate leads with
+    /// <c>organization_id</c>, so a session in another organization is NEVER
+    /// returned even when the surrogate id matches, and the surrogate id alone
+    /// never crosses the tenant boundary (threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
+    /// authorization; docs/06_AUTHORIZATION_MATRIX.md: the organization boundary is
+    /// checked before the workspace boundary). It returns the whole session,
+    /// carrying its workspace id, so the subsequent workspace-membership check has
+    /// the workspace it needs.
+    ///
+    /// The two-boundary <see cref="FindByIdAsync(Guid, Guid, Guid, CancellationToken)"/>
+    /// REMAINS the workspace-scoped lookup and is the right choice whenever the
+    /// workspace is already known from the request (for example the workspace
+    /// session routes). This org-only lookup is used only by the by-session-id
+    /// routes, where the workspace is not in the path and must be discovered from
+    /// the row inside the tenant boundary.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or session id is empty. An empty id can never address a
+    /// stored session, so the lookup is rejected instead of silently returning
+    /// nothing.
+    /// </exception>
+    Task<Session?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new session. A session has no natural key (it is identified only
     /// by its surrogate id), so there is no uniqueness outcome to report; the result
     /// is always <see cref="SessionAddResult.Added"/> on success. Foreign-key

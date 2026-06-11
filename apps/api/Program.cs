@@ -172,6 +172,18 @@ app.MapLiveCoreHealthEndpoints();
 // configured, so mapping them never crashes startup.
 app.MapWorkspaceEndpoints();
 
+// Session lifecycle endpoints (CORE-SES-004): the session start/end commands.
+// They live in an authenticated route group and fail closed (503) when
+// persistence is not configured, exactly like the workspace endpoints. No new DI
+// registration is required: the tenant context resolver, the session repository
+// and the workspace member repository they consume are already registered above
+// inside the persistence conditional. The durable SessionStarted/SessionEnded
+// events these commands will eventually emit are deferred to the Realtime epic
+// (no event store/SignalR transport exists yet); the persisted status transition
+// is the behavior delivered here (docs/09_EVENT_CATALOG.md; csv/database_tables.csv
+// assigns session_events to the Realtime module).
+app.MapSessionEndpoints();
+
 app.Run();
 
 /// <summary>
