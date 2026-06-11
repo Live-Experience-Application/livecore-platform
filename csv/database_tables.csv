@@ -4,6 +4,7 @@ users,IdentityAccess,global,OIDC-linked user reference
 organization_members,Organizations,organization,Tenant membership
 workspaces,Workspaces,organization,Generic workspace
 workspace_members,Workspaces,workspace,Workspace roles
+workspace_invitations,Workspaces,workspace,Member invite scoped token (hash only)
 participants,Participants,workspace,Session-facing participant
 sessions,Sessions,workspace,Live/prepared run
 scenes,Scenes,workspace,Ordered segments

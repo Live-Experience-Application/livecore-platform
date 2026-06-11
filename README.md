@@ -241,10 +241,9 @@ missing, conflicting or malformed security-relevant claims produce a typed
 error, never a partially trusted principal, and organization claim matching is
 exact and case-sensitive (threat T5 in `docs/07_SECURITY_THREAT_MODEL.md`).
 
-Token validation middleware (JWT bearer wiring against the provider, with
-inbound claim type mapping disabled) and the `/api/v1/me` endpoint are not
-part of this story; they follow with the remaining Identity and Tenant
-Boundaries stories. No endpoint behavior changes yet.
+The JWT bearer middleware that validates provider tokens at the edge landed
+later with the first HTTP endpoints (see "Tenant model and HTTP API" below);
+the `/api/v1/me` endpoint is still a follow-up.
 
 ### Persistence (user profile reference)
 
@@ -265,6 +264,59 @@ pinned `dotnet-ef` local tool:
 dotnet tool restore
 dotnet ef migrations add <Name> --project apps/api
 ```
+
+### Tenant model and HTTP API
+
+The Identity and Tenant Boundaries epic builds the tenant model in the
+IdentityAccess and Organizations modules: `Organization` (the tenant root),
+`OrganizationMember` (a subject's generic role in an organization, drawn from
+`docs/06_AUTHORIZATION_MATRIX.md` — the roles are not a linear hierarchy, so
+they are matched exactly), and the `TenantContextResolver`, which turns an
+authenticated principal plus a target organization into a trusted
+`TenantContext` only when both the token's organization claim and a persisted
+membership agree (defence in depth for tenant isolation, threat T5).
+
+The Workspaces module adds the tenant-scoped `Workspace` aggregate,
+`WorkspaceMember` (workspace-level roles) and `WorkspaceInvitation` (a member
+invite carrying a single-use, scoped token — see below).
+
+HTTP endpoints live under `/api/v1` (JSON, RFC 7807 Problem Details, the status
+codes in `docs/08_API_CONTRACTS.md`). Requests are authenticated with an OIDC
+JWT bearer token validated against the configured provider; configure it with:
+
+```text
+Authentication__Oidc__Authority = https://<your-oidc-issuer>
+Authentication__Oidc__Audience  = <your-api-audience>
+```
+
+No identity-provider settings are committed to the repository. When no
+`Authority` is configured the host still starts, but every authenticated
+endpoint fails closed with `401` (never anonymous access); the unauthenticated
+health endpoints stay reachable. Authorization is enforced server-side on every
+request: the target organization is resolved from the request and verified
+against the caller's membership, and cross-tenant or non-member access is hidden
+as `404` rather than `403`.
+
+The workspace routes implemented so far:
+
+| Method | Route                                      | Authorized callers                                                  |
+| ------ | ------------------------------------------ | ------------------------------------------------------------------- |
+| `GET`  | `/api/v1/workspaces`                       | any workspace member (results filtered to the caller's memberships) |
+| `POST` | `/api/v1/workspaces`                       | organization `Owner` or `Admin`                                     |
+| `GET`  | `/api/v1/workspaces/{workspaceId}`         | members of that workspace                                           |
+| `PUT`  | `/api/v1/workspaces/{workspaceId}`         | organization `Owner` or `Admin` (rename)                            |
+| `POST` | `/api/v1/workspaces/{workspaceId}/members` | organization `Owner` or `Admin` (create invite)                     |
+
+### Workspace member invites (scoped tokens)
+
+`POST /api/v1/workspaces/{workspaceId}/members` creates a workspace invitation
+with a single-use, scoped token. The token is generated with a cryptographically
+secure RNG and is returned **once** in the creation response; only its SHA-256
+hash is stored, and the token is never logged or returned again. Each token is
+bound to one organization, one workspace, one role and an expiry, and is
+single-use. It is a one-time join grant, not an authentication credential and
+not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Invite acceptance,
+delivery and revocation endpoints are follow-up stories.
 
 ## Container images
 

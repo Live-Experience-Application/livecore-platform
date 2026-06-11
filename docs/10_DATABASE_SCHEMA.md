@@ -26,6 +26,7 @@ users
 organization_members
 workspaces
 workspace_members
+workspace_invitations
 participants
 sessions
 scenes
@@ -50,6 +51,8 @@ Examples:
 organizations(id)
 workspaces(organization_id, id)
 workspace_members(workspace_id, user_id)
+workspace_invitations(token_hash) unique
+workspace_invitations(organization_id, workspace_id)
 participants(workspace_id, id)
 sessions(workspace_id, id)
 scenes(workspace_id, id)
