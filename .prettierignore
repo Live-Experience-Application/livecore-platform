@@ -1,0 +1,17 @@
+# Documentation and backlog data are read-only reference material; they are
+# not formatted by tooling.
+docs/
+csv/
+LICENSE
+
+# Lockfiles and generated output.
+pnpm-lock.yaml
+node_modules/
+dist/
+bin/
+obj/
+TestResults/
+coverage/
+
+# Local tooling state.
+.claude/

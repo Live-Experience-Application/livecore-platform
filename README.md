@@ -59,6 +59,10 @@ Do not implement code until the first story is selected.
 
 ```text
 LiveCore.slnx            .NET solution (apps + tests)
+Directory.Build.props    repository-wide .NET build/lint enforcement
+.editorconfig            formatting and C# code-style baseline
+eslint.config.mjs        ESLint flat config for the TypeScript packages
+.prettierrc.json         Prettier configuration (with .prettierignore)
 apps/api                 ASP.NET Core API host skeleton (LiveCore.Api)
 apps/worker              Background worker host skeleton (LiveCore.Worker)
 packages/contracts       @livecore/contracts  - TypeScript contract types (skeleton)
@@ -77,11 +81,14 @@ csv/                     backlog stories and forbidden term list
 - Node.js 22 or later
 - pnpm 10 (pinned via the `packageManager` field; with Corepack run `corepack enable pnpm` once, or prefix pnpm commands with `corepack`)
 
-## Build, test and boundary scan
+## Build, format, lint, test and boundary scan
 
-Run all commands from the repository root.
+Run all commands from the repository root. A later CI story (CORE-FND-003)
+calls these commands verbatim.
 
-Build the .NET solution:
+### .NET solution (API, worker, smoke tests)
+
+Build:
 
 ```bash
 dotnet build LiveCore.slnx
@@ -93,12 +100,63 @@ Run the smoke tests:
 dotnet test LiveCore.slnx
 ```
 
-Install and build the TypeScript packages:
+Verify formatting and code style (no files are changed; non-zero exit code on
+violations):
+
+```bash
+dotnet format LiveCore.slnx --verify-no-changes
+```
+
+Apply formatting and code-style fixes:
+
+```bash
+dotnet format LiveCore.slnx
+```
+
+C# style rules live in `.editorconfig`. `Directory.Build.props` additionally
+enforces them at build time (`EnforceCodeStyleInBuild`) and treats warnings as
+errors, so `dotnet build` doubles as the .NET lint gate.
+
+### TypeScript packages
+
+Install dependencies:
 
 ```bash
 pnpm install
+```
+
+Build all packages:
+
+```bash
 pnpm --recursive run build
 ```
+
+Lint (ESLint; zero warnings allowed):
+
+```bash
+pnpm run lint
+```
+
+Verify formatting (Prettier; non-zero exit code on violations):
+
+```bash
+pnpm run format:check
+```
+
+Apply formatting:
+
+```bash
+pnpm run format
+```
+
+Run package test scripts (packages define none yet; this exits 0 and picks up
+`test` scripts automatically as packages add them):
+
+```bash
+pnpm --recursive run test
+```
+
+### Boundary scan
 
 Run the boundary scan (fails with a non-zero exit code if any forbidden
 vertical term from `csv/forbidden_core_terms.csv` appears in Core source under

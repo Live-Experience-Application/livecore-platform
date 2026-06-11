@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Repository-wide .NET build quality settings (CORE-FND-002).
+
+    Code style comes from .editorconfig. It is enforced at build time
+    (EnforceCodeStyleInBuild + TreatWarningsAsErrors) and verified without
+    writing changes by running 'dotnet format' with the verify-no-changes
+    option (see README, "Format and lint").
+  -->
+  <PropertyGroup>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Required so unused-using detection (IDE0005) runs at build time. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591 (missing XML doc comment) is intentionally not enforced. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>
