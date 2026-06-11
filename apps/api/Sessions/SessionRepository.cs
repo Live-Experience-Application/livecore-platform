@@ -1,0 +1,86 @@
+using LiveCore.Api.Persistence;
+using Microsoft.EntityFrameworkCore;
+
+namespace LiveCore.Api.Sessions;
+
+/// <summary>
+/// EF Core implementation of <see cref="ISessionRepository"/> (CORE-SES-002),
+/// backed by the <c>sessions</c> table mapped in
+/// <see cref="SessionConfiguration"/>.
+/// </summary>
+internal sealed class SessionRepository : ISessionRepository
+{
+    private readonly LiveCoreDbContext _dbContext;
+
+    public SessionRepository(LiveCoreDbContext dbContext)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        _dbContext = dbContext;
+    }
+
+    /// <inheritdoc />
+    public async Task<Session?> FindByIdAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored session (ids are generated
+        // non-empty), so the lookup fails fast instead of returning an arbitrary
+        // row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(id));
+        }
+
+        // All three predicates translate to parameterized SQL equality, leading
+        // with the tenant column. The lookup is exactly tenant- and
+        // workspace-scoped, so a session under another organization or workspace is
+        // never returned even when the surrogate id matches (threat T5/T1).
+        return await _dbContext.Sessions
+            .FirstOrDefaultAsync(
+                session => session.OrganizationId == organizationId
+                    && session.WorkspaceId == workspaceId
+                    && session.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<SessionAddResult> AddAsync(Session session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        _dbContext.Sessions.Add(session);
+
+        // A session has no uniqueness constraint to violate, so there is no
+        // duplicate outcome to translate here; a foreign-key violation (a
+        // non-existent workspace or tenant) propagates as a DbUpdateException.
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return SessionAddResult.Added;
+    }
+
+    /// <inheritdoc />
+    public async Task UpdateAsync(Session session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        // The session was loaded and mutated within this scope's change tracker (or
+        // is attached here); only the mutable title, status, live-timeline
+        // timestamps and update timestamp change. The organization, workspace and
+        // id are immutable on the aggregate, so an update can never move the row to
+        // another tenant or workspace (threat T5).
+        _dbContext.Sessions.Update(session);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+}

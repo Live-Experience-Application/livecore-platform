@@ -3,6 +3,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
@@ -97,6 +98,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (docs/03_DOMAIN_LANGUAGE.md). HTTP endpoints (the participant-visible feed
     // CORE-SES-005) and the session-join flow (CORE-SES-003) are later stories.
     builder.Services.AddScoped<IParticipantRepository, ParticipantRepository>();
+
+    // Session persistence (CORE-SES-002): the Sessions module owns the
+    // workspace-scoped, tenant-scoped sessions table that holds the live/prepared
+    // run records and their lifecycle (docs/05_MODULE_CONTRACTS.md: the Sessions
+    // module owns "session lifecycle" and "session status"; csv/database_tables.csv:
+    // sessions, module Sessions, scope workspace, "Live/prepared run"). Registered
+    // here, inside the persistence conditional, exactly like the participant and
+    // workspace repositories above; the repository's lookups are scoped by
+    // organization id and workspace id (the organization boundary is checked before
+    // the workspace boundary; threat T5). The session lifecycle is a guarded
+    // Prepared -> Live -> Ended state machine on the aggregate; the create/start/end
+    // HTTP endpoints and the SessionCreated/Started/Ended events (CORE-SES-004) are
+    // later stories and are deliberately not wired here.
+    builder.Services.AddScoped<ISessionRepository, SessionRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed

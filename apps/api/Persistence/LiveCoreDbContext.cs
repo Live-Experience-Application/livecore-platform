@@ -1,6 +1,7 @@
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
@@ -15,9 +16,9 @@ namespace LiveCore.Api.Persistence;
 /// module contributes only its own table mappings (the IdentityAccess
 /// <c>users</c> table, the Organizations <c>organizations</c> and
 /// <c>organization_members</c> tables, the Workspaces <c>workspaces</c>,
-/// <c>workspace_members</c> and <c>workspace_invitations</c> tables, and the
-/// Participants <c>participants</c> table) and
-/// other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
+/// <c>workspace_members</c> and <c>workspace_invitations</c> tables, the
+/// Participants <c>participants</c> table and the Sessions <c>sessions</c> table)
+/// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
 /// <c>apps/api/Persistence/Migrations</c>; migrations are applied as a
@@ -51,6 +52,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Participants owned by the Participants module.</summary>
     public DbSet<Participant> Participants => Set<Participant>();
 
+    /// <summary>Sessions owned by the Sessions module.</summary>
+    public DbSet<Session> Sessions => Set<Session>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -60,5 +64,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new WorkspaceMemberConfiguration());
         modelBuilder.ApplyConfiguration(new WorkspaceInvitationConfiguration());
         modelBuilder.ApplyConfiguration(new ParticipantConfiguration());
+        modelBuilder.ApplyConfiguration(new SessionConfiguration());
     }
 }
