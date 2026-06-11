@@ -1,6 +1,7 @@
 using LiveCore.Api;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
@@ -83,6 +84,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // organization id and workspace id (threat T5), and it stores only the
     // SHA-256 hash of the scoped token, never the plaintext (threats T6/T7).
     builder.Services.AddScoped<IWorkspaceInvitationRepository, WorkspaceInvitationRepository>();
+
+    // Participant persistence (CORE-SES-001): the Participants module owns the
+    // workspace-scoped, tenant-scoped participants table that holds the
+    // session-facing participant records (docs/05_MODULE_CONTRACTS.md;
+    // csv/database_tables.csv: participants, module Participants, scope
+    // workspace). Registered here, inside the persistence conditional, exactly
+    // like the workspace and membership repositories above; the repository's
+    // lookups are scoped by organization id and workspace id (the organization
+    // boundary is checked before the workspace boundary; threat T5). The user
+    // link is optional so anonymous participants are supported
+    // (docs/03_DOMAIN_LANGUAGE.md). HTTP endpoints (the participant-visible feed
+    // CORE-SES-005) and the session-join flow (CORE-SES-003) are later stories.
+    builder.Services.AddScoped<IParticipantRepository, ParticipantRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed

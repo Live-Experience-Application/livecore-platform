@@ -1,0 +1,154 @@
+using LiveCore.Api.Persistence;
+using Microsoft.EntityFrameworkCore;
+
+namespace LiveCore.Api.Participants;
+
+/// <summary>
+/// EF Core implementation of <see cref="IParticipantRepository"/> (CORE-SES-001),
+/// backed by the <c>participants</c> table mapped in
+/// <see cref="ParticipantConfiguration"/>.
+/// </summary>
+internal sealed class ParticipantRepository : IParticipantRepository
+{
+    private readonly LiveCoreDbContext _dbContext;
+
+    public ParticipantRepository(LiveCoreDbContext dbContext)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        _dbContext = dbContext;
+    }
+
+    /// <inheritdoc />
+    public async Task<Participant?> FindByIdAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored participant (ids are generated
+        // non-empty), so the lookup fails fast instead of returning an arbitrary
+        // row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Participant id must not be empty.", nameof(id));
+        }
+
+        // All three predicates translate to parameterized SQL equality, leading
+        // with the tenant column. The lookup is exactly tenant- and
+        // workspace-scoped, so a participant under another organization or
+        // workspace is never returned even when the surrogate id matches
+        // (threat T5/T1).
+        return await _dbContext.Participants
+            .FirstOrDefaultAsync(
+                participant => participant.OrganizationId == organizationId
+                    && participant.WorkspaceId == workspaceId
+                    && participant.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<Participant?> FindByUserAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // All three predicates translate to parameterized SQL equality, leading
+        // with the tenant column. The filtered unique (workspace_id, user_id)
+        // index guarantees at most one user-linked participant per workspace; a
+        // participant the user has in another workspace, or in the same workspace
+        // id under a different organization, is never returned (threat T5/T1).
+        return await _dbContext.Participants
+            .FirstOrDefaultAsync(
+                participant => participant.OrganizationId == organizationId
+                    && participant.WorkspaceId == workspaceId
+                    && participant.UserProfileId == userProfileId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<ParticipantAddResult> AddAsync(
+        Participant participant,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(participant);
+
+        _dbContext.Participants.Add(participant);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return ParticipantAddResult.Added;
+        }
+        catch (DbUpdateException)
+        {
+            // Keep the context usable: the failed insert must not be retried by a
+            // later SaveChanges on the same scope.
+            _dbContext.Entry(participant).State = EntityState.Detached;
+
+            // Provider-neutral duplicate detection: only user-linked participants
+            // are subject to the unique (workspace_id, user_id) index, so a
+            // duplicate is possible only when this participant has a user link and
+            // a participant for the same (workspace, user) pair exists now
+            // (typically a lost create race). Any other failure (for example a
+            // foreign-key violation for a non-existent workspace, tenant or user)
+            // is rethrown unchanged. Anonymous participants can never trip this.
+            if (participant.UserProfileId is { } userProfileId)
+            {
+                var duplicateExists = await _dbContext.Participants
+                    .AsNoTracking()
+                    .AnyAsync(
+                        existing => existing.WorkspaceId == participant.WorkspaceId
+                            && existing.UserProfileId == userProfileId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (duplicateExists)
+                {
+                    return ParticipantAddResult.DuplicateUserParticipant;
+                }
+            }
+
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task UpdateAsync(Participant participant, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(participant);
+
+        // The participant was loaded and mutated within this scope's change
+        // tracker (or is attached here); only the mutable display name, status
+        // and update timestamp change. The organization, workspace, user link and
+        // id are immutable on the aggregate, so an update can never move the row
+        // to another tenant, workspace or subject (threat T5).
+        _dbContext.Participants.Update(participant);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+}
