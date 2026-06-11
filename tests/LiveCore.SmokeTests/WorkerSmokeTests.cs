@@ -1,4 +1,6 @@
 using LiveCore.Worker;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace LiveCore.SmokeTests;
 
@@ -12,8 +14,12 @@ public class WorkerSmokeTests
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var host = WorkerHostFactory.Create([]).Build();
+        var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
 
         await host.StartAsync(timeout.Token);
+        Assert.True(lifetime.ApplicationStarted.IsCancellationRequested);
+
         await host.StopAsync(timeout.Token);
+        Assert.True(lifetime.ApplicationStopped.IsCancellationRequested);
     }
 }

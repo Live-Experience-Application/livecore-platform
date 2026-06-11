@@ -24,9 +24,9 @@ public class ApiSmokeTests : IClassFixture<WebApplicationFactory<Program>>
 
         var response = await client.GetAsync("/");
 
-        // The skeleton intentionally exposes no endpoints yet
-        // (health endpoints arrive with CORE-FND-004), so the pipeline
-        // must answer with 404 rather than failing to start.
+        // The host intentionally exposes no root endpoint (only the health
+        // endpoints from CORE-FND-004 exist, covered by HealthEndpointTests),
+        // so the pipeline must answer with 404 rather than failing to start.
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 

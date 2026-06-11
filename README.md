@@ -67,13 +67,13 @@ Directory.Build.props    repository-wide .NET build/lint enforcement
 .github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan)
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
-apps/api                 ASP.NET Core API host skeleton (LiveCore.Api)
+apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints only
 apps/worker              Background worker host skeleton (LiveCore.Worker)
 packages/contracts       @livecore/contracts  - TypeScript contract types (skeleton)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
 packages/design-tokens   @livecore/design-tokens - design tokens/theme contracts (skeleton)
-tests/LiveCore.SmokeTests  xUnit smoke tests for the API and worker hosts
+tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
@@ -175,6 +175,46 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/boundary-scan.ps1
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/boundary-scan.ps1
 ```
+
+## Run the hosts locally
+
+Start the API host (listens on `http://localhost:5062` by default, see
+`apps/api/Properties/launchSettings.json`):
+
+```bash
+dotnet run --project apps/api
+```
+
+Start the background worker host (registers no jobs yet):
+
+```bash
+dotnet run --project apps/worker
+```
+
+### Health endpoints
+
+The API host exposes two unauthenticated health endpoints:
+
+| Endpoint        | Purpose                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                  |
+| `/health/ready` | Readiness: runs the health checks tagged `ready` (none registered yet; database and other dependencies add theirs in later stories). |
+
+Both return `200 OK` with the minimal JSON body `{"status":"Healthy"}`;
+readiness returns `503` with `{"status":"Unhealthy"}` once a registered
+readiness check fails. Because the endpoints are reachable without
+authentication, the response carries only the overall status: no version
+numbers, configuration values, host names or individual check details (see
+`docs/07_SECURITY_THREAT_MODEL.md`).
+
+### Structured logging
+
+Both hosts write structured, single-line JSON log entries to stdout using the
+JSON console formatter built into `Microsoft.Extensions.Logging` (UTC
+timestamps, scopes included); no external logging dependency is used. Log
+levels are configured per host in `appsettings.json`. Logs must carry
+identifiers and metadata, never sensitive content (threat T7 in
+`docs/07_SECURITY_THREAT_MODEL.md`).
 
 ## Continuous integration
 
