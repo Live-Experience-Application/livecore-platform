@@ -1,0 +1,11 @@
+table,purpose,owner,notes
+plan_definitions,Defines generic plans and plan metadata,Entitlements,No vertical pricing copy in Core
+entitlement_definitions,Defines generic entitlement keys,Entitlements,Use keys such as workspace.active.max and ads.disabled
+subject_entitlements,Stores active entitlements for users/orgs/workspaces,Entitlements,Server source of truth for premium state
+quota_definitions,Defines generic quota keys and limits,Entitlements,No DnD wording
+quota_usage,Tracks current quota consumption,Entitlements,Used for server-side enforcement
+purchase_providers,Configured purchase providers,Store,Apple/Google allowed as provider names
+purchase_transactions,Stores verified purchase records,Store,Idempotent transaction handling required
+purchase_events,Append-only purchase lifecycle events,Store,Renewal/cancel/refund/grace events
+store_notification_events,Raw and normalized store notifications,Store,Idempotent and auditable
+billing_account_links,Links store accounts to Core subjects,Store,Needed for restore/sync behavior

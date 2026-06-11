@@ -1,0 +1,9 @@
+method,path,owner,auth_required,purpose,notes
+GET,/v1/me/entitlements,Core,true,Return effective entitlements for current user,Generic no vertical language
+GET,/v1/me/quota-status,Core,true,Return user quota usage and limits,Used by paywalls and feature guards
+GET,/v1/workspaces/{workspaceId}/quota-status,Core,true,Return workspace quota status,Must enforce membership authorization
+GET,/v1/me/ad-eligibility,Core,true,Return whether ads are required,Does not include ad provider config
+POST,/v1/purchases/apple/transactions,Core,true,Submit Apple transaction for server verification,Provider-specific infrastructure endpoint
+POST,/v1/purchases/google/tokens,Core,true,Submit Google purchase token for server verification,Provider-specific infrastructure endpoint
+POST,/v1/store-notifications/apple,Core,false,Receive App Store Server Notifications,Must validate signature/idempotency
+POST,/v1/store-notifications/google/rtdn,Core,false,Receive Google RTDN via Pub/Sub push,Must validate source/idempotency

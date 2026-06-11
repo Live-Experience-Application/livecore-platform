@@ -1,0 +1,10 @@
+event_name,emitter,recipients,persisted,audit,notes
+EntitlementGranted,Core system,authorized admins/subject,true,true,Granted after verified purchase or admin action
+EntitlementRevoked,Core system,authorized admins/subject,true,true,Refunds/cancellations/downgrades revoke entitlements
+QuotaExceeded,Core API,requesting subject,true,true,Command rejected because quota limit was exceeded
+PurchaseVerificationSubmitted,API client,system,true,true,Client submitted Apple/Google purchase proof
+PurchaseVerificationSucceeded,Core system,subject,true,true,Backend verification succeeded
+PurchaseVerificationFailed,Core system,subject,true,true,Backend verification failed and no entitlement granted
+StoreNotificationReceived,Store provider,system,true,true,Apple/Google notification received
+StoreNotificationProcessed,Core system,system,true,true,Notification idempotently applied
+AdEligibilityEvaluated,Core API,requesting subject,false,false,Usually not persisted unless debugging/security requires

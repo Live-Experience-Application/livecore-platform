@@ -37,3 +37,18 @@ The first milestone is not product features. It is a production-quality foundati
 - CI
 
 Do not implement ArcanOS or ScenarioOS features here.
+
+## Mobile monetization extension
+
+This complete handoff includes mobile monetization as a Core extension while keeping Core product-neutral.
+
+Read additionally:
+
+```text
+docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md
+docs/22_ADS_AND_MOBILE_BILLING_BOUNDARIES.md
+csv/mobile_entitlement_catalog.csv
+csv/mobile_store_api_routes.csv
+```
+
+These documents do not make Core a mobile app. Core only verifies purchases, stores entitlements, enforces quotas and answers ad eligibility. ArcanOS Mobile owns paywall UI, ad rendering and store UX.

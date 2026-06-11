@@ -13,3 +13,6 @@ Initial ADRs:
 - 0007 PWA-first Verticals
 - 0008 Server-side Visibility Enforcement
 - 0009 AGPL and Dual Licensing Strategy
+
+- `0010-core-owned-entitlements-and-quotas.md`
+- `0011-mobile-ads-stay-outside-core.md`
