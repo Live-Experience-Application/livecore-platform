@@ -1,0 +1,26 @@
+# .NET build output
+bin/
+obj/
+artifacts/
+*.user
+
+# Test results and coverage
+TestResults/
+coverage/
+*.trx
+
+# Node / TypeScript build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE and OS noise
+.vs/
+.idea/
+*.swp
+.DS_Store

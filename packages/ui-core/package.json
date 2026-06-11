@@ -1,0 +1,19 @@
+{
+  "name": "@livecore/ui-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Generic React components and design primitives for LiveCore vertical apps. Skeleton only; component content arrives with CORE-SDK-004.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

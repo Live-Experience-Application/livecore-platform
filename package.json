@@ -1,0 +1,14 @@
+{
+  "name": "livecore-platform",
+  "version": "0.0.0",
+  "private": true,
+  "description": "LiveCore Platform workspace root for TypeScript packages (contracts, sdk-ts, ui-core, design-tokens).",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm --recursive run build"
+  },
+  "packageManager": "pnpm@10.34.2+sha512.9ae7e3fe477c52bbce1ddc8aa196ff243ed4b48f1ceaa7455820adfa7a48b5f57e817ed2d20e5f3c2c3646dfedba360567693e534572dccd252fb2eb8b7c044c"
+}
