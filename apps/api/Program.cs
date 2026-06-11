@@ -122,6 +122,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // context and tenant isolation checks; threat T5).
     builder.Services.AddScoped<TenantContextResolver>();
 
+    // Session participant join service (CORE-SES-003): the fail-closed decision of
+    // whether a participant may join a session. Registered here because it depends
+    // on the session and participant repositories above, which exist only when a
+    // database connection string is configured — exactly like the tenant context
+    // resolver. It mirrors that resolver's shape: repositories in, a trusted
+    // admission or a typed fail-closed denial out, with every lookup scoped by
+    // organization id then workspace id so a session or participant outside the
+    // caller's tenant/workspace is hidden as not-found (threats T1/T5). The join
+    // HTTP endpoint, the durable ParticipantJoined session event and its SignalR
+    // delivery (docs/09_EVENT_CATALOG.md; docs/11_REALTIME_SYNC.md) and the
+    // persisted participant connection metadata are later stories (the Realtime
+    // epic / Participants-owned work) and are deliberately not wired here.
+    builder.Services.AddScoped<SessionParticipantJoinService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
