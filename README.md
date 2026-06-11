@@ -205,10 +205,10 @@ dotnet run --project apps/worker
 
 The API host exposes two unauthenticated health endpoints:
 
-| Endpoint        | Purpose                                                                                                                              |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                  |
-| `/health/ready` | Readiness: runs the health checks tagged `ready` (none registered yet; database and other dependencies add theirs in later stories). |
+| Endpoint        | Purpose                                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                        |
+| `/health/ready` | Readiness: runs the health checks tagged `ready` (currently the `database` check, registered only when a connection string is configured). |
 
 Both return `200 OK` with the minimal JSON body `{"status":"Healthy"}`;
 readiness returns `503` with `{"status":"Unhealthy"}` once a registered
@@ -245,6 +245,26 @@ Token validation middleware (JWT bearer wiring against the provider, with
 inbound claim type mapping disabled) and the `/api/v1/me` endpoint are not
 part of this story; they follow with the remaining Identity and Tenant
 Boundaries stories. No endpoint behavior changes yet.
+
+### Persistence (user profile reference)
+
+CORE-ID-002 adds the first persisted aggregate: the user profile reference
+(`UserProfile`, keyed by OIDC issuer + subject), stored in PostgreSQL through
+EF Core (`apps/api/Persistence/`, provider `Npgsql.EntityFrameworkCore.PostgreSQL`).
+The connection string is read exclusively from configuration
+(`ConnectionStrings:Database`, e.g. the environment variable
+`ConnectionStrings__Database`); no credentials live in this repository. When
+no connection string is configured the host starts without persistence and
+without the `database` readiness check, so local runs and the test suite need
+no database server (tests use the EF Core SQLite provider in-memory).
+
+Migrations live in `apps/api/Persistence/Migrations` and are managed with the
+pinned `dotnet-ef` local tool:
+
+```bash
+dotnet tool restore
+dotnet ef migrations add <Name> --project apps/api
+```
 
 ## Container images
 

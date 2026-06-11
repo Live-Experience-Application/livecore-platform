@@ -15,9 +15,10 @@ namespace LiveCore.Api;
 internal static class HealthEndpoints
 {
     /// <summary>
-    /// Health checks tagged with this value gate readiness. Later stories
+    /// Health checks tagged with this value gate readiness. Dependencies
     /// (database, storage, realtime backplane) register their checks with
-    /// this tag; the skeleton registers none yet.
+    /// this tag as their stories land; the database check is registered when
+    /// a connection string is configured.
     /// </summary>
     internal const string ReadinessTag = "ready";
 
@@ -33,7 +34,7 @@ internal static class HealthEndpoints
         });
 
         // Readiness: the process is ready to receive traffic. Runs only the
-        // checks tagged as readiness-relevant (none registered yet).
+        // checks tagged as readiness-relevant.
         endpoints.MapHealthChecks("/health/ready", new HealthCheckOptions
         {
             Predicate = registration => registration.Tags.Contains(ReadinessTag),

@@ -1,4 +1,7 @@
 using LiveCore.Api;
+using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Persistence;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,7 +25,35 @@ builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
 builder.Services.AddHealthChecks();
 
+// Persistence (CORE-ID-002): PostgreSQL via EF Core per docs/02_ARCHITECTURE.md
+// and docs/10_DATABASE_SCHEMA.md. The connection string comes only from
+// configuration (ConnectionStrings:Database, e.g. the environment variable
+// ConnectionStrings__Database); no credentials live in this repository.
+// Without a configured connection string the host runs without persistence
+// (no database-backed feature exists yet) and the database readiness check
+// is not registered, so local runs and tests need no database server.
+var databaseConnectionString = builder.Configuration.GetConnectionString("Database");
+if (!string.IsNullOrWhiteSpace(databaseConnectionString))
+{
+    builder.Services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(databaseConnectionString));
+    builder.Services.AddSingleton(TimeProvider.System);
+    builder.Services.AddScoped<IUserProfileRepository, UserProfileRepository>();
+    builder.Services.AddScoped<UserProfileReferenceService>();
+
+    // Gate readiness on database connectivity. The health response stays
+    // status-only (see HealthEndpoints), so a failing check never leaks
+    // connection details to the unauthenticated readiness endpoint.
+    builder.Services.AddHealthChecks()
+        .AddDbContextCheck<LiveCoreDbContext>("database", tags: [HealthEndpoints.ReadinessTag]);
+}
+
 var app = builder.Build();
+
+if (string.IsNullOrWhiteSpace(databaseConnectionString))
+{
+    app.Logger.LogWarning(
+        "No database connection string configured (ConnectionStrings:Database); persistence and the database readiness check are disabled.");
+}
 
 // Health endpoints only (CORE-FND-004). Domain modules and their endpoints
 // arrive with their own backlog stories.
