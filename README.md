@@ -82,6 +82,11 @@ docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
 
+## Mobile-related Core extension
+
+The Core includes product-neutral Entitlements, Quotas, Purchase Verification and Ad Eligibility contracts so that mobile apps cannot bypass limits or premium state client-side.
+Core does not render ads, own mobile screens, or contain App Store / Google Play marketing copy.
+
 ## Prerequisites
 
 - .NET SDK 10.0 or later
