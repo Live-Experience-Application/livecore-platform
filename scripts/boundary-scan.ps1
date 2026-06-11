@@ -4,8 +4,8 @@
     Boundary scan for the LiveCore Core Platform.
 
 .DESCRIPTION
-    Scans Core source directories (apps, packages, tests, scripts) for
-    forbidden vertical terms defined in csv/forbidden_core_terms.csv.
+    Scans Core source directories (apps, packages, tests, scripts, .github)
+    for forbidden vertical terms defined in csv/forbidden_core_terms.csv.
 
     The Core Platform must stay product-neutral; vertical domain language
     may appear only in documentation that explains the boundary (docs/, csv/,
@@ -65,8 +65,8 @@ if ($terms.Count -eq 0) {
 #   'first second', 'first-second' and (after CamelCase splitting)
 #   'FirstSecond'.
 # - Simple plural forms are matched too ('...s', '...es', 'y' -> 'ies').
-# Scanned lines are normalized by splitting CamelCase before matching, so
-# compound identifiers cannot hide a forbidden term.
+# Scanned lines are normalized by splitting CamelCase and uppercase acronym
+# runs before matching, so compound identifiers cannot hide a forbidden term.
 $patterns = foreach ($term in $terms) {
     $pattern = [regex]::Escape($term) -replace '_', '[ _-]?'
     if ($pattern.EndsWith('y')) {
@@ -83,10 +83,14 @@ $combinedRegex = New-Object System.Text.RegularExpressions.Regex(
     [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
 )
 $camelSplitRegex = New-Object System.Text.RegularExpressions.Regex('([a-z0-9])([A-Z])')
+# Splits an uppercase acronym run from a following capitalized word, so
+# compound identifiers that start with an acronym are matched as words too
+# (e.g. 'APIClient' -> 'API Client', 'XMLHttpRequest' -> 'XML Http Request').
+$acronymSplitRegex = New-Object System.Text.RegularExpressions.Regex('([A-Z]+)([A-Z][a-z])')
 
 # Core source locations. docs/ and csv/ are documentation and intentionally
 # excluded: forbidden terms may appear there only to explain the boundary.
-$sourceDirNames = @('apps', 'packages', 'tests', 'scripts')
+$sourceDirNames = @('apps', 'packages', 'tests', 'scripts', '.github')
 $sourceDirs = @(
     $sourceDirNames |
         ForEach-Object { Join-Path $RepoRoot $_ } |
@@ -105,7 +109,8 @@ $excludedDirPattern = '[\\/](bin|obj|node_modules|dist|coverage|TestResults|\.gi
 $sourceExtensions = @(
     '.cs', '.csproj', '.sln', '.slnx', '.props', '.targets', '.razor', '.cshtml',
     '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-    '.json', '.yml', '.yaml', '.xml', '.config',
+    '.json', '.yml', '.yaml', '.xml', '.config', '.resx',
+    '.css', '.scss', '.html', '.svg',
     '.ps1', '.psm1', '.sh', '.sql', '.http', '.md', '.txt', '.env'
 )
 
@@ -113,7 +118,9 @@ $violations = New-Object System.Collections.Generic.List[object]
 $scannedFileCount = 0
 
 foreach ($dir in $sourceDirs) {
-    $files = Get-ChildItem -Path $dir -Recurse -File | Where-Object {
+    # -Force keeps Windows and Linux consistent: on Linux, pwsh treats
+    # dot-prefixed files as hidden and would silently skip them otherwise.
+    $files = Get-ChildItem -Path $dir -Recurse -File -Force | Where-Object {
         $_.FullName -notmatch $excludedDirPattern -and
         (
             $_.Extension -eq '' -or
@@ -129,16 +136,32 @@ foreach ($dir in $sourceDirs) {
             $line = $lines[$lineIndex]
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
 
-            # Split CamelCase so compound identifiers are matched as words.
-            $normalizedLine = $camelSplitRegex.Replace($line, '$1 $2')
+            # Match the raw line plus normalized variants so compound
+            # identifiers cannot hide a forbidden term:
+            # - CamelCase split alone keeps acronym plurals intact,
+            # - acronym split before CamelCase split exposes terms hidden in
+            #   leading uppercase runs (e.g. 'APIClient' -> 'API Client').
+            $camelOnly = $camelSplitRegex.Replace($line, '$1 $2')
+            $acronymThenCamel = $camelSplitRegex.Replace(
+                $acronymSplitRegex.Replace($line, '$1 $2'), '$1 $2')
+            $lineVariants = @($line, $camelOnly, $acronymThenCamel) |
+                Select-Object -Unique
 
-            foreach ($match in $combinedRegex.Matches($normalizedLine)) {
-                $violations.Add([pscustomobject]@{
-                    File = $relativePath
-                    Line = $lineIndex + 1
-                    Term = $match.Value
-                    Text = $line.Trim()
-                })
+            # Report each forbidden term at most once per line, even when
+            # several variants surface the same occurrence.
+            $reportedTerms = @{}
+            foreach ($variant in $lineVariants) {
+                foreach ($match in $combinedRegex.Matches($variant)) {
+                    $termKey = $match.Value.ToLowerInvariant()
+                    if ($reportedTerms.ContainsKey($termKey)) { continue }
+                    $reportedTerms[$termKey] = $true
+                    $violations.Add([pscustomobject]@{
+                        File = $relativePath
+                        Line = $lineIndex + 1
+                        Term = $match.Value
+                        Text = $line.Trim()
+                    })
+                }
             }
         }
     }

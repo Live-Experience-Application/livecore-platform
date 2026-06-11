@@ -1,0 +1,109 @@
+# CI pipeline for livecore-platform (CORE-FND-003).
+#
+# Runs the commands documented in README.md verbatim. Four independent jobs:
+#   dotnet          - build, smoke tests, format/code-style verification
+#   typescript      - pnpm install, lint, format check, package builds/tests
+#   boundary-scan   - forbidden vertical term scan (pwsh on Linux)
+#   powershell-lint - PSScriptAnalyzer over scripts/*.ps1
+#
+# No deployment, no product features: foundation quality gates only.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dotnet:
+    name: .NET build, test and format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build solution
+        run: dotnet build LiveCore.slnx
+
+      - name: Run smoke tests
+        run: dotnet test LiveCore.slnx
+
+      - name: Verify formatting and code style
+        run: dotnet format LiveCore.slnx --verify-no-changes
+
+  typescript:
+    name: TypeScript lint, format and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (pinned pnpm)
+        run: corepack enable pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Verify formatting
+        run: pnpm run format:check
+
+      - name: Build packages
+        run: pnpm --recursive run build
+
+      - name: Run package tests
+        run: pnpm --recursive run test
+
+  boundary-scan:
+    name: Boundary scan (forbidden vertical terms)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run boundary scan
+        run: pwsh -NoProfile -File scripts/boundary-scan.ps1
+
+  powershell-lint:
+    name: PowerShell script analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run PSScriptAnalyzer on scripts/
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          # PSAvoidUsingWriteHost is excluded: the scan scripts are console
+          # tools and Write-Host targets the host information stream by
+          # design (PowerShell 5+).
+          $findings = @(Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Severity Error, Warning -ExcludeRule PSAvoidUsingWriteHost)
+          if ($findings.Count -gt 0) {
+            $findings |
+              Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize |
+              Out-String -Width 220 |
+              Write-Output
+            Write-Output "PSScriptAnalyzer found $($findings.Count) issue(s) in scripts/."
+            exit 1
+          }
+          Write-Output 'PSScriptAnalyzer: no findings in scripts/.'

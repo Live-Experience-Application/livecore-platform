@@ -1,5 +1,7 @@
 # livecore-platform
 
+[![CI](https://github.com/Live-Experience-Application/livecore-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Live-Experience-Application/livecore-platform/actions/workflows/ci.yml)
+
 Generic Core Platform for live, role-aware, scene-based interactive sessions.
 
 This repository must stay product-neutral. It must not contain ArcanOS, Pen-and-Paper, DnD, Enterprise or ScenarioOS domain language in source code.
@@ -61,6 +63,8 @@ Do not implement code until the first story is selected.
 LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
+.gitattributes           line-ending normalization (LF in the repository)
+.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan)
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
 apps/api                 ASP.NET Core API host skeleton (LiveCore.Api)
@@ -83,8 +87,8 @@ csv/                     backlog stories and forbidden term list
 
 ## Build, format, lint, test and boundary scan
 
-Run all commands from the repository root. A later CI story (CORE-FND-003)
-calls these commands verbatim.
+Run all commands from the repository root. CI (`.github/workflows/ci.yml`)
+calls these commands verbatim, so a green local run means a green pipeline.
 
 ### .NET solution (API, worker, smoke tests)
 
@@ -160,7 +164,7 @@ pnpm --recursive run test
 
 Run the boundary scan (fails with a non-zero exit code if any forbidden
 vertical term from `csv/forbidden_core_terms.csv` appears in Core source under
-`apps/`, `packages/`, `tests/` or `scripts/`):
+`apps/`, `packages/`, `tests/`, `scripts/` or `.github/`):
 
 ```powershell
 # Windows (Windows PowerShell 5.1 or pwsh)
@@ -171,6 +175,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/boundary-scan.ps1
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/boundary-scan.ps1
 ```
+
+## Continuous integration
+
+GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and on
+every pull request. All jobs run on `ubuntu-latest` and execute the commands
+documented above verbatim:
+
+| Job               | What it runs                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `dotnet`          | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`       |
+| `typescript`      | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`      |
+| `boundary-scan`   | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build) |
+| `powershell-lint` | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                              |
+
+Line endings are normalized to LF in the repository via `.gitattributes`, so
+the boundary scan and `dotnet format` behave identically on Linux CI and on
+Windows working copies.
 
 ## License
 

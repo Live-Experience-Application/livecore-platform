@@ -18,9 +18,9 @@ indent_size = 4
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-# end_of_line is intentionally not set: git (core.autocrlf) owns line-ending
-# handling until repository-wide normalization lands with the CI story
-# (CORE-FND-003).
+# end_of_line is intentionally not set: .gitattributes (* text=auto) stores
+# all text files with LF in the repository, while working-tree line endings
+# follow each developer's git configuration (core.autocrlf/core.eol).
 
 #### Web, config and script formats: 2-space indentation ####
 

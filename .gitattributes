@@ -1,0 +1,28 @@
+# EOL normalization (CORE-FND-003).
+#
+# All text files are stored with LF in the repository so the boundary scan
+# and dotnet format behave deterministically on Linux CI and on Windows
+# working copies alike. Working-tree line endings follow each developer's
+# git configuration (core.autocrlf/core.eol) unless pinned below.
+
+* text=auto
+
+# Shell scripts must stay LF to run on Linux.
+*.sh text eol=lf
+
+# Windows batch scripts require CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets: never normalize line endings or diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary
+*.zip binary
