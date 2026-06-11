@@ -7,6 +7,7 @@
     <Project Path="apps/worker/LiveCore.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/LiveCore.Api.IntegrationTests/LiveCore.Api.IntegrationTests.csproj" />
     <Project Path="tests/LiveCore.Api.UnitTests/LiveCore.Api.UnitTests.csproj" />
     <Project Path="tests/LiveCore.SmokeTests/LiveCore.SmokeTests.csproj" />
   </Folder>

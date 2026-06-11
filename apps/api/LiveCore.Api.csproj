@@ -13,6 +13,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Official Microsoft package that implements the documented OIDC-first
+         request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
+         validation against the external OIDC provider. Patch-aligned to the other
+         Microsoft.* packages here (10.0.9). -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

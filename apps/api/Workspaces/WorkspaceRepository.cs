@@ -77,6 +77,44 @@ internal sealed class WorkspaceRepository : IWorkspaceRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Workspace>> ListByMemberAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // Join workspaces to workspace_members on the workspace id, scoped on
+        // BOTH boundaries: the organization (the tenant) and the subject. Every
+        // predicate translates to parameterized SQL equality, leading with
+        // organization_id, so the listing returns only the tenant's workspaces
+        // the subject actually has a membership row for. A workspace the subject
+        // is not a member of, or any workspace in another organization, is never
+        // returned (deny-by-default; threat T5/T1). The membership row's own
+        // organization_id is matched as well so a membership can never bridge a
+        // workspace from a foreign tenant. Ordering by the (time-ordered) UUIDv7
+        // id keeps the listing stable.
+        return await _dbContext.Workspaces
+            .AsNoTracking()
+            .Where(workspace => workspace.OrganizationId == organizationId
+                && _dbContext.WorkspaceMembers.Any(member =>
+                    member.WorkspaceId == workspace.Id
+                    && member.OrganizationId == organizationId
+                    && member.UserProfileId == userProfileId))
+            .OrderBy(workspace => workspace.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<WorkspaceAddResult> AddAsync(
         Workspace workspace,
         CancellationToken cancellationToken)
@@ -114,5 +152,19 @@ internal sealed class WorkspaceRepository : IWorkspaceRepository
 
             throw;
         }
+    }
+
+    /// <inheritdoc />
+    public async Task UpdateAsync(Workspace workspace, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+
+        // The workspace was loaded and mutated within this scope's change
+        // tracker (or is attached here); only the mutable display name and the
+        // update timestamp change. The organization, slug and id are immutable on
+        // the aggregate, so an update can never move the row to another tenant
+        // (threat T5).
+        _dbContext.Workspaces.Update(workspace);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 }

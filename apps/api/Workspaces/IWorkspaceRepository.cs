@@ -61,6 +61,29 @@ public interface IWorkspaceRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the workspaces in the given organization that the given subject is a
+    /// member of (CORE-WS-003: <c>GET /api/v1/workspaces</c>, "Filtered by
+    /// membership"). The lookup is scoped to exactly one organization and joins
+    /// the <c>workspace_members</c> table, so it returns only the workspaces in
+    /// that tenant for which a membership row exists for the subject: a workspace
+    /// the subject is not a member of, and any workspace in another organization,
+    /// are never returned (deny-by-default; threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
+    /// authorization). Results are ordered by the workspace surrogate id (UUIDv7,
+    /// time-ordered) so the listing is stable. An empty list (the subject is a
+    /// member of no workspace in that tenant) is a normal, non-error result.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or subject id is empty. An empty id can never address
+    /// a stored tenant or subject, so the lookup is rejected instead of silently
+    /// returning nothing.
+    /// </exception>
+    Task<IReadOnlyList<Workspace>> ListByMemberAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new workspace. Returns
     /// <see cref="WorkspaceAddResult.DuplicateSlug"/> when a workspace with the
     /// same slug already exists in the same organization (enforced by the unique
@@ -69,4 +92,14 @@ public interface IWorkspaceRepository
     /// slug remains available to other organizations.
     /// </summary>
     Task<WorkspaceAddResult> AddAsync(Workspace workspace, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Persists changes to a workspace previously loaded through this repository.
+    /// The organization, slug and id of a workspace are immutable
+    /// (<see cref="Workspace"/>), so an update only ever changes the display name
+    /// and the update timestamp; it can never move the workspace to another
+    /// tenant (threat T5). The caller is responsible for having loaded the
+    /// workspace through a tenant-scoped lookup.
+    /// </summary>
+    Task UpdateAsync(Workspace workspace, CancellationToken cancellationToken);
 }

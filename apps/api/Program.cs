@@ -27,6 +27,18 @@ builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
 builder.Services.AddHealthChecks();
 
+// Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
+// validation for the external OIDC provider per the documented request flow
+// (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
+// (Authentication:Oidc:*; no secrets in code). The bearer scheme is registered
+// only when an Authority is configured, so the host still starts (and the smoke
+// tests still pass) without an identity provider; a fail-closed default scheme is
+// registered in its place so authenticated endpoints challenge with 401 rather
+// than crashing or allowing anonymous access. MapInboundClaims=false (set in the
+// extension) preserves the raw OIDC claim names for OidcPrincipalMapper
+// (CORE-ID-001 carry-over requirement).
+var oidcConfigured = builder.Services.AddOidcAuthentication(builder.Configuration);
+
 // Persistence (CORE-ID-002): PostgreSQL via EF Core per docs/02_ARCHITECTURE.md
 // and docs/10_DATABASE_SCHEMA.md. The connection string comes only from
 // configuration (ConnectionStrings:Database, e.g. the environment variable
@@ -85,9 +97,26 @@ if (string.IsNullOrWhiteSpace(databaseConnectionString))
         "No database connection string configured (ConnectionStrings:Database); persistence and the database readiness check are disabled.");
 }
 
-// Health endpoints only (CORE-FND-004). Domain modules and their endpoints
-// arrive with their own backlog stories.
+if (!oidcConfigured)
+{
+    app.Logger.LogWarning(
+        "No OIDC Authority configured (Authentication:Oidc:Authority); authentication is disabled and authenticated endpoints fail closed.");
+}
+
+// Authentication runs before authorization, which runs before the endpoints, per
+// the documented request flow (docs/02_ARCHITECTURE.md). The health endpoints
+// are mapped after this and stay anonymous because they are not in the
+// authenticated workspace route group.
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Health endpoints (CORE-FND-004): unauthenticated by convention.
 app.MapLiveCoreHealthEndpoints();
+
+// Workspace endpoints (CORE-WS-003): the first domain HTTP endpoints. They live
+// in an authenticated route group and fail closed (503) when persistence is not
+// configured, so mapping them never crashes startup.
+app.MapWorkspaceEndpoints();
 
 app.Run();
 
