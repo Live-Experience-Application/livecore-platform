@@ -1,0 +1,99 @@
+using LiveCore.Api.Persistence;
+using Microsoft.EntityFrameworkCore;
+
+namespace LiveCore.Api.Workspaces;
+
+/// <summary>
+/// EF Core implementation of <see cref="IWorkspaceInvitationRepository"/>
+/// (CORE-WS-004), backed by the <c>workspace_invitations</c> table mapped in
+/// <see cref="WorkspaceInvitationConfiguration"/>.
+/// </summary>
+internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationRepository
+{
+    private readonly LiveCoreDbContext _dbContext;
+
+    public WorkspaceInvitationRepository(LiveCoreDbContext dbContext)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        _dbContext = dbContext;
+    }
+
+    /// <inheritdoc />
+    public async Task<WorkspaceInvitationAddResult> AddAsync(
+        WorkspaceInvitation invitation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+
+        _dbContext.WorkspaceInvitations.Add(invitation);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return WorkspaceInvitationAddResult.Added;
+        }
+        catch (DbUpdateException)
+        {
+            // Keep the context usable: the failed insert must not be retried by
+            // a later SaveChanges on the same scope.
+            _dbContext.Entry(invitation).State = EntityState.Detached;
+
+            // Provider-neutral duplicate detection: if a row with this token
+            // hash exists now, the unique token-hash index rejected the insert
+            // as a duplicate. Any other failure (for example a foreign-key
+            // violation for a non-existent workspace or tenant) is rethrown
+            // unchanged. The plaintext token is never involved here — only its
+            // hash (threats T6/T7).
+            var duplicateExists = await _dbContext.WorkspaceInvitations
+                .AsNoTracking()
+                .AnyAsync(
+                    existing => existing.TokenHash == invitation.TokenHash,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (duplicateExists)
+            {
+                return WorkspaceInvitationAddResult.DuplicateToken;
+            }
+
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<WorkspaceInvitation?> FindByTokenHashAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        string tokenHash,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids and malformed hashes can never address a stored invitation,
+        // so the lookup fails fast instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (!WorkspaceInvitationToken.IsValidHash(tokenHash))
+        {
+            throw new ArgumentException("Token hash violates the hash invariants.", nameof(tokenHash));
+        }
+
+        // All three predicates translate to parameterized SQL equality. Scoping
+        // by the organization (the tenant, checked before the workspace
+        // boundary) and the workspace means a matching token hash under another
+        // organization or workspace is never returned: the token is only ever
+        // honoured inside the scope it was minted for (threats T5/T6). The
+        // unique token-hash index guarantees at most one row.
+        return await _dbContext.WorkspaceInvitations
+            .FirstOrDefaultAsync(
+                invitation => invitation.OrganizationId == organizationId
+                    && invitation.WorkspaceId == workspaceId
+                    && invitation.TokenHash == tokenHash,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+}

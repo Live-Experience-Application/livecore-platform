@@ -23,6 +23,12 @@ namespace LiveCore.Api.Workspaces;
 ///   members only; non-member or cross-tenant is hidden as 404.</item>
 ///   <item><c>PUT  /api/v1/workspaces/{workspaceId}</c> — rename (the update
 ///   slice), "Manage workspace settings" (Owner or Admin).</item>
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/members</c> — invite a
+///   member (CORE-WS-004), "Manage members" (Owner or Admin). Creates a scoped,
+///   single-use invite token and returns the plaintext token exactly once; only
+///   its hash is stored (threats T6/T7). This is the invite PLACEHOLDER: there
+///   is no acceptance/redeem route, no email delivery and no UI in this
+///   story.</item>
 /// </list>
 ///
 /// Authorization model (object-level, server-side; docs/06_AUTHORIZATION_MATRIX.md;
@@ -69,6 +75,7 @@ internal static class WorkspaceEndpoints
         group.MapPost("/", CreateWorkspaceAsync);
         group.MapGet("/{workspaceId}", GetWorkspaceAsync);
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
+        group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
 
         return endpoints;
     }
@@ -347,6 +354,151 @@ internal static class WorkspaceEndpoints
         return Results.Ok(WorkspaceResponse.From(workspace));
     }
 
+    // POST /api/v1/workspaces/{workspaceId}/members
+    private static async Task<IResult> InviteWorkspaceMemberAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromBody] InviteWorkspaceMemberRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // Validate the invite inputs before touching the tenant, so a broken
+        // body is a 400 regardless of authorization. The email is data, not a
+        // credential (docs/adr/0005); the role must be a defined generic role,
+        // never an undefined value a cast could smuggle in (threat T6 role
+        // limitation; MembershipRole is non-linear, so this is a parse + defined
+        // check, never an ordering comparison).
+        if (!WorkspaceInvitation.IsValidInvitedEmail(request.Email?.Trim()))
+        {
+            return ValidationError("A valid invited email is required.");
+        }
+
+        if (!TryParseRole(request.Role, out var role))
+        {
+            return ValidationError("A valid membership role is required.");
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it
+        // as hidden (404), never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the workspace as 404 so a foreign
+            // or non-existent tenant is indistinguishable from a missing
+            // workspace (threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise
+        // hide as 404 (a cross-tenant or unknown workspace is never revealed;
+        // threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md;
+        // csv/api_routes.csv roles "Owner,Admin"). The caller is a known member
+        // of the tenant and the workspace exists, so an insufficient role is a
+        // 403. Exact, non-linear role check (no >/< ).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Create the invitation. The aggregate generates the scoped token with a
+        // cryptographically secure RNG, stores ONLY its SHA-256 hash, and hands
+        // back the plaintext exactly once through the out parameter for the
+        // response below; the plaintext is never persisted and never logged
+        // (threats T6/T7).
+        var now = timeProvider.GetUtcNow();
+        var invitation = WorkspaceInvitation.Create(
+            context.OrganizationId,
+            workspace.Id,
+            request.Email!.Trim(),
+            role,
+            now,
+            out var plaintextToken);
+
+        var addResult = await deps.WorkspaceInvitations
+            .AddAsync(invitation, cancellationToken)
+            .ConfigureAwait(false);
+        if (addResult == WorkspaceInvitationAddResult.DuplicateToken)
+        {
+            // A token-hash collision is astronomically unlikely for a 256-bit
+            // random token; if it ever happens, fail closed without leaking the
+            // token rather than returning a non-unique invite.
+            return Results.Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Conflict",
+                detail: "The invitation could not be created; retry.");
+        }
+
+        // The one-time token is returned to the caller here and only here.
+        var response = WorkspaceInvitationResponse.From(invitation, plaintextToken);
+        return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
+    }
+
+    /// <summary>
+    /// Parses a generic membership role name (case-insensitive) and confirms it
+    /// is a DEFINED role. The authorization matrix is non-linear, so this is a
+    /// parse + defined check only; it never interprets the role into a
+    /// capability and never compares roles by ordering. A null, blank, unknown
+    /// or undefined value is rejected so an invitation can never grant an
+    /// undefined role (threat T6 role limitation).
+    /// </summary>
+    private static bool TryParseRole(string? value, out MembershipRole role)
+    {
+        role = default;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        // Reject purely numeric input: only the stable role NAMES are accepted,
+        // so a caller cannot smuggle an out-of-range numeric value past the
+        // defined-check via Enum.TryParse's numeric path.
+        if (int.TryParse(value, out _))
+        {
+            return false;
+        }
+
+        return Enum.TryParse(value.Trim(), ignoreCase: true, out role)
+            && WorkspaceInvitation.IsValidRole(role);
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They
     /// exist only when a database connection string is configured; when absent,
@@ -358,14 +510,19 @@ internal static class WorkspaceEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var workspaceInvitations = services.GetService<IWorkspaceInvitationRepository>();
 
-        if (resolver is null || workspaces is null || workspaceMembers is null)
+        if (resolver is null
+            || workspaces is null
+            || workspaceMembers is null
+            || workspaceInvitations is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new WorkspaceEndpointDependencies(resolver, workspaces, workspaceMembers);
+        dependencies = new WorkspaceEndpointDependencies(
+            resolver, workspaces, workspaceMembers, workspaceInvitations);
         return true;
     }
 
@@ -431,5 +588,6 @@ internal static class WorkspaceEndpoints
     private readonly record struct WorkspaceEndpointDependencies(
         TenantContextResolver Resolver,
         IWorkspaceRepository Workspaces,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        IWorkspaceInvitationRepository WorkspaceInvitations);
 }

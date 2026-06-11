@@ -13,8 +13,8 @@ namespace LiveCore.Api.Persistence;
 /// The context is shared infrastructure of the modular monolith: each
 /// module contributes only its own table mappings (the IdentityAccess
 /// <c>users</c> table, the Organizations <c>organizations</c> and
-/// <c>organization_members</c> tables, and the Workspaces <c>workspaces</c> and
-/// <c>workspace_members</c> tables) and
+/// <c>organization_members</c> tables, and the Workspaces <c>workspaces</c>,
+/// <c>workspace_members</c> and <c>workspace_invitations</c> tables) and
 /// other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -43,6 +43,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Workspace memberships owned by the Workspaces module.</summary>
     public DbSet<WorkspaceMember> WorkspaceMembers => Set<WorkspaceMember>();
 
+    /// <summary>Workspace invitations owned by the Workspaces module.</summary>
+    public DbSet<WorkspaceInvitation> WorkspaceInvitations => Set<WorkspaceInvitation>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -50,5 +53,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new OrganizationMemberConfiguration());
         modelBuilder.ApplyConfiguration(new WorkspaceConfiguration());
         modelBuilder.ApplyConfiguration(new WorkspaceMemberConfiguration());
+        modelBuilder.ApplyConfiguration(new WorkspaceInvitationConfiguration());
     }
 }

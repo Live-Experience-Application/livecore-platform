@@ -84,3 +84,86 @@ public sealed record WorkspaceResponse(
             workspace.UpdatedAt);
     }
 }
+
+/// <summary>
+/// Request body for inviting a member to a workspace (CORE-WS-004,
+/// <c>POST /api/v1/workspaces/{workspaceId}/members</c>, csv/api_routes.csv
+/// "Invite/add member", roles Owner,Admin).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> (the
+/// route carries no organization in its path), matched against the caller's
+/// token organization claim and a persisted organization membership by the
+/// tenant context resolver (CORE-ID-005); the invite is then authorized by the
+/// caller's organization role (Owner or Admin). The workspace is taken from the
+/// route. The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md):
+/// it names the invitee by email (data, not a credential;
+/// docs/adr/0005) and the generic role to grant. It carries NO token: the
+/// scoped token is generated server-side and returned only in the response.
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to
+/// resolve the tenant context.
+/// </param>
+/// <param name="Email">Email of the invitee (informational data only).</param>
+/// <param name="Role">Generic role the invite will grant on redemption.</param>
+public sealed record InviteWorkspaceMemberRequest(string? OrganizationSlug, string? Email, string? Role);
+
+/// <summary>
+/// Response of creating a workspace invitation (CORE-WS-004). It is the ONLY
+/// place the plaintext scoped token is ever returned: the inviter receives the
+/// token exactly once, at creation, and it is never returned again on any read
+/// and never logged (threats T6/T7 in docs/07_SECURITY_THREAT_MODEL.md). The
+/// stored value is only the token's SHA-256 hash, which is never exposed.
+///
+/// The response is generic and product-neutral (docs/08_API_CONTRACTS.md DTO
+/// rules): the invitation id, its tenant and workspace, the granted role, the
+/// expiry, the lifecycle status, the server creation timestamp and the one-time
+/// token. It carries no invited email back (personal data minimization), no
+/// token hash and no internal authorization rationale.
+/// </summary>
+/// <param name="Id">Surrogate id of the invitation (UUIDv7).</param>
+/// <param name="OrganizationId">Tenant the invitation belongs to.</param>
+/// <param name="WorkspaceId">Workspace the invite grants admission to.</param>
+/// <param name="Role">Generic role the invite will grant on redemption.</param>
+/// <param name="Status">Lifecycle status of the invitation (Pending at creation).</param>
+/// <param name="ExpiresAt">When the scoped token expires (UTC).</param>
+/// <param name="CreatedAt">When the invitation was created (UTC).</param>
+/// <param name="Token">
+/// The one-time plaintext scoped token. Returned exactly once here; never stored
+/// in plaintext, never returned again and never logged.
+/// </param>
+public sealed record WorkspaceInvitationResponse(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    string Role,
+    string Status,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset CreatedAt,
+    string Token)
+{
+    /// <summary>
+    /// Projects a created <see cref="WorkspaceInvitation"/> plus its one-time
+    /// plaintext token into the creation response. The plaintext token is passed
+    /// in (it lives only on the stack of the create call, never on the
+    /// aggregate); the token hash and invited email are never copied out.
+    /// </summary>
+    public static WorkspaceInvitationResponse From(WorkspaceInvitation invitation, string plaintextToken)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+        if (string.IsNullOrWhiteSpace(plaintextToken))
+        {
+            throw new ArgumentException("A one-time token value is required.", nameof(plaintextToken));
+        }
+
+        return new WorkspaceInvitationResponse(
+            invitation.Id,
+            invitation.OrganizationId,
+            invitation.WorkspaceId,
+            invitation.Role.ToString(),
+            invitation.Status.ToString(),
+            invitation.ExpiresAt,
+            invitation.CreatedAt,
+            plaintextToken);
+    }
+}

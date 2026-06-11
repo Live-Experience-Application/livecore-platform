@@ -73,6 +73,17 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // authorization policies are later stories (CORE-WS-003, CORE-WS-005).
     builder.Services.AddScoped<IWorkspaceMemberRepository, WorkspaceMemberRepository>();
 
+    // Workspace invitation persistence (CORE-WS-004): the Workspaces module owns
+    // the workspace-scoped, tenant-scoped workspace_invitations table that backs
+    // the member invite placeholder with its scoped token model
+    // (docs/05_MODULE_CONTRACTS.md; csv/api_routes.csv: POST
+    // /api/v1/workspaces/{workspaceId}/members, "Invite/add member"). Registered
+    // here, inside the persistence conditional, exactly like the workspace and
+    // membership repositories above; the repository's lookups are scoped by
+    // organization id and workspace id (threat T5), and it stores only the
+    // SHA-256 hash of the scoped token, never the plaintext (threats T6/T7).
+    builder.Services.AddScoped<IWorkspaceInvitationRepository, WorkspaceInvitationRepository>();
+
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
     // denial. Registered here because it depends on the organization, user
