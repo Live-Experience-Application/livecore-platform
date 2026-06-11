@@ -68,7 +68,7 @@ Directory.Build.props    repository-wide .NET build/lint enforcement
 .dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
-apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints only
+apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/worker              Background worker host skeleton (LiveCore.Worker)
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
@@ -76,6 +76,7 @@ packages/contracts       @livecore/contracts  - TypeScript contract types (skele
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
 packages/design-tokens   @livecore/design-tokens - design tokens/theme contracts (skeleton)
+tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
 docs/                    architecture and product documentation
@@ -107,7 +108,7 @@ Build:
 dotnet build LiveCore.slnx
 ```
 
-Run the smoke tests:
+Run the tests (unit and smoke):
 
 ```bash
 dotnet test LiveCore.slnx
@@ -224,6 +225,26 @@ timestamps, scopes included); no external logging dependency is used. Log
 levels are configured per host in `appsettings.json`. Logs must carry
 identifiers and metadata, never sensitive content (threat T7 in
 `docs/07_SECURITY_THREAT_MODEL.md`).
+
+### Identity (OIDC principal model)
+
+Authentication is OIDC-first (`docs/adr/0005-oidc-first-authentication.md`):
+the platform consumes tokens issued by an external OIDC provider (Keycloak by
+default) and implements no custom password authentication.
+
+CORE-ID-001 adds the principal model of the IdentityAccess module
+(`apps/api/IdentityAccess/`): `OidcPrincipalMapper` normalizes the claims of a
+validated token into an immutable `OidcPrincipal` (issuer + subject identity,
+user vs. service account, optional display metadata, and the raw organization
+claim values that later feed the tenant boundary). Mapping is fail-closed:
+missing, conflicting or malformed security-relevant claims produce a typed
+error, never a partially trusted principal, and organization claim matching is
+exact and case-sensitive (threat T5 in `docs/07_SECURITY_THREAT_MODEL.md`).
+
+Token validation middleware (JWT bearer wiring against the provider, with
+inbound claim type mapping disabled) and the `/api/v1/me` endpoint are not
+part of this story; they follow with the remaining Identity and Tenant
+Boundaries stories. No endpoint behavior changes yet.
 
 ## Container images
 
