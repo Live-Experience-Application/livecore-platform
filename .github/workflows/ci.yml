@@ -1,12 +1,14 @@
-# CI pipeline for livecore-platform (CORE-FND-003).
+# CI pipeline for livecore-platform (CORE-FND-003, docker job: CORE-FND-005).
 #
-# Runs the commands documented in README.md verbatim. Four independent jobs:
+# Runs the commands documented in README.md verbatim. Five independent jobs:
 #   dotnet          - build, smoke tests, format/code-style verification
 #   typescript      - pnpm install, lint, format check, package builds/tests
 #   boundary-scan   - forbidden vertical term scan (pwsh on Linux)
 #   powershell-lint - PSScriptAnalyzer over scripts/*.ps1
+#   docker          - image builds and container smoke tests (no push)
 #
-# No deployment, no product features: foundation quality gates only.
+# No deployment, no registry push, no product features: foundation quality
+# gates only.
 name: CI
 
 on:
@@ -82,6 +84,49 @@ jobs:
 
       - name: Run boundary scan
         run: pwsh -NoProfile -File scripts/boundary-scan.ps1
+
+  docker:
+    name: Docker image builds and container smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build --file apps/api/Dockerfile --tag livecore-api:ci .
+
+      - name: Build worker image
+        run: docker build --file apps/worker/Dockerfile --tag livecore-worker:ci .
+
+      - name: Smoke test API container (/health/live)
+        run: |
+          docker run --detach --name livecore-api-smoke --publish 8080:8080 livecore-api:ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://localhost:8080/health/live; then
+              echo "API container answered /health/live after $attempt attempt(s)."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API container did not answer /health/live in time."
+          docker logs livecore-api-smoke
+          exit 1
+
+      - name: Smoke test worker container (clean startup)
+        run: |
+          docker run --detach --name livecore-worker-smoke livecore-worker:ci
+          sleep 5
+          status="$(docker inspect --format '{{.State.Status}}' livecore-worker-smoke)"
+          docker logs livecore-worker-smoke
+          if [ "$status" != "running" ]; then
+            echo "Worker container is not running (status: $status)."
+            exit 1
+          fi
+          echo "Worker container started and stayed running."
+
+      - name: Clean up smoke test containers
+        if: always()
+        run: docker rm --force livecore-api-smoke livecore-worker-smoke || true
 
   powershell-lint:
     name: PowerShell script analysis

@@ -1,0 +1,46 @@
+# Build-context exclusions for the container image builds (CORE-FND-005).
+#
+# The image builds (apps/api/Dockerfile, apps/worker/Dockerfile) only need
+# Directory.Build.props, .editorconfig and the respective apps/ sources.
+# Everything else is excluded to keep the context small and deterministic.
+
+# Version control and local tooling state
+.git/
+.github/
+.claude/
+.vs/
+.idea/
+
+# .NET build and test output (images publish from source, never from local output)
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+coverage/
+*.user
+
+# Node / TypeScript workspace (not part of the .NET images)
+node_modules/
+**/node_modules/
+**/dist/
+packages/
+pnpm-lock.yaml
+*.tsbuildinfo
+
+# Tests run in CI, not inside image builds
+tests/
+
+# Documentation, backlog data and license texts are not image content
+docs/
+csv/
+*.md
+LICENSE
+
+# Local environment files must never enter an image
+.env
+.env.*
+
+# The Docker files themselves are not image content
+Dockerfile
+**/Dockerfile
+.dockerignore

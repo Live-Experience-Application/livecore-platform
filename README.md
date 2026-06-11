@@ -64,11 +64,14 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan)
+.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds)
+.dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints only
+apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/worker              Background worker host skeleton (LiveCore.Worker)
+apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (skeleton)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
@@ -84,6 +87,7 @@ csv/                     backlog stories and forbidden term list
 - .NET SDK 10.0 or later
 - Node.js 22 or later
 - pnpm 10 (pinned via the `packageManager` field; with Corepack run `corepack enable pnpm` once, or prefix pnpm commands with `corepack`)
+- Docker (optional; only needed to build and run the container images)
 
 ## Build, format, lint, test and boundary scan
 
@@ -216,18 +220,69 @@ levels are configured per host in `appsettings.json`. Logs must carry
 identifiers and metadata, never sensitive content (threat T7 in
 `docs/07_SECURITY_THREAT_MODEL.md`).
 
+## Container images
+
+Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final
+stage). Build from the repository root so the repository-wide build
+configuration (`Directory.Build.props`, `.editorconfig`) applies inside the
+image build; `.dockerignore` keeps the build context small.
+
+Build the images:
+
+```bash
+docker build -f apps/api/Dockerfile -t livecore-api .
+docker build -f apps/worker/Dockerfile -t livecore-worker .
+```
+
+Run the API container (Kestrel listens on container port 8080) and probe it:
+
+```bash
+docker run --rm -d -p 8080:8080 --name livecore-api livecore-api
+curl http://localhost:8080/health/live
+docker stop livecore-api
+```
+
+Run the worker container (no ports; it registers no jobs yet and idles):
+
+```bash
+docker run --rm livecore-worker
+```
+
+Image baseline:
+
+- Both runtime images run as the non-root user built into the official .NET
+  images (`USER $APP_UID`, a numeric UID so policies like `runAsNonRoot` can
+  verify it).
+- The runtime images contain only the published output: no SDK, no package
+  caches, no build tooling.
+- Only the API image exposes a port (8080, unprivileged); the worker serves
+  no HTTP traffic.
+- The images define no `HEALTHCHECK` instruction on purpose: the .NET runtime
+  images ship no HTTP client tooling, and none is installed just for probing.
+  Orchestration platforms (Compose, Kubernetes, load balancers) probe
+  `GET /health/live` (liveness) and `GET /health/ready` (readiness) over HTTP
+  instead; the worker's liveness is the process itself.
+- Configuration is supplied at runtime through environment variables
+  (for example `ASPNETCORE_ENVIRONMENT` and logging levels); no secrets are
+  baked into the images.
+
+Local development orchestration (Compose with database, auth and storage
+services) lives in `livecore-deploy`, not in this repository (see
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
 ## Continuous integration
 
 GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and on
 every pull request. All jobs run on `ubuntu-latest` and execute the commands
 documented above verbatim:
 
-| Job               | What it runs                                                                                |
-| ----------------- | ------------------------------------------------------------------------------------------- |
-| `dotnet`          | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`       |
-| `typescript`      | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`      |
-| `boundary-scan`   | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build) |
-| `powershell-lint` | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                              |
+| Job               | What it runs                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------ |
+| `dotnet`          | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`            |
+| `typescript`      | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`           |
+| `boundary-scan`   | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)      |
+| `powershell-lint` | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                   |
+| `docker`          | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup) |
 
 Line endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
