@@ -51,6 +51,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // organization id (threat T5). HTTP endpoints are a later story (CORE-WS-003).
     builder.Services.AddScoped<IWorkspaceRepository, WorkspaceRepository>();
 
+    // Workspace membership persistence (CORE-WS-002): the Workspaces module
+    // owns the workspace-scoped, tenant-scoped workspace_members table and the
+    // generic workspace-level roles (docs/05_MODULE_CONTRACTS.md). Registered
+    // here, inside the persistence conditional, exactly like the workspace and
+    // organization repositories above; the repository's lookups are scoped by
+    // organization id and workspace id (the organization boundary is checked
+    // before the workspace boundary; threat T5). HTTP endpoints and per-action
+    // authorization policies are later stories (CORE-WS-003, CORE-WS-005).
+    builder.Services.AddScoped<IWorkspaceMemberRepository, WorkspaceMemberRepository>();
+
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
     // denial. Registered here because it depends on the organization, user
