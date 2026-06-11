@@ -1,5 +1,6 @@
 using LiveCore.Api;
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -39,6 +40,7 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddScoped<IUserProfileRepository, UserProfileRepository>();
     builder.Services.AddScoped<UserProfileReferenceService>();
+    builder.Services.AddScoped<IOrganizationRepository, OrganizationRepository>();
 
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks

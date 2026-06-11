@@ -1,4 +1,5 @@
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Organizations;
 using Microsoft.EntityFrameworkCore;
 
 namespace LiveCore.Api.Persistence;
@@ -9,9 +10,10 @@ namespace LiveCore.Api.Persistence;
 /// docs/02_ARCHITECTURE.md and docs/10_DATABASE_SCHEMA.md.
 ///
 /// The context is shared infrastructure of the modular monolith: each
-/// module contributes only its own table mappings (currently the
-/// IdentityAccess <c>users</c> table) and other modules never query foreign
-/// tables directly (docs/02_ARCHITECTURE.md: module boundaries). Schema
+/// module contributes only its own table mappings (the IdentityAccess
+/// <c>users</c> table and the Organizations <c>organizations</c> table) and
+/// other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
+/// module boundaries). Schema
 /// changes ship as checked-in migrations under
 /// <c>apps/api/Persistence/Migrations</c>; migrations are applied as a
 /// deployment step, never implicitly at host startup.
@@ -26,8 +28,12 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>User profile references owned by the IdentityAccess module.</summary>
     public DbSet<UserProfile> UserProfiles => Set<UserProfile>();
 
+    /// <summary>Organization tenant roots owned by the Organizations module.</summary>
+    public DbSet<Organization> Organizations => Set<Organization>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
+        modelBuilder.ApplyConfiguration(new OrganizationConfiguration());
     }
 }
