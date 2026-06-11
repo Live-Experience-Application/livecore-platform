@@ -4,6 +4,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
@@ -183,6 +184,22 @@ app.MapWorkspaceEndpoints();
 // is the behavior delivered here (docs/09_EVENT_CATALOG.md; csv/database_tables.csv
 // assigns session_events to the Realtime module).
 app.MapSessionEndpoints();
+
+// Participant-visible feed endpoint (CORE-SES-005): the Visibility module's first
+// route, GET /api/v1/participants/{participantId}/visible-feed. It lives in an
+// authenticated route group and fails closed (503) when persistence is not
+// configured, exactly like the session/workspace endpoints. No new DI registration
+// is required: the tenant context resolver, the participant repository and the
+// workspace member repository it consumes are already registered above inside the
+// persistence conditional. This is a SKELETON: it establishes the route + the
+// fail-closed object-level authorization (own-feed ownership, or Host/CoHost
+// preview, every denial hidden as 404) and returns a participant-safe EMPTY feed.
+// The actual visible content (filtered reveal events / content blocks / the
+// server-side visibility-rule engine) belongs to the later Visibility + Reveal +
+// Realtime epics and is deliberately not built here (docs/05_MODULE_CONTRACTS.md:
+// the Visibility module owns visibility rules / audience calculations /
+// preview-as-participant).
+app.MapVisibilityEndpoints();
 
 app.Run();
 

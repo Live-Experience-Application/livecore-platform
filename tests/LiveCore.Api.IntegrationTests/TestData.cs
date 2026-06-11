@@ -1,5 +1,6 @@
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
@@ -77,6 +78,34 @@ internal static class TestData
         context.WorkspaceMembers.Add(member);
         await context.SaveChangesAsync();
         return member;
+    }
+
+    /// <summary>
+    /// Creates and persists a participant in the given workspace, optionally linked
+    /// to a user (pass <paramref name="userProfileId"/> as <see langword="null"/> for
+    /// an anonymous participant). The participant is created Active by the real
+    /// aggregate factory; when <paramref name="removed"/> is <see langword="true"/>
+    /// it is then soft-removed through <see cref="Participant.Remove"/>, so the seeded
+    /// row has exactly the status the production transition would produce.
+    /// </summary>
+    public static async Task<Participant> AddParticipantAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid? userProfileId,
+        string displayName = "Participant",
+        bool removed = false)
+    {
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId, displayName, SeedTime);
+
+        if (removed)
+        {
+            participant.Remove(SeedTime);
+        }
+
+        context.Participants.Add(participant);
+        await context.SaveChangesAsync();
+        return participant;
     }
 
     /// <summary>

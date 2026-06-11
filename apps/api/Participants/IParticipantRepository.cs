@@ -23,10 +23,12 @@ namespace LiveCore.Api.Participants;
 /// (threat T5 in docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
 /// authorization). Resolving the "current" organization or workspace from a
 /// request is not done here; that is the tenant context resolver (CORE-ID-005)
-/// and later endpoint stories. This is the aggregate + persistence story; HTTP
-/// endpoints (the participant-visible feed CORE-SES-005) and the session-join
-/// flow (CORE-SES-003) are later stories and are deliberately not built here.
-/// This contract takes explicit ids.
+/// and the endpoint stories. The aggregate and the workspace-scoped lookups were
+/// added in the aggregate story (CORE-SES-001); the org-only
+/// <see cref="FindByIdInOrganizationAsync(Guid, Guid, CancellationToken)"/> lookup
+/// the participant-visible feed route consumes was added with that route
+/// (CORE-SES-005), mirroring the Sessions module's org-only precedent. This
+/// contract takes explicit ids.
 /// </summary>
 public interface IParticipantRepository
 {
@@ -46,6 +48,47 @@ public interface IParticipantRepository
     Task<Participant?> FindByIdAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finds the participant with exactly the given id WITHIN the given
+    /// organization (tenant) ALONE — without a workspace boundary — or
+    /// <see langword="null"/> when no such participant exists in that organization
+    /// (CORE-SES-005).
+    ///
+    /// This lookup exists because the participant-visible feed route
+    /// (<c>GET /api/v1/participants/{participantId}/visible-feed</c>) addresses a
+    /// participant by id within a query-supplied organization only: the route path
+    /// carries no workspace, so the workspace boundary is not known up front. The
+    /// participant's own <see cref="Participant.WorkspaceId"/> is DISCOVERED from
+    /// the returned row AFTER the tenant boundary has been enforced, and the caller
+    /// then authorizes against that workspace (own-feed ownership, or Host/CoHost
+    /// preview of exactly that workspace). The lookup is still tenant-safe: the
+    /// predicate leads with <c>organization_id</c>, so a participant in another
+    /// organization is NEVER returned even when the surrogate id matches, and the
+    /// surrogate id alone never crosses the tenant boundary (threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
+    /// authorization; docs/06_AUTHORIZATION_MATRIX.md: the organization boundary is
+    /// checked before the workspace boundary). It returns the whole participant,
+    /// carrying its workspace id, user link and status, so the subsequent
+    /// object-level authorization has the boundaries it needs.
+    ///
+    /// The two-boundary <see cref="FindByIdAsync(Guid, Guid, Guid, CancellationToken)"/>
+    /// REMAINS the workspace-scoped lookup and is the right choice whenever the
+    /// workspace is already known from the request. This org-only lookup is used
+    /// only by the by-participant-id feed route, where the workspace is not in the
+    /// path and must be discovered from the row inside the tenant boundary,
+    /// mirroring the Sessions module's
+    /// <c>FindByIdInOrganizationAsync</c> precedent (CORE-SES-004).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or participant id is empty. An empty id can never
+    /// address a stored participant, so the lookup is rejected instead of silently
+    /// returning nothing.
+    /// </exception>
+    Task<Participant?> FindByIdInOrganizationAsync(
+        Guid organizationId,
         Guid id,
         CancellationToken cancellationToken);
 

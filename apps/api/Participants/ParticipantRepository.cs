@@ -58,6 +58,42 @@ internal sealed class ParticipantRepository : IParticipantRepository
     }
 
     /// <inheritdoc />
+    public async Task<Participant?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored participant (ids are generated
+        // non-empty), so the lookup fails fast instead of returning an arbitrary
+        // row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Participant id must not be empty.", nameof(id));
+        }
+
+        // The predicate LEADS with the tenant column, so the lookup is exactly
+        // tenant-scoped: a participant under another organization is never
+        // returned even when the surrogate id matches (threat T5/T1). The
+        // workspace is deliberately NOT part of the predicate because the
+        // by-participant-id feed route does not know it up front; it is read off
+        // the returned row (Participant.WorkspaceId) so the caller can authorize
+        // against that workspace AFTER the tenant boundary has been enforced. The
+        // returned participant also carries its user link and status for the
+        // own-feed/preview decision and the removed-participant guard.
+        return await _dbContext.Participants
+            .FirstOrDefaultAsync(
+                participant => participant.OrganizationId == organizationId
+                    && participant.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<Participant?> FindByUserAsync(
         Guid organizationId,
         Guid workspaceId,

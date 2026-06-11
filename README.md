@@ -341,6 +341,31 @@ These commands persist the session status transition (the authoritative state).
 The durable `SessionStarted` / `SessionEnded` events and their realtime delivery
 belong to the later realtime event stream and are not emitted yet.
 
+### Participant visible feed (skeleton)
+
+The Visibility module's first route returns a single participant's visible feed:
+
+| Method | Route                                              | Authorized callers                                            |
+| ------ | -------------------------------------------------- | ------------------------------------------------------------- |
+| `GET`  | `/api/v1/participants/{participantId}/visible-feed` | the participant's own user, or a `Host`/`CoHost` of its workspace |
+
+The route path carries only the participant id, so the target organization is
+supplied as a required `?organizationSlug=` query parameter (resolved by the same
+token-claim-and-membership tenant check as the session by-id routes). Access is
+granted only when the caller **owns** the participant (own feed) or is a `Host` or
+`CoHost` of the participant's own workspace (preview). The feed is private, so
+**every** denial — a cross-tenant or unknown participant, a removed participant, an
+`Owner`/`Admin`/`Observer`/`Auditor` who is not the owner or a host, a different
+participant, or a host of a different workspace — is hidden as `404` (never `403`),
+and the participant-safe response never echoes any authorization rationale.
+
+This is a **skeleton**: it establishes the route, its fail-closed object-level
+authorization and a participant-safe response envelope whose item list is always
+**empty**. The actual visible content (filtered reveal events / content blocks and
+the server-side visibility-rule engine) belongs to the later Visibility, Reveal and
+Realtime epics; broad external/anonymous participant feed delivery over the realtime
+hub is likewise a Realtime-epic follow-up.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final
