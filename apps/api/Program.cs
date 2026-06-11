@@ -2,6 +2,7 @@ using LiveCore.Api;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -42,6 +43,13 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<UserProfileReferenceService>();
     builder.Services.AddScoped<IOrganizationRepository, OrganizationRepository>();
     builder.Services.AddScoped<IOrganizationMemberRepository, OrganizationMemberRepository>();
+
+    // Workspace persistence (CORE-WS-001): the Workspaces module owns the
+    // tenant-scoped workspaces table (docs/05_MODULE_CONTRACTS.md). Registered
+    // here, inside the persistence conditional, exactly like the organization
+    // repositories above; the repository's lookups are tenant-scoped by
+    // organization id (threat T5). HTTP endpoints are a later story (CORE-WS-003).
+    builder.Services.AddScoped<IWorkspaceRepository, WorkspaceRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
