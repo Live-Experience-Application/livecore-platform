@@ -43,6 +43,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IOrganizationRepository, OrganizationRepository>();
     builder.Services.AddScoped<IOrganizationMemberRepository, OrganizationMemberRepository>();
 
+    // Tenant context resolver (CORE-ID-005): turns an authenticated principal
+    // plus a target organization into a trusted TenantContext or a fail-closed
+    // denial. Registered here because it depends on the organization, user
+    // profile and membership repositories above, which exist only when a
+    // database connection string is configured (docs/02_ARCHITECTURE.md request
+    // flow; docs/05_MODULE_CONTRACTS.md: Organizations provides organization
+    // context and tenant isolation checks; threat T5).
+    builder.Services.AddScoped<TenantContextResolver>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
