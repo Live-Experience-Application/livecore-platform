@@ -11,7 +11,8 @@ namespace LiveCore.Api.Persistence;
 ///
 /// The context is shared infrastructure of the modular monolith: each
 /// module contributes only its own table mappings (the IdentityAccess
-/// <c>users</c> table and the Organizations <c>organizations</c> table) and
+/// <c>users</c> table and the Organizations <c>organizations</c> and
+/// <c>organization_members</c> tables) and
 /// other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -31,9 +32,13 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Organization tenant roots owned by the Organizations module.</summary>
     public DbSet<Organization> Organizations => Set<Organization>();
 
+    /// <summary>Organization memberships owned by the Organizations module.</summary>
+    public DbSet<OrganizationMember> OrganizationMembers => Set<OrganizationMember>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
         modelBuilder.ApplyConfiguration(new OrganizationConfiguration());
+        modelBuilder.ApplyConfiguration(new OrganizationMemberConfiguration());
     }
 }
