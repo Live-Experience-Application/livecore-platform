@@ -46,8 +46,10 @@ namespace LiveCore.Api.Workspaces;
 ///   403 for writes when the caller is authenticated but lacks standing.</item>
 ///   <item><c>MembershipRole</c> is non-linear, so role checks are EXACT
 ///   (role == Owner || role == Admin), never an ordering comparison.</item>
-///   <item>Per-action authorization is inline here (CORE-WS-005 builds the reusable
-///   policy/handler framework; it is deliberately not built in this story).</item>
+///   <item>Per-action authorization is inline here. CORE-WS-005 adds a systematic
+///   authorization test matrix over these checks
+///   (tests/LiveCore.Api.IntegrationTests/WorkspaceAuthorizationPolicyTests.cs);
+///   a reusable policy/handler framework is intentionally not built.</item>
 /// </list>
 ///
 /// Persistence dependency: the endpoints use the repositories and the tenant
