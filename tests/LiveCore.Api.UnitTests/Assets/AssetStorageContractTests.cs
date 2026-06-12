@@ -63,6 +63,21 @@ public class AssetStorageContractTests
     }
 
     [Fact]
+    public async Task DeleteObjectAsync_completes_for_the_assets_object_and_rejects_a_null_asset()
+    {
+        // The server-side delete (CORE-AST-006) hands back no URL and only ever removes access, so it
+        // cannot weaken the private-by-default posture. A conforming adapter completes the delete and still
+        // guards against a null asset.
+        IAssetStorage storage = new FakeSignedUrlAssetStorage(_now);
+        var asset = CreateAsset("livecore-private-assets", "org/ws/asset-delete.bin");
+
+        await storage.DeleteObjectAsync(asset, CancellationToken.None);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => storage.DeleteObjectAsync(null!, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Each_asset_signs_its_own_object_so_one_assets_url_never_addresses_another()
     {
         IAssetStorage storage = new FakeSignedUrlAssetStorage(_now);
@@ -93,6 +108,14 @@ public class AssetStorageContractTests
 
         public Task<SignedAssetUrl> CreateDownloadUrlAsync(Asset asset, CancellationToken cancellationToken)
             => Task.FromResult(Sign(asset, AssetStorageOperation.Download));
+
+        public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+        {
+            // Server-side delete (CORE-AST-006): hands back no URL, only ever removes access. Idempotent —
+            // deleting an object that was never uploaded completes successfully.
+            ArgumentNullException.ThrowIfNull(asset);
+            return Task.CompletedTask;
+        }
 
         private SignedAssetUrl Sign(Asset asset, AssetStorageOperation operation)
         {

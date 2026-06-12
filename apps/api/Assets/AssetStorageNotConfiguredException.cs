@@ -10,8 +10,11 @@ namespace LiveCore.Api.Assets;
 /// some other (insecure) way: it FAILS CLOSED, so assets stay private by default (the epic acceptance
 /// criterion; threat T4 "Asset leak" in docs/07_SECURITY_THREAT_MODEL.md). This mirrors how the host runs
 /// without a database connection string or without an OIDC authority and denies cleanly rather than
-/// degrading security. The consuming flows (CORE-AST-003 / CORE-AST-004) surface this as a fail-closed
-/// response (a storage misconfiguration is an unavailable feature, never anonymous access).
+/// degrading security. The consuming flows surface this as a fail-closed outcome (a storage
+/// misconfiguration is an unavailable feature, never anonymous access): the upload-intent (CORE-AST-003)
+/// and signed-download (CORE-AST-004) endpoints return a fail-closed response, and the cleanup job
+/// (CORE-AST-006) removes nothing — it never deletes a metadata row whose object it could not delete, so
+/// no orphan is created.
 ///
 /// The message carries only the attempted operation name — never any storage coordinate — so it is safe
 /// for structured logs (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
@@ -19,11 +22,11 @@ namespace LiveCore.Api.Assets;
 public sealed class AssetStorageNotConfiguredException : InvalidOperationException
 {
     /// <summary>
-    /// Creates a fail-closed storage error describing the operation that could not be served because no
+    /// Creates a fail-closed storage error describing the operation that could not be performed because no
     /// object-storage adapter is configured.
     /// </summary>
     public AssetStorageNotConfiguredException(AssetStorageOperation operation)
-        : base($"No object storage is configured; cannot produce a signed {operation} URL.")
+        : base($"No object storage is configured; cannot perform the {operation} operation.")
     {
         Operation = operation;
     }

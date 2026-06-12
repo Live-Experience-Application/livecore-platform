@@ -142,4 +142,53 @@ internal sealed class AssetRepository : IAssetRepository
         _dbContext.Assets.Update(asset);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Asset>> ListExpiredPendingAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SYSTEM maintenance sweep (CORE-AST-006): the predicate filters on status, so an Available
+        // (confirmed) asset is never returned even if it is old — confirmed content is never reclaimed. It
+        // deliberately spans all tenants/workspaces because the cleanup job is a system job, not a tenant
+        // actor; it returns only pending (unconfirmed, contentless) rows so it serves no content and grants
+        // no access (see the interface remarks; threats T4/T5).
+        //
+        // The order is the time-ordered surrogate id (UUIDv7, chronological and provider-independent —
+        // SQLite cannot ORDER BY or compare a DateTimeOffset, matching the other repositories' ordering
+        // convention), so the OLDEST pending assets sort first. The bounded batch (Take(maxCount)) therefore
+        // surfaces the most-expired assets first, and the creation-time threshold is applied AFTER
+        // materialization: a still-fresh pending asset that slips into the batch is filtered out here and
+        // never reclaimed (an upload may still be in flight). The id and creation time are both stamped when
+        // the upload intent is registered, so id order tracks creation order; over repeated sweeps every
+        // expired asset is covered.
+        var oldestPending = await _dbContext.Assets
+            .Where(asset => asset.Status == AssetStatus.Pending)
+            .OrderBy(asset => asset.Id)
+            .Take(maxCount)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return oldestPending
+            .Where(asset => asset.CreatedAt < createdBefore)
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(Asset asset, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+
+        // Remove the metadata row. The asset_links.asset_id foreign key cascades on delete, so any links to
+        // this asset are removed with it and no dangling join remains. The cleanup job has already deleted
+        // the storage object before calling this, so the row is never removed while its object remains.
+        _dbContext.Assets.Remove(asset);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

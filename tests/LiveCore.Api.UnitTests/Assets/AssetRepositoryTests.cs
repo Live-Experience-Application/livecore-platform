@@ -518,4 +518,142 @@ public sealed class AssetRepositoryTests : IDisposable
         var remaining = await context.Assets.CountAsync(CancellationToken.None);
         Assert.Equal(0, remaining);
     }
+
+    [Fact]
+    public async Task ListExpiredPending_returns_only_pending_assets_older_than_the_threshold()
+    {
+        // The cleanup sweep (CORE-AST-006) reclaims abandoned, unconfirmed (pending) upload intents older
+        // than the grace window. It must return the OLD PENDING asset but never a confirmed (available)
+        // asset (real content is never reclaimed, however old) and never a still-fresh pending asset (an
+        // upload may still be in flight).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+
+        var oldCreatedAt = new DateTimeOffset(2026, 6, 10, 8, 0, 0, TimeSpan.Zero);
+        var freshCreatedAt = new DateTimeOffset(2026, 6, 12, 8, 0, 0, TimeSpan.Zero);
+        var threshold = new DateTimeOffset(2026, 6, 11, 8, 0, 0, TimeSpan.Zero);
+
+        var oldPending = await SeedAssetAtAsync(organization.Id, workspace.Id, user.Id, "org/ws/old-pending.bin", oldCreatedAt);
+        // An old but CONFIRMED asset must be excluded: confirmed content is never reclaimed.
+        var oldAvailable = await SeedAvailableAssetAtAsync(
+            organization.Id, workspace.Id, user.Id, "org/ws/old-available.bin", oldCreatedAt, _confirmedAt);
+        // A fresh pending asset must be excluded: it is still within the grace window.
+        await SeedAssetAtAsync(organization.Id, workspace.Id, user.Id, "org/ws/fresh-pending.bin", freshCreatedAt);
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        var expired = await repository.ListExpiredPendingAsync(threshold, 100, CancellationToken.None);
+
+        Assert.Equal(new[] { oldPending.Id }, expired.Select(asset => asset.Id).ToArray());
+        Assert.DoesNotContain(expired, asset => asset.Id == oldAvailable.Id);
+        Assert.All(expired, asset => Assert.Equal(AssetStatus.Pending, asset.Status));
+    }
+
+    [Fact]
+    public async Task ListExpiredPending_spans_tenants_and_workspaces_oldest_first()
+    {
+        // The sweep is a SYSTEM maintenance job, not a tenant actor: it deliberately spans tenants and
+        // workspaces (it returns only contentless pending rows, exclusively for deletion). The order is
+        // deterministic — oldest creation time first.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspaceB = await SeedWorkspaceAsync(organizationB.Id, _workspaceSlugB);
+        var user = await SeedUserAsync(_issuer, _subject);
+
+        var threshold = new DateTimeOffset(2026, 6, 12, 0, 0, 0, TimeSpan.Zero);
+        var olderInA = await SeedAssetAtAsync(
+            organizationA.Id, workspaceA.Id, user.Id, "orgA/ws/older.bin",
+            new DateTimeOffset(2026, 6, 10, 8, 0, 0, TimeSpan.Zero));
+        var newerInB = await SeedAssetAtAsync(
+            organizationB.Id, workspaceB.Id, user.Id, "orgB/ws/newer.bin",
+            new DateTimeOffset(2026, 6, 11, 8, 0, 0, TimeSpan.Zero));
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        var expired = await repository.ListExpiredPendingAsync(threshold, 100, CancellationToken.None);
+
+        Assert.Equal(new[] { olderInA.Id, newerInB.Id }, expired.Select(asset => asset.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task ListExpiredPending_bounds_the_result_to_the_batch_size()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+
+        var threshold = new DateTimeOffset(2026, 6, 12, 0, 0, 0, TimeSpan.Zero);
+        await SeedAssetAtAsync(organization.Id, workspace.Id, user.Id, "org/ws/p1.bin", new DateTimeOffset(2026, 6, 10, 1, 0, 0, TimeSpan.Zero));
+        await SeedAssetAtAsync(organization.Id, workspace.Id, user.Id, "org/ws/p2.bin", new DateTimeOffset(2026, 6, 10, 2, 0, 0, TimeSpan.Zero));
+        await SeedAssetAtAsync(organization.Id, workspace.Id, user.Id, "org/ws/p3.bin", new DateTimeOffset(2026, 6, 10, 3, 0, 0, TimeSpan.Zero));
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        var firstBatch = await repository.ListExpiredPendingAsync(threshold, 2, CancellationToken.None);
+
+        Assert.Equal(2, firstBatch.Count);
+    }
+
+    [Fact]
+    public async Task ListExpiredPending_rejects_a_non_positive_batch_size()
+    {
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListExpiredPendingAsync(_createdAt, 0, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListExpiredPendingAsync(_createdAt, -1, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_removes_the_asset_row()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var seeded = await SeedAssetAsync(organization.Id, workspace.Id, user.Id, "org/ws/a.bin");
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AssetRepository(context);
+            var loaded = await repository.FindByIdAsync(organization.Id, workspace.Id, seeded.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.DeleteAsync(loaded, CancellationToken.None);
+        }
+
+        await using var assertionContext = CreateContext();
+        var remaining = await assertionContext.Assets.CountAsync(CancellationToken.None);
+        Assert.Equal(0, remaining);
+    }
+
+    private async Task<Asset> SeedAssetAtAsync(
+        Guid organizationId, Guid workspaceId, Guid createdBy, string objectKey, DateTimeOffset createdAt)
+    {
+        var asset = Asset.Create(
+            organizationId, workspaceId, createdBy, _storageProvider, _bucket, objectKey, _contentType, createdAt);
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        Assert.Equal(AssetAddResult.Added, await repository.AddAsync(asset, CancellationToken.None));
+        return asset;
+    }
+
+    private async Task<Asset> SeedAvailableAssetAtAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid createdBy,
+        string objectKey,
+        DateTimeOffset createdAt,
+        DateTimeOffset confirmedAt)
+    {
+        var asset = Asset.Create(
+            organizationId, workspaceId, createdBy, _storageProvider, _bucket, objectKey, _contentType, createdAt);
+        asset.MarkAvailable(4096, _checksum, confirmedAt);
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        Assert.Equal(AssetAddResult.Added, await repository.AddAsync(asset, CancellationToken.None));
+        return asset;
+    }
 }

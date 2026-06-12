@@ -418,5 +418,12 @@ public sealed class AssetDownloadUrlEndpointTests
             var url = new Uri($"https://storage.example.com/{asset.Bucket}/{asset.ObjectKey}?op=get&signature=fake");
             return Task.FromResult(SignedAssetUrl.Create(url, AssetStorageOperation.Download, TestData.SeedTime, _lifetime));
         }
+
+        public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+        {
+            // Not exercised by the download flow; the cleanup job (CORE-AST-006) drives deletion.
+            ArgumentNullException.ThrowIfNull(asset);
+            return Task.CompletedTask;
+        }
     }
 }

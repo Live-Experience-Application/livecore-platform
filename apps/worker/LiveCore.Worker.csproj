@@ -7,6 +7,21 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Host-internal types (e.g. the cleanup background service) stay internal;
+         only the smoke test project may see them. -->
+    <InternalsVisibleTo Include="LiveCore.SmokeTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The worker hosts background jobs that reuse the Core domain (CORE-AST-006: the asset cleanup
+         job). The Core is a modular monolith with all domain modules in apps/api, so the worker shares
+         that assembly rather than duplicating the Assets module. This propagates the API's framework
+         reference (Microsoft.AspNetCore.App) and its Npgsql/EF Core packages, so the worker's runtime
+         image uses the aspnet base (see apps/worker/Dockerfile). -->
+    <ProjectReference Include="..\api\LiveCore.Api.csproj" />
   </ItemGroup>
 </Project>

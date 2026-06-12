@@ -51,6 +51,15 @@ namespace LiveCore.Api.Assets;
 /// docs/06_AUTHORIZATION_MATRIX.md). Minting a signed URL is the last step after the permission check has
 /// passed; the adapter is a dumb, secure signer. The endpoints, their role/tenant authorization and their
 /// negative-authorization (foreign-tenant / wrong-role) tests land with those flow stories.
+///
+/// CLEANUP (CORE-AST-006). The port also exposes one SERVER-SIDE operation — <see cref="DeleteObjectAsync"/>
+/// — that hands no URL to any client: it removes an asset's object from its private bucket. The background
+/// asset cleanup job uses it to reclaim the orphaned objects of abandoned pending upload intents (an upload
+/// intent that was registered but never confirmed). Deletion only ever REMOVES access; it never widens it,
+/// so it cannot weaken the private-by-default posture. It is fail-closed exactly like the signing
+/// operations: when no concrete adapter is configured it throws <see cref="AssetStorageNotConfiguredException"/>
+/// rather than silently pretending success, so the cleanup job never deletes a metadata row whose object it
+/// could not delete and so never orphans an object.
 /// </summary>
 public interface IAssetStorage
 {
@@ -83,4 +92,23 @@ public interface IAssetStorage
     /// <exception cref="ArgumentNullException">The asset is null.</exception>
     /// <exception cref="AssetStorageNotConfiguredException">No object storage is configured (fail closed).</exception>
     Task<SignedAssetUrl> CreateDownloadUrlAsync(Asset asset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the given asset's object from its private bucket (the cleanup step of the asset lifecycle,
+    /// CORE-AST-006). The adapter deletes the object directly with the deployment's own storage credentials —
+    /// no signed URL is produced and no bytes are served, so this can only ever REMOVE access (threat T4
+    /// "Asset leak"). The asset is the already-loaded, tenant- and workspace-scoped metadata row; the adapter
+    /// addresses its own storage coordinates only, never an arbitrary bucket or object key (threats T5/T1).
+    /// The caller is the background asset cleanup job, which has already determined the asset is an expired,
+    /// unconfirmed (pending) upload intent.
+    ///
+    /// Deletion is IDEMPOTENT: removing an object that does not exist (an upload intent whose client never
+    /// actually uploaded anything) completes successfully rather than failing, so the cleanup job can safely
+    /// reclaim a pending asset whether or not its object was ever written.
+    /// </summary>
+    /// <param name="asset">The asset whose object is removed.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentNullException">The asset is null.</exception>
+    /// <exception cref="AssetStorageNotConfiguredException">No object storage is configured (fail closed).</exception>
+    Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken);
 }

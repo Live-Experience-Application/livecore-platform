@@ -22,4 +22,31 @@ public class WorkerSmokeTests
         await host.StopAsync(timeout.Token);
         Assert.True(lifetime.ApplicationStopped.IsCancellationRequested);
     }
+
+    [Fact]
+    public void WorkerHost_registers_the_asset_cleanup_job_when_a_database_is_configured()
+    {
+        // CORE-AST-006: with a database configured the worker schedules the asset cleanup job. The
+        // connection string is supplied through configuration only (no connection is opened by building the
+        // host), exactly as the API host reads it.
+        using var host = WorkerHostFactory.Create(
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
+            .Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.Contains(hostedServices, service => service is AssetCleanupBackgroundService);
+    }
+
+    [Fact]
+    public void WorkerHost_registers_no_cleanup_job_without_a_database()
+    {
+        // Persistence-gated, fail-safe: with no database configured the worker still starts but schedules no
+        // cleanup loop (mirroring how the API host runs without persistence).
+        using var host = WorkerHostFactory.Create([]).Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.DoesNotContain(hostedServices, service => service is AssetCleanupBackgroundService);
+    }
 }

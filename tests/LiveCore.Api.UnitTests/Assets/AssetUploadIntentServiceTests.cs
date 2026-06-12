@@ -169,6 +169,12 @@ public class AssetUploadIntentServiceTests
 
         public Task UpdateAsync(Asset asset, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<Asset>> ListExpiredPendingAsync(DateTimeOffset createdBefore, int maxCount, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeleteAsync(Asset asset, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     /// <summary>
@@ -193,6 +199,13 @@ public class AssetUploadIntentServiceTests
             ArgumentNullException.ThrowIfNull(asset);
             var url = new Uri($"https://storage.example.com/{asset.Bucket}/{asset.ObjectKey}?op=get&signature=fake");
             return Task.FromResult(SignedAssetUrl.Create(url, AssetStorageOperation.Download, now, _lifetime));
+        }
+
+        public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+        {
+            // Not exercised by the upload-intent flow; the cleanup job (CORE-AST-006) drives deletion.
+            ArgumentNullException.ThrowIfNull(asset);
+            return Task.CompletedTask;
         }
     }
 }

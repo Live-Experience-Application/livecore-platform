@@ -70,7 +70,7 @@ eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
-apps/worker              Background worker host skeleton (LiveCore.Worker)
+apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup job
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (skeleton)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
@@ -195,7 +195,8 @@ Start the API host (listens on `http://localhost:5062` by default, see
 dotnet run --project apps/api
 ```
 
-Start the background worker host (registers no jobs yet):
+Start the background worker host (runs the asset cleanup job when a database is
+configured; see "Asset cleanup job" below):
 
 ```bash
 dotnet run --project apps/worker
@@ -790,8 +791,38 @@ to a content block or entity **visible to the audience**; host-content roles
 are **denied fail-closed**. The asset stays **private by default** and is reached only through
 the single short-lived signed URL minted after the permission check (the epic acceptance
 criterion; threat T4 "Asset leak"; threat T2 visibility leak). Per-participant asset access
-(an asset linked to a resource revealed only to one participant) and the cleanup job
-(CORE-AST-006) are later stories.
+(an asset linked to a resource revealed only to one participant) is a later story.
+
+### Asset cleanup job
+
+CORE-AST-006 adds the Assets module's lifecycle cleanup — the final step of the asset
+lifecycle (`docs/12_STORAGE_ASSETS.md`). It is a periodic background sweep that runs in the
+**worker** host (`apps/worker`; `docs/02_ARCHITECTURE.md`: the worker owns "cleanup" and async
+jobs), behind no HTTP route. It reclaims **abandoned upload intents**: an asset registered
+`Pending` when its upload intent was created (CORE-AST-003) whose upload was never confirmed
+(CORE-AST-004) within the deployment's grace window (`Assets:Cleanup:PendingRetention`, default
+24 hours). Each leaves a stale metadata row and possibly an orphaned object in private storage;
+the sweep deletes the **object first**, then the **metadata row**, so a row never outlives its
+object and no orphaned object is ever left behind. The asset's links cascade away with the row.
+
+Object deletion is a new **server-side** `IAssetStorage` operation: the deployment-supplied
+adapter deletes the object directly with its own credentials — no signed URL is produced and no
+bytes are served — so cleanup only ever **removes** access and can never weaken the
+private-by-default posture (threat T4 "Asset leak"). It is **fail-closed** like the signing
+operations: with no configured storage adapter (`UnconfiguredAssetStorage`) the delete throws and
+the sweep removes **nothing** — it never deletes a metadata row whose object it could not delete.
+Only `Pending` assets are ever touched; a confirmed (`Available`) asset — real, possibly-linked
+content — is **never** reclaimed, however old (defence in depth: the candidate query is
+pending-only and the sweep re-checks each asset's status).
+
+The cleanup logic lives in the Assets module (`ExpiredPendingAssetCleanupService`); the worker
+only schedules it (`AssetCleanupBackgroundService`, every `Assets:Cleanup:SweepInterval`, in
+bounded `Assets:Cleanup:BatchSize` batches), and like the API host it is **gated on a configured
+database connection string** (no database -> the worker starts but runs no cleanup loop). No
+storage credentials live in Core; the concrete S3-compatible adapter is supplied by the
+deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Because the worker now
+reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
+`apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
 
 ## Container images
 
@@ -815,7 +846,8 @@ curl http://localhost:8080/health/live
 docker stop livecore-api
 ```
 
-Run the worker container (no ports; it registers no jobs yet and idles):
+Run the worker container (no ports; runs the asset cleanup job when a database is configured,
+otherwise idles):
 
 ```bash
 docker run --rm livecore-worker

@@ -32,4 +32,15 @@ internal sealed class UnconfiguredAssetStorage : IAssetStorage
         ArgumentNullException.ThrowIfNull(asset);
         throw new AssetStorageNotConfiguredException(AssetStorageOperation.Download);
     }
+
+    /// <inheritdoc />
+    public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+    {
+        // Fail closed for deletion too (CORE-AST-006): with no configured adapter there is no object to
+        // delete, and the cleanup job must NOT remove a metadata row whose object it could not delete (that
+        // would orphan an object once storage IS configured). Throwing here makes the cleanup job leave the
+        // record untouched rather than silently pretending success.
+        ArgumentNullException.ThrowIfNull(asset);
+        throw new AssetStorageNotConfiguredException(AssetStorageOperation.Delete);
+    }
 }

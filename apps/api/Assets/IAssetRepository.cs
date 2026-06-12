@@ -6,25 +6,25 @@ namespace LiveCore.Api.Assets;
 /// application services (docs/02_ARCHITECTURE.md: no direct table ownership violations;
 /// docs/05_MODULE_CONTRACTS.md: the Assets module owns "asset metadata").
 ///
-/// Every lookup is explicitly scoped by BOTH boundaries: the caller passes the organization id and the
-/// workspace id, and an asset is only ever returned when it belongs to exactly that (organization,
-/// workspace) pair. The organization boundary is checked before the workspace boundary
+/// Every CALLER-FACING lookup is explicitly scoped by BOTH boundaries: the caller passes the organization
+/// id and the workspace id, and an asset is only ever returned when it belongs to exactly that
+/// (organization, workspace) pair. The organization boundary is checked before the workspace boundary
 /// (docs/06_AUTHORIZATION_MATRIX.md authorization principles), so an asset is never returned through a
 /// foreign organization's id even when the workspace and ids are correct, and never through a foreign
-/// workspace's id even when the organization and ids are correct. There is deliberately no lookup of an
-/// asset by id alone, no lookup that crosses tenants, and NO list-everything method, so one workspace's
-/// asset can never be read through another workspace's id and an asset in one tenant can never be read
-/// through another tenant's id (threat T5 in docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken
-/// object-level authorization). Returning the metadata row is NOT the same as granting access to the
-/// stored object: the object is reached only through an authorized, short-lived signed URL after a
-/// permission check (the signed download flow is CORE-AST-004; threat T4 "Asset leak").
+/// workspace's id even when the organization and ids are correct. There is deliberately no caller-facing
+/// lookup of an asset by id alone, no caller-facing lookup that crosses tenants, and NO list-everything
+/// read method, so one workspace's asset can never be read through another workspace's id and an asset in
+/// one tenant can never be read through another tenant's id (threat T5 in docs/07_SECURITY_THREAT_MODEL.md;
+/// threat T1 broken object-level authorization). Returning the metadata row is NOT the same as granting
+/// access to the stored object: the object is reached only through an authorized, short-lived signed URL
+/// after a permission check (the signed download flow is CORE-AST-004; threat T4 "Asset leak").
 ///
-/// This is the metadata aggregate + persistence story. There are NO HTTP endpoints in this story (the
-/// asset upload-intent and signed-download routes in csv/api_routes.csv are CORE-AST-003 / CORE-AST-004),
-/// no storage adapter (CORE-AST-002), no linking to content blocks/entities (CORE-AST-005) and no
-/// cleanup job (CORE-AST-006); those are later stories and are deliberately not built here. This contract
-/// takes explicit ids; resolving the "current" organization or workspace from a request is the tenant
-/// context resolver and later stories.
+/// The single exception is the background MAINTENANCE sweep <see cref="ListExpiredPendingAsync"/>
+/// (CORE-AST-006): it deliberately spans all tenants because the cleanup job is a SYSTEM job, not a tenant
+/// actor on behalf of any caller. It does not implicate threat T5 (a tenant reading another tenant's data
+/// through the API) because it is never reached from a request, returns ONLY still-pending — therefore
+/// unconfirmed and contentless — assets, and exists only so those abandoned upload intents can be deleted.
+/// It serves no bytes and grants no access.
 /// </summary>
 public interface IAssetRepository
 {
@@ -116,4 +116,43 @@ public interface IAssetRepository
     /// T4/T5). The caller is responsible for having loaded the asset through a tenant-scoped lookup.
     /// </summary>
     Task UpdateAsync(Asset asset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists up to <paramref name="maxCount"/> assets that are still <see cref="AssetStatus.Pending"/> and
+    /// were created strictly before <paramref name="createdBefore"/>, oldest-first. (The batch is taken in
+    /// time-ordered surrogate-id order — a chronological proxy that is provider-portable, since the SQLite
+    /// test provider cannot order or compare a <see cref="DateTimeOffset"/> — and the creation-time threshold
+    /// is applied to that bounded batch, so the oldest pending assets are surfaced first and a still-fresh
+    /// pending asset is never returned.) These are the EXPIRED, UNCONFIRMED upload intents the background
+    /// cleanup job reclaims (CORE-AST-006): an upload intent was
+    /// registered (the asset went <see cref="AssetStatus.Pending"/>) but its upload was never confirmed
+    /// within the deployment's grace window, so the metadata row — and any orphaned object — is abandoned.
+    ///
+    /// This is a SYSTEM maintenance sweep, NOT a caller-facing read: it spans all tenants and workspaces
+    /// because the cleanup job runs on behalf of the deployment, not on behalf of any tenant. It is the one
+    /// deliberate exception to this repository's tenant-scoped read rule, and it is safe because it returns
+    /// ONLY pending (hence unconfirmed and contentless) assets, exclusively so they can be deleted: it never
+    /// returns an <see cref="AssetStatus.Available"/> asset (confirmed content is never reclaimed), serves no
+    /// bytes and grants no access (threats T4/T5 are about reaching another tenant's CONTENT through the API,
+    /// which this never does). A non-positive <paramref name="maxCount"/> is rejected so a sweep always has
+    /// a bounded batch size.
+    /// </summary>
+    /// <param name="createdBefore">The exclusive upper bound on an asset's creation time (UTC).</param>
+    /// <param name="maxCount">The maximum number of assets to return (a positive batch size).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxCount"/> is not positive.</exception>
+    Task<IReadOnlyList<Asset>> ListExpiredPendingAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes an asset metadata row previously loaded through this repository — used by the cleanup job
+    /// (CORE-AST-006) once the asset's storage object has been deleted. The asset's links cascade away with
+    /// it (the <c>asset_links.asset_id</c> foreign key cascades on delete), so the row leaves behind no
+    /// dangling join. Deleting the metadata row does not, by itself, delete the stored object; the cleanup
+    /// job deletes the object FIRST through <see cref="IAssetStorage.DeleteObjectAsync"/> and only then
+    /// removes the row, so a row is never deleted while its object remains (no orphaned object).
+    /// </summary>
+    Task DeleteAsync(Asset asset, CancellationToken cancellationToken);
 }

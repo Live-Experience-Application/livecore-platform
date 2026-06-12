@@ -109,8 +109,29 @@ may obtain a download URL only when the asset is linked to a content block or en
 the audience** (`VisibilityPolicy.CanViewResource`, reused — not duplicated); host-content roles may always
 download, and the audit role and any other role are denied fail-closed. The asset stays **private** and is
 reached only through the single short-lived signed URL minted after the permission check (the epic
-acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak). The cleanup job (CORE-AST-006) is
-a later story.
+acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak).
+
+### Cleanup job (CORE-AST-006)
+
+The asset cleanup job is the lifecycle's final step. It is a periodic background sweep that runs in the
+**worker** host (docs/02_ARCHITECTURE.md: the worker owns "cleanup" and async jobs), not behind any HTTP
+route. It reclaims **abandoned upload intents**: an asset registered `Pending` when its upload intent was
+created (CORE-AST-003) whose upload was never confirmed (CORE-AST-004) within the deployment's grace window
+(`Assets:Cleanup:PendingRetention`, default 24 hours). Each such asset leaves a stale metadata row and,
+possibly, an orphaned object in private storage; the sweep deletes the **object first**, then the **metadata
+row** (so a row never outlives its object — no orphaned object is ever left behind).
+
+Object deletion is a new, server-side `IAssetStorage` operation (the adapter deletes the object directly with
+the deployment's own credentials — no signed URL is produced and no bytes are served), so cleanup only ever
+**removes** access and can never weaken the private-by-default posture (threat T4 "Asset leak"). It is
+fail-closed like the signing operations: with no configured storage adapter (`UnconfiguredAssetStorage`) the
+delete throws and the sweep removes **nothing** — it never deletes a metadata row whose object it could not
+delete. Only `Pending` assets are ever touched; a confirmed (`Available`) asset — real, possibly-linked
+content — is never reclaimed, however old. The cleanup logic lives in the Assets module
+(`ExpiredPendingAssetCleanupService`); the worker only schedules it (`Assets:Cleanup:SweepInterval`,
+`Assets:Cleanup:BatchSize`), and like the API host it is gated on a configured database connection string. No
+storage credentials live in Core; the concrete S3-compatible adapter is supplied by the deployment
+(docs/13_SELF_HOSTING_REQUIREMENTS.md; ADR 0006; threat T7).
 
 ## Security rules
 
@@ -131,6 +152,9 @@ Create upload intent
   -> Core stores asset metadata
   -> asset can be linked to ContentBlock or Entity
   -> visibility controls whether it can be accessed
+
+(an upload intent that is never confirmed within the grace window is reclaimed
+ by the background cleanup job: its object and metadata row are deleted)
 ```
 
 ## Metadata

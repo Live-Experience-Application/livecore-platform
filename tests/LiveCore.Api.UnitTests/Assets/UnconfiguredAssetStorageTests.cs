@@ -60,6 +60,30 @@ public class UnconfiguredAssetStorageTests
     }
 
     [Fact]
+    public async Task DeleteObjectAsync_fails_closed_when_storage_is_not_configured()
+    {
+        // The cleanup job (CORE-AST-006) deletes through the same port. When no adapter is configured the
+        // delete must FAIL CLOSED so the job never removes a metadata row whose object it could not delete
+        // (which would orphan an object once storage is wired) — it never silently pretends success.
+        var exception = await Assert.ThrowsAsync<AssetStorageNotConfiguredException>(
+            () => _storage.DeleteObjectAsync(_asset, CancellationToken.None));
+
+        Assert.Equal(AssetStorageOperation.Delete, exception.Operation);
+    }
+
+    [Fact]
+    public async Task The_fail_closed_delete_exception_message_leaks_no_storage_coordinate()
+    {
+        var exception = await Assert.ThrowsAsync<AssetStorageNotConfiguredException>(
+            () => _storage.DeleteObjectAsync(_asset, CancellationToken.None));
+
+        // Log-safe even for the delete operation (threats T4/T7): only the operation name, no coordinate.
+        Assert.DoesNotContain(_asset.Bucket, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(_asset.ObjectKey, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(_asset.StorageProvider, exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CreateUploadUrlAsync_rejects_a_null_asset()
         => await Assert.ThrowsAsync<ArgumentNullException>(
             () => _storage.CreateUploadUrlAsync(null!, CancellationToken.None));
@@ -68,4 +92,9 @@ public class UnconfiguredAssetStorageTests
     public async Task CreateDownloadUrlAsync_rejects_a_null_asset()
         => await Assert.ThrowsAsync<ArgumentNullException>(
             () => _storage.CreateDownloadUrlAsync(null!, CancellationToken.None));
+
+    [Fact]
+    public async Task DeleteObjectAsync_rejects_a_null_asset()
+        => await Assert.ThrowsAsync<ArgumentNullException>(
+            () => _storage.DeleteObjectAsync(null!, CancellationToken.None));
 }
