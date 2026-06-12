@@ -1256,6 +1256,37 @@ request-shape feedback. Granting the resulting `SubjectEntitlement` from the rec
 purchase-token endpoint is CORE-STORE-004 and idempotent store notifications are CORE-STORE-005. This story adds
 no new table and no EF migration (it reuses `purchase_transactions` and `purchase_events`).
 
+### Google purchase token verification endpoint
+
+CORE-STORE-004 adds the **Google** side of the receipt-verification flow — the Google analogue of the Apple
+endpoint above — so that **Google purchase tokens are verified before entitlements are granted** (the story's
+acceptance criterion):
+
+| Method | Route                             | Authorized callers                                   |
+| ------ | --------------------------------- | ---------------------------------------------------- |
+| `POST` | `/api/v1/purchases/google/tokens` | any authenticated user (a service account is denied) |
+
+The request body carries only the opaque Google Play **purchase token** and an optional opaque product reference
+(a Google Play product/SKU); Core never parses, trusts or logs the token (it is carried verbatim into a
+provider-neutral `PurchaseVerificationRequest`). The flow is **verify-then-record, fail-closed**: the endpoint
+authorizes the caller, resolves the deployment-supplied Google adapter through
+`PurchaseVerificationProviderResolver` and verifies the token, and **only a verified result** is persisted as a
+`PurchaseTransaction` (reusing the CORE-STORE-002 `PurchaseTransactionService`, so recording is idempotent — a
+retry or a replayed-but-genuine token creates no second row and no duplicate audit event). A rejected (forged /
+replayed / unverifiable) token is `422` and records **nothing**; when no Google adapter is configured the resolver
+fails closed and the request is `503` (the verification analogue of the unconfigured asset storage). So Core never
+trusts a client's premium claim and never grants premium state without a real server-side verification behind it.
+
+Submitting a purchase is an inherently **per-user** action (the buyer's own receipt), so a missing/invalid token
+is `401` and a non-user **service-account** principal is `403` (the same rule as the Apple endpoint and the `/me`
+quota-status read). The transaction is named **globally** by its `(provider, provider_transaction_id)` pair and
+carries **no tenant** (CORE-STORE-002: `purchase_transactions` has no `organization_id`), so there is no
+organization/workspace boundary on this route; the body is validated only **after** authorization, so an
+unauthorized caller never receives request-shape feedback. Granting the resulting `SubjectEntitlement` from the
+recorded purchase and linking the buyer (`billing_account_links`) are later stories; idempotent store
+notifications are CORE-STORE-005. This story adds no new table and no EF migration (it reuses
+`purchase_transactions` and `purchase_events`).
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

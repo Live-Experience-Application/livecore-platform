@@ -234,6 +234,43 @@ acceptance criterion).
   grace periods is CORE-STORE-005. This story adds no new table and no EF migration (it reuses the CORE-STORE-002
   `purchase_transactions` and `purchase_events`).
 
+## Google purchase token verification endpoint (CORE-STORE-004)
+
+CORE-STORE-003 wired the Apple side of the receipt-verification flow; CORE-STORE-004 adds the **Google** side —
+the Google half of "Mobile app sends transaction token/JWS/purchase token to backend; Backend verifies with
+Apple/Google server APIs; Backend persists PurchaseTransaction" (the "Receipt verification" flow above) — so that
+**Google purchase tokens are verified before entitlements are granted** (the story's acceptance criterion). It is
+the Google analogue of CORE-STORE-003: the same verify-then-record, fail-closed shape over the same CORE-STORE-001
+abstraction and CORE-STORE-002 persistence, differing only in the provider and the proof's name.
+
+- `POST /api/v1/purchases/google/tokens` (`apps/api/Store/GooglePurchaseEndpoints.cs`) — the route of
+  `csv/mobile_store_api_routes.csv` (`POST /v1/purchases/google/tokens`) surfaced under the Core `/api/v1`
+  prefix `docs/08_API_CONTRACTS.md` mandates, and added to `csv/api_routes.csv`. The request body carries only the
+  opaque Google Play **purchase token** and an optional opaque product reference (a Google Play product/SKU); Core
+  never parses, trusts or logs the token (it is carried verbatim into a provider-neutral
+  `PurchaseVerificationRequest`).
+- **Verify-then-record, fail-closed.** The endpoint authorizes the caller, resolves the deployment-supplied Google
+  adapter through `PurchaseVerificationProviderResolver` and verifies the token, and **only a verified result** is
+  persisted as a `PurchaseTransaction` (reusing the CORE-STORE-002 `PurchaseTransactionService`, so recording is
+  idempotent — a retry or a replayed-but-genuine token creates no second row and no duplicate audit event). A
+  rejected (forged / replayed / unverifiable) token is `422` and records **nothing**; when no Google adapter is
+  configured the resolver fails closed and the request is `503` (the verification analogue of the unconfigured
+  asset storage). So Core never trusts a client's premium claim and never grants premium state without a real
+  server-side verification behind it ("Never trust client-side premium flags"; "Never unlock limits before server
+  verification succeeds").
+- **Authorization.** A missing/invalid token is `401`. Submitting a purchase is an inherently per-user action (the
+  buyer's own receipt), so a non-user **service-account** principal is denied `403` — it has no personal purchase
+  to submit (the same rule as the Apple endpoint and the `/me` quota-status read). The transaction is named
+  **globally** by its (`provider`, `provider_transaction_id`) pair and carries **no tenant** (CORE-STORE-002:
+  `purchase_transactions` has no `organization_id`), so there is no organization/workspace boundary to resolve on
+  this route. The request body is validated only **after** authorization, so an unauthorized caller never receives
+  request-shape feedback.
+- **Out of scope (later stories).** Granting the resulting `SubjectEntitlement` from the recorded purchase (the
+  product → plan → entitlement mapping) and linking the buyer (`billing_account_links`) are later stories;
+  CORE-STORE-004 establishes the verify-and-record gate they sit behind. The idempotent store-notification handling
+  that drives renewals / cancellations / refunds / grace periods is CORE-STORE-005. This story adds no new table and
+  no EF migration (it reuses the CORE-STORE-002 `purchase_transactions` and `purchase_events`).
+
 ## Security requirements
 
 - Never trust client-side premium flags.

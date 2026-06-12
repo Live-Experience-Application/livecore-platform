@@ -45,7 +45,54 @@ public sealed record AppleTransactionVerificationRequest(
 }
 
 /// <summary>
-/// Response body of a SUCCESSFUL purchase verification (CORE-STORE-003; reused by the later Google endpoint,
+/// Request body for the Google purchase token verification endpoint (CORE-STORE-004,
+/// <c>POST /api/v1/purchases/google/tokens</c>, csv/api_routes.csv / csv/mobile_store_api_routes.csv
+/// "Submit Google purchase token for server verification"). A mobile client completes a purchase against the
+/// Google Play store and submits its purchase token here for the backend to verify with Google's server APIs
+/// BEFORE any entitlement is granted (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md "Receipt verification":
+/// the client never becomes the source of truth for premium access). This is the Google analogue of
+/// <see cref="AppleTransactionVerificationRequest"/>; only the proof's name differs (Google issues a purchase
+/// token rather than a signed transaction JWS), and both reduce to the same provider-neutral
+/// <see cref="PurchaseVerificationRequest"/>.
+///
+/// THE PROOF IS UNTRUSTED AND OPAQUE. <see cref="PurchaseToken"/> is the Google Play purchase token the client
+/// submitted; Core treats it as an OPAQUE, untrusted token — it is carried verbatim into a provider-neutral
+/// <see cref="PurchaseVerificationRequest"/> and verified only inside the deployment-supplied Google adapter,
+/// never parsed or trusted here ("Never trust client-side premium flags", docs/21). It is a secret: a forged or
+/// replayed token is rejected by verification, and the proof is never logged (threat T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md). The optional <see cref="ProductReference"/> is an opaque store
+/// product/subscription identifier (a Google Play product/SKU) some flows submit alongside the token.
+///
+/// The body carries NO subject identity and NO premium claim: WHO is verifying is the authenticated caller
+/// (resolved server-side from the bearer token), and WHETHER the purchase is genuine is decided only by the
+/// provider verification, never by anything the client asserts. The body carries no vertical vocabulary
+/// (docs/04_PRODUCT_BOUNDARIES.md).
+/// </summary>
+/// <param name="PurchaseToken">
+/// The opaque Google Play purchase token to verify. Required and bounded; a missing, blank or oversize value is
+/// a 400.
+/// </param>
+/// <param name="ProductReference">
+/// An optional opaque store product/subscription identifier (a Google Play product/SKU) submitted alongside the
+/// token, or <see langword="null"/>. Never interpreted by Core; bounded, and an oversize value is a 400.
+/// </param>
+public sealed record GoogleTokenVerificationRequest(
+    string? PurchaseToken,
+    string? ProductReference)
+{
+    /// <summary>
+    /// Log-safe representation: it reveals only whether a product reference is present. The
+    /// <see cref="PurchaseToken"/> proof is a secret (an unverified, possibly forged credential-like token) and
+    /// is deliberately EXCLUDED so a log line can never leak or replay it (threat T7 in
+    /// docs/07_SECURITY_THREAT_MODEL.md), exactly as <see cref="PurchaseVerificationRequest.ToString"/> excludes
+    /// the proof.
+    /// </summary>
+    public override string ToString()
+        => $"GoogleTokenVerificationRequest hasProductReference={ProductReference is not null}";
+}
+
+/// <summary>
+/// Response body of a SUCCESSFUL purchase verification (CORE-STORE-003; reused by the Google endpoint,
 /// CORE-STORE-004). It is returned only after the provider verified the proof and the verified purchase was
 /// persisted (CORE-STORE-002), so it is the server's confirmation that a genuine purchase is now the recorded
 /// source of truth — the epic acceptance criterion "Apple transaction data is verified before entitlements are
