@@ -1,7 +1,9 @@
+using LiveCore.Api.Content;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 
@@ -139,5 +141,44 @@ internal static class TestData
         context.Sessions.Add(session);
         await context.SaveChangesAsync();
         return session;
+    }
+
+    /// <summary>
+    /// Creates and persists a scene in the given workspace at an explicit order, driving
+    /// the real <see cref="Scene.Create"/> aggregate factory so the seeded row has exactly
+    /// the invariants production would produce. Used to arrange a workspace's existing
+    /// scenes (and their ordering) for the list and append-to-end tests.
+    /// </summary>
+    public static async Task<Scene> AddSceneAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        string title,
+        int order)
+    {
+        var scene = Scene.Create(organizationId, workspaceId, title, order, SeedTime);
+        context.Scenes.Add(scene);
+        await context.SaveChangesAsync();
+        return scene;
+    }
+
+    /// <summary>
+    /// Creates and persists a content block in the given scene, driving the real
+    /// <see cref="ContentBlock.Create"/> aggregate factory so the seeded row starts at the
+    /// initial revision exactly as production would. Used to assert content-block creates
+    /// did or did not happen.
+    /// </summary>
+    public static async Task<ContentBlock> AddContentBlockAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sceneId,
+        ContentBlockType type,
+        string body)
+    {
+        var contentBlock = ContentBlock.Create(organizationId, workspaceId, sceneId, type, body, SeedTime);
+        context.ContentBlocks.Add(contentBlock);
+        await context.SaveChangesAsync();
+        return contentBlock;
     }
 }

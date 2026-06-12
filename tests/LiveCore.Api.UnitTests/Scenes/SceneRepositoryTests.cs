@@ -372,6 +372,70 @@ public sealed class SceneRepositoryTests : IDisposable
         Assert.Null(underB);
     }
 
+    // --- FindByIdInOrganization (org-scoped, workspace-agnostic; CORE-SCENE-003) ----
+
+    [Fact]
+    public async Task FindByIdInOrganization_finds_a_scene_in_its_organization_regardless_of_workspace()
+    {
+        // The org-only lookup (used by the by-scene-id content-block route, which does not
+        // know the workspace up front) resolves a scene by id WITHIN the tenant and exposes
+        // the scene's own workspace id off the returned row, so the caller can then
+        // authorize against that workspace's membership (threat T5).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var scene = await SeedSceneAsync(organization.Id, workspace.Id, "Segment", 0);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var found = await repository.FindByIdInOrganizationAsync(
+            organization.Id, scene.Id, CancellationToken.None);
+
+        Assert.NotNull(found);
+        Assert.Equal(scene.Id, found.Id);
+        Assert.Equal(workspace.Id, found.WorkspaceId);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_for_a_scene_in_another_tenant_returns_null()
+    {
+        // Mandatory negative foreign-tenant test for the NEW org-only lookup (threat T5):
+        // a scene exists in org A; looking the SAME scene id up under organization B's id
+        // must return null even though the scene id is correct. The predicate leads with
+        // the organization column, so the surrogate id never crosses the tenant boundary.
+        // This regression-locks the organization predicate of FindByIdInOrganizationAsync
+        // (dropping it would let a foreign-tenant scene be reached by id).
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceInA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var inA = await SeedSceneAsync(organizationA.Id, workspaceInA.Id, "Segment", 0);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var underA = await repository.FindByIdInOrganizationAsync(
+            organizationA.Id, inA.Id, CancellationToken.None);
+        var underB = await repository.FindByIdInOrganizationAsync(
+            organizationB.Id, inA.Id, CancellationToken.None);
+
+        Assert.NotNull(underA);
+        Assert.Null(underB);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(
+                Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(
+                Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
     [Fact]
     public async Task ListByWorkspace_never_returns_another_workspaces_scenes()
     {

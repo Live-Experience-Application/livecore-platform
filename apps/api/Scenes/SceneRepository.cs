@@ -55,6 +55,39 @@ internal sealed class SceneRepository : ISceneRepository
     }
 
     /// <inheritdoc />
+    public async Task<Scene?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored scene (ids are generated non-empty),
+        // so the lookup fails fast instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Scene id must not be empty.", nameof(id));
+        }
+
+        // The predicate LEADS with the tenant column, so the lookup is exactly
+        // tenant-scoped: a scene under another organization is never returned even
+        // when the surrogate id matches (threat T5/T1). The workspace is not part of
+        // the predicate because the by-scene-id content-block route does not know it
+        // up front; it is read off the returned row (Scene.WorkspaceId) so the caller
+        // can authorize against workspace membership AFTER the tenant boundary has
+        // been enforced (mirrors SessionRepository.FindByIdInOrganizationAsync).
+        return await _dbContext.Scenes
+            .FirstOrDefaultAsync(
+                scene => scene.OrganizationId == organizationId
+                    && scene.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<Scene>> ListByWorkspaceAsync(
         Guid organizationId,
         Guid workspaceId,

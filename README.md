@@ -366,6 +366,35 @@ the server-side visibility-rule engine) belongs to the later Visibility, Reveal 
 Realtime epics; broad external/anonymous participant feed delivery over the realtime
 hub is likewise a Realtime-epic follow-up.
 
+### Scene content APIs
+
+The Scenes and Content modules expose their first HTTP routes for preparing a
+workspace's scenes and the content blocks shown within them:
+
+| Method | Route                                     | Authorized callers                             |
+| ------ | ----------------------------------------- | ---------------------------------------------- |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/scenes` | any member of that workspace                   |
+| `POST` | `/api/v1/workspaces/{workspaceId}/scenes` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/scenes/{sceneId}/content-blocks` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The two workspace-scoped scene routes resolve the target organization from a
+required `organizationSlug` (a query parameter on the `GET`, a body field on the
+`POST`), exactly like the workspace by-id routes; the content-block route carries
+only the scene id in its path, so it takes a required `?organizationSlug=` query
+parameter like the session commands. Every route runs the same
+token-claim-and-membership tenant check and then authorizes the caller by their
+role in the relevant workspace (the scene's own workspace for the content-block
+route). A caller who cannot see the tenant, or who is not a member of the
+workspace, is hidden as `404` (never `403`); a known member who lacks the write
+role is `403`.
+
+Creating a scene assigns its ordering position server-side (appended after the
+current last scene in the workspace); clients never supply or reorder positions.
+Creating a content block stores it at its initial revision. Both creates return
+`201 Created`. The list returns the same generic scene projection to every
+member; the host-versus-participant DTO separation and content validation/size
+limits are later stories in this epic and are not applied yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

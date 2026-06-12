@@ -242,6 +242,32 @@ app.MapSessionEndpoints();
 // preview-as-participant).
 app.MapVisibilityEndpoints();
 
+// Scene content endpoints (CORE-SCENE-003): the Scenes module's first HTTP routes,
+// GET/POST /api/v1/workspaces/{workspaceId}/scenes. They live in an authenticated
+// route group and fail closed (503) when persistence is not configured, exactly like
+// the workspace endpoints. No new DI registration is required: the tenant context
+// resolver, the scene repository and the workspace member repository they consume are
+// already registered above inside the persistence conditional. The GET list returns the
+// SAME generic scene DTO to all workspace members; the per-role / host-vs-participant
+// projection (the "Projection by role" route note) is the later CORE-SCENE-004 story.
+// The POST assigns the scene order server-side as append-to-end (no client-supplied
+// order, no reorder route).
+app.MapSceneEndpoints();
+
+// Scene content-block endpoint (CORE-SCENE-003): the Content module's first HTTP route,
+// POST /api/v1/scenes/{sceneId}/content-blocks. It lives in an authenticated route group
+// and fails closed (503) when persistence is not configured, exactly like the session
+// endpoints. No new DI registration is required: the tenant context resolver, the scene
+// repository (for the org-scoped scene lookup), the content block repository and the
+// workspace member repository it consumes are already registered above inside the
+// persistence conditional. The scene is resolved within the query-supplied organization,
+// its own workspace is discovered from the loaded row after the tenant boundary is
+// enforced, and the create is authorized by the caller's role in the scene's own
+// workspace (every denial hidden as 404, an insufficient role as 403). The
+// host-vs-participant DTO projection (CORE-SCENE-004) and content validation/size limits
+// (CORE-SCENE-005) are later stories and are deliberately not built here.
+app.MapContentBlockEndpoints();
+
 app.Run();
 
 /// <summary>
