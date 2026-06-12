@@ -3,6 +3,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
@@ -113,6 +114,24 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // HTTP endpoints and the SessionCreated/Started/Ended events (CORE-SES-004) are
     // later stories and are deliberately not wired here.
     builder.Services.AddScoped<ISessionRepository, SessionRepository>();
+
+    // Scene persistence (CORE-SCENE-001): the Scenes module owns the
+    // workspace-scoped, tenant-scoped scenes table that holds the workspace-prepared
+    // ordered segments (docs/05_MODULE_CONTRACTS.md: the Scenes module owns "scene
+    // metadata" and "scene ordering"; csv/database_tables.csv: scenes, module Scenes,
+    // scope workspace, "Ordered segments"). Registered here, inside the persistence
+    // conditional, exactly like the session and participant repositories above; the
+    // repository's lookups are scoped by organization id and workspace id (the
+    // organization boundary is checked before the workspace boundary; threat T5), and
+    // ListByWorkspaceAsync returns a workspace's scenes in deterministic
+    // (scene_order, id) order. A scene carries no session_id: a session activates a
+    // scene through its active scene pointer in a later story. The create/reorder HTTP
+    // endpoints (POST /api/v1/workspaces/{workspaceId}/scenes and the reorder route),
+    // content blocks (CORE-SCENE-002), the scene content APIs (CORE-SCENE-003), the
+    // host vs participant DTO separation (CORE-SCENE-004) and content
+    // validation/size limits (CORE-SCENE-005) are later stories and are deliberately
+    // not wired here.
+    builder.Services.AddScoped<ISceneRepository, SceneRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
