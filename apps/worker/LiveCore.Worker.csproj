@@ -24,4 +24,24 @@
          image uses the aspnet base (see apps/worker/Dockerfile). -->
     <ProjectReference Include="..\api\LiveCore.Api.csproj" />
   </ItemGroup>
+
+  <!-- The API is a Web SDK project, so its appsettings*.json are auto-marked as
+       publish content and flow transitively into this project's publish output
+       (the build-output path de-conflicts via CopyConflictingTransitiveContent,
+       but the publish path has no equivalent). There they collide with the
+       worker's own appsettings at the same relative path, which fails the build
+       with NETSDK1152. The worker is its own host with its own configuration, so
+       drop the API-sourced appsettings from the publish set, keeping ours. This
+       runs before the duplicate check so that check stays active for any genuine
+       future collision. Matching on the source path (not this project's dir)
+       keeps the worker's files and is correct on both Windows and Linux. -->
+  <Target Name="_RemoveTransitiveApiHostConfigFromPublish"
+          AfterTargets="ComputeFilesToPublish"
+          BeforeTargets="_HandleFileConflictsForPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish
+          Remove="@(ResolvedFileToPublish)"
+          Condition="('%(ResolvedFileToPublish.RelativePath)' == 'appsettings.json' or '%(ResolvedFileToPublish.RelativePath)' == 'appsettings.Development.json') and !$([MSBuild]::ValueOrDefault('%(ResolvedFileToPublish.FullPath)', '').StartsWith('$(MSBuildProjectDirectory)'))" />
+    </ItemGroup>
+  </Target>
 </Project>
