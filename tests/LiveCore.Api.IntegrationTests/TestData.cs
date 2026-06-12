@@ -5,6 +5,7 @@ using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -180,5 +181,24 @@ internal static class TestData
         context.ContentBlocks.Add(contentBlock);
         await context.SaveChangesAsync();
         return contentBlock;
+    }
+
+    /// <summary>
+    /// Creates and persists a visibility rule for the given resource in the given workspace, driving
+    /// the real <see cref="VisibilityRule.Create"/> aggregate factory. Used to arrange a resource's
+    /// existing visibility (for example a Hidden rule the reveal command flips to Visible).
+    /// </summary>
+    public static async Task<VisibilityRule> AddVisibilityRuleAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        VisibilityState visibility)
+    {
+        var rule = VisibilityRule.Create(organizationId, workspaceId, resourceType, resourceId, visibility, SeedTime);
+        context.VisibilityRules.Add(rule);
+        await context.SaveChangesAsync();
+        return rule;
     }
 }

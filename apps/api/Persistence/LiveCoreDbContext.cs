@@ -5,6 +5,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
@@ -25,7 +26,8 @@ namespace LiveCore.Api.Persistence;
 /// Participants <c>participants</c> table, the Sessions <c>sessions</c> table, the
 /// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table, the
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
-/// Templates <c>templates</c> table and the Visibility <c>visibility_rules</c> table)
+/// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table and the
+/// System <c>idempotency_keys</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -84,6 +86,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Visibility rules owned by the Visibility module.</summary>
     public DbSet<VisibilityRule> VisibilityRules => Set<VisibilityRule>();
 
+    /// <summary>Idempotency keys owned by the System module.</summary>
+    public DbSet<IdempotencyKey> IdempotencyKeys => Set<IdempotencyKey>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -101,5 +106,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new EntityRelationshipConfiguration());
         modelBuilder.ApplyConfiguration(new TemplateConfiguration());
         modelBuilder.ApplyConfiguration(new VisibilityRuleConfiguration());
+        modelBuilder.ApplyConfiguration(new IdempotencyKeyConfiguration());
     }
 }

@@ -7,6 +7,7 @@ using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
@@ -291,6 +292,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // records (CORE-VIS-006) are also later stories not wired here.
     builder.Services.AddScoped<VisibilityPreviewService>();
 
+    // Idempotency key store (CORE-VIS-004): the System module's generic retry-safety store over the
+    // idempotency_keys table (csv/database_tables.csv: module System, "Retry safety"). Registered here,
+    // inside the persistence conditional, because it depends on the DbContext. The unique
+    // idempotency_keys(scope, key) index (docs/10_DATABASE_SCHEMA.md) is the idempotency guarantee; the
+    // store is generic infrastructure (any retry-safe write can use it), consumed first by the reveal
+    // command below.
+    builder.Services.AddScoped<IIdempotencyKeyStore, IdempotencyKeyStore>();
+
+    // Reveal command service (CORE-VIS-004): the Visibility module's idempotent reveal — makes a
+    // resource VISIBLE to the audience (reusing the CORE-VIS-001 VisibilityRule.ChangeVisibility
+    // primitive) exactly once per client Idempotency-Key. Registered here because it depends on the
+    // visibility rule repository and the idempotency store above. The reveal is idempotent at the state
+    // level (ensure-visible is a no-op when already visible) and the idempotency key short-circuits a
+    // retry; the durable ContentRevealed/VisibilityRuleChanged event emission is deferred to the
+    // Realtime epic (CORE-RT-003), exactly as the session start/end commands deferred their events.
+    builder.Services.AddScoped<RevealService>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities
@@ -407,6 +425,13 @@ app.MapSessionEndpoints();
 // the Visibility module owns visibility rules / audience calculations /
 // preview-as-participant).
 app.MapVisibilityEndpoints();
+
+// Reveal command endpoint (CORE-VIS-004): the Visibility module's first COMMAND route,
+// POST /api/v1/sessions/{sessionId}/reveal. It makes a resource visible to the audience
+// idempotently (a required Idempotency-Key header; reuses the VisibilityRule aggregate), authorized
+// to the reveal roles (Owner/Admin/Host/CoHost) in the session's own workspace exactly like the
+// session start/end commands. The durable reveal event emission is deferred to the Realtime epic.
+app.MapRevealEndpoints();
 
 // Scene content endpoints (CORE-SCENE-003): the Scenes module's first HTTP routes,
 // GET/POST /api/v1/workspaces/{workspaceId}/scenes. They live in an authenticated

@@ -341,6 +341,31 @@ These commands persist the session status transition (the authoritative state).
 The durable `SessionStarted` / `SessionEnded` events and their realtime delivery
 belong to the later realtime event stream and are not emitted yet.
 
+### Reveal command
+
+The Visibility module's reveal command makes a resource visible to the audience,
+idempotently:
+
+| Method | Route                                 | Authorized callers                             |
+| ------ | ------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/reveal` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The session id in the path pins the workspace; the request body carries the
+`organizationSlug` (resolved by the same token-claim-and-membership tenant check
+as the other by-session-id routes) plus the target `resourceType`
+(`Scene`/`ContentBlock`/`Entity`) and `resourceId`. The caller is authorized by
+their role in the session's own workspace; a caller who cannot see the tenant, or
+who is not a member of the session's workspace, is hidden as `404` (never `403`).
+
+The command is **idempotent**: a required `Idempotency-Key` request header makes a
+client retry safe. The first call applies the reveal (the resource's visibility
+rule becomes `Visible`) and returns `Applied`; a repeat with the same key returns
+`AlreadyApplied` and produces no duplicate effect (the System module's
+`idempotency_keys` table records processed keys, and the visibility change is
+itself idempotent). The durable `ContentRevealed` event and its realtime delivery
+belong to the later realtime event stream and are not emitted yet; restricting a
+reveal to selected participants is a later visibility story.
+
 ### Participant visible feed (skeleton)
 
 The Visibility module's first route returns a single participant's visible feed:
