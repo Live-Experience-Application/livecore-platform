@@ -21,3 +21,4 @@ GET,/api/v1/assets/{assetId}/download-url,Assets,authorized viewers,Signed URL a
 POST,/api/v1/assets/{assetId}/links,Assets,"Host,CoHost,Owner,Admin",Link asset to content block or entity
 GET,/api/v1/me/quota-status,Entitlements,authenticated user,Server-calculated quota status for the current user
 GET,/api/v1/workspaces/{workspaceId}/quota-status,Entitlements,"Host,CoHost,Owner,Admin",Server-calculated workspace quota status; membership authorized
+POST,/api/v1/purchases/apple/transactions,Store,authenticated user,Verify Apple transaction server-side before granting entitlements; service account denied

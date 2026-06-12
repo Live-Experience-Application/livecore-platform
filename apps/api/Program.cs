@@ -785,6 +785,20 @@ app.MapAssetEndpoints();
 // CORE-ENTL-004.
 app.MapQuotaStatusEndpoints();
 
+// Apple transaction verification endpoint (CORE-STORE-003): the Store module's first HTTP route,
+// POST /api/v1/purchases/apple/transactions. It lives in an authenticated route group and fails closed (503)
+// when persistence is not configured, exactly like the asset/quota endpoints. No new DI registration is
+// required: the PurchaseVerificationProviderResolver (registered unconditionally above) and the
+// PurchaseTransactionService + TimeProvider (registered in the persistence conditional, CORE-STORE-002) it
+// reuses are already registered. It authorizes the caller as a user principal (a service account is 403; the
+// purchase is global, so there is no tenant boundary — CORE-STORE-002), resolves the deployment-supplied Apple
+// verifier and verifies the submitted proof, and ONLY a verified result is recorded as a PurchaseTransaction
+// (verify-then-record): a rejected proof is 422 and records nothing, and an unconfigured verifier is 503, so
+// "Apple transaction data is verified before entitlements are granted" (the story acceptance criterion;
+// docs/21). Granting the SubjectEntitlement from the recorded purchase and the buyer linkage
+// (billing_account_links) are later stories; the Google endpoint is CORE-STORE-004.
+app.MapApplePurchaseEndpoints();
+
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires
 // authorization (the hub is [Authorize] and the mapping adds RequireAuthorization()), so an
 // unauthenticated client is challenged with 401 at negotiate exactly like the REST endpoints. The hub

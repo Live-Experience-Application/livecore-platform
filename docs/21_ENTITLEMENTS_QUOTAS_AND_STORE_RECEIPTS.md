@@ -197,6 +197,43 @@ verification endpoints are CORE-STORE-003/004).
   verify the proof **before** recording, and the store-notification handler (CORE-STORE-005) drives the status
   changes; this story supplies the generic, reusable persistence + audit primitives they build on.
 
+## Apple transaction verification endpoint (CORE-STORE-003)
+
+CORE-STORE-001 isolated provider verification behind the `IPurchaseVerificationProvider` port, and CORE-STORE-002
+added the idempotent, auditable persistence of a verified purchase. CORE-STORE-003 wires them into the first
+**store HTTP route** — the Apple side of "Mobile app sends transaction token/JWS/purchase token to backend;
+Backend verifies with Apple/Google server APIs; Backend persists PurchaseTransaction" (the "Receipt verification"
+flow above) — so that **Apple transaction data is verified before entitlements are granted** (the story's
+acceptance criterion).
+
+- `POST /api/v1/purchases/apple/transactions` (`apps/api/Store/ApplePurchaseEndpoints.cs`) — the route of
+  `csv/mobile_store_api_routes.csv` (`POST /v1/purchases/apple/transactions`) surfaced under the Core `/api/v1`
+  prefix `docs/08_API_CONTRACTS.md` mandates, and added to `csv/api_routes.csv`. The request body carries only the
+  opaque Apple App Store **signed transaction (JWS) / transaction proof** and an optional opaque product
+  reference; Core never parses, trusts or logs the proof (it is carried verbatim into a provider-neutral
+  `PurchaseVerificationRequest`).
+- **Verify-then-record, fail-closed.** The endpoint authorizes the caller, resolves the deployment-supplied Apple
+  adapter through `PurchaseVerificationProviderResolver` and verifies the proof, and **only a verified result** is
+  persisted as a `PurchaseTransaction` (reusing the CORE-STORE-002 `PurchaseTransactionService`, so recording is
+  idempotent — a retry or a replayed-but-genuine proof creates no second row and no duplicate audit event). A
+  rejected (forged / replayed / unverifiable) proof is `422` and records **nothing**; when no Apple adapter is
+  configured the resolver fails closed and the request is `503` (the verification analogue of the unconfigured
+  asset storage). So Core never trusts a client's premium claim and never grants premium state without a real
+  server-side verification behind it ("Never trust client-side premium flags"; "Never unlock limits before server
+  verification succeeds").
+- **Authorization.** A missing/invalid token is `401`. Submitting a purchase is an inherently per-user action (the
+  buyer's own receipt), so a non-user **service-account** principal is denied `403` — it has no personal purchase
+  to submit (the same rule as the `/me` quota-status read). The transaction is named **globally** by its
+  (`provider`, `provider_transaction_id`) pair and carries **no tenant** (CORE-STORE-002: `purchase_transactions`
+  has no `organization_id`), so there is no organization/workspace boundary to resolve on this route. The request
+  body is validated only **after** authorization, so an unauthorized caller never receives request-shape feedback.
+- **Out of scope (later stories).** Granting the resulting `SubjectEntitlement` from the recorded purchase (the
+  product → plan → entitlement mapping) and linking the buyer (`billing_account_links`) are later stories;
+  CORE-STORE-003 establishes the verify-and-record gate they sit behind. The Google purchase-token endpoint is
+  CORE-STORE-004, and the idempotent store-notification handling that drives renewals / cancellations / refunds /
+  grace periods is CORE-STORE-005. This story adds no new table and no EF migration (it reuses the CORE-STORE-002
+  `purchase_transactions` and `purchase_events`).
+
 ## Security requirements
 
 - Never trust client-side premium flags.
