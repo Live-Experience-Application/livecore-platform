@@ -880,6 +880,46 @@ not access; the export-request/list HTTP route and its server-side access author
 later Exports story. CORE-AUD-002 is the export job model, its persistence and its EF migration
 only; there is no export HTTP route yet.
 
+### Export manifests
+
+CORE-AUD-003 adds the Exports module's **workspace export manifest** — the produced
+**table of contents** of a completed workspace export (`docs/05_MODULE_CONTRACTS.md`: the Exports
+module owns "export manifests"). CORE-AUD-002 modeled the export **job** and left "the produced
+export manifest" to this story; the `ExportManifest` aggregate is that manifest, persisted in the
+tenant- and workspace-scoped `export_manifests` table with its per-kind inventory in the
+`export_manifest_entries` child table (`apps/api/Exports/`; the documented critical index is
+`export_manifests(workspace_id, id)`, with a unique `export_manifests(export_job_id)` — exactly one
+manifest per job). A manifest records which `export_job` produced it, the tenant/workspace it
+belongs to, the explicit export `scope`, a manifest format `version`, the `generated_at` timestamp
+and one `ExportManifestEntry` per generic `ExportResourceKind`
+(`Session`/`Scene`/`ContentBlock`/`Entity`/`Participant`/`Asset`) with a **count** — the inventory
+of how many resources of each kind the export covered.
+
+The manifest is **generic and authorized** (the epic acceptance criterion) along the same immutable
+axes as the job: it is workspace- and tenant-scoped, so every lookup is scoped by organization id
+then workspace id (the organization boundary is checked before the workspace boundary) and one
+workspace's manifest can never be read through another workspace's or another tenant's id (threats
+T5/T1); and it carries the explicit `ExportScope` of the producing job — the workspace export
+manifest factory (`ExportManifest.ForWorkspaceExport`) only ever builds a manifest for a
+**completed**, **workspace-scoped** export job, so a user-data export is never widened into a
+workspace one (threat T8 "explicit host/admin export scopes"). The manifest is **write-once**
+(the produced output of a finished export): the aggregate is immutable and the repository exposes
+only an append and tenant-scoped reads — no update or delete — exactly as the audit log is
+append-only.
+
+The manifest holds identifiers, the scope, a version, a timestamp and per-kind **counts** only —
+never the exported data and never any scene/content body (threats T7/T8). Because the per-kind
+inventory reveals the shape of a workspace's host content, the Exports module also defines the
+**role-based manifest projection** (the "export role-based projection" control for threat T8): the
+full `ExportManifestView` (with the inventory) for host-capable / metadata roles
+(Owner/Admin/Host/CoHost/Auditor — the "View workspace metadata" = yes roles) versus the stripped,
+audience-safe `ExportManifestSummaryView` (`{id, scope}` only — no inventory) for audience roles,
+fail-closed to the summary shape for any undefined role. The projector decides the view **shape**,
+not access; the worker that drives the export and produces the manifest, and any export HTTP route
+with its server-side access authorization, are later Exports stories (exactly as CORE-AUD-002
+deferred the export endpoint). CORE-AUD-003 is the manifest model, its persistence, its EF
+migration and its role-based projection only; there is no export HTTP route yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

@@ -65,6 +65,9 @@ asset_links(workspace_id, asset_id)
 asset_links(workspace_id, asset_id, target_type, target_id) unique
 audit_logs(organization_id, created_at)
 export_jobs(workspace_id, id)
+export_manifests(workspace_id, id)
+export_manifests(export_job_id) unique
+export_manifest_entries(export_manifest_id, kind) unique
 idempotency_keys(scope, key)
 ```
 
