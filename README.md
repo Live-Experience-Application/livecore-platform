@@ -394,9 +394,26 @@ tenant boundary (`organization_id`) is a foreign key — the workspace, actor, r
 and participant references are recorded facts, so the trail survives later deletion of
 the things it references and is never cascade-erased. The entry stores identifiers and
 state names only, never revealed content (threat T7). No free-form scene/content body
-is logged. The generic append-only audit log and its read API with the "View audit
-log" authorization (Owner/Admin/Auditor) are the later `Audit, Export and Recap`
-epic; there is no audit HTTP route yet.
+is logged.
+
+CORE-AUD-001 (the `Audit, Export and Recap` epic) makes the log **generic**: a single
+`AuditLogEntry.Create(...)` factory records **any** security-relevant `AuditAction` as
+an append-only fact, with every part beyond the tenant and the action optional — an
+organization-level **or** workspace-scoped action, a user **or** system actor, an
+optional governed resource (the resource type and id are supplied as a pair or omitted
+entirely), an optional selected-participant target and an **optional** before/after
+state (a generic action such as a session start or a member invite is not a state
+transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a thin
+specialization of that generic factory, so the reveal producer is unchanged and
+visibility logic is not duplicated. The generic action catalog
+(`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`) is
+extensible without a schema change because the action persists by its stable name;
+each producer command wires its own action in its own story.
+
+The audit log is still written only as a side effect of an **already-authorized**
+command, so audit writes are inherently authorized. The audit **read** API with the
+"View audit log" authorization (Owner/Admin/Auditor) is the later audit query
+permissions story (CORE-AUD-005); there is no audit HTTP route yet.
 
 ### Participant visible feed (skeleton)
 

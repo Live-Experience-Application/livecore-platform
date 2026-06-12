@@ -72,10 +72,11 @@ internal sealed class AuditLogConfiguration : IEntityTypeConfiguration<AuditLogE
             .HasColumnName("previous_state")
             .HasMaxLength(AuditLogEntry.MaxStateLength);
 
+        // Optional: a generic action need not be a state transition (CORE-AUD-001). The visibility
+        // producer always writes a new state, but a session start or a member invite records none.
         builder.Property(entry => entry.NewState)
             .HasColumnName("new_state")
-            .HasMaxLength(AuditLogEntry.MaxStateLength)
-            .IsRequired();
+            .HasMaxLength(AuditLogEntry.MaxStateLength);
 
         builder.Property(entry => entry.CreatedAt)
             .HasColumnName("created_at")

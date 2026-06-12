@@ -353,9 +353,11 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // "Append-only audit"). Registered here, inside the persistence conditional, because it depends on
     // the DbContext. The repository exposes only append + a tenant-scoped read (no update/delete —
     // audit facts are immutable, docs/10_DATABASE_SCHEMA.md); the documented critical index is
-    // audit_logs(organization_id, created_at). It is consumed first by the reveal command below to
-    // record visibility changes; the generic append-only audit log (CORE-AUD-001), the audit query
-    // endpoint and its "View audit log" authorization (CORE-AUD-005) are later stories not wired here.
+    // audit_logs(organization_id, created_at). CORE-AUD-001 makes the log generic: the
+    // AuditLogEntry.Create factory records any security-relevant AuditAction through this same append
+    // contract (the reveal command below is the first producer, via the ForVisibilityRuleChange
+    // specialization). The audit query endpoint and its "View audit log" authorization (CORE-AUD-005)
+    // are a later story not wired here.
     builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
     // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent

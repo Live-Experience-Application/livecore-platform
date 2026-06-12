@@ -1,13 +1,20 @@
 namespace LiveCore.Api.Audit;
 
 /// <summary>
-/// An append-only audit log entry (CORE-VIS-006, the LAST story of the "Visibility and Reveal Engine"
-/// epic). The Audit module — FIRST appearing here — owns the "append-only audit log" and the "security
+/// An append-only audit log entry. The Audit module owns the "append-only audit log" and the "security
 /// event records" (docs/05_MODULE_CONTRACTS.md; csv/database_tables.csv: table <c>audit_logs</c>,
 /// module Audit, scope <c>organization</c>, "Append-only audit"). An <see cref="AuditLogEntry"/> is the
-/// durable, immutable record of one security-relevant action — for this story, a visibility rule change
-/// (<see cref="AuditAction.VisibilityRuleChanged"/>), the docs/07_SECURITY_THREAT_MODEL.md required
-/// control "audit creation for visibility changes".
+/// durable, immutable record of one security-relevant action.
+///
+/// CORE-VIS-006 introduced this aggregate with a single producer — the visibility reveal command, which
+/// records a visibility rule change (<see cref="AuditAction.VisibilityRuleChanged"/>), the
+/// docs/07_SECURITY_THREAT_MODEL.md required control "audit creation for visibility changes".
+/// CORE-AUD-001 — the generic append-only audit log — makes the creation API GENERIC: the
+/// <see cref="Create"/> factory records ANY <see cref="AuditAction"/> as an append-only fact, with every
+/// part beyond the tenant and the action optional (an org- or workspace-level action, a user or system
+/// actor, an optional governed resource, an optional selected-participant target and an optional
+/// before/after state pair). <see cref="ForVisibilityRuleChange"/> is now a thin specialization of
+/// <see cref="Create"/>, so the visibility producer is unchanged and visibility logic is not duplicated.
 ///
 /// APPEND-ONLY (docs/10_DATABASE_SCHEMA.md: "audit logs are append-only"). The aggregate is fully
 /// immutable: every property is get-only and there is NO state-transition method, no setter and no
@@ -27,8 +34,8 @@ namespace LiveCore.Api.Audit;
 /// TENANT SCOPE. The audit log is tenant-scoped (csv/database_tables.csv scope <c>organization</c>), so
 /// every entry carries <see cref="OrganizationId"/>; the documented critical index is
 /// <c>audit_logs(organization_id, created_at)</c> (docs/10_DATABASE_SCHEMA.md). A visibility change is
-/// also workspace-scoped, so this story always sets <see cref="WorkspaceId"/>; the column is nullable
-/// only so later org-level audit events (CORE-AUD-001) need no schema change.
+/// also workspace-scoped, so the visibility producer always sets <see cref="WorkspaceId"/>; the column
+/// is nullable so an organization-level generic action (CORE-AUD-001) needs no schema change.
 ///
 /// NO SENSITIVE CONTENT (threat T7). Every field is an identifier, an enum or a generic state NAME
 /// (Hidden/Visible) — never free-form scene/content body — so <see cref="ToString"/> is safe for
@@ -36,12 +43,12 @@ namespace LiveCore.Api.Audit;
 /// visibility change happened, to whom and from which state to which.
 ///
 /// GENERIC, EXTENSIBLE SHAPE. The columns are generic on purpose (a generic action, an optional
-/// resource reference, an optional before/after state pair) so the generic append-only audit log story
-/// (CORE-AUD-001) and the audit query permissions story (CORE-AUD-005) extend this table by adding
-/// actions and read paths, not by reshaping it. This story exposes exactly ONE factory —
-/// <see cref="ForVisibilityRuleChange"/> — because the visibility reveal command is its only producer
-/// today; no HTTP read route is built here (viewing the audit log is CORE-AUD-005, the "View audit
-/// log" row of docs/06_AUTHORIZATION_MATRIX.md).
+/// resource reference, an optional before/after state pair) so new actions extend this table by being
+/// recorded through the generic <see cref="Create"/> factory, not by reshaping it. CORE-AUD-001 adds
+/// that generic creation API; the audit query permissions story (CORE-AUD-005) adds the read path with
+/// its "View audit log" authorization (Owner/Admin/Auditor, docs/06_AUTHORIZATION_MATRIX.md). No HTTP
+/// read route is built here — the audit log is written as a side effect of already-authorized commands
+/// and read only through that later authorized endpoint.
 /// </summary>
 public sealed class AuditLogEntry
 {
@@ -61,7 +68,7 @@ public sealed class AuditLogEntry
         Guid? resourceId,
         Guid? targetParticipantId,
         string? previousState,
-        string newState,
+        string? newState,
         DateTimeOffset createdAt)
     {
         if (id == Guid.Empty)
@@ -104,6 +111,21 @@ public sealed class AuditLogEntry
                 nameof(resourceId));
         }
 
+        // A resource reference is the (type, id) PAIR or neither: a generic action with no governed
+        // resource records both as null, a resource-scoped action records both. A half-set reference
+        // (one without the other) can never address a resource, so it is rejected rather than stored.
+        if (resourceType is null != (resourceId is null))
+        {
+            throw new ArgumentException(
+                "Resource type and resource id must be supplied together or both omitted.",
+                nameof(resourceType));
+        }
+
+        if (resourceType is not null && string.IsNullOrWhiteSpace(resourceType))
+        {
+            throw new ArgumentException("Resource type must not be blank when provided.", nameof(resourceType));
+        }
+
         if (targetParticipantId == Guid.Empty)
         {
             throw new ArgumentException(
@@ -111,9 +133,17 @@ public sealed class AuditLogEntry
                 nameof(targetParticipantId));
         }
 
-        if (string.IsNullOrWhiteSpace(newState))
+        // The before/after state is OPTIONAL: a generic action need not be a state transition (a session
+        // start or an invite has no audit state pair). A SET value must still be meaningful, so a
+        // whitespace-only state is rejected rather than stored as a blank string.
+        if (previousState is not null && string.IsNullOrWhiteSpace(previousState))
         {
-            throw new ArgumentException("New state must not be empty.", nameof(newState));
+            throw new ArgumentException("Previous state must not be blank when provided.", nameof(previousState));
+        }
+
+        if (newState is not null && string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be blank when provided.", nameof(newState));
         }
 
         Id = id;
@@ -134,7 +164,6 @@ public sealed class AuditLogEntry
     /// <summary>Materialization constructor for the persistence layer.</summary>
     private AuditLogEntry()
     {
-        NewState = null!;
     }
 
     /// <summary>Surrogate key of the row (UUID version 7, time-ordered per docs/10_DATABASE_SCHEMA.md).</summary>
@@ -190,17 +219,81 @@ public sealed class AuditLogEntry
     /// </summary>
     public string? PreviousState { get; }
 
-    /// <summary>The generic state AFTER the action (the new visibility name, e.g. Visible). Required.</summary>
-    public string NewState { get; }
+    /// <summary>
+    /// The generic state AFTER the action (the new visibility name, e.g. Visible), or
+    /// <see langword="null"/> when the action is not a state transition (a generic action such as a
+    /// session start or a member invite has no audit state pair). Always set by
+    /// <see cref="ForVisibilityRuleChange"/>, which records a real state change.
+    /// </summary>
+    public string? NewState { get; }
 
     /// <summary>When the audited action happened (UTC). Part of the critical index with the tenant.</summary>
     public DateTimeOffset CreatedAt { get; }
 
     /// <summary>
+    /// Records a generic security-relevant action as an append-only audit fact — the generic creation API
+    /// of the append-only audit log (CORE-AUD-001). Any module records a security event through this one
+    /// factory (then <see cref="IAuditLogRepository.AppendAsync"/>); <see cref="ForVisibilityRuleChange"/>
+    /// is the visibility producer's specialization of it.
+    ///
+    /// Every part beyond the tenant and the action is OPTIONAL, so the log is genuinely generic:
+    /// <paramref name="workspaceId"/> is <see langword="null"/> for an organization-level action;
+    /// <paramref name="actorUserProfileId"/> is <see langword="null"/> for a system action; the resource
+    /// reference (<paramref name="resourceType"/>, <paramref name="resourceId"/>) is supplied as a PAIR
+    /// or omitted entirely; <paramref name="targetParticipantId"/> is <see langword="null"/> for an
+    /// audience-wide action; and <paramref name="previousState"/>/<paramref name="newState"/> are the
+    /// optional generic before/after state NAMES of a transition (a non-transition action records
+    /// neither). Every value is an identifier, an enum or a generic state name — never free-form content
+    /// (threat T7). The entry is immutable; there is no update or delete (append-only,
+    /// docs/10_DATABASE_SCHEMA.md).
+    /// </summary>
+    /// <param name="organizationId">The tenant the action happened in (required).</param>
+    /// <param name="workspaceId">The workspace the action happened in, or <see langword="null"/> for an organization-level action.</param>
+    /// <param name="action">The kind of security-relevant action (required, must be a defined <see cref="AuditAction"/>).</param>
+    /// <param name="actorUserProfileId">The user who performed the action, or <see langword="null"/> for a system action.</param>
+    /// <param name="resourceType">The governed resource kind name, or <see langword="null"/> when the action concerns no resource.</param>
+    /// <param name="resourceId">The governed resource id, paired with <paramref name="resourceType"/> or both <see langword="null"/>.</param>
+    /// <param name="targetParticipantId">The selected participant, or <see langword="null"/> for an audience-wide action.</param>
+    /// <param name="previousState">The generic state name before the action, or <see langword="null"/>.</param>
+    /// <param name="newState">The generic state name after the action, or <see langword="null"/> when the action is not a transition.</param>
+    /// <param name="createdAt">When the action happened.</param>
+    /// <exception cref="ArgumentException">
+    /// The organization id is empty, a SET optional id is explicitly empty, the resource reference is
+    /// half-set, or a SET resource type / state value is blank.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The action is not a defined <see cref="AuditAction"/>.</exception>
+    public static AuditLogEntry Create(
+        Guid organizationId,
+        Guid? workspaceId,
+        AuditAction action,
+        Guid? actorUserProfileId,
+        string? resourceType,
+        Guid? resourceId,
+        Guid? targetParticipantId,
+        string? previousState,
+        string? newState,
+        DateTimeOffset createdAt)
+        => new(
+            Guid.CreateVersion7(),
+            organizationId,
+            workspaceId,
+            action,
+            actorUserProfileId,
+            resourceType,
+            resourceId,
+            targetParticipantId,
+            previousState,
+            newState,
+            createdAt);
+
+    /// <summary>
     /// Records a visibility rule change (<see cref="AuditAction.VisibilityRuleChanged"/>) — the audit
     /// fact written by the Visibility module's reveal command when a resource's audience visibility
-    /// actually changes (CORE-VIS-006). The caller (the reveal command, the only producer) supplies the
-    /// already-resolved tenant, workspace, the authenticated actor, the governed resource, the optional
+    /// actually changes (CORE-VIS-006). A thin specialization of <see cref="Create"/> that pins the
+    /// action and applies the visibility producer's stricter contract (the workspace, actor, resource
+    /// and new state are all REQUIRED for a real visibility change, where the generic factory leaves them
+    /// optional). The caller (the reveal command, the only producer) supplies the already-resolved
+    /// tenant, workspace, the authenticated actor, the governed resource, the optional
     /// selected-participant target and the before/after visibility state NAMES (passed as generic
     /// strings so this module does not depend on the Visibility enum).
     /// </summary>
@@ -252,8 +345,14 @@ public sealed class AuditLogEntry
             throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
         }
 
-        return new AuditLogEntry(
-            Guid.CreateVersion7(),
+        // A real visibility change always has a resulting state, so the visibility producer requires it
+        // even though the generic factory leaves it optional.
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
             organizationId,
             workspaceId,
             AuditAction.VisibilityRuleChanged,
@@ -278,5 +377,5 @@ public sealed class AuditLogEntry
             + $"actor={(ActorUserProfileId is { } actor ? actor.ToString() : "system")} "
             + $"resource={ResourceType ?? "none"}:{(ResourceId is { } rid ? rid.ToString() : "none")} "
             + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")} "
-            + $"state={PreviousState ?? "none"}->{NewState}";
+            + $"state={PreviousState ?? "none"}->{NewState ?? "none"}";
 }
