@@ -400,8 +400,13 @@ stripped, audience-safe projection (scene id, title and order only — no intern
 tenant/workspace ids, no host preparation timestamps, no authorization
 rationale). Only the response shape differs by role; every member still receives
 all of the workspace's scenes, since deciding which scenes an audience may
-actually see is the later Visibility epic. Content validation and size limits
-remain a later story in this epic.
+actually see is the later Visibility epic.
+
+A content block's body is validated per type before it is stored: `Text` is
+bounded plain text, `Media` a bounded reference string (the real asset linkage is
+a later story), and `Data` a bounded, well-formed JSON document — each with its
+own explicit size limit. An invalid or oversize body is rejected with `400`
+before any persistence, and the rejected content is never echoed back.
 
 ## Container images
 

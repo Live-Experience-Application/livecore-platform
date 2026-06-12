@@ -114,16 +114,19 @@ internal static class ContentBlockEndpoints
 
         // Validate the content inputs before touching the tenant, so a broken body is a
         // 400 regardless of authorization. The type must be a DEFINED generic content
-        // type, never an undefined value a cast could smuggle in; the body must satisfy
-        // the aggregate's body invariants (rich validation/size limits are CORE-SCENE-005).
+        // type, never an undefined value a cast could smuggle in; the body must then
+        // satisfy the PER-TYPE content validation and size limits (CORE-SCENE-005): the
+        // early body check is TYPE-AWARE, so e.g. a malformed-JSON Data body or an
+        // over-limit body for its type is a 400 before any persistence. The Problem Details
+        // leaks nothing about the bad body (threat T7) — the rejected body is never echoed.
         if (!TryParseType(request.Type, out var type))
         {
             return ValidationError("A valid content block type is required.");
         }
 
-        if (!ContentBlock.IsValidBody(request.Body?.Trim()))
+        if (!ContentValidator.IsValidBody(type, request.Body?.Trim()))
         {
-            return ValidationError("A valid content block body is required.");
+            return ValidationError("A valid content block body is required for the content type.");
         }
 
         // A malformed scene id can never address a stored scene; treat it as hidden

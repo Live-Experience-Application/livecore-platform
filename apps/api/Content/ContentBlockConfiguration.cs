@@ -26,10 +26,14 @@ namespace LiveCore.Api.Content;
 /// (Text/Media/Data); <c>body</c> stores the content payload; <c>revision_number</c>
 /// stores the monotonic revision counter (the revisions feature). The body is mapped
 /// as a plain text column bounded by <see cref="ContentBlock.MaxBodyLength"/> — the
-/// aggregate validates the bound. A structured (JSONB) body shape and rich,
-/// type-specific size limits are the later CORE-SCENE-005 story; JSONB is permitted by
-/// docs/10_DATABASE_SCHEMA.md only for flexible attributes, never for authorization
-/// fields, so it is deliberately not used for any boundary column here.
+/// overall maximum across content types (the maximum of the per-type limits in
+/// <see cref="ContentValidator"/>, CORE-SCENE-005). The aggregate validates the real,
+/// narrower per-type size limits and well-formedness; the column keeps the catch-all
+/// bound (unchanged from when the table was created, so this story needs no migration).
+/// A structured (JSONB) column type is deliberately not used: docs/10_DATABASE_SCHEMA.md
+/// permits JSONB only for flexible attributes, never for authorization fields, and a Data
+/// body is validated as well-formed JSON text by <see cref="ContentValidator"/> without
+/// coupling the column to a JSONB shape.
 ///
 /// Two indexes back the documented access patterns:
 /// <list type="bullet">

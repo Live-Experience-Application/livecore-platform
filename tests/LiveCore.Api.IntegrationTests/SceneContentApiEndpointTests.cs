@@ -873,6 +873,115 @@ public sealed class SceneContentApiEndpointTests
     }
 
     [Fact]
+    public async Task Create_content_block_is_400_for_a_malformed_json_data_body()
+    {
+        // Per-type validation (CORE-SCENE-005): a Data body must be well-formed JSON. A
+        // malformed-JSON body is a type-aware 400 BEFORE persistence; the bad body must not
+        // leak into the Problem Details (threat T7) and nothing is persisted.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid sceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Opening", 0);
+            sceneId = scene.Id;
+        });
+
+        const string malformed = "{ this-is-not-valid-json ";
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            $"/api/v1/scenes/{sceneId}/content-blocks?organizationSlug={_orgA}",
+            new CreateContentBlockRequest(nameof(ContentBlockType.Data), malformed));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertBodyContentDoesNotLeakAsync(response, malformed);
+        await AssertContentBlockCountAsync(factory, sceneId, 0);
+    }
+
+    [Theory]
+    [InlineData(nameof(ContentBlockType.Text))]
+    [InlineData(nameof(ContentBlockType.Media))]
+    [InlineData(nameof(ContentBlockType.Data))]
+    public async Task Create_content_block_is_400_for_an_oversize_body_for_its_type(string type)
+    {
+        // Per-type size limits (CORE-SCENE-005): a body over its type's maximum length is a
+        // type-aware 400 before persistence. The oversize content is never echoed (T7) and
+        // nothing is persisted.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid sceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Opening", 0);
+            sceneId = scene.Id;
+        });
+
+        var parsedType = Enum.Parse<ContentBlockType>(type);
+        var limit = ContentValidator.MaxLengthFor(parsedType);
+        // The oversize body opens with a distinctive marker so the no-leak assertion below
+        // checks a recognisable slice rather than an incidental run of padding. For Data the
+        // body stays a well-formed JSON string literal padded past the Data limit, so only
+        // SIZE (not well-formedness) trips the rejection.
+        const string leakMarker = "do-not-echo-marker-";
+        var oversize = parsedType == ContentBlockType.Data
+            ? "\"" + leakMarker + new string('a', limit) + "\""
+            : leakMarker + new string('a', limit + 1);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            $"/api/v1/scenes/{sceneId}/content-blocks?organizationSlug={_orgA}",
+            new CreateContentBlockRequest(type, oversize));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertBodyContentDoesNotLeakAsync(response, oversize);
+        await AssertContentBlockCountAsync(factory, sceneId, 0);
+    }
+
+    [Fact]
+    public async Task Create_content_block_is_400_for_a_media_body_with_a_control_character()
+    {
+        // Per-type validation (CORE-SCENE-005): a Media reference with a disallowed control
+        // character is an invalid per-type body -> type-aware 400, no leak, nothing persisted.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid sceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Opening", 0);
+            sceneId = scene.Id;
+        });
+
+        // A disallowed control character (NUL) embedded in the reference behind a
+        // distinctive marker. PostAsJsonAsync encodes the NUL as a unicode escape, which the
+        // server decodes back to a NUL char that the per-type validator rejects (only
+        // tab/CR/LF are allowed).
+        var badReference = "asset://do-not-echo-marker" + (char)0 + "bad";
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            $"/api/v1/scenes/{sceneId}/content-blocks?organizationSlug={_orgA}",
+            new CreateContentBlockRequest(nameof(ContentBlockType.Media), badReference));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertBodyContentDoesNotLeakAsync(response, badReference);
+        await AssertContentBlockCountAsync(factory, sceneId, 0);
+    }
+
+    [Fact]
     public async Task Create_content_block_is_400_for_a_missing_request_body()
     {
         await using var factory = new WorkspaceApiFactory();
@@ -988,6 +1097,21 @@ public sealed class SceneContentApiEndpointTests
         Assert.DoesNotContain("role", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("member", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("tenant", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Asserts a validation (400) Problem Details body never echoes the rejected content
+    /// body (threat T7): host-prepared content must not leak back through an error
+    /// response. A distinctive marker substring of the submitted body must NOT appear in
+    /// the response.
+    /// </summary>
+    private static async Task AssertBodyContentDoesNotLeakAsync(HttpResponseMessage response, string submittedBody)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        // Use a distinctive, sufficiently long slice of the submitted body so the check is
+        // not fooled by an incidental short overlap with the generic Problem Details text.
+        var marker = submittedBody.Length <= 16 ? submittedBody : submittedBody.Substring(0, 16);
+        Assert.DoesNotContain(marker, body, StringComparison.Ordinal);
     }
 
     private static async Task<SceneDto[]> ReadHostScenesAsync(HttpResponseMessage response)

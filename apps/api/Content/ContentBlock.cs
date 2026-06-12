@@ -19,9 +19,10 @@ namespace LiveCore.Api.Content;
 /// concern (the <c>visibility_rules</c> table; threats T2/T3). So this aggregate is
 /// only the host-prepared content unit and its revisions; whether a participant may
 /// see it is computed server-side by the Visibility module in a later epic, never
-/// here. Likewise the host-vs-participant DTO separation (CORE-SCENE-004) and content
-/// validation/size limits (CORE-SCENE-005) are later stories and are deliberately not
-/// built here.
+/// here. The host-vs-participant DTO separation is the CORE-SCENE-004 story; per-type
+/// content validation and explicit size limits are enforced via
+/// <see cref="ContentValidator"/> (CORE-SCENE-005) and must NEVER become a visibility
+/// decision.
 ///
 /// Tenant + scene boundary: a content block is workspace-scoped (csv/database_tables.csv
 /// scopes <c>content_blocks</c> to <c>workspace</c>) AND scene-scoped — the documented
@@ -48,11 +49,12 @@ namespace LiveCore.Api.Content;
 /// Body invariant: <see cref="Body"/> is the content payload — text, a media
 /// reference or a structured data document depending on <see cref="Type"/>. It is
 /// host-prepared content, so it is treated as sensitive (it is never written to logs;
-/// see <see cref="ToString"/>, threat T7). The aggregate keeps only the minimal
-/// invariants (non-null, trimmed, non-blank); rich content VALIDATION and explicit
-/// size limits are the later CORE-SCENE-005 story and are deliberately not enforced
-/// here beyond the same bounded-length guard the other aggregates apply to their
-/// display fields.
+/// see <see cref="ToString"/>, threat T7). The body is validated PER TYPE by
+/// <see cref="ContentValidator"/> (CORE-SCENE-005): Text is bounded plain text, Media a
+/// bounded reference string, and Data a bounded, well-formed JSON document, each with its
+/// own explicit size limit. Both <see cref="Create"/> and <see cref="Revise"/> reject an
+/// invalid or oversize body for the block's type with NO mutation, so a rejected revision
+/// leaves the prior revision intact.
 ///
 /// Revision invariant (the headline feature): <see cref="RevisionNumber"/> is an
 /// explicit monotonically increasing version of the block's body, starting at
@@ -88,13 +90,14 @@ public sealed class ContentBlock
     public const int InitialRevisionNumber = 1;
 
     /// <summary>
-    /// Maximum accepted body length. The body is host-prepared content; a generous
-    /// upper bound rejects only hostile or broken input here, mirroring the bounded
-    /// length the other aggregates apply to their display fields. The richer content
-    /// validation and the real, type-specific size limits are the later
-    /// CORE-SCENE-005 story.
+    /// Overall maximum accepted body length across all content types — the maximum of the
+    /// per-type limits in <see cref="ContentValidator"/> (re-exposed here so the
+    /// persistence column bound and any caller can reference it from the aggregate). The
+    /// real, narrower, type-specific size limits live on <see cref="ContentValidator"/>
+    /// (CORE-SCENE-005); this column-level bound equals the size the table was created
+    /// with, so no schema migration is required.
     /// </summary>
-    public const int MaxBodyLength = 65536;
+    public const int MaxBodyLength = ContentValidator.MaxBodyLength;
 
     private ContentBlock(
         Guid id,
@@ -132,9 +135,13 @@ public sealed class ContentBlock
             throw new ArgumentOutOfRangeException(nameof(type), type, "Type is not a defined content block type.");
         }
 
-        if (!IsValidBody(body))
+        // Per-type content validation and size limits (CORE-SCENE-005): the body must be
+        // valid for THIS block's type (Text/Media/Data), not merely non-blank. The
+        // validator never throws and never decides visibility; it only judges
+        // well-formedness and the per-type size bound.
+        if (!ContentValidator.IsValidBody(type, body))
         {
-            throw new ArgumentException("Body violates the body invariants.", nameof(body));
+            throw new ArgumentException("Body violates the body invariants for its content type.", nameof(body));
         }
 
         if (!IsValidRevisionNumber(revisionNumber))
@@ -327,10 +334,14 @@ public sealed class ContentBlock
             throw new ArgumentOutOfRangeException(nameof(type), type, "Type is not a defined content block type.");
         }
 
+        // Per-type content validation and size limits (CORE-SCENE-005): the NEW body must be
+        // valid for the NEW type. An invalid/oversize revision is rejected here with NO
+        // mutation, so the prior revision's type, body and number are left intact
+        // (prior-revision immutability).
         var trimmed = body?.Trim() ?? string.Empty;
-        if (!IsValidBody(trimmed))
+        if (!ContentValidator.IsValidBody(type, trimmed))
         {
-            throw new ArgumentException("Body violates the body invariants.", nameof(body));
+            throw new ArgumentException("Body violates the body invariants for its content type.", nameof(body));
         }
 
         Type = type;
@@ -346,25 +357,11 @@ public sealed class ContentBlock
     public static bool IsValidType(ContentBlockType type) => Enum.IsDefined(type);
 
     /// <summary>
-    /// Whether the given value is a valid body: non-blank, within the length bound and
-    /// free of control characters other than the common whitespace (tab, carriage
-    /// return, line feed) that legitimately appears in textual and structured content.
-    /// Rich, type-specific validation is the later CORE-SCENE-005 story.
-    /// </summary>
-    public static bool IsValidBody(string? value)
-        => !string.IsNullOrWhiteSpace(value)
-            && value.Length <= MaxBodyLength
-            && !value.Any(IsDisallowedControlCharacter);
-
-    /// <summary>
     /// Whether the given value is a valid revision number: at least the initial
     /// revision number (1). A revision number below 1 is meaningless and is rejected.
     /// </summary>
     public static bool IsValidRevisionNumber(int revisionNumber)
         => revisionNumber >= InitialRevisionNumber;
-
-    private static bool IsDisallowedControlCharacter(char value)
-        => char.IsControl(value) && value is not '\t' and not '\r' and not '\n';
 
     /// <summary>
     /// Identifier-only representation that is safe for structured logs: content block

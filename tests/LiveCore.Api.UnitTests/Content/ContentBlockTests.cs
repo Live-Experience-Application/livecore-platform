@@ -80,10 +80,21 @@ public class ContentBlockTests
     [InlineData(ContentBlockType.Data)]
     public void Create_accepts_every_defined_type(ContentBlockType type)
     {
-        var block = CreateBlock(type);
+        // Each type has its own valid body shape (CORE-SCENE-005): Text is plain text,
+        // Media a reference string, Data a well-formed JSON document.
+        var block = CreateBlock(type, ValidBodyFor(type));
 
         Assert.Equal(type, block.Type);
     }
+
+    /// <summary>A minimal valid body for the given content type (per CORE-SCENE-005 rules).</summary>
+    private static string ValidBodyFor(ContentBlockType type) => type switch
+    {
+        ContentBlockType.Text => "Some plain text.",
+        ContentBlockType.Media => "asset://ref-1",
+        ContentBlockType.Data => "{\"key\":\"value\"}",
+        _ => "Some plain text.",
+    };
 
     [Fact]
     public void Timestamps_are_normalized_to_utc()
@@ -129,18 +140,20 @@ public class ContentBlockTests
     [Fact]
     public void Create_allows_common_whitespace_in_the_body()
     {
-        // Tab/CR/LF legitimately appear in textual and structured content, so they are
-        // not rejected as control characters (richer validation is CORE-SCENE-005).
+        // Tab/CR/LF legitimately appear in textual content, so they are not rejected as
+        // control characters. (Text body — a Data body now requires well-formed JSON,
+        // CORE-SCENE-005, so this multi-line plain-text body is a Text block.)
         var block = ContentBlock.Create(
-            _organizationId, _workspaceId, _sceneId, ContentBlockType.Data, "line one\nline two\tindented", _createdAt);
+            _organizationId, _workspaceId, _sceneId, ContentBlockType.Text, "line one\nline two\tindented", _createdAt);
 
         Assert.Equal("line one\nline two\tindented", block.Body);
     }
 
     [Fact]
-    public void Create_rejects_a_body_over_the_length_bound()
+    public void Create_rejects_a_body_over_the_per_type_length_bound()
     {
-        var tooLong = new string('a', ContentBlock.MaxBodyLength + 1);
+        // Per-type size limit (CORE-SCENE-005): a Text body over MaxTextLength is rejected.
+        var tooLong = new string('a', ContentValidator.MaxTextLength + 1);
 
         Assert.Throws<ArgumentException>(
             () => ContentBlock.Create(_organizationId, _workspaceId, _sceneId, ContentBlockType.Text, tooLong, _createdAt));
@@ -151,6 +164,105 @@ public class ContentBlockTests
         => Assert.Throws<ArgumentOutOfRangeException>(
             () => ContentBlock.Create(
                 _organizationId, _workspaceId, _sceneId, (ContentBlockType)999, _body, _createdAt));
+
+    // --- Per-type content validation + size limits (CORE-SCENE-005) ------------
+    // The aggregate enforces the SAME per-type rules the ContentValidator exposes, so a
+    // body that is invalid for its type is rejected at Create AND Revise with no mutation.
+
+    [Fact]
+    public void Create_accepts_a_well_formed_json_data_body()
+    {
+        // Data: a structured, well-formed JSON document is accepted (well-formedness only —
+        // the JSON schema is never validated here, that is the Templates epic).
+        var block = ContentBlock.Create(
+            _organizationId, _workspaceId, _sceneId, ContentBlockType.Data, "{\"key\":\"value\"}", _createdAt);
+
+        Assert.Equal("{\"key\":\"value\"}", block.Body);
+        Assert.Equal(ContentBlockType.Data, block.Type);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"unterminated\":")]
+    [InlineData("{ key: 'value' }")] // unquoted key + single quotes are not valid JSON
+    public void Create_rejects_a_malformed_json_data_body(string body)
+        // Data: a body that is not well-formed JSON is rejected.
+        => Assert.Throws<ArgumentException>(
+            () => ContentBlock.Create(_organizationId, _workspaceId, _sceneId, ContentBlockType.Data, body, _createdAt));
+
+    [Fact]
+    public void Create_accepts_a_media_reference_body()
+    {
+        // Media: a non-blank, bounded reference string is accepted (the reference is NOT
+        // resolved against a real Asset — asset linkage is the later CORE-AST-005 story).
+        var block = ContentBlock.Create(
+            _organizationId, _workspaceId, _sceneId, ContentBlockType.Media, "asset://ref-1", _createdAt);
+
+        Assert.Equal("asset://ref-1", block.Body);
+        Assert.Equal(ContentBlockType.Media, block.Type);
+    }
+
+    [Theory]
+    [InlineData(ContentBlockType.Text, "bad\0body")]
+    [InlineData(ContentBlockType.Media, "bad\0ref")]
+    public void Create_rejects_a_disallowed_control_character_for_text_and_media(ContentBlockType type, string body)
+        => Assert.Throws<ArgumentException>(
+            () => ContentBlock.Create(_organizationId, _workspaceId, _sceneId, type, body, _createdAt));
+
+    [Theory]
+    [InlineData(ContentBlockType.Text)]
+    [InlineData(ContentBlockType.Media)]
+    public void Create_accepts_a_body_at_exactly_the_per_type_length_limit(ContentBlockType type)
+    {
+        // At-limit boundary (CORE-SCENE-005): a body of exactly the per-type maximum length
+        // is accepted. Text and Media bodies are plain reference/text characters.
+        var atLimit = new string('a', ContentValidator.MaxLengthFor(type));
+
+        var block = ContentBlock.Create(_organizationId, _workspaceId, _sceneId, type, atLimit, _createdAt);
+
+        Assert.Equal(atLimit.Length, block.Body.Length);
+    }
+
+    [Theory]
+    [InlineData(ContentBlockType.Text)]
+    [InlineData(ContentBlockType.Media)]
+    public void Create_rejects_a_body_one_over_the_per_type_length_limit(ContentBlockType type)
+    {
+        // Over-limit boundary (CORE-SCENE-005): one character over the per-type maximum is
+        // rejected.
+        var overLimit = new string('a', ContentValidator.MaxLengthFor(type) + 1);
+
+        Assert.Throws<ArgumentException>(
+            () => ContentBlock.Create(_organizationId, _workspaceId, _sceneId, type, overLimit, _createdAt));
+    }
+
+    [Fact]
+    public void Revise_rejects_a_malformed_json_data_body_and_leaves_the_block_untouched()
+    {
+        // Revise enforces the new type's rule too: replacing a Text body with a malformed
+        // JSON Data body is rejected with NO mutation (prior revision intact).
+        var block = CreateBlock(ContentBlockType.Text, "Original body");
+
+        Assert.Throws<ArgumentException>(
+            () => block.Revise(ContentBlockType.Data, "not json", _updatedAt));
+
+        Assert.Equal(ContentBlockType.Text, block.Type);
+        Assert.Equal("Original body", block.Body);
+        Assert.Equal(1, block.RevisionNumber);
+        Assert.Equal(_createdAt, block.UpdatedAt);
+    }
+
+    [Fact]
+    public void Revise_accepts_a_well_formed_json_data_body()
+    {
+        var block = CreateBlock(ContentBlockType.Text, "Original body");
+
+        block.Revise(ContentBlockType.Data, "{\"a\":1}", _updatedAt);
+
+        Assert.Equal(ContentBlockType.Data, block.Type);
+        Assert.Equal("{\"a\":1}", block.Body);
+        Assert.Equal(2, block.RevisionNumber);
+    }
 
     [Fact]
     public void IsValidRevisionNumber_accepts_one_and_above_and_rejects_below_one()
@@ -350,10 +462,10 @@ public class ContentBlockTests
     }
 
     [Fact]
-    public void Revise_rejects_a_body_over_the_length_bound_and_leaves_the_block_untouched()
+    public void Revise_rejects_a_body_over_the_per_type_length_bound_and_leaves_the_block_untouched()
     {
         var block = CreateBlock(ContentBlockType.Text, "Original body");
-        var tooLong = new string('a', ContentBlock.MaxBodyLength + 1);
+        var tooLong = new string('a', ContentValidator.MaxTextLength + 1);
 
         Assert.Throws<ArgumentException>(() => block.Revise(ContentBlockType.Text, tooLong, _updatedAt));
 
