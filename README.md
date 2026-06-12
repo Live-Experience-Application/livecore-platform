@@ -1072,6 +1072,57 @@ that _exposes_ the resolved state (with its authenticated, own-subject-only auth
 this story supplies the generic, reusable assignment, revocation and lookup primitives they build on. There is
 still no entitlement HTTP route.
 
+### Quota definitions and quota status
+
+CORE-ENTL-003 (the next story of the `Entitlements and Quotas` epic) adds the **quota definition** and the
+**server-side quota-status calculation and API** — the acceptance criterion **"Quota status is calculated
+server-side for subjects and workspaces"** (`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`: "Limits such as
+active workspace count, active session count, participant count, storage ... must be enforced server-side").
+CORE-ENTL-001/002 modeled _what_ entitlements exist and assigned a subject its _limit_; this story adds _how_ a
+numeric quota is measured and _how much is left_, in two new tables (`apps/api/Entitlements/`; module
+Entitlements, `csv/database_tables.csv`).
+
+A `QuotaDefinition` (the global `quota_definitions` catalog, no `organization_id`) says how a numeric
+`EntitlementValueKind.Quota` entitlement is measured: the measured `entitlement_definition_id` (with its
+denormalized, immutable `entitlement_key` recorded as a fact, and a **restricted** foreign key so the measured
+definition can't be hard-deleted), the `subject_type` the usage is counted for (`User` → surfaced on
+`/me/quota-status`; `Workspace` → surfaced on `/workspaces/{workspaceId}/quota-status`) and the `unit` (`Count`
+or `Bytes`). Only a **quota** entitlement can be measured — a flag (boolean capability) has no usage to count and
+is rejected — and a quota is soft-retired via `is_active`, never hard-deleted. A `QuotaUsage` (the per-subject
+`quota_usage` table, keyed by the `(subject_type, subject_id)` pair exactly like `subject_entitlements`, the
+subject id a generic polymorphic reference) records a subject's current `used_amount` of a quota; a subject
+records each quota **at most once** (the unique `quota_usage(subject_type, subject_id, quota_definition_id)`
+index).
+
+The **status is calculated server-side and fail-closed** by `QuotaStatusCalculator`, the single place the quota
+math lives: for each active quota defined for the subject's kind it combines the subject's **granted limit**
+(resolved from its active entitlements through the CORE-ENTL-002 `SubjectEntitlementResolver` — **reused**, not
+re-derived) with its **recorded usage** (a missing usage row reads as zero). The boundary semantics: usage
+exactly **at** the cap is allowed (not exceeded, zero remaining); usage **over** the cap is exceeded with zero
+remaining (never negative); an **unlimited** (fair-use) grant is never exceeded and has no finite remaining; and a
+subject **not entitled** to a defined quota has **no allowance** — the limit is zero, so any usage already exceeds
+it (a client can never obtain headroom the server did not grant; `docs/21` "Never unlock limits before server
+verification succeeds").
+
+Two HTTP routes expose the calculated status (under the Core `/api/v1` prefix `docs/08_API_CONTRACTS.md` mandates;
+`csv/api_routes.csv`, `csv/mobile_store_api_routes.csv`):
+
+| Method | Route                                           | Authorized callers                             |
+| ------ | ----------------------------------------------- | ---------------------------------------------- |
+| `GET`  | `/api/v1/me/quota-status`                       | any authenticated user (their own status)      |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/quota-status` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+`/me/quota-status` resolves the **current user's** profile (the canonical, idempotent "current user" resolution)
+and calculates the `User` subject's status; a **service account** has no personal quota and is `403`.
+`/workspaces/{workspaceId}/quota-status` resolves the target organization from a required `?organizationSlug=`
+(token claim **and** persisted membership), then requires the caller to be a **member** of that workspace — a
+caller who cannot see the tenant, and a non-member, are hidden as `404` (never `403`); a known member who is not a
+host-capable role is `403`, since a workspace's limits/usage are management metadata. The response is
+**client-safe**: only the generic quota key, unit and computed numbers — no subject id, no internal ids, no
+authorization rationale (a vertical maps the key to its own paywall copy in its UI). **Enforcing** quotas on
+protected workspace/session commands (incrementing usage and rejecting over-limit) is the next story
+(CORE-ENTL-004).
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

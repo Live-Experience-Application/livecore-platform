@@ -19,3 +19,5 @@ GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant own
 POST,/api/v1/assets/upload-intent,Assets,"Host,CoHost,Owner,Admin",Creates upload intent
 GET,/api/v1/assets/{assetId}/download-url,Assets,authorized viewers,Signed URL after permission check
 POST,/api/v1/assets/{assetId}/links,Assets,"Host,CoHost,Owner,Admin",Link asset to content block or entity
+GET,/api/v1/me/quota-status,Entitlements,authenticated user,Server-calculated quota status for the current user
+GET,/api/v1/workspaces/{workspaceId}/quota-status,Entitlements,"Host,CoHost,Owner,Admin",Server-calculated workspace quota status; membership authorized

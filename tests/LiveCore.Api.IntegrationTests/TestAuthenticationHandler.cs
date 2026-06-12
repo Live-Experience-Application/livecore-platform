@@ -39,6 +39,11 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
     public const string IssuerHeader = "X-Test-Iss";
     public const string OrganizationHeader = "X-Test-Org";
 
+    // Optional: emits the issuer-asserted service-account marker (the client_id claim Keycloak stamps on
+    // client-credentials tokens), so a test can present a SERVICE ACCOUNT principal exactly as production maps
+    // one. End-user clients omit it and stay user principals (OidcPrincipalMapper).
+    public const string ClientIdHeader = "X-Test-ClientId";
+
     public const string DefaultIssuer = "https://issuer.test";
 
     public TestAuthenticationHandler(
@@ -80,6 +85,14 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
             {
                 claims.Add(new Claim(OidcClaimTypes.Organization, organizationClaim));
             }
+        }
+
+        // The issuer-asserted service-account marker (client_id). Present only when a test opts in; a human
+        // user token never carries it, so this never changes the default user-principal behavior.
+        if (Request.Headers.TryGetValue(ClientIdHeader, out var clientIdValues)
+            && !string.IsNullOrWhiteSpace(clientIdValues.ToString()))
+        {
+            claims.Add(new Claim(OidcClaimTypes.ClientId, clientIdValues.ToString()));
         }
 
         var identity = new ClaimsIdentity(claims, SchemeName);

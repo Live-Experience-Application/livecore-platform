@@ -38,7 +38,8 @@ namespace LiveCore.Api.Persistence;
 /// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
 /// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
 /// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c>,
-/// <c>plan_entitlements</c> and <c>subject_entitlements</c> tables)
+/// <c>plan_entitlements</c>, <c>subject_entitlements</c>, <c>quota_definitions</c>
+/// and <c>quota_usage</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -136,6 +137,12 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Per-subject entitlement assignments owned by the Entitlements module.</summary>
     public DbSet<SubjectEntitlement> SubjectEntitlements => Set<SubjectEntitlement>();
 
+    /// <summary>Generic quota definitions owned by the Entitlements module.</summary>
+    public DbSet<QuotaDefinition> QuotaDefinitions => Set<QuotaDefinition>();
+
+    /// <summary>Per-subject quota usage owned by the Entitlements module.</summary>
+    public DbSet<QuotaUsage> QuotaUsage => Set<QuotaUsage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -166,5 +173,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new PlanDefinitionConfiguration());
         modelBuilder.ApplyConfiguration(new PlanEntitlementConfiguration());
         modelBuilder.ApplyConfiguration(new SubjectEntitlementConfiguration());
+        modelBuilder.ApplyConfiguration(new QuotaDefinitionConfiguration());
+        modelBuilder.ApplyConfiguration(new QuotaUsageConfiguration());
     }
 }

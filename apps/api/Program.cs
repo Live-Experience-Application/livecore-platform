@@ -574,6 +574,25 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<SubjectEntitlementResolver>();
     builder.Services.AddScoped<SubjectEntitlementAssignmentService>();
 
+    // Quota definition + usage persistence and the server-side quota-status calculation (CORE-ENTL-003, the quota
+    // definition and quota status story of the "Entitlements and Quotas" epic): the Entitlements module owns the
+    // global quota_definitions catalog (how a numeric quota entitlement is measured — for which subject kind and in
+    // which unit) and the per-subject quota_usage table (docs/05_MODULE_CONTRACTS.md;
+    // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md "Database additions"; csv/database_tables.csv: module
+    // Entitlements). Registered here, inside the persistence conditional, exactly like the entitlement repositories
+    // above. The quota-definition repository is a global catalog read (no organization_id); the usage repository's
+    // reads are scoped by the (subject_type, subject_id) pair, so one subject's usage is never returned through
+    // another subject's id (per-subject isolation). The QuotaStatusCalculator combines the active quota definitions
+    // for a subject kind, the subject's effective entitlement limits (REUSING the CORE-ENTL-002 resolver) and the
+    // recorded usage into the subject's quota status — computed entirely server-side and FAIL-CLOSED (no
+    // entitlement ⇒ no allowance), the epic acceptance criterion "Quota status is calculated server-side for
+    // subjects and workspaces". The GET /api/v1/me/quota-status and /api/v1/workspaces/{workspaceId}/quota-status
+    // endpoints sit on it; enforcing quotas on protected workspace/session commands (incrementing usage and
+    // rejecting over-limit) is the next story (CORE-ENTL-004).
+    builder.Services.AddScoped<IQuotaDefinitionRepository, QuotaDefinitionRepository>();
+    builder.Services.AddScoped<IQuotaUsageRepository, QuotaUsageRepository>();
+    builder.Services.AddScoped<QuotaStatusCalculator>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
@@ -703,6 +722,19 @@ app.MapContentBlockEndpoints();
 // backend fails closed with 503 in both signed-URL flows (threat T4 "Asset leak"). The cleanup job
 // (CORE-AST-006) is a later story.
 app.MapAssetEndpoints();
+
+// Quota-status endpoints (CORE-ENTL-003): the Entitlements module's quota-status reads,
+// GET /api/v1/me/quota-status and GET /api/v1/workspaces/{workspaceId}/quota-status. They live in an
+// authenticated route group and fail closed (503) when persistence is not configured, exactly like the
+// workspace/asset endpoints. No new DI registration beyond the quota repositories and the QuotaStatusCalculator
+// above is required: the user profile service, the tenant context resolver and the workspace member repository
+// they reuse are already registered. /me/quota-status resolves the current user (a service account is 403) and
+// calculates the USER subject's status; the workspace route resolves the tenant from the query-supplied
+// organization, requires the caller to be a host-capable member of the workspace (every denial hidden as 404, an
+// insufficient role as 403) and calculates the WORKSPACE subject's status. Both compute the status entirely
+// server-side and fail-closed (the epic acceptance criterion). Quota ENFORCEMENT on protected commands is
+// CORE-ENTL-004.
+app.MapQuotaStatusEndpoints();
 
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires
 // authorization (the hub is [Authorize] and the mapping adds RequireAuthorization()), so an

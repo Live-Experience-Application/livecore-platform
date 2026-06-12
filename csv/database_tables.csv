@@ -26,4 +26,6 @@ entitlement_definitions,Entitlements,global,Generic entitlement catalog entry
 plan_definitions,Entitlements,global,Generic plan catalog entry
 plan_entitlements,Entitlements,global,Plan-to-entitlement grant
 subject_entitlements,Entitlements,subject,Per-subject entitlement assignment
+quota_definitions,Entitlements,global,Generic quota measurement definition
+quota_usage,Entitlements,subject,Per-subject recorded quota usage
 idempotency_keys,System,scope,Retry safety

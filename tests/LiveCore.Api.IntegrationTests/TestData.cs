@@ -1,6 +1,7 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -299,5 +300,78 @@ internal static class TestData
         context.AssetLinks.Add(link);
         await context.SaveChangesAsync();
         return link;
+    }
+
+    /// <summary>
+    /// Creates and persists a generic numeric quota entitlement definition, driving the real
+    /// <see cref="EntitlementDefinition.Define"/> factory. Used to arrange the catalog a quota definition
+    /// measures and a subject entitlement grants a limit for. The key is generic Core vocabulary (AGENTS.md).
+    /// </summary>
+    public static async Task<EntitlementDefinition> AddQuotaEntitlementDefinitionAsync(
+        this LiveCoreDbContext context,
+        string key)
+    {
+        var definition = EntitlementDefinition.Define(
+            key, EntitlementValueKind.Quota, "Quota entitlement", null, SeedTime);
+        context.EntitlementDefinitions.Add(definition);
+        await context.SaveChangesAsync();
+        return definition;
+    }
+
+    /// <summary>
+    /// Creates and persists a quota definition measuring the given quota entitlement for the given subject kind
+    /// and unit, driving the real <see cref="QuotaDefinition.Define"/> factory.
+    /// </summary>
+    public static async Task<QuotaDefinition> AddQuotaDefinitionAsync(
+        this LiveCoreDbContext context,
+        EntitlementDefinition entitlement,
+        EntitlementSubjectType subjectType,
+        QuotaUnit unit = QuotaUnit.Count)
+    {
+        var definition = QuotaDefinition.Define(entitlement, subjectType, unit, SeedTime);
+        context.QuotaDefinitions.Add(definition);
+        await context.SaveChangesAsync();
+        return definition;
+    }
+
+    /// <summary>
+    /// Creates and persists a quota entitlement assignment granting a subject a numeric limit (or null for an
+    /// unlimited/fair-use grant), driving the real <see cref="SubjectEntitlement.GrantQuota"/> factory.
+    /// </summary>
+    public static async Task<SubjectEntitlement> AddSubjectQuotaEntitlementAsync(
+        this LiveCoreDbContext context,
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        EntitlementDefinition entitlement,
+        long? limit)
+    {
+        var assignment = SubjectEntitlement.GrantQuota(
+            subjectType, subjectId, entitlement, limit, sourcePlanDefinitionId: null, SeedTime);
+        context.SubjectEntitlements.Add(assignment);
+        await context.SaveChangesAsync();
+        return assignment;
+    }
+
+    /// <summary>
+    /// Creates and persists a subject's recorded usage of a quota at the given amount, driving the real
+    /// <see cref="QuotaUsage.Start"/> factory and <see cref="QuotaUsage.Record"/> transition so the seeded row
+    /// has exactly the amount production would record.
+    /// </summary>
+    public static async Task<QuotaUsage> AddQuotaUsageAsync(
+        this LiveCoreDbContext context,
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        QuotaDefinition definition,
+        long usedAmount)
+    {
+        var usage = QuotaUsage.Start(subjectType, subjectId, definition, SeedTime);
+        if (usedAmount != 0)
+        {
+            usage.Record(usedAmount, SeedTime);
+        }
+
+        context.QuotaUsage.Add(usage);
+        await context.SaveChangesAsync();
+        return usage;
     }
 }
