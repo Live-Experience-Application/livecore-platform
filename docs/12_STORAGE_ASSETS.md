@@ -77,6 +77,41 @@ still-`Pending` asset (its upload not yet confirmed) is `409 Conflict`, reported
 authorized viewer. An unconfigured storage backend fails closed (`503`) and produces no URL,
 so assets stay private by default even when storage is not configured.
 
+### Asset linking flow (CORE-AST-005)
+
+The asset-link route, `POST /api/v1/assets/{assetId}/links` (`csv/api_routes.csv`, roles
+Host/CoHost/Owner/Admin), is the "asset can be linked to ContentBlock or Entity" step of the lifecycle
+below. The route path carries only the asset id, so the request body supplies the target organization
+(`organizationSlug`, resolved by the same token-claim-and-membership tenant check as the reveal command)
+and the linked resource — its generic `targetType` (`ContentBlock` or `Entity`, never a `Scene`) and
+`targetId`. The asset is loaded **within** the resolved tenant (`FindByIdInOrganizationAsync`, the
+predicate leads with `organization_id`), its own workspace is **discovered from the loaded row** after the
+tenant boundary is enforced, and the caller is authorized **server-side** by their role in the asset's own
+workspace. A caller who cannot see the tenant, an unknown or cross-tenant asset, and a non-member of the
+asset's workspace are all hidden as `404` (never `403`); a known member who lacks the link role is `403`.
+
+Only after authorization is the target validated. The polymorphic `target_id` is a plain reference (not a
+database foreign key), so the create flow enforces the **same-workspace coupling**: it resolves the target
+content block / entity through the workspace-scoped repository of the asset's **own** organization and
+workspace before creating the link (mirrors `visibility_rules.resource_id`, `content_blocks.scene_id`,
+`entities.entity_type_id`). A target that does not exist in the asset's workspace — including one in
+another workspace or tenant — is hidden as `404` and no link is created, so an asset can never be linked to
+a foreign-workspace or foreign-tenant resource. A repeat of the same link is `409` (the per-workspace
+unique `asset_links(workspace_id, asset_id, target_type, target_id)` key prevents duplicates); a new link
+is `201`.
+
+The `asset_links` table (`csv/database_tables.csv`, module Assets, scope `workspace`; the documented
+critical index is `asset_links(workspace_id, asset_id)`) is the **join** that lets an asset **inherit**
+the audience visibility of the resource it is attached to. Linking never makes an asset public: it only
+records the attachment whose audience visibility the **central Visibility engine** then governs. The
+signed download flow (CORE-AST-004) now consults these links — an **audience** role (Participant/Observer)
+may obtain a download URL only when the asset is linked to a content block or entity that is **visible to
+the audience** (`VisibilityPolicy.CanViewResource`, reused — not duplicated); host-content roles may always
+download, and the audit role and any other role are denied fail-closed. The asset stays **private** and is
+reached only through the single short-lived signed URL minted after the permission check (the epic
+acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak). The cleanup job (CORE-AST-006) is
+a later story.
+
 ## Security rules
 
 - buckets private by default
@@ -85,6 +120,7 @@ so assets stay private by default even when storage is not configured.
 - download URL requires authorization
 - signed URLs are short-lived
 - asset metadata is filtered by visibility rules
+- an asset is audience-accessible only when linked to a visible content block or entity
 
 ## Asset lifecycle
 

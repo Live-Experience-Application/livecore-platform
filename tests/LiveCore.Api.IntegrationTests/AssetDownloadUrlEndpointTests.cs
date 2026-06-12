@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Assets;
+using LiveCore.Api.Content;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Visibility;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -111,11 +113,62 @@ public sealed class AssetDownloadUrlEndpointTests
     [MemberData(nameof(NonViewerRoles))]
     public async Task Download_url_is_403_for_a_non_viewer_workspace_role(MembershipRole role)
     {
-        // The caller is a member of the asset's workspace but is NOT an authorized viewer: an asset has no
-        // audience-visibility linkage yet (CORE-AST-005), so audience/audit roles are denied fail-closed.
+        // The caller is a member of the asset's workspace but is NOT an authorized viewer: the asset is not
+        // linked to any visible content (CORE-AST-005), so audience/audit roles are denied fail-closed.
         await using var factory = new FakeStorageApiFactory();
         var subject = $"member-{role}";
         var seed = await SeedWorkspaceWithAssetAsync(factory, subject, role, available: true);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(MembershipRole.Participant)]
+    [InlineData(MembershipRole.Observer)]
+    public async Task Audience_role_downloads_an_asset_linked_to_a_visible_content_block(MembershipRole role)
+    {
+        // CORE-AST-005: an asset linked to a content block that is VISIBLE to the audience becomes
+        // audience-accessible — the audience role now gets a signed download URL (200).
+        await using var factory = new FakeStorageApiFactory();
+        var subject = $"member-{role}";
+        var seed = await SeedWorkspaceWithLinkedAssetAsync(factory, subject, role, VisibilityState.Visible);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<DownloadDto>(_json);
+        Assert.NotNull(body);
+        Assert.True(Uri.TryCreate(body.DownloadUrl, UriKind.Absolute, out _));
+    }
+
+    [Theory]
+    [InlineData(MembershipRole.Participant)]
+    [InlineData(MembershipRole.Observer)]
+    public async Task Audience_role_is_403_for_an_asset_linked_to_a_hidden_content_block(MembershipRole role)
+    {
+        // Linked, but the content block is HIDDEN from the audience: the asset stays host-only (fail-closed).
+        await using var factory = new FakeStorageApiFactory();
+        var subject = $"member-{role}";
+        var seed = await SeedWorkspaceWithLinkedAssetAsync(factory, subject, role, VisibilityState.Hidden);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Auditor_is_403_even_for_an_asset_linked_to_a_visible_content_block()
+    {
+        // The audit role is audit-only, not a live content grant: even a visible link does not grant a
+        // download (threat T2 visibility leak; docs/06_AUTHORIZATION_MATRIX.md).
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "member-auditor";
+        var seed = await SeedWorkspaceWithLinkedAssetAsync(factory, subject, MembershipRole.Auditor, VisibilityState.Visible);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await GetAsync(client, seed.AssetId, _orgA);
@@ -278,6 +331,36 @@ public sealed class AssetDownloadUrlEndpointTests
             var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
             await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
             var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id, available: available);
+            seed = new SeedResult(org.Id, workspace.Id, asset.Id);
+        });
+        return seed;
+    }
+
+    /// <summary>
+    /// Seeds an org + a caller with the given (audience) role plus an Available asset that is LINKED to a
+    /// content block whose audience visibility is <paramref name="visibility"/>. Used to exercise the
+    /// CORE-AST-005 audience-download path: an audience role may download only when the linked content is
+    /// visible.
+    /// </summary>
+    private static async Task<SeedResult> SeedWorkspaceWithLinkedAssetAsync(
+        WorkspaceApiFactory factory,
+        string subject,
+        MembershipRole role,
+        VisibilityState visibility)
+    {
+        SeedResult seed = default;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, role);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
+            var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id, available: true);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Scene", 1);
+            var block = await db.AddContentBlockAsync(org.Id, workspace.Id, scene.Id, ContentBlockType.Text, "Generic");
+            await db.AddVisibilityRuleAsync(org.Id, workspace.Id, VisibilityResourceType.ContentBlock, block.Id, visibility);
+            await db.AddAssetLinkAsync(org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, block.Id, user.Id);
             seed = new SeedResult(org.Id, workspace.Id, asset.Id);
         });
         return seed;

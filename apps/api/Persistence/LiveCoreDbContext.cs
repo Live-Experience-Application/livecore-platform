@@ -31,7 +31,8 @@ namespace LiveCore.Api.Persistence;
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
 /// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
-/// Realtime <c>session_events</c> table and the Assets <c>assets</c> table)
+/// Realtime <c>session_events</c> table and the Assets <c>assets</c> and
+/// <c>asset_links</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -102,6 +103,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Asset metadata records owned by the Assets module.</summary>
     public DbSet<Asset> Assets => Set<Asset>();
 
+    /// <summary>Asset-to-content/entity links owned by the Assets module.</summary>
+    public DbSet<AssetLink> AssetLinks => Set<AssetLink>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -123,5 +127,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new AuditLogConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
         modelBuilder.ApplyConfiguration(new AssetConfiguration());
+        modelBuilder.ApplyConfiguration(new AssetLinkConfiguration());
     }
 }

@@ -18,3 +18,4 @@ POST,/api/v1/scenes/{sceneId}/content-blocks,Content,"Host,CoHost,Owner,Admin",C
 GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant owner or Host,Participant-safe feed
 POST,/api/v1/assets/upload-intent,Assets,"Host,CoHost,Owner,Admin",Creates upload intent
 GET,/api/v1/assets/{assetId}/download-url,Assets,authorized viewers,Signed URL after permission check
+POST,/api/v1/assets/{assetId}/links,Assets,"Host,CoHost,Owner,Admin",Link asset to content block or entity

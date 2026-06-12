@@ -509,6 +509,32 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // above. Linking (CORE-AST-005) and cleanup (CORE-AST-006) are later stories.
     builder.Services.AddScoped<AssetUploadIntentService>();
 
+    // Asset linking persistence + commands (CORE-AST-005, the asset-linking story of the "Asset Storage and
+    // Authorization" epic): the Assets module owns the workspace-scoped, tenant-scoped asset_links table
+    // that records that an asset is attached to a host-prepared resource — a content block or entity
+    // (csv/database_tables.csv: asset_links, module Assets, scope workspace; the documented critical index
+    // is asset_links(workspace_id, asset_id)). Registered here, inside the persistence conditional, exactly
+    // like the asset repository above; the repository's lookups are scoped by organization id then
+    // workspace id (the organization boundary is checked before the workspace boundary; threat T5), and
+    // there is NO list-everything method. The AssetLinkService create command enforces the same-workspace
+    // coupling for the polymorphic target reference (it resolves the content block/entity through the
+    // workspace-scoped repository before linking, so an asset can never be linked to a foreign-workspace or
+    // foreign-tenant resource; threats T5/T1) and is consumed by POST /api/v1/assets/{assetId}/links.
+    builder.Services.AddScoped<IAssetLinkRepository, AssetLinkRepository>();
+    builder.Services.AddScoped<AssetLinkService>();
+
+    // Asset download authorization (CORE-AST-005): the Assets module's "may this workspace role download
+    // this asset?" decision over the asset's links and the central Visibility engine. Registered here
+    // because it depends on the asset link repository above and the VisibilityPolicy registered with the
+    // Visibility module. It REUSES VisibilityPolicy.CanViewResource per linked target rather than
+    // duplicating visibility logic (docs/05_MODULE_CONTRACTS.md), so an asset's audience access can never
+    // diverge from the content's visibility: host-content roles always download; an audience role
+    // (Participant/Observer) downloads only when the asset is linked to a content block/entity VISIBLE to
+    // the audience; the audit role and any undefined role are denied fail-closed (threat T4 "Asset leak";
+    // threat T2 visibility leak). The signed download endpoint (CORE-AST-004) now applies this policy
+    // before minting a URL.
+    builder.Services.AddScoped<AssetDownloadPolicy>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
@@ -616,22 +642,27 @@ app.MapSceneEndpoints();
 // (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
 
-// Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download): the Assets
-// module's HTTP routes, POST /api/v1/assets/upload-intent and
-// GET /api/v1/assets/{assetId}/download-url. They live in an authenticated route group and
-// fail closed (503) when persistence is not configured, exactly like the reveal/scene
-// endpoints. No new DI registration beyond the upload-intent service and storage location
-// above is required: the tenant context resolver, the asset repository, the workspace member
+// Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005
+// linking): the Assets module's HTTP routes, POST /api/v1/assets/upload-intent,
+// GET /api/v1/assets/{assetId}/download-url and POST /api/v1/assets/{assetId}/links. They live
+// in an authenticated route group and fail closed (503) when persistence is not configured,
+// exactly like the reveal/scene endpoints. No new DI registration beyond the upload-intent
+// service, the asset link service, the download policy and the storage location above is
+// required: the tenant context resolver, the asset/asset-link repositories, the workspace member
 // repository and the IAssetStorage adapter they reuse are already registered. Upload-intent
-// authorizes the caller by their role in the target workspace (Owner/Admin/Host/CoHost),
-// mints server-side storage coordinates, registers a PENDING asset and returns a short-lived
-// signed upload URL. The signed download flow resolves the asset within the query-supplied
-// organization, discovers its workspace from the loaded row, authorizes the caller as a
-// host-content viewer of that workspace (every denial hidden as 404, an insufficient role as
-// 403, a still-pending asset as 409) and returns a short-lived signed download URL. The asset
-// is private by default and an unconfigured storage backend fails closed with 503 in both
-// flows (threat T4 "Asset leak"). Linking (CORE-AST-005) and cleanup (CORE-AST-006) are later
-// stories.
+// authorizes the caller by their role in the target workspace (Owner/Admin/Host/CoHost), mints
+// server-side storage coordinates, registers a PENDING asset and returns a short-lived signed
+// upload URL. The signed download flow resolves the asset within the query-supplied organization,
+// discovers its workspace from the loaded row, authorizes the caller through the central Assets
+// download policy (host-content roles always; an audience role only when the asset is linked to a
+// VISIBLE content block/entity — CORE-AST-005; every denial hidden as 404, an insufficient role as
+// 403, a still-pending asset as 409) and returns a short-lived signed download URL. The linking
+// flow resolves the asset within the body-supplied organization, authorizes a host-content role,
+// verifies the target content block/entity is in the asset's own workspace (the same-workspace
+// coupling for the polymorphic target; threats T5/T1) and records the link (201; a repeat is 409, a
+// missing target hidden as 404). The asset is private by default and an unconfigured storage
+// backend fails closed with 503 in both signed-URL flows (threat T4 "Asset leak"). The cleanup job
+// (CORE-AST-006) is a later story.
 app.MapAssetEndpoints();
 
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires

@@ -1,5 +1,6 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.Content;
+using LiveCore.Api.Entities;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -241,5 +242,62 @@ internal static class TestData
         context.VisibilityRules.Add(rule);
         await context.SaveChangesAsync();
         return rule;
+    }
+
+    /// <summary>
+    /// Creates and persists an entity type in the given workspace, driving the real
+    /// <see cref="EntityType.Create"/> aggregate factory. Used to arrange a type that an entity instance
+    /// (and, through it, an asset link) can reference. The schema is a generic, well-formed JSON object.
+    /// </summary>
+    public static async Task<EntityType> AddEntityTypeAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        string typeKey = "generic-type")
+    {
+        var entityType = EntityType.Create(organizationId, workspaceId, typeKey, "Generic Type", "{}", SeedTime);
+        context.EntityTypes.Add(entityType);
+        await context.SaveChangesAsync();
+        return entityType;
+    }
+
+    /// <summary>
+    /// Creates and persists an entity instance in the given workspace, driving the real
+    /// <see cref="Entity.Create"/> aggregate factory. Used to arrange a generic entity an asset can be
+    /// linked to. The attribute values are a generic, well-formed JSON object.
+    /// </summary>
+    public static async Task<Entity> AddEntityAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid entityTypeId,
+        string name = "Generic Entity")
+    {
+        var entity = Entity.Create(organizationId, workspaceId, entityTypeId, name, "{}", SeedTime);
+        context.Entities.Add(entity);
+        await context.SaveChangesAsync();
+        return entity;
+    }
+
+    /// <summary>
+    /// Creates and persists an asset link attaching the given asset to the given target (a content block
+    /// or entity) in the given workspace, driving the real <see cref="AssetLink.Create"/> aggregate
+    /// factory. Used to arrange an asset's audience-visibility linkage for the download-authorization
+    /// tests.
+    /// </summary>
+    public static async Task<AssetLink> AddAssetLinkAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid assetId,
+        AssetLinkTargetType targetType,
+        Guid targetId,
+        Guid createdByUserProfileId)
+    {
+        var link = AssetLink.Create(
+            organizationId, workspaceId, assetId, targetType, targetId, createdByUserProfileId, SeedTime);
+        context.AssetLinks.Add(link);
+        await context.SaveChangesAsync();
+        return link;
     }
 }

@@ -107,6 +107,7 @@ internal static class AssetEndpoints
 
         group.MapPost("/upload-intent", CreateUploadIntentAsync);
         group.MapGet("/{assetId}/download-url", CreateDownloadUrlAsync);
+        group.MapPost("/{assetId}/links", CreateAssetLinkAsync);
 
         return endpoints;
     }
@@ -285,16 +286,16 @@ internal static class AssetEndpoints
             return HiddenAsset();
         }
 
-        // The caller is a known member of the asset's workspace, so an insufficient role is 403. The
-        // authorized viewers are the host-content roles (Owner/Admin/Host/CoHost — "View host-only content"
-        // in docs/06_AUTHORIZATION_MATRIX.md), reused through the central Visibility module's role
-        // classification so visibility logic is not duplicated (docs/05_MODULE_CONTRACTS.md). Audience roles
-        // (Participant/Observer) and the audit role are DENIED fail-closed: an asset becomes audience-visible
-        // only once linked to a visible content block/entity (CORE-AST-005), which does not exist yet, so
-        // there is no rule that could grant them access — until then only host-content roles may download
-        // (threat T4 "Asset leak"; threat T2 visibility leak). MembershipRole is non-linear, so this is an
-        // EXACT set membership check, never an ordering comparison.
-        if (!VisibilityRoles.ViewsHostOnlyContent(member.Role))
+        // The caller is a known member of the asset's workspace, so an insufficient role is 403.
+        // Authorization is the central Assets download policy (CORE-AST-005), which reuses the Visibility
+        // engine so asset access never diverges from content visibility (docs/05_MODULE_CONTRACTS.md): the
+        // host-content roles (Owner/Admin/Host/CoHost — "View host-only content" in
+        // docs/06_AUTHORIZATION_MATRIX.md) may always download, and an AUDIENCE role (Participant/Observer)
+        // may download only when the asset is linked to a content block/entity that is VISIBLE to the
+        // audience (the linking story makes an asset audience-accessible; threat T4 "Asset leak"; threat T2
+        // visibility leak). The audit role and any undefined role are DENIED fail-closed. MembershipRole is
+        // non-linear, so the policy uses EXACT set membership, never an ordering comparison.
+        if (!await deps.DownloadPolicy.CanDownloadAsync(asset, member.Role, cancellationToken).ConfigureAwait(false))
         {
             return Forbidden();
         }
@@ -325,6 +326,147 @@ internal static class AssetEndpoints
         return Results.Ok(DownloadUrlResponse.From(asset, downloadUrl));
     }
 
+    // POST /api/v1/assets/{assetId}/links
+    private static async Task<IResult> CreateAssetLinkAsync(
+        HttpContext httpContext,
+        string assetId,
+        [FromBody] CreateAssetLinkRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // A missing/unparseable body cannot carry the target organization or the linked resource; 400.
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        // The target organization is required to resolve the tenant; it is supplied in the body (the route
+        // path carries only the asset id), exactly like the reveal command.
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty asset id can never address a stored asset; hidden as 404, never echoing why.
+        if (!Guid.TryParse(assetId, out var assetGuid) || assetGuid == Guid.Empty)
+        {
+            return HiddenAsset();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the asset as 404 (threat T5).
+            return HiddenAsset();
+        }
+
+        var context = resolution.Context;
+
+        // Load the asset WITHIN the resolved tenant (org boundary leads); a cross-tenant or unknown asset is
+        // hidden as 404. The asset's own workspace is then discovered from the loaded row, AFTER the tenant
+        // boundary has been enforced (mirrors the signed download route).
+        var asset = await deps.Assets
+            .FindByIdInOrganizationAsync(context.OrganizationId, assetGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (asset is null)
+        {
+            return HiddenAsset();
+        }
+
+        // Object-level authorization: the caller must be a member of the ASSET'S workspace. A caller who is
+        // a member of the tenant but NOT of the asset's workspace must not learn the asset exists, so a
+        // missing membership is hidden as 404 (not 403) — the same rule as the download route (threats
+        // T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, asset.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenAsset();
+        }
+
+        // The caller is a known member of the asset's workspace, so an insufficient role is 403. The link
+        // (host-preparation) roles are Owner/Admin/Host/CoHost (csv/api_routes.csv "Host,CoHost,Owner,Admin";
+        // the content-control capability of docs/06_AUTHORIZATION_MATRIX.md, the same set as the
+        // upload-intent and reveal commands). MembershipRole is non-linear, so this is an EXACT set
+        // membership check, never an ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized. Only now validate the rest of the request, so an unauthorized caller never receives
+        // request-shape feedback. The target kind is parsed by NAME; a numeric or unknown value is rejected.
+        if (!TryParseTargetType(request.TargetType, out var targetType))
+        {
+            return ValidationError("A valid target type is required (ContentBlock or Entity).");
+        }
+
+        if (request.TargetId == Guid.Empty)
+        {
+            return ValidationError("The 'targetId' value is required.");
+        }
+
+        var now = timeProvider.GetUtcNow();
+
+        // The command verifies the target exists in the asset's OWN workspace (the same-workspace coupling
+        // for the polymorphic target reference; threats T5/T1) and then persists the link. A target not in
+        // the workspace is hidden as 404; a repeat of the same link is 409 (no duplicate is created).
+        var result = await deps.AssetLinks
+            .LinkAsync(asset, targetType, request.TargetId, context.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Outcome switch
+        {
+            AssetLinkOutcome.Linked => Results.Created(
+                $"/api/v1/assets/{asset.Id}/links/{result.Link!.Id}",
+                AssetLinkResponse.From(result.Link)),
+            AssetLinkOutcome.AlreadyLinked => AssetAlreadyLinked(),
+            // The target content block / entity is not in the asset's workspace: hidden as 404, reported
+            // only to an authorized host so no cross-workspace resource existence leaks (threats T1/T5).
+            _ => HiddenAsset(),
+        };
+    }
+
+    /// <summary>
+    /// Parses an <see cref="AssetLinkTargetType"/> from its NAME only (case-insensitive), rejecting
+    /// null/blank, numeric values and unknown names — so a client cannot smuggle in an undefined enum value
+    /// by number (mirrors the reveal command's resource-type parsing and the content-block type parsing).
+    /// </summary>
+    private static bool TryParseTargetType(string? value, out AssetLinkTargetType targetType)
+    {
+        targetType = default;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        // A numeric string must not bind to an enum member by value.
+        if (int.TryParse(value, out _))
+        {
+            return false;
+        }
+
+        return Enum.TryParse(value.Trim(), ignoreCase: true, out targetType)
+            && AssetLink.IsValidTargetType(targetType);
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They exist only when a database
     /// connection string is configured; when absent, the endpoint fails closed with 503 instead of throwing.
@@ -337,18 +479,23 @@ internal static class AssetEndpoints
         var uploadIntents = services.GetService<AssetUploadIntentService>();
         var assets = services.GetService<IAssetRepository>();
         var storage = services.GetService<IAssetStorage>();
+        var assetLinks = services.GetService<AssetLinkService>();
+        var downloadPolicy = services.GetService<AssetDownloadPolicy>();
 
         if (resolver is null
             || workspaceMembers is null
             || uploadIntents is null
             || assets is null
-            || storage is null)
+            || storage is null
+            || assetLinks is null
+            || downloadPolicy is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new AssetEndpointDependencies(resolver, workspaceMembers, uploadIntents, assets, storage);
+        dependencies = new AssetEndpointDependencies(
+            resolver, workspaceMembers, uploadIntents, assets, storage, assetLinks, downloadPolicy);
         return true;
     }
 
@@ -416,6 +563,15 @@ internal static class AssetEndpoints
             title: "Conflict",
             detail: "The asset is not available for download.");
 
+    // An authorized host asked to link an asset to a target it is already linked to (the per-workspace
+    // unique key). Reported as 409 only to an authorized host, after authorization, so no link existence
+    // leaks to a non-member or an unauthorized role.
+    private static IResult AssetAlreadyLinked()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The asset is already linked to the target.");
+
     private static IResult NotFound()
         => Results.Problem(
             statusCode: StatusCodes.Status404NotFound,
@@ -427,5 +583,7 @@ internal static class AssetEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         AssetUploadIntentService UploadIntents,
         IAssetRepository Assets,
-        IAssetStorage Storage);
+        IAssetStorage Storage,
+        AssetLinkService AssetLinks,
+        AssetDownloadPolicy DownloadPolicy);
 }

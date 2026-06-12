@@ -124,3 +124,63 @@ public sealed record DownloadUrlResponse(
     public override string ToString()
         => $"DownloadUrlResponse assetId={AssetId} status={Status} contentType={ContentType} expiresAt={ExpiresAt:O}";
 }
+
+/// <summary>
+/// Request body for the asset-link command (CORE-AST-005, <c>POST /api/v1/assets/{assetId}/links</c>,
+/// csv/api_routes.csv "Link asset to content block or entity", roles Host/CoHost/Owner/Admin). The route
+/// path carries the asset id, so the body supplies the target organization
+/// (<see cref="OrganizationSlug"/>, resolved to the tenant by the same token-claim-and-membership check as
+/// the reveal command — defence in depth, threat T5) and the linked resource: its generic
+/// <see cref="TargetType"/> (ContentBlock or Entity) and its <see cref="TargetId"/> (a resource in the
+/// asset's own workspace). The body carries no vertical vocabulary (docs/04_PRODUCT_BOUNDARIES.md) and no
+/// storage coordinate (linking never touches the stored object).
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the asset's workspace, used to resolve the tenant context.
+/// </param>
+/// <param name="TargetType">
+/// The generic kind of resource to link the asset to: <c>ContentBlock</c> or <c>Entity</c>. Parsed by its
+/// stable NAME; a missing, numeric or unknown value is a 400.
+/// </param>
+/// <param name="TargetId">
+/// The surrogate id of the target content block / entity, which must exist in the asset's own workspace; a
+/// target not in the workspace is hidden as 404.
+/// </param>
+public sealed record CreateAssetLinkRequest(
+    string? OrganizationSlug,
+    string? TargetType,
+    Guid TargetId);
+
+/// <summary>
+/// Response body of the asset-link command (CORE-AST-005). It returns the created link's id, the asset it
+/// attaches, the linked target (kind + id) and the creation timestamp. It carries NO storage coordinate
+/// and NO authorization rationale (docs/08_API_CONTRACTS.md; threat T7): a link only records that the
+/// asset is attached to a resource whose audience visibility the Visibility engine governs — the asset
+/// stays private and is still reached only through an authorized signed URL (the epic acceptance
+/// criterion; threat T4 "Asset leak").
+/// </summary>
+/// <param name="LinkId">The surrogate id of the created link.</param>
+/// <param name="AssetId">The asset the link attaches.</param>
+/// <param name="TargetType">The linked resource kind name (<c>ContentBlock</c>/<c>Entity</c>).</param>
+/// <param name="TargetId">The linked resource's surrogate id.</param>
+/// <param name="CreatedAt">When the link was created (UTC).</param>
+public sealed record AssetLinkResponse(
+    Guid LinkId,
+    Guid AssetId,
+    string TargetType,
+    Guid TargetId,
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>Projects a created link into the response DTO.</summary>
+    public static AssetLinkResponse From(AssetLink link)
+    {
+        ArgumentNullException.ThrowIfNull(link);
+
+        return new AssetLinkResponse(
+            link.Id,
+            link.AssetId,
+            link.TargetType.ToString(),
+            link.TargetId,
+            link.CreatedAt);
+    }
+}

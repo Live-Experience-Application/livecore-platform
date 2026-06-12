@@ -742,8 +742,56 @@ permission check passes (the epic acceptance criterion; threat T4). The asset mu
 `Available`: a still-`Pending` asset (its upload not yet confirmed) is `409 Conflict`,
 reported only to an authorized viewer. When no object storage is configured the
 fail-closed `UnconfiguredAssetStorage` makes the request `503` and no URL is produced, so
-the private-by-default posture holds even unconfigured. Linking to content
-blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories.
+the private-by-default posture holds even unconfigured.
+
+The download authorizer is the central Assets `AssetDownloadPolicy` (CORE-AST-005, below):
+host-content roles may always download, an audience role may download only when the asset
+is linked to a **visible** content block/entity, and every other role is denied
+fail-closed. The cleanup job (CORE-AST-006) is a later story.
+
+### Asset linking
+
+CORE-AST-005 adds the Assets module's linking flow — the "asset can be linked to a
+ContentBlock or Entity" step of the asset lifecycle (`docs/12_STORAGE_ASSETS.md`):
+
+| Method | Route                            | Authorized callers                             |
+| ------ | -------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/assets/{assetId}/links` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The route path carries only the asset id, so the request body carries the `organizationSlug`
+(resolved by the same token-claim-and-membership tenant check as the reveal command), the
+generic `targetType` (`ContentBlock` or `Entity` — never a `Scene`) and the `targetId`. The
+asset is loaded **within** the resolved tenant, its own workspace is **discovered from the
+loaded row**, and the caller is authorized **server-side** by their role in the asset's own
+workspace: a caller who cannot see the tenant, an unknown or cross-tenant asset, and a
+non-member of the asset's workspace are hidden as `404` (never `403`); a known member who
+lacks the link role is `403`.
+
+The link's `target_id` is a **polymorphic** reference (not a database foreign key), so the
+create flow enforces the **same-workspace coupling**: it resolves the target content block /
+entity through the workspace-scoped repository of the asset's **own** organization and
+workspace **before** creating the link (mirrors `visibility_rules.resource_id`,
+`content_blocks.scene_id`, `entities.entity_type_id`). A target not in the asset's workspace —
+including one in another workspace or tenant — is hidden as `404` and no link is created, so
+an asset can never be linked to a foreign-workspace or foreign-tenant resource (threats
+T5/T1). A repeat of the same link is `409` (the per-workspace unique
+`asset_links(workspace_id, asset_id, target_type, target_id)` key prevents duplicates); a new
+link returns `201`.
+
+The `asset_links` table (the documented critical index is `asset_links(workspace_id,
+asset_id)`) is the **join** that lets an asset **inherit** the audience visibility of the
+resource it is attached to. Linking **never** makes an asset public — it only records the
+attachment whose audience visibility the **central Visibility engine** governs. The signed
+download flow (CORE-AST-004) now consults these links through `AssetDownloadPolicy`, which
+**reuses** `VisibilityPolicy.CanViewResource` (visibility logic is not duplicated): an
+**audience** role (`Participant`/`Observer`) may download an asset **only** when it is linked
+to a content block or entity **visible to the audience**; host-content roles
+(`Owner`/`Admin`/`Host`/`CoHost`) may always download; the audit role and any undefined role
+are **denied fail-closed**. The asset stays **private by default** and is reached only through
+the single short-lived signed URL minted after the permission check (the epic acceptance
+criterion; threat T4 "Asset leak"; threat T2 visibility leak). Per-participant asset access
+(an asset linked to a resource revealed only to one participant) and the cleanup job
+(CORE-AST-006) are later stories.
 
 ## Container images
 

@@ -35,6 +35,7 @@ entities
 entity_types
 entity_relationships
 assets
+asset_links
 visibility_rules
 session_events
 audit_logs
@@ -60,6 +61,8 @@ content_blocks(workspace_id, scene_id)
 visibility_rules(workspace_id, resource_type, resource_id)
 session_events(session_id, created_at, event_id)
 assets(workspace_id, id)
+asset_links(workspace_id, asset_id)
+asset_links(workspace_id, asset_id, target_type, target_id) unique
 audit_logs(organization_id, created_at)
 idempotency_keys(scope, key)
 ```
