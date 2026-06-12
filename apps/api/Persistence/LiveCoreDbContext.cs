@@ -7,6 +7,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Realtime;
+using LiveCore.Api.Recaps;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.SystemModule;
@@ -33,8 +34,8 @@ namespace LiveCore.Api.Persistence;
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
 /// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
 /// Realtime <c>session_events</c> table, the Assets <c>assets</c> and
-/// <c>asset_links</c> tables and the Exports <c>export_jobs</c>, <c>export_manifests</c> and
-/// <c>export_manifest_entries</c> tables)
+/// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
+/// <c>export_manifest_entries</c> tables and the Recaps <c>recaps</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -117,6 +118,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Export manifest inventory entries owned by the Exports module.</summary>
     public DbSet<ExportManifestEntry> ExportManifestEntries => Set<ExportManifestEntry>();
 
+    /// <summary>Produced session recaps owned by the Recaps module.</summary>
+    public DbSet<Recap> Recaps => Set<Recap>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -142,5 +146,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new ExportJobConfiguration());
         modelBuilder.ApplyConfiguration(new ExportManifestConfiguration());
         modelBuilder.ApplyConfiguration(new ExportManifestEntryConfiguration());
+        modelBuilder.ApplyConfiguration(new RecapConfiguration());
     }
 }

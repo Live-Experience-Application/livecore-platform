@@ -168,3 +168,14 @@ Owns:
 - export manifests
 - user data export
 - workspace export
+
+## Recaps
+
+Owns:
+
+- session recaps
+- recap projection
+
+May not:
+
+- expose the recap body to the audience without a separate reveal

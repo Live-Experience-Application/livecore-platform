@@ -920,6 +920,43 @@ with its server-side access authorization, are later Exports stories (exactly as
 deferred the export endpoint). CORE-AUD-003 is the manifest model, its persistence, its EF
 migration and its role-based projection only; there is no export HTTP route yet.
 
+### Recaps
+
+The Recaps module owns generic session **recaps** (`docs/03_DOMAIN_LANGUAGE.md`: a Recap is a
+"session summary or structured continuation output"; `docs/05_MODULE_CONTRACTS.md`: the Recaps
+module owns "session recaps"; `docs/00_START_HERE.md`: a Host can "stream SessionEvents and
+produce Recaps"). CORE-AUD-004 (the `Audit, Export and Recap` epic) adds the first piece — the
+`Recap` aggregate and its session-scoped `recaps` table (`apps/api/Recaps/`; the documented
+critical index is `recaps(workspace_id, id)`). A recap records which `session` it summarizes, the
+tenant (`organization_id`) and workspace (`workspace_id`) it belongs to, the optional producing
+user (`generated_by`), a recap format `version`, the generic `summary` body and the `generated_at`
+timestamp. It stores no vertical product language — a generic session recap only, never a
+"session debrief report" (`csv/forbidden_core_terms.csv`).
+
+The recap is **generic and authorized** (the epic acceptance criterion). It is session-, workspace-
+and tenant-scoped, so every lookup is scoped by organization id then workspace id (the organization
+boundary is checked before the workspace boundary) and one workspace's recap can never be read
+through another workspace's or another tenant's id (threats T5/T1). A recap may be produced by a
+**Host** or by the **system** (`docs/09_EVENT_CATALOG.md`: `RecapGenerated` source "System/Host"),
+so the `generated_by` user foreign key is **nullable** and **sets null** on delete — deleting the
+producing user anonymizes the recap rather than deleting it (mirrors `export_jobs.requested_by`);
+the tenant, workspace and session foreign keys cascade. A recap is **write-once** — the aggregate is
+immutable and the repository exposes only an append and tenant-scoped reads (no update or delete),
+exactly as the audit log is append-only.
+
+The recap `summary` is **host content**. The event catalog records that a generated recap is
+"Participant-visible only after separate reveal" (`docs/09_EVENT_CATALOG.md`), so the Recaps module
+defines the **role-based recap projection** (threat T2 visibility leak): the full `RecapView` (with
+the body) for host-content / metadata roles (Owner/Admin/Host/CoHost/Auditor) versus the stripped,
+audience-safe `RecapSummaryView` (`{id, sessionId}` only — no body) for audience roles, fail-closed
+to the summary shape for any undefined role. The body is also kept out of logs: the aggregate's
+identifier-only `ToString` renders a coarse length, never the body (threat T7). The projector decides
+the view **shape**, not access; the recap-generation command (the producer that writes a recap and
+emits `RecapGenerated`), the separate participant reveal, and any recap HTTP route with its
+server-side access authorization are later stories (exactly as CORE-AUD-002/003 deferred the export
+endpoint). CORE-AUD-004 is the recap model, its persistence, its EF migration and its role-based
+projection only; there is no recap HTTP route yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

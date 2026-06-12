@@ -68,6 +68,8 @@ export_jobs(workspace_id, id)
 export_manifests(workspace_id, id)
 export_manifests(export_job_id) unique
 export_manifest_entries(export_manifest_id, kind) unique
+recaps(workspace_id, id)
+recaps(session_id, id)
 idempotency_keys(scope, key)
 ```
 
