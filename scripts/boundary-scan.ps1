@@ -65,8 +65,9 @@ if ($terms.Count -eq 0) {
 #   'first second', 'first-second' and (after CamelCase splitting)
 #   'FirstSecond'.
 # - Simple plural forms are matched too ('...s', '...es', 'y' -> 'ies').
-# Scanned lines are normalized by splitting CamelCase and uppercase acronym
-# runs before matching, so compound identifiers cannot hide a forbidden term.
+# Scanned lines are normalized by splitting CamelCase, uppercase acronym
+# runs and snake_case (underscores) before matching, so compound identifiers
+# cannot hide a forbidden term.
 $patterns = foreach ($term in $terms) {
     $pattern = [regex]::Escape($term) -replace '_', '[ _-]?'
     if ($pattern.EndsWith('y')) {
@@ -140,11 +141,22 @@ foreach ($dir in $sourceDirs) {
             # identifiers cannot hide a forbidden term:
             # - CamelCase split alone keeps acronym plurals intact,
             # - acronym split before CamelCase split exposes terms hidden in
-            #   leading uppercase runs (e.g. 'APIClient' -> 'API Client').
+            #   leading uppercase runs (e.g. 'APIClient' -> 'API Client'),
+            # - snake_case split exposes terms hidden between underscores
+            #   (e.g. 'prefix_term_suffix'): '_' is a word character, so the
+            #   word-bounded pattern cannot match a term flanked by underscores
+            #   until the underscores are turned into spaces. The acronym +
+            #   CamelCase split is also applied to the snake-split variant so
+            #   mixed snake_case + CamelCase identifiers are caught too
+            #   (e.g. 'prefix_termSuffix').
             $camelOnly = $camelSplitRegex.Replace($line, '$1 $2')
             $acronymThenCamel = $camelSplitRegex.Replace(
                 $acronymSplitRegex.Replace($line, '$1 $2'), '$1 $2')
-            $lineVariants = @($line, $camelOnly, $acronymThenCamel) |
+            $snakeSplit = $line -replace '_', ' '
+            $snakeThenCamel = $camelSplitRegex.Replace(
+                $acronymSplitRegex.Replace($snakeSplit, '$1 $2'), '$1 $2')
+            $lineVariants = @(
+                $line, $camelOnly, $acronymThenCamel, $snakeSplit, $snakeThenCamel) |
                 Select-Object -Unique
 
             # Report each forbidden term at most once per line, even when
