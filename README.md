@@ -594,6 +594,47 @@ every backplane — in-process or scaled-out — by construction.
 Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`) over this delivery path is a later
 Realtime story (`docs/11_REALTIME_SYNC.md`).
 
+### Asset metadata
+
+The Assets module owns generic asset metadata: the record of a stored file or
+media object whose binary content lives in private, S3-compatible object storage,
+never in PostgreSQL (`docs/12_STORAGE_ASSETS.md`; ADR 0006). CORE-AST-001 adds the
+first piece — the `Asset` aggregate and its tenant- and workspace-scoped `assets`
+table (`apps/api/Assets/`; the documented critical index is `assets(workspace_id,
+id)`). The row is **metadata only**: the storage coordinates (`storage_provider`,
+`bucket`, `object_key`), the `content_type`, the `created_by` creator, the
+lifecycle `status` and — once an upload is confirmed — the `size_bytes` and
+`checksum`.
+
+Assets are **private by default** (`docs/07_SECURITY_THREAT_MODEL.md` threat T4
+"Asset leak"). The metadata model carries no public URL, no "is public" flag and
+no shareable token; the storage coordinates address a private bucket and are never
+participant-facing and never written to logs (the log-safe `ToString` excludes the
+provider, bucket, object key and checksum, so an asset can never be located from
+logs — threats T4/T7). An asset is reachable only through an authorized,
+short-lived signed URL after a server-side permission check, which is a later
+story (the signed download flow, CORE-AST-004); there is no public or static URL
+in any status.
+
+An asset is workspace-scoped and tenant-scoped, so every lookup is scoped by
+organization id then workspace id (the organization boundary is checked before the
+workspace boundary), and one workspace's asset can never be read through another
+workspace's or another tenant's id (threats T5/T1). The tenant and workspace
+foreign keys cascade on delete; the optional `created_by` user foreign key **sets
+null** on delete, so deleting the creating user anonymizes the asset record rather
+than deleting an asset other content may link to (mirrors `participants.user_id`).
+An asset is registered `Pending` when its upload intent is created (size and
+checksum unknown) and moves to `Available` once the upload is confirmed, via a
+guarded state transition that rejects confirming an already-available asset (so a
+confirm can never silently overwrite a different recorded size/checksum).
+
+This story is the metadata aggregate, its persistence and its EF migration only.
+The S3-compatible storage adapter (CORE-AST-002), the upload intent flow
+(`POST /api/v1/assets/upload-intent`, CORE-AST-003), the signed download URL flow
+(`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004), linking to content
+blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later
+stories; there is no asset HTTP route yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

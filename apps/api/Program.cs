@@ -1,4 +1,5 @@
 using LiveCore.Api;
+using LiveCore.Api.Assets;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
@@ -452,6 +453,24 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // docs/11_REALTIME_SYNC.md). The GET /api/v1/sessions/{sessionId}/events endpoint resolves it from the
     // request services and fails closed (503) when persistence is off.
     builder.Services.AddScoped<SessionReplayService>();
+
+    // Asset metadata persistence (CORE-AST-001, the first story of the "Asset Storage and Authorization"
+    // epic): the Assets module — FIRST appearing here — owns the workspace-scoped, tenant-scoped assets
+    // table that holds the generic asset METADATA (docs/05_MODULE_CONTRACTS.md: the Assets module owns
+    // "asset metadata", the "storage adapter", "upload/download authorization" and "signed URL creation";
+    // csv/database_tables.csv: assets, module Assets, scope workspace, "Metadata only"). Registered here,
+    // inside the persistence conditional, exactly like the session and entity repositories above; the
+    // repository's lookups are scoped by organization id then workspace id (the organization boundary is
+    // checked before the workspace boundary; threat T5), and there is NO list-everything method. The row
+    // is METADATA ONLY — the binary content lives in private S3-compatible object storage, never in
+    // PostgreSQL (docs/12_STORAGE_ASSETS.md; ADR 0006). The asset is PRIVATE BY DEFAULT: nothing on the
+    // aggregate makes it publicly reachable, and the stored object is reached only through an authorized,
+    // short-lived signed URL after a permission check (threat T4 "Asset leak"). The storage adapter
+    // interface (CORE-AST-002), the upload intent flow (CORE-AST-003), the signed download URL flow
+    // (CORE-AST-004 — the POST /api/v1/assets/upload-intent and GET /api/v1/assets/{assetId}/download-url
+    // routes in csv/api_routes.csv), linking to content blocks/entities (CORE-AST-005) and the cleanup job
+    // (CORE-AST-006) are later stories and are deliberately not wired here.
+    builder.Services.AddScoped<IAssetRepository, AssetRepository>();
 
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
