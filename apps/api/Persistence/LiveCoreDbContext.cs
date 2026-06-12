@@ -1,3 +1,4 @@
+using LiveCore.Api.Content;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -18,8 +19,8 @@ namespace LiveCore.Api.Persistence;
 /// <c>users</c> table, the Organizations <c>organizations</c> and
 /// <c>organization_members</c> tables, the Workspaces <c>workspaces</c>,
 /// <c>workspace_members</c> and <c>workspace_invitations</c> tables, the
-/// Participants <c>participants</c> table, the Sessions <c>sessions</c> table and
-/// the Scenes <c>scenes</c> table)
+/// Participants <c>participants</c> table, the Sessions <c>sessions</c> table, the
+/// Scenes <c>scenes</c> table and the Content <c>content_blocks</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -60,6 +61,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Scenes owned by the Scenes module.</summary>
     public DbSet<Scene> Scenes => Set<Scene>();
 
+    /// <summary>Content blocks owned by the Content module.</summary>
+    public DbSet<ContentBlock> ContentBlocks => Set<ContentBlock>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -71,5 +75,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new ParticipantConfiguration());
         modelBuilder.ApplyConfiguration(new SessionConfiguration());
         modelBuilder.ApplyConfiguration(new SceneConfiguration());
+        modelBuilder.ApplyConfiguration(new ContentBlockConfiguration());
     }
 }

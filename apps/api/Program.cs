@@ -1,4 +1,5 @@
 using LiveCore.Api;
+using LiveCore.Api.Content;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -132,6 +133,27 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // validation/size limits (CORE-SCENE-005) are later stories and are deliberately
     // not wired here.
     builder.Services.AddScoped<ISceneRepository, SceneRepository>();
+
+    // Content block persistence (CORE-SCENE-002): the Content module owns the
+    // scene-scoped, workspace-scoped, tenant-scoped content_blocks table that holds
+    // the host-prepared Text/media/data units and their revisions
+    // (docs/05_MODULE_CONTRACTS.md: the Content module owns "content blocks" and
+    // "content block revisions"; csv/database_tables.csv: content_blocks, module
+    // Content, scope workspace, "Text/media/data block"; the documented critical index
+    // content_blocks(workspace_id, scene_id) scopes a block to its scene). Registered
+    // here, inside the persistence conditional, exactly like the scene and session
+    // repositories above; the repository's lookups are scoped by organization id then
+    // workspace id then scene id (the organization boundary is checked before the
+    // workspace boundary; threat T5), there is NO list-everything method, and revisions
+    // are an explicit monotonic revision_number on the aggregate (no separate revisions
+    // table — csv/database_tables.csv lists only content_blocks). The content block
+    // carries NO visibility logic: whether a participant may see it is computed
+    // server-side by the Visibility module in a later epic (docs/05_MODULE_CONTRACTS.md:
+    // the Content module "may not decide visibility alone"). The scene content HTTP
+    // endpoints (CORE-SCENE-003), the host vs participant DTO separation
+    // (CORE-SCENE-004) and content validation/size limits (CORE-SCENE-005) are later
+    // stories and are deliberately not wired here.
+    builder.Services.AddScoped<IContentBlockRepository, ContentBlockRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
