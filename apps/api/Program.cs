@@ -1,4 +1,5 @@
 using LiveCore.Api;
+using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
 using LiveCore.Api.IdentityAccess;
@@ -300,13 +301,27 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // command below.
     builder.Services.AddScoped<IIdempotencyKeyStore, IdempotencyKeyStore>();
 
-    // Reveal command service (CORE-VIS-004): the Visibility module's idempotent reveal — makes a
-    // resource VISIBLE to the audience (reusing the CORE-VIS-001 VisibilityRule.ChangeVisibility
-    // primitive) exactly once per client Idempotency-Key. Registered here because it depends on the
-    // visibility rule repository and the idempotency store above. The reveal is idempotent at the state
-    // level (ensure-visible is a no-op when already visible) and the idempotency key short-circuits a
-    // retry; the durable ContentRevealed/VisibilityRuleChanged event emission is deferred to the
-    // Realtime epic (CORE-RT-003), exactly as the session start/end commands deferred their events.
+    // Append-only audit log (CORE-VIS-006): the Audit module — FIRST appearing here — owns the
+    // tenant-scoped audit_logs table holding the immutable security event records
+    // (docs/05_MODULE_CONTRACTS.md: the Audit module owns the "append-only audit log" and "security
+    // event records"; csv/database_tables.csv: audit_logs, module Audit, scope organization,
+    // "Append-only audit"). Registered here, inside the persistence conditional, because it depends on
+    // the DbContext. The repository exposes only append + a tenant-scoped read (no update/delete —
+    // audit facts are immutable, docs/10_DATABASE_SCHEMA.md); the documented critical index is
+    // audit_logs(organization_id, created_at). It is consumed first by the reveal command below to
+    // record visibility changes; the generic append-only audit log (CORE-AUD-001), the audit query
+    // endpoint and its "View audit log" authorization (CORE-AUD-005) are later stories not wired here.
+    builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
+
+    // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent
+    // reveal — makes a resource VISIBLE to the audience (reusing the CORE-VIS-001
+    // VisibilityRule.ChangeVisibility primitive) exactly once per client Idempotency-Key. Registered
+    // here because it depends on the visibility rule repository, the idempotency store and the audit log
+    // repository above. The reveal is idempotent at the state level (ensure-visible is a no-op when
+    // already visible) and the idempotency key short-circuits a retry; when a reveal actually changes
+    // visibility it appends an append-only audit record of the change (CORE-VIS-006). The durable
+    // ContentRevealed/VisibilityRuleChanged realtime event emission is deferred to the Realtime epic
+    // (CORE-RT-003), exactly as the session start/end commands deferred their events.
     builder.Services.AddScoped<RevealService>();
 
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a

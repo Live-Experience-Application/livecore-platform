@@ -372,6 +372,31 @@ workspace (otherwise the request is hidden as `404`). The durable
 `ContentRevealed` event and its realtime delivery belong to the later realtime
 event stream and are not emitted yet.
 
+Whenever a reveal **actually changes** a resource's visibility, the command writes
+an append-only audit record of the change (see "Audit log" below). A reveal that is
+an idempotent retry, or that finds the resource already visible, changes nothing and
+so writes no audit record.
+
+### Audit log
+
+The Audit module owns the tenant-scoped, append-only `audit_logs` table (the
+documented critical index is `audit_logs(organization_id, created_at)`). It records
+security-relevant actions as immutable facts; the first producer is the reveal
+command (CORE-VIS-006), which appends a `VisibilityRuleChanged` entry capturing the
+tenant, workspace, the authenticated **actor** (the caller's resolved user profile),
+the governed resource, the optional selected-participant target and the before/after
+visibility state. This satisfies the threat model's required control "audit creation
+for visibility changes" (`docs/07_SECURITY_THREAT_MODEL.md`).
+
+The audit log is **append-only**: there is no update or delete path, and only the
+tenant boundary (`organization_id`) is a foreign key — the workspace, actor, resource
+and participant references are recorded facts, so the trail survives later deletion of
+the things it references and is never cascade-erased. The entry stores identifiers and
+state names only, never revealed content (threat T7). No free-form scene/content body
+is logged. The generic append-only audit log and its read API with the "View audit
+log" authorization (Owner/Admin/Auditor) are the later `Audit, Export and Recap`
+epic; there is no audit HTTP route yet.
+
 ### Participant visible feed (skeleton)
 
 The Visibility module's first route returns a single participant's visible feed:

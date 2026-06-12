@@ -23,11 +23,14 @@ namespace LiveCore.Api.Visibility;
 ///
 /// Authoritative behavior — the resource is made VISIBLE to the audience, idempotently. The reveal
 /// sets the target resource's visibility rule to <see cref="VisibilityState.Visible"/>
-/// (<see cref="RevealService"/>, reusing the CORE-VIS-001 aggregate). EVENT EMISSION IS DEFERRED to
-/// the Realtime epic exactly as CORE-SES-004 deferred SessionStarted/SessionEnded: the durable
-/// <c>ContentRevealed</c>/<c>VisibilityRuleChanged</c> events (docs/09_EVENT_CATALOG.md) and their
-/// delivery are CORE-RT-003, and the <c>session_events</c> table is Realtime-owned. The persisted
-/// visibility change is the behavior delivered here.
+/// (<see cref="RevealService"/>, reusing the CORE-VIS-001 aggregate) and, when that actually changes the
+/// visibility, appends an append-only AUDIT record (CORE-VIS-006) capturing the authenticated actor (the
+/// resolved tenant context's user profile id), the resource, the optional selected-participant target and
+/// the before/after state. The durable realtime EVENT, by contrast, IS DEFERRED to the Realtime epic
+/// exactly as CORE-SES-004 deferred SessionStarted/SessionEnded: the
+/// <c>ContentRevealed</c>/<c>VisibilityRuleChanged</c> session events (docs/09_EVENT_CATALOG.md) and
+/// their delivery are CORE-RT-003, and the <c>session_events</c> table is Realtime-owned. The persisted
+/// visibility change and its audit record are the behavior delivered here.
 ///
 /// IDEMPOTENCY (docs/08_API_CONTRACTS.md). A client-supplied <c>Idempotency-Key</c> request HEADER is
 /// REQUIRED; a repeated reveal with the same key does not apply a second effect
@@ -216,6 +219,7 @@ internal static class RevealEndpoints
                 resourceType,
                 request.ResourceId,
                 targetParticipantId,
+                context.UserProfileId,
                 idempotencyKey,
                 timeProvider.GetUtcNow(),
                 cancellationToken)

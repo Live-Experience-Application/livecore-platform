@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
@@ -37,6 +38,11 @@ public sealed class RevealServiceTests : IDisposable
 
     private static readonly DateTimeOffset _now = new(2026, 6, 12, 9, 0, 0, TimeSpan.Zero);
 
+    // A fixed, non-empty actor (the authenticated host who executes the reveal). It is recorded as the
+    // audit actor; it is intentionally NOT a seeded user profile because the audit actor column is a
+    // recorded fact, not a foreign key.
+    private static readonly Guid _actor = Guid.CreateVersion7();
+
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
 
@@ -63,7 +69,10 @@ public sealed class RevealServiceTests : IDisposable
     }
 
     private RevealService CreateService(LiveCoreDbContext context)
-        => new(new VisibilityRuleRepository(context), new IdempotencyKeyStore(context));
+        => new(
+            new VisibilityRuleRepository(context),
+            new IdempotencyKeyStore(context),
+            new AuditLogRepository(context));
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
     {
@@ -114,7 +123,14 @@ public sealed class RevealServiceTests : IDisposable
     {
         await using var context = CreateContext();
         var service = CreateService(context);
-        return await service.RevealAsync(org, ws, type, resourceId, targetParticipantId, key, _now, CancellationToken.None);
+        return await service.RevealAsync(
+            org, ws, type, resourceId, targetParticipantId, _actor, key, _now, CancellationToken.None);
+    }
+
+    private async Task<IReadOnlyList<AuditLogEntry>> ListAuditAsync(Guid org)
+    {
+        await using var context = CreateContext();
+        return await new AuditLogRepository(context).ListByOrganizationAsync(org, CancellationToken.None);
     }
 
     private async Task<Participant> SeedParticipantAsync(Guid org, Guid ws)
@@ -307,16 +323,19 @@ public sealed class RevealServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            Guid.Empty, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
+            Guid.Empty, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
+            org, Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.Empty, null, "key", _now, CancellationToken.None));
+            org, ws, VisibilityResourceType.Entity, Guid.Empty, null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, "  ", _now, CancellationToken.None));
+            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "  ", _now, CancellationToken.None));
         // An explicitly empty (non-null) target participant id is rejected.
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), Guid.Empty, "key", _now, CancellationToken.None));
+            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), Guid.Empty, _actor, "key", _now, CancellationToken.None));
+        // An empty actor id is rejected: a visibility change must record who made it (CORE-VIS-006).
+        await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
+            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, Guid.Empty, "key", _now, CancellationToken.None));
     }
 
     [Fact]
@@ -327,6 +346,102 @@ public sealed class RevealServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.RevealAsync(
-            org, ws, (VisibilityResourceType)999, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
+            org, ws, (VisibilityResourceType)999, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
+    }
+
+    // --- Audit (CORE-VIS-006) --------------------------------------------------
+
+    [Fact]
+    public async Task Reveal_records_an_audit_entry_for_the_visibility_change()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+
+        await RevealAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1");
+
+        var audit = await ListAuditAsync(org);
+        var entry = Assert.Single(audit);
+        Assert.Equal(AuditAction.VisibilityRuleChanged, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(_actor, entry.ActorUserProfileId);
+        Assert.Equal(nameof(VisibilityResourceType.ContentBlock), entry.ResourceType);
+        Assert.Equal(resourceId, entry.ResourceId);
+        Assert.Null(entry.TargetParticipantId);
+        // A brand-new visible rule has no prior state.
+        Assert.Null(entry.PreviousState);
+        Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
+    }
+
+    [Fact]
+    public async Task Reveal_of_a_hidden_rule_audits_the_hidden_to_visible_transition()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+
+        await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1");
+
+        var entry = Assert.Single(await ListAuditAsync(org));
+        Assert.Equal(nameof(VisibilityState.Hidden), entry.PreviousState);
+        Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
+    }
+
+    [Fact]
+    public async Task Reveal_of_an_already_visible_resource_records_no_audit()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+
+        // A fresh idempotency key, but the resource is already visible: ensure-visible is a no-op, so
+        // there is no change to audit.
+        await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-1");
+
+        Assert.Empty(await ListAuditAsync(org));
+    }
+
+    [Fact]
+    public async Task Repeating_the_same_key_records_no_additional_audit()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+
+        await RevealAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1");
+        // The retry short-circuits before the effect, so it writes no second audit record.
+        await RevealAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1");
+
+        Assert.Single(await ListAuditAsync(org));
+    }
+
+    [Fact]
+    public async Task Selected_reveal_audits_the_target_participant()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1", participant.Id);
+
+        var entry = Assert.Single(await ListAuditAsync(org));
+        Assert.Equal(participant.Id, entry.TargetParticipantId);
+        Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
+    }
+
+    [Fact]
+    public async Task Audit_records_are_scoped_to_their_tenant()
+    {
+        var (orgA, wsA) = await SeedWorkspaceAsync(_organizationSlugA, _workspaceSlugA);
+        var (orgB, wsB) = await SeedWorkspaceAsync(_organizationSlugB, "b-show");
+        var resourceId = Guid.NewGuid();
+
+        await RevealAsync(orgA, wsA, VisibilityResourceType.Entity, resourceId, "key-a");
+        await RevealAsync(orgB, wsB, VisibilityResourceType.Entity, resourceId, "key-b");
+
+        // Each tenant's audit read returns only its own change.
+        Assert.Single(await ListAuditAsync(orgA));
+        var entryB = Assert.Single(await ListAuditAsync(orgB));
+        Assert.Equal(orgB, entryB.OrganizationId);
+        Assert.Equal(wsB, entryB.WorkspaceId);
     }
 }

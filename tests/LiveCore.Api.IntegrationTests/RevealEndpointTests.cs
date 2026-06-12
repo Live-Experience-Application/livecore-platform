@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using LiveCore.Api.Audit;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
@@ -87,6 +88,18 @@ public sealed class RevealEndpointTests
         Assert.Equal(nameof(RevealOutcome.Applied), body.Outcome);
 
         Assert.True(await ResourceVisibleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Entity, resourceId));
+
+        // CORE-VIS-006: the change is audited, with the actor threaded from the authenticated principal
+        // (the host's resolved user profile id) — end-to-end, not just at the service layer.
+        var audit = await ListAuditAsync(factory, seed.OrganizationId);
+        var entry = Assert.Single(audit);
+        Assert.Equal(AuditAction.VisibilityRuleChanged, entry.Action);
+        Assert.Equal(seed.WorkspaceId, entry.WorkspaceId);
+        Assert.Equal("Entity", entry.ResourceType);
+        Assert.Equal(resourceId, entry.ResourceId);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
+        Assert.Equal(await SingleHostProfileIdAsync(factory), entry.ActorUserProfileId);
     }
 
     [Fact]
@@ -457,6 +470,29 @@ public sealed class RevealEndpointTests
                 && rule.ResourceId == resourceId)
             .ToListAsync();
         return rules.Any(rule => rule.IsVisibleToAudience());
+    }
+
+    private static async Task<IReadOnlyList<AuditLogEntry>> ListAuditAsync(
+        WorkspaceApiFactory factory,
+        Guid organizationId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        return await context.AuditLogs.AsNoTracking()
+            .Where(entry => entry.OrganizationId == organizationId)
+            .OrderBy(entry => entry.Id)
+            .ToListAsync();
+    }
+
+    /// <summary>
+    /// Returns the id of the single seeded user profile (the host). The reveal happy-path test seeds
+    /// exactly one user, so this is the actor the audit record must capture.
+    /// </summary>
+    private static async Task<Guid> SingleHostProfileIdAsync(WorkspaceApiFactory factory)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        return await context.UserProfiles.AsNoTracking().Select(profile => profile.Id).SingleAsync();
     }
 
     private readonly record struct SeedResult(Guid OrganizationId, Guid WorkspaceId, Guid SessionId);
