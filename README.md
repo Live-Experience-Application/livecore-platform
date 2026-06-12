@@ -573,8 +573,26 @@ Like the participant-visible feed, the stream is private: every denial — a for
 an unknown session, a caller with no legitimate relationship, or a `participantId` the
 caller does not own — is hidden as `404` (never `403`).
 
-Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`) and scale-out are
-later Realtime stories (`docs/11_REALTIME_SYNC.md`).
+**Scale-out abstraction (CORE-RT-006).** `docs/11_REALTIME_SYNC.md` ("Scale-out") calls for a
+"Valkey/Redis-compatible backplane later when multiple API instances run". The Realtime module now defines
+that seam: `IRealtimeBackplane` is the single transport boundary a server-computed event delivery crosses
+on its way to the connected clients. The default `InProcessRealtimeBackplane` fans a delivery out to the
+connections held by **this** API instance over the SignalR hub (`IHubContext<SessionHub>`, part of the
+shared framework — no new dependency); a multi-instance deployment substitutes a Valkey/Redis-backed
+implementation so the **same** delivery also reaches connections held by **other** instances. The real
+backplane wiring (the Redis package and its configuration) lives with deployment, not in this repository
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+The backplane receives an **already-authorized** delivery — one recipient-safe payload addressed to exactly
+**one** server-managed group (`RealtimeGroups`), produced by the per-recipient recipient resolver
+(CORE-RT-004) and only ever invoked by the publisher. It has no event, no visibility subject and no way to
+enumerate recipients, so it **cannot** widen the audience: it only forwards what the resolver already
+authorized. The per-recipient recipient computation therefore stays the **single send path**, and
+"Realtime delivery never leaks hidden events" (threat T3 in `docs/07_SECURITY_THREAT_MODEL.md`) holds for
+every backplane — in-process or scaled-out — by construction.
+
+Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`) over this delivery path is a later
+Realtime story (`docs/11_REALTIME_SYNC.md`).
 
 ## Container images
 

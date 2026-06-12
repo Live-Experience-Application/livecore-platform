@@ -44,6 +44,17 @@ builder.Services.AddHealthChecks();
 // mandates SignalR for realtime communication.
 builder.Services.AddSignalR();
 
+// Realtime scale-out seam (CORE-RT-006, the Realtime Event Stream epic's final story). The backplane is
+// the single transport boundary a computed event delivery crosses on its way to connected clients. The
+// default in-process implementation sends a recipient-safe payload to its server-managed group via
+// IHubContext<SessionHub> (this instance's connections only); a multi-instance deployment substitutes a
+// Valkey/Redis-compatible IRealtimeBackplane (docs/11_REALTIME_SYNC.md "Scale-out") so the SAME delivery
+// also reaches connections on other instances. It receives an ALREADY-AUTHORIZED delivery (one payload to
+// one group, computed by the per-recipient resolver), so swapping the transport cannot widen the audience
+// and realtime delivery never leaks a hidden event (threat T3). It needs only the shared-framework hub
+// context (no new dependency, no database), so it is registered unconditionally next to AddSignalR.
+builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
+
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
 // (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
@@ -422,9 +433,10 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // participant's group and gating every recipient through the central Visibility engine
     // (IEventRecipientVisibility above + the participant repository), so realtime delivery never leaks a
     // hidden event (threat T3; docs/11_REALTIME_SYNC.md "Events are never broadcast blindly"). The
-    // publisher composes the repository, IHubContext<SessionHub> (registered by AddSignalR above) and the
-    // resolver to persist an event and then send each computed delivery ("persist event -> compute
-    // recipients -> project payload -> send to recipient groups", docs/11_REALTIME_SYNC.md). The reveal
+    // publisher composes the repository, the recipient resolver and the IRealtimeBackplane (CORE-RT-006,
+    // registered above) to persist an event and then forward each computed delivery over the scale-out seam
+    // ("persist event -> compute recipients -> project payload -> send to recipient groups",
+    // docs/11_REALTIME_SYNC.md). The reveal
     // command is the first producer (the ContentRevealed event, carrying the revealed resource as its
     // visibility subject); the SessionStarted/Ended events and reconnect replay (CORE-RT-005) are later
     // stories.

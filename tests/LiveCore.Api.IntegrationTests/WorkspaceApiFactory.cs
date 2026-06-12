@@ -33,8 +33,14 @@ namespace LiveCore.Api.IntegrationTests;
 /// The shared SQLite connection means every request in a test sees the same
 /// seeded database. Use <see cref="SeedAsync"/> to arrange data and the
 /// <c>Create*Client</c> helpers to act as a chosen caller.
+///
+/// It is unsealed so a test that needs to observe an extra production seam can
+/// derive from it and override <see cref="ConfigureWebHost"/> (calling base
+/// first); for example the realtime delivery tests substitute a recording
+/// <see cref="LiveCore.Api.Realtime.IRealtimeBackplane"/> to capture which
+/// server-managed groups an event was delivered to.
 /// </summary>
-internal sealed class WorkspaceApiFactory : WebApplicationFactory<Program>
+internal class WorkspaceApiFactory : WebApplicationFactory<Program>
 {
     // A placeholder connection string only switches the production persistence
     // conditional on; the actual provider is replaced with SQLite below. No real
