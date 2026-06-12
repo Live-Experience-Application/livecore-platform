@@ -6,6 +6,7 @@ using LiveCore.Api.Participants;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Templates;
+using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
@@ -23,8 +24,8 @@ namespace LiveCore.Api.Persistence;
 /// <c>workspace_members</c> and <c>workspace_invitations</c> tables, the
 /// Participants <c>participants</c> table, the Sessions <c>sessions</c> table, the
 /// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table, the
-/// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables and the
-/// Templates <c>templates</c> table)
+/// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
+/// Templates <c>templates</c> table and the Visibility <c>visibility_rules</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -80,6 +81,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Template registry entries owned by the Templates module.</summary>
     public DbSet<Template> Templates => Set<Template>();
 
+    /// <summary>Visibility rules owned by the Visibility module.</summary>
+    public DbSet<VisibilityRule> VisibilityRules => Set<VisibilityRule>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -96,5 +100,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new EntityConfiguration());
         modelBuilder.ApplyConfiguration(new EntityRelationshipConfiguration());
         modelBuilder.ApplyConfiguration(new TemplateConfiguration());
+        modelBuilder.ApplyConfiguration(new VisibilityRuleConfiguration());
     }
 }

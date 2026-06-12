@@ -240,6 +240,26 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // version-transition workflow in this story.
     builder.Services.AddScoped<ITemplateRepository, TemplateRepository>();
 
+    // Visibility rule persistence (CORE-VIS-001, the first story of the Visibility and Reveal Engine
+    // epic): the Visibility module — THE central security module (docs/05_MODULE_CONTRACTS.md) — owns
+    // the workspace-scoped, tenant-scoped visibility_rules table that holds the generic AUDIENCE
+    // RULES binding a Core resource (a scene/content-block/entity, named by resource_type +
+    // resource_id) to a base audience visibility state (Hidden/Visible) (csv/database_tables.csv:
+    // visibility_rules, module Visibility, scope workspace, "Audience rules"). Registered here, inside
+    // the persistence conditional, exactly like the entity and content-block repositories above. The
+    // repository's lookups are scoped by organization id then workspace id (organization boundary
+    // before workspace boundary; threat T5), there is NO list-everything method, and
+    // ListByWorkspace/ListByResource return a workspace's rules in deterministic (time-ordered
+    // surrogate id) order. The authorization-relevant fields are REAL COLUMNS, never JSON
+    // (docs/10_DATABASE_SCHEMA.md). resource_id is a polymorphic reference (no DB foreign key); the
+    // same-workspace coupling is the create-rule application flow's responsibility (mirrors
+    // ContentBlock/scene_id, Entity/entity_type_id). The CanViewResource policy (CORE-VIS-002),
+    // preview-as-participant (CORE-VIS-003), the reveal command with idempotency + append-only event
+    // (CORE-VIS-004), selected-participant reveal (CORE-VIS-005) and any HTTP endpoint (the
+    // POST /sessions/{sessionId}/reveal route is CORE-VIS-004) are later stories and are deliberately
+    // not wired here.
+    builder.Services.AddScoped<IVisibilityRuleRepository, VisibilityRuleRepository>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities
