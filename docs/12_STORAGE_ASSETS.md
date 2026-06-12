@@ -9,6 +9,29 @@ Supported deployment options:
 - RustFS for self-hosted S3-compatible object storage
 - any S3-compatible provider in hosted environments
 
+### Adapter port (CORE-AST-002)
+
+The adapter is a Core **port**, `IAssetStorage` (Assets module). It is the single
+seam between Core and the object storage, and the only access it ever yields is a
+short-lived, signed URL (`SignedAssetUrl`) for an `Upload` or `Download` of an
+already-resolved, tenant- and workspace-scoped asset's own object — never a public
+or static URL, and never an arbitrary caller-supplied object key. The
+`SignedAssetUrl` type enforces the security invariants structurally: it requires an
+absolute URL and a strictly positive lifetime no longer than a one-hour ceiling, so
+a long-lived, non-expiring or public URL is unrepresentable, and its `ToString`
+omits the secret URL so a signed URL is never logged.
+
+The port does not authorize the caller; the consuming upload-intent (CORE-AST-003)
+and signed-download (CORE-AST-004) flows authorize server-side first and only then
+ask the adapter to mint a URL.
+
+The concrete, provider-specific implementation (its SDK and the object-storage
+endpoint/credentials) is supplied by the deployment (see
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006), so Core carries no
+object-storage SDK dependency and no credentials in source. Until one is wired, the
+default is a fail-closed adapter that denies every operation, so assets stay private
+by default even when storage is not configured.
+
 ## Security rules
 
 - buckets private by default

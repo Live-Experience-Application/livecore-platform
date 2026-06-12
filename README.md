@@ -628,12 +628,50 @@ checksum unknown) and moves to `Available` once the upload is confirmed, via a
 guarded state transition that rejects confirming an already-available asset (so a
 confirm can never silently overwrite a different recorded size/checksum).
 
-This story is the metadata aggregate, its persistence and its EF migration only.
-The S3-compatible storage adapter (CORE-AST-002), the upload intent flow
-(`POST /api/v1/assets/upload-intent`, CORE-AST-003), the signed download URL flow
-(`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004), linking to content
-blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later
-stories; there is no asset HTTP route yet.
+CORE-AST-001 is the metadata aggregate, its persistence and its EF migration only.
+The upload intent flow (`POST /api/v1/assets/upload-intent`, CORE-AST-003), the
+signed download URL flow (`GET /api/v1/assets/{assetId}/download-url`,
+CORE-AST-004), linking to content blocks/entities (CORE-AST-005) and the cleanup
+job (CORE-AST-006) are later stories; there is no asset HTTP route yet.
+
+### Asset storage adapter
+
+CORE-AST-002 adds the S3-compatible storage adapter **port** — the single seam
+between Core and the private object storage that holds an asset's binary content
+(`docs/12_STORAGE_ASSETS.md`; ADR 0006). `IAssetStorage` mints **short-lived,
+signed URLs** for the two object accesses Core ever needs: an `Upload` URL (for
+the upload-intent flow, CORE-AST-003) and a `Download` URL (for the signed
+download flow, CORE-AST-004). It signs only for an already-resolved, tenant- and
+workspace-scoped `Asset`'s own storage coordinates — never an arbitrary bucket or
+object key — so a signed URL can only ever address an object inside the caller's
+tenant and workspace (threats T5/T1).
+
+The security guarantees are enforced by the **type system** so no adapter can
+forget them: the only value the port hands back is a `SignedAssetUrl`, which
+cannot be constructed without an absolute URL and a strictly positive lifetime no
+longer than `MaxLifetime` (one hour). A long-lived, non-expiring or public/static
+URL is therefore unrepresentable — assets are private by default and reachable
+only through a short-lived signed URL after a server-side permission check (the
+epic acceptance criterion; threat T4 "Asset leak"). The signed URL is itself a
+secret (it embeds the object key and signature), so `SignedAssetUrl.ToString()`
+excludes the URL and logs only the operation and expiry (threats T4/T7).
+
+The port does **not** authorize the caller — that is the consuming flow's job:
+the upload-intent (CORE-AST-003) and signed-download (CORE-AST-004) endpoints
+authorize server-side (role + tenant + workspace + visibility) and only then ask
+the adapter to mint a URL. The adapter is a dumb, secure signer; minting is the
+last step after the permission check has passed.
+
+The **concrete, provider-specific adapter** (its SDK and the object-storage
+endpoint/credentials) is supplied by the deployment, exactly as a Valkey/Redis
+backplane replaces the in-process realtime default (CORE-RT-006); Core carries no
+object-storage SDK dependency and no storage credentials in source
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat T7). Until one is wired, the
+default registration is the **fail-closed** `UnconfiguredAssetStorage`: every
+operation throws `AssetStorageNotConfiguredException` rather than serving bytes
+some insecure way, so the private-by-default posture holds even when storage is
+not configured (mirroring how the host runs without a database connection string
+or OIDC authority and denies cleanly). There is no asset HTTP route yet.
 
 ## Container images
 

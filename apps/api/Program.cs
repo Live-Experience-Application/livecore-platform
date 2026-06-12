@@ -56,6 +56,20 @@ builder.Services.AddSignalR();
 // context (no new dependency, no database), so it is registered unconditionally next to AddSignalR.
 builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 
+// Asset storage adapter seam (CORE-AST-002, the storage adapter interface story of the "Asset Storage and
+// Authorization" epic). IAssetStorage is the single port between Core and the private, S3-compatible
+// object storage that holds an asset's binary content (docs/05_MODULE_CONTRACTS.md: the Assets module owns
+// the "storage adapter" and "signed URL creation"; docs/12_STORAGE_ASSETS.md; ADR 0006). The concrete,
+// provider-specific adapter (and its SDK + object-storage endpoint/credentials) is supplied by the
+// deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md), exactly as a Valkey/Redis backplane replaces the
+// in-process realtime default (CORE-RT-006). Until one is wired, the default is the FAIL-CLOSED
+// UnconfiguredAssetStorage: every asset operation throws AssetStorageNotConfiguredException rather than
+// serving bytes some insecure way, so assets stay private by default even when storage is not configured
+// (the epic acceptance criterion; threat T4 "Asset leak"). It is stateless and needs no database, so it is
+// registered unconditionally next to the realtime backplane. The upload-intent flow (CORE-AST-003) and the
+// signed download flow with authorization (CORE-AST-004) consume this port; they are later stories.
+builder.Services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
+
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
 // (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
