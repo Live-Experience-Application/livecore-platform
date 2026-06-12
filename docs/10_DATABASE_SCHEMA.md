@@ -70,6 +70,9 @@ export_manifests(export_job_id) unique
 export_manifest_entries(export_manifest_id, kind) unique
 recaps(workspace_id, id)
 recaps(session_id, id)
+entitlement_definitions(key) unique
+plan_definitions(key) unique
+plan_entitlements(plan_definition_id, entitlement_definition_id) unique
 idempotency_keys(scope, key)
 ```
 

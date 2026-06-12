@@ -2,6 +2,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Exports;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
@@ -35,7 +36,9 @@ namespace LiveCore.Api.Persistence;
 /// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
 /// Realtime <c>session_events</c> table, the Assets <c>assets</c> and
 /// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
-/// <c>export_manifest_entries</c> tables and the Recaps <c>recaps</c> table)
+/// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
+/// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c> and
+/// <c>plan_entitlements</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -121,6 +124,15 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Produced session recaps owned by the Recaps module.</summary>
     public DbSet<Recap> Recaps => Set<Recap>();
 
+    /// <summary>Generic entitlement catalog definitions owned by the Entitlements module.</summary>
+    public DbSet<EntitlementDefinition> EntitlementDefinitions => Set<EntitlementDefinition>();
+
+    /// <summary>Generic plan catalog definitions owned by the Entitlements module.</summary>
+    public DbSet<PlanDefinition> PlanDefinitions => Set<PlanDefinition>();
+
+    /// <summary>Plan-to-entitlement grants owned by the Entitlements module.</summary>
+    public DbSet<PlanEntitlement> PlanEntitlements => Set<PlanEntitlement>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -147,5 +159,8 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new ExportManifestConfiguration());
         modelBuilder.ApplyConfiguration(new ExportManifestEntryConfiguration());
         modelBuilder.ApplyConfiguration(new RecapConfiguration());
+        modelBuilder.ApplyConfiguration(new EntitlementDefinitionConfiguration());
+        modelBuilder.ApplyConfiguration(new PlanDefinitionConfiguration());
+        modelBuilder.ApplyConfiguration(new PlanEntitlementConfiguration());
     }
 }

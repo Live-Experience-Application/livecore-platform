@@ -3,6 +3,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -538,6 +539,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // threat T2 visibility leak). The signed download endpoint (CORE-AST-004) now applies this policy
     // before minting a URL.
     builder.Services.AddScoped<AssetDownloadPolicy>();
+
+    // Entitlement and plan definition catalog (CORE-ENTL-001, the first story of the "Entitlements and Quotas"
+    // epic): the Entitlements module — FIRST appearing here — owns the GLOBAL entitlement_definitions,
+    // plan_definitions and plan_entitlements tables that hold the deployment-wide monetization catalog
+    // (docs/05_MODULE_CONTRACTS.md / docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md: Core "stores
+    // entitlements, enforces quotas"; csv/database_tables.csv: module Entitlements, scope global). Registered
+    // here, inside the persistence conditional, exactly like the asset and recap repositories above. The
+    // entitlement keys are GENERIC and product-neutral (the epic acceptance criterion "Generic entitlements
+    // can be defined without vertical terminology"; AGENTS.md): a vertical maps them to its own paywall copy in
+    // its UI. These are GLOBAL catalog tables (no organization_id), so the repositories are NOT tenant-scoped
+    // and a list-everything read is the catalog read, not a T5 leak; the per-subject assignment and the
+    // user-visible "premium state comes only from server entitlements" view are the later subject-entitlement
+    // story (CORE-ENTL-002), the quota definition and quota-status API are CORE-ENTL-003, and quota enforcement
+    // on protected commands is CORE-ENTL-004. There is NO entitlement HTTP route in this story
+    // (csv/mobile_store_api_routes.csv defines the /v1/me/entitlements read for a later story).
+    builder.Services.AddScoped<IEntitlementDefinitionRepository, EntitlementDefinitionRepository>();
+    builder.Services.AddScoped<IPlanDefinitionRepository, PlanDefinitionRepository>();
 
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks

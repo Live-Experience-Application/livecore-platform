@@ -975,6 +975,51 @@ server-side access authorization are later stories (exactly as CORE-AUD-002/003 
 endpoint). CORE-AUD-004 is the recap model, its persistence, its EF migration and its role-based
 projection only; there is no recap HTTP route yet.
 
+### Entitlement and plan definitions
+
+The Entitlements module owns the Core's product-neutral monetization catalog so that usage limits and premium
+capabilities are enforced **server-side** and cannot be bypassed by a mobile client
+(`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`: "Limits ... must be enforced server-side. Otherwise users
+can bypass mobile UI restrictions"). CORE-ENTL-001 (the first story of the `Entitlements and Quotas` epic) adds
+the first piece — the **definition model**: the `EntitlementDefinition` and `PlanDefinition` aggregates and
+their three **global** tables (`apps/api/Entitlements/`; `csv/database_tables.csv`: module Entitlements, scope
+`global`).
+
+An `EntitlementDefinition` is the catalog entry for one generic entitlement: a stable, lower-case dotted `key`
+(such as `workspace.active.max` or `ads.disabled` — `docs/21` "Generic entitlement keys"), a `value_kind`
+(`Flag` for a boolean capability or `Quota` for a numeric limit, mirroring `csv/mobile_entitlement_catalog.csv`'s
+`type` column), generic display metadata and a soft-lifecycle `is_active` flag. A `PlanDefinition` is a named
+bundle: a stable `key`, generic display metadata, `is_active`, and a child collection of `plan_entitlements`
+**grants** that bind an entitlement definition to a concrete value. The grant's value shape is fixed by the
+referenced definition's `value_kind` — a flag grant carries a boolean (`flag_value`) and a quota grant carries
+a numeric `quota_limit` (or `null` for an unlimited/fair-use grant) — so a plan can never bind the wrong value
+shape, and an entitlement is granted **at most once per plan** (the unique
+`plan_entitlements(plan_definition_id, entitlement_definition_id)` index). The granted value is always decided
+**server-side**, never trusted from a client (`docs/21` "Never trust client-side premium flags").
+
+**Generic — the epic acceptance criterion** ("Generic entitlements can be defined without vertical
+terminology"). Every key, display name and description is generic Core vocabulary only (AGENTS.md,
+`csv/forbidden_core_terms.csv`); a vertical maps a key to its own paywall copy in its UI (`docs/21` "ArcanOS may
+display these as ..."). The specific commercial plans of a vertical — and their concrete values, which `docs/21`
+lists only as a "Recommended ... mapping" of "examples ... to be finalized" — are vertical **seed data**
+supplied by the vertical (`docs/04_PRODUCT_BOUNDARIES.md`), never hardcoded in Core source.
+
+These are **global** catalog tables (the deployment-wide catalog, like `organizations`/`users`/`templates`), so
+none carries an `organization_id`: there is no per-tenant copy, no host-only body and no audience to project
+away, so unlike the recap/export models there is **no** tenant-scoped or role-based projection in this story.
+Definitions are **business data** that grants (and later subject assignments) reference, so they are never
+hard-deleted — they are soft-retired via `is_active` (`docs/10_DATABASE_SCHEMA.md`: "avoid hard-delete for
+business data; use soft delete where needed"), the `plan_definition_id` grant foreign key cascades and the
+`entitlement_definition_id` grant foreign key is **restricted** so a referenced definition can never be deleted
+out from under a grant. The `key` of each definition is immutable, so an entitlement or plan key can never
+silently change meaning.
+
+CORE-ENTL-001 is the definition model, its persistence and its EF migration only. The per-subject assignment
+and lookup ("user-visible premium state comes only from server entitlements", CORE-ENTL-002), the quota
+definition and quota-status API (CORE-ENTL-003) and quota enforcement on protected workspace/session commands
+(CORE-ENTL-004) are later stories; there is no entitlement HTTP route yet
+(`csv/mobile_store_api_routes.csv` defines the `GET /v1/me/entitlements` read for a later story).
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

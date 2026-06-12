@@ -22,4 +22,7 @@ export_jobs,Exports,workspace,Async exports
 export_manifests,Exports,workspace,Produced workspace export table-of-contents
 export_manifest_entries,Exports,workspace,Per-kind export manifest inventory line
 recaps,Recaps,session,Produced session recap
+entitlement_definitions,Entitlements,global,Generic entitlement catalog entry
+plan_definitions,Entitlements,global,Generic plan catalog entry
+plan_entitlements,Entitlements,global,Plan-to-entitlement grant
 idempotency_keys,System,scope,Retry safety
