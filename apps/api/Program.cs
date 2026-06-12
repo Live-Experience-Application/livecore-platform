@@ -277,6 +277,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // and audit records (CORE-VIS-006) are later stories not wired here.
     builder.Services.AddScoped<VisibilityPolicy>();
 
+    // Visibility preview-as-participant query (CORE-VIS-003): computes the SET of resources an
+    // audience participant may currently see in a workspace (GetVisibleResourcesForParticipant /
+    // PreviewVisibilityForHost, docs/05_MODULE_CONTRACTS.md). Registered here, inside the persistence
+    // conditional, because it depends on the visibility rule repository and the VisibilityPolicy above.
+    // It REUSES VisibilityPolicy.CanViewResourceAsync per candidate resource under the audience
+    // viewpoint, so the preview can never diverge from the per-resource access decision and visibility
+    // is decided in exactly one place (docs/05: do not duplicate visibility logic elsewhere). The set
+    // is audience-wide for now (per-participant subset = CORE-VIS-005). There is NO HTTP endpoint
+    // (csv/api_routes.csv defines no preview route); wiring this set into the CORE-SES-005
+    // participant-visible-feed response — alongside the Realtime reveal-event projection — is a later
+    // step. The reveal command (CORE-VIS-004), selected-participant reveal (CORE-VIS-005) and audit
+    // records (CORE-VIS-006) are also later stories not wired here.
+    builder.Services.AddScoped<VisibilityPreviewService>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities
