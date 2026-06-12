@@ -557,6 +557,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IEntitlementDefinitionRepository, EntitlementDefinitionRepository>();
     builder.Services.AddScoped<IPlanDefinitionRepository, PlanDefinitionRepository>();
 
+    // Subject entitlement assignment and lookup (CORE-ENTL-002, the subject entitlement story of the
+    // "Entitlements and Quotas" epic): the Entitlements module owns the subject_entitlements table that records
+    // which generic subject (a user or a workspace) holds which catalog entitlement at which value. Registered
+    // here, inside the persistence conditional, exactly like the definition repositories above. The repository
+    // reads are scoped by the (subject_type, subject_id) pair, so one subject's premium state is never returned
+    // through another subject's id (per-subject isolation). The resolver is the single server-side path that
+    // produces a subject's effective entitlements, and the assignment service REUSES the CORE-ENTL-001 plan and
+    // entitlement catalog to grant/revoke them — so "User-visible premium state comes only from server
+    // entitlements" (the epic acceptance criterion; docs/21 "Never trust client-side premium flags"): a subject
+    // with no active server assignment is not entitled (fail-closed default), and a revoked assignment removes
+    // the premium state. There is NO entitlement HTTP route in this story; the resolver/assignment primitives
+    // are the reusable core the later GET /v1/me/entitlements read (csv/mobile_store_api_routes.csv), the quota
+    // status API (CORE-ENTL-003) and quota enforcement (CORE-ENTL-004) sit on.
+    builder.Services.AddScoped<ISubjectEntitlementRepository, SubjectEntitlementRepository>();
+    builder.Services.AddScoped<SubjectEntitlementResolver>();
+    builder.Services.AddScoped<SubjectEntitlementAssignmentService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.

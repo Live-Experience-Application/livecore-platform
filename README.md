@@ -1020,6 +1020,58 @@ definition and quota-status API (CORE-ENTL-003) and quota enforcement on protect
 (CORE-ENTL-004) are later stories; there is no entitlement HTTP route yet
 (`csv/mobile_store_api_routes.csv` defines the `GET /v1/me/entitlements` read for a later story).
 
+### Subject entitlements
+
+CORE-ENTL-002 (the next story of the `Entitlements and Quotas` epic) adds the **per-subject assignment** of the
+catalog entitlements and the **server-side lookup** that resolves them into a subject's premium state — the
+acceptance criterion **"User-visible premium state comes only from server entitlements"**
+(`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`: "Never trust client-side premium flags";
+"User-visible premium state must come from server entitlements"). CORE-ENTL-001 modeled the global catalog
+(_what_ entitlements and plans exist); this story records _which subject holds which entitlement at which value_
+in the `subject_entitlements` table (`apps/api/Entitlements/`; module Entitlements,
+`csv/database_tables.csv`).
+
+A `SubjectEntitlement` records that one **generic subject** — an `EntitlementSubjectType.User`
+(the "current user" of `GET /v1/me/entitlements`) or an `EntitlementSubjectType.Workspace` (the subject of a
+workspace-scoped entitlement) — holds a granted `EntitlementDefinition` at a concrete value. Its value shape is
+fixed by the definition's `value_kind` exactly like a plan grant (a flag carries `flag_value`, a quota carries
+`quota_limit` — `null` meaning an unlimited/fair-use grant), so an assignment can never bind the wrong value
+shape. The row is **self-describing**: the stable, immutable `entitlement_key` is denormalized onto it as a
+recorded fact (so the hot-path lookup needs no join), while the `entitlement_definition_id` foreign key still
+**restricts** hard-deleting a referenced definition (it is soft-retired via `is_active` instead). The optional
+`source_plan_definition_id` records the plan an assignment was granted from (provenance, **set null** on the
+rare plan delete).
+
+The assignment is **per-subject, not tenant content**: it carries no `organization_id` and is keyed by the
+`(subject_type, subject_id)` pair. The subject id is a generic **polymorphic** reference (no database foreign
+key, mirroring `asset_links.target_id` / `visibility_rules.resource_id` / `session_events.visibility_subject_id`),
+so a user subject and a workspace subject that share a guid never collide, and one subject's premium state can
+never be read through another subject's id. A subject holds each entitlement **at most once** (the unique
+`subject_entitlements(subject_type, subject_id, entitlement_definition_id)` index, whose
+`(subject_type, subject_id)` prefix is the critical lookup index).
+
+Premium state is resolved **server-side and fail-closed** by `SubjectEntitlementResolver`, which reads **only**
+a subject's **active** assignments into `EffectiveEntitlements` — the single source of premium state, used
+identically by a later `GET /v1/me/entitlements` response and any internal feature guard so the two can never
+diverge. A subject with no active assignment for an entitlement is simply **not entitled** (`IsFlagEnabled`
+defaults to `false`; `TryGetQuotaLimit` reports "no entitlement"), and a **revoked** assignment (a refund,
+cancellation or downgrade — `docs/21` "Refunds and chargebacks must revoke or downgrade entitlements") is
+excluded by the active-only read, so a client can never obtain premium state the server did not grant. The
+`EffectiveEntitlement` view handed out carries only the generic key and value — no subject id, no internal ids,
+no source-plan provenance, no authorization rationale (a vertical maps the key to its own paywall copy in its
+UI).
+
+The `SubjectEntitlementAssignmentService` is the write side: `AssignFromPlanAsync` grants a subject every
+entitlement of a plan at the plan's server-decided values (**reusing** the CORE-ENTL-001 plan catalog — the
+client never supplies a premium value), idempotently (a re-run updates existing assignments in place and
+reinstates revoked ones rather than duplicating; a retired plan or a retired entitlement is never newly
+assigned, fail-closed), and `RevokeAsync` revokes a single entitlement for the downgrade/refund path. The
+service performs the assignment mechanism only; the purchase-verification flow that _triggers_ an assignment,
+the store-notification downgrade flow that _triggers_ a revocation, and the `GET /v1/me/entitlements` HTTP route
+that _exposes_ the resolved state (with its authenticated, own-subject-only authorization) are later stories —
+this story supplies the generic, reusable assignment, revocation and lookup primitives they build on. There is
+still no entitlement HTTP route.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

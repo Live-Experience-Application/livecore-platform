@@ -37,8 +37,8 @@ namespace LiveCore.Api.Persistence;
 /// Realtime <c>session_events</c> table, the Assets <c>assets</c> and
 /// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
 /// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
-/// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c> and
-/// <c>plan_entitlements</c> tables)
+/// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c>,
+/// <c>plan_entitlements</c> and <c>subject_entitlements</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -133,6 +133,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Plan-to-entitlement grants owned by the Entitlements module.</summary>
     public DbSet<PlanEntitlement> PlanEntitlements => Set<PlanEntitlement>();
 
+    /// <summary>Per-subject entitlement assignments owned by the Entitlements module.</summary>
+    public DbSet<SubjectEntitlement> SubjectEntitlements => Set<SubjectEntitlement>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -162,5 +165,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new EntitlementDefinitionConfiguration());
         modelBuilder.ApplyConfiguration(new PlanDefinitionConfiguration());
         modelBuilder.ApplyConfiguration(new PlanEntitlementConfiguration());
+        modelBuilder.ApplyConfiguration(new SubjectEntitlementConfiguration());
     }
 }
