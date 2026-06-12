@@ -6,6 +6,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.SystemModule;
@@ -35,6 +36,13 @@ builder.Logging.AddJsonConsole(options =>
 builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
 builder.Services.AddHealthChecks();
+
+// Realtime SignalR services (CORE-RT-001, the Realtime Event Stream epic's first story). SignalR is
+// part of the ASP.NET Core shared framework (Microsoft.AspNetCore.App) — no new package dependency.
+// Registered unconditionally (the hub needs no database): the session hub it backs is authenticated and
+// carries no events yet (groups = CORE-RT-002; event delivery = CORE-RT-003+). docs/11_REALTIME_SYNC.md
+// mandates SignalR for realtime communication.
+builder.Services.AddSignalR();
 
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
@@ -473,6 +481,14 @@ app.MapSceneEndpoints();
 // host-vs-participant DTO projection (CORE-SCENE-004) and content validation/size limits
 // (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
+
+// Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires
+// authorization (the hub is [Authorize] and the mapping adds RequireAuthorization()), so an
+// unauthenticated client is challenged with 401 at negotiate exactly like the REST endpoints. The hub
+// carries no groups or events yet (CORE-RT-002/003+); it is the authenticated front door the later
+// realtime delivery connects through. Unlike the persistence-gated REST endpoints it needs no database,
+// so it is mapped unconditionally.
+app.MapRealtimeHubs();
 
 app.Run();
 

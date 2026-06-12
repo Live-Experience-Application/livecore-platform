@@ -464,6 +464,32 @@ a later story), and `Data` a bounded, well-formed JSON document — each with it
 own explicit size limit. An invalid or oversize body is rejected with `400`
 before any persistence, and the rejected content is never echoed back.
 
+### Realtime hub
+
+The Realtime module exposes an authenticated [SignalR](https://learn.microsoft.com/aspnet/core/signalr/introduction)
+hub for live sessions:
+
+| Hub        | Path            | Authorized callers                          |
+| ---------- | --------------- | ------------------------------------------- |
+| SessionHub | `/hubs/session` | any authenticated caller (valid OIDC token) |
+
+SignalR is part of the ASP.NET Core shared framework, so no new dependency is
+added. The hub is `[Authorize]` and mapped with `RequireAuthorization()`, so its
+`negotiate` and connection endpoints challenge an unauthenticated client with
+`401` exactly like the REST endpoints. Because browser WebSocket clients cannot
+set the `Authorization` header, the OIDC bearer token is also accepted from the
+`access_token` query-string parameter — but **only** for hub paths (under
+`/hubs`), never for the REST API, so a token is never read from a non-hub URL.
+The token is fully validated by the same JWT bearer pipeline either way. On
+connect the hub additionally fails closed, aborting any connection whose
+authenticated principal does not normalize to a valid OIDC principal.
+
+This story (CORE-RT-001) delivers the authenticated hub only: it exposes no
+client-callable methods and joins no groups, so it never sends an event. The
+server-managed connection groups, event append and delivery, per-recipient
+projection, reconnect replay and scale-out are later Realtime stories
+(`docs/11_REALTIME_SYNC.md`).
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

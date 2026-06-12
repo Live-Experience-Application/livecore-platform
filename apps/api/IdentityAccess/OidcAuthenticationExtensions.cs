@@ -115,6 +115,30 @@ public static class OidcAuthenticationExtensions
                     ValidateAudience = !string.IsNullOrWhiteSpace(audience),
                     ValidAudience = audience,
                 };
+
+                // SignalR hub authentication (CORE-RT-001). Browser WebSocket clients cannot set the
+                // Authorization header, so the SignalR client sends the access token as a query-string
+                // parameter on the hub connection. Read it from there for hub paths ONLY (HubBearerToken
+                // restricts query-string tokens to the /hubs area; the REST API keeps using the
+                // Authorization header), so a token never leaks from a non-hub URL (threat T7). The token
+                // is still fully validated by the same bearer pipeline above — this only changes where it
+                // is read from, never whether it is verified.
+                options.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = context =>
+                    {
+                        if (HubBearerToken.IsHubPath(context.HttpContext.Request.Path.Value))
+                        {
+                            var queryToken = context.Request.Query[HubBearerToken.QueryParameter].ToString();
+                            if (!string.IsNullOrWhiteSpace(queryToken))
+                            {
+                                context.Token = queryToken;
+                            }
+                        }
+
+                        return Task.CompletedTask;
+                    },
+                };
             });
         services.AddAuthorization();
 
