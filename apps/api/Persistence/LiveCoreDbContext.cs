@@ -5,6 +5,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Templates;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
@@ -21,8 +22,9 @@ namespace LiveCore.Api.Persistence;
 /// <c>organization_members</c> tables, the Workspaces <c>workspaces</c>,
 /// <c>workspace_members</c> and <c>workspace_invitations</c> tables, the
 /// Participants <c>participants</c> table, the Sessions <c>sessions</c> table, the
-/// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table and the
-/// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables)
+/// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table, the
+/// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables and the
+/// Templates <c>templates</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -75,6 +77,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Entity relationships (graph edges) owned by the Entities module.</summary>
     public DbSet<EntityRelationship> EntityRelationships => Set<EntityRelationship>();
 
+    /// <summary>Template registry entries owned by the Templates module.</summary>
+    public DbSet<Template> Templates => Set<Template>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -90,5 +95,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new EntityTypeConfiguration());
         modelBuilder.ApplyConfiguration(new EntityConfiguration());
         modelBuilder.ApplyConfiguration(new EntityRelationshipConfiguration());
+        modelBuilder.ApplyConfiguration(new TemplateConfiguration());
     }
 }

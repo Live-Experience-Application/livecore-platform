@@ -7,6 +7,7 @@ using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
@@ -221,6 +222,37 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // any HTTP endpoint (csv/api_routes.csv defines no entity-relationship route) are later stories
     // and are deliberately not wired here.
     builder.Services.AddScoped<IEntityRelationshipRepository, EntityRelationshipRepository>();
+
+    // Template registry persistence (CORE-ENT-004, fourth story of the Entity System and Templates
+    // epic): the Templates module — FIRST appearing here — owns the global/organization-scoped
+    // templates table that holds the versioned template registry (docs/05_MODULE_CONTRACTS.md: the
+    // Templates module owns the "generic template loader, template validation, template versioning"
+    // and may not hardcode vertical behavior; csv/database_tables.csv row 19: templates, module
+    // Templates, scope global/organization, "Template registry"). Registered here, inside the
+    // persistence conditional, exactly like the entity-type and content-block repositories above.
+    // A template's scope is a single nullable organization_id (NULL = global / available to all
+    // tenants, set = owned by one organization), and the repository's lookups are scope-aware — a
+    // global template is never read through an org path and an org-A template is never read through
+    // org-B's id (threat T5). The template definition (its entity-type keys/names/schemas) is stored
+    // verbatim as DATA and the source contains no key/name branching (THE TEMPLATE BOUNDARY,
+    // docs/04_PRODUCT_BOUNDARIES.md); it is validated for JSON well-formedness + minimal structure
+    // only. There is NO HTTP endpoint (csv/api_routes.csv defines no template route) and NO template
+    // version-transition workflow in this story.
+    builder.Services.AddScoped<ITemplateRepository, TemplateRepository>();
+
+    // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
+    // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
+    // generically (a foreach, never a switch on type names) and persisting through the Entities
+    // module's IEntityTypeRepository.AddAsync — the allowed cross-module contract access
+    // (docs/02_ARCHITECTURE.md; docs/05_MODULE_CONTRACTS.md), CONSUMING EntityType.Create without
+    // modifying the entity_types table. It enforces TENANT SECURITY before creating anything: an
+    // organization-scoped template may be loaded only into a workspace of the SAME organization, a
+    // global template into any workspace (threat T5); an org-A template targeted at an org-B
+    // workspace is denied and nothing is created. A duplicate key already in the workspace is skipped
+    // and reported (partial-load-with-report), not fatal. It depends only on the entity-type
+    // repository and TimeProvider, already registered above. No HTTP endpoint, event, visibility or
+    // entity-instance schema-conformance is wired here (all out of scope).
+    builder.Services.AddScoped<TemplateEntityTypeLoader>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
