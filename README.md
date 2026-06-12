@@ -345,8 +345,8 @@ belong to the later realtime event stream and are not emitted yet.
 
 The Visibility module's first route returns a single participant's visible feed:
 
-| Method | Route                                              | Authorized callers                                            |
-| ------ | -------------------------------------------------- | ------------------------------------------------------------- |
+| Method | Route                                               | Authorized callers                                                |
+| ------ | --------------------------------------------------- | ----------------------------------------------------------------- |
 | `GET`  | `/api/v1/participants/{participantId}/visible-feed` | the participant's own user, or a `Host`/`CoHost` of its workspace |
 
 The route path carries only the participant id, so the target organization is
