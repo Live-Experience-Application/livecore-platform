@@ -49,6 +49,34 @@ is minted before the metadata row is persisted, so an unconfigured storage backe
 fails closed (`503`) leaving no orphan pending asset — assets stay private by default
 even when storage is not configured.
 
+### Signed download flow (CORE-AST-004)
+
+The asset read route, `GET /api/v1/assets/{assetId}/download-url` (`csv/api_routes.csv`,
+"authorized viewers", "Signed URL after permission check"), is the "download URL requires
+authorization" step of the lifecycle above. The route path carries only the asset id, so
+the target organization is a required `?organizationSlug=` query parameter; the asset is
+loaded **within** that resolved tenant (`IAssetRepository.FindByIdInOrganizationAsync`, the
+predicate leads with `organization_id` so a foreign-tenant asset is never found), its own
+workspace is **discovered from the loaded row** after the tenant boundary is enforced, and
+the caller is authorized **server-side** by their role in the asset's own workspace.
+
+The authorized viewers are the host-content roles (Owner/Admin/Host/CoHost — the "View
+host-only content" capability of `docs/06_AUTHORIZATION_MATRIX.md`), reused through the
+central Visibility module's role classification so visibility logic is not duplicated.
+Audience roles (Participant/Observer) and the audit role are **denied fail-closed**: an
+asset becomes audience-visible only once it is linked to a visible content block/entity
+(CORE-AST-005), which does not exist yet, so until then only host-content roles may
+download (threat T4 "Asset leak"; threat T2 visibility leak). A caller who cannot see the
+tenant, an unknown or cross-tenant asset, and a non-member of the asset's workspace are all
+hidden as `404` (never `403`); a known member who is not an authorized viewer is `403`.
+
+Only **after** the permission check passes does the flow mint the short-lived, signed
+**download** URL through the adapter port and return `200 OK`. The asset stays private —
+the only access handed out is that single signed URL. The asset must be `Available`: a
+still-`Pending` asset (its upload not yet confirmed) is `409 Conflict`, reported only to an
+authorized viewer. An unconfigured storage backend fails closed (`503`) and produces no URL,
+so assets stay private by default even when storage is not configured.
+
 ## Security rules
 
 - buckets private by default

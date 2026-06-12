@@ -1,3 +1,4 @@
+using LiveCore.Api.Assets;
 using LiveCore.Api.Content;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
@@ -181,6 +182,46 @@ internal static class TestData
         context.ContentBlocks.Add(contentBlock);
         await context.SaveChangesAsync();
         return contentBlock;
+    }
+
+    /// <summary>
+    /// Creates and persists an asset in the given workspace, driving the real <see cref="Asset.Create"/>
+    /// aggregate factory so the seeded row has exactly the invariants production would produce. The asset
+    /// starts <see cref="AssetStatus.Pending"/>; when <paramref name="available"/> is
+    /// <see langword="true"/> it is then confirmed through <see cref="Asset.MarkAvailable"/> (recording a
+    /// size and checksum), so the seeded row has exactly the status the production confirm transition would
+    /// produce. Used to arrange a downloadable (or not-yet-downloadable) asset for the signed download
+    /// tests. The storage coordinates are generic, tenant- and workspace-scoped naming (never client input).
+    /// </summary>
+    public static async Task<Asset> AddAssetAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid createdByUserProfileId,
+        string contentType = "image/png",
+        bool available = true)
+    {
+        var asset = Asset.Create(
+            organizationId,
+            workspaceId,
+            createdByUserProfileId,
+            "s3",
+            "livecore-private-assets",
+            $"assets/{organizationId}/{workspaceId}/{Guid.CreateVersion7()}",
+            contentType,
+            SeedTime);
+
+        if (available)
+        {
+            asset.MarkAvailable(
+                4096,
+                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                SeedTime);
+        }
+
+        context.Assets.Add(asset);
+        await context.SaveChangesAsync();
+        return asset;
     }
 
     /// <summary>

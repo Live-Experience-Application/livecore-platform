@@ -54,6 +54,38 @@ internal sealed class AssetRepository : IAssetRepository
     }
 
     /// <inheritdoc />
+    public async Task<Asset?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored asset (ids are generated non-empty), so the lookup fails
+        // fast instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Asset id must not be empty.", nameof(id));
+        }
+
+        // The predicate LEADS with the tenant column, so the lookup is exactly tenant-scoped: an asset
+        // under another organization is never returned even when the surrogate id matches (threat T5/T1).
+        // The workspace is not part of the predicate because the by-asset-id download route does not know
+        // it up front; it is read off the returned row (Asset.WorkspaceId) so the caller can authorize
+        // against workspace membership AFTER the tenant boundary has been enforced (mirrors
+        // SceneRepository.FindByIdInOrganizationAsync).
+        return await _dbContext.Assets
+            .FirstOrDefaultAsync(
+                asset => asset.OrganizationId == organizationId
+                    && asset.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<Asset>> ListByWorkspaceAsync(
         Guid organizationId,
         Guid workspaceId,

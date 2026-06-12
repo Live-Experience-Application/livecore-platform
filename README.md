@@ -706,8 +706,43 @@ The signed URL is minted through the `IAssetStorage` adapter **before** the meta
 row is persisted, so when no object storage is configured the fail-closed
 `UnconfiguredAssetStorage` makes the request `503` and **no** orphan pending asset is
 left behind — the private-by-default posture holds even unconfigured, exactly as the
-host denies cleanly without a database or OIDC authority. The signed download URL flow
-(`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004), linking to content
+host denies cleanly without a database or OIDC authority. Linking to content
+blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories.
+
+### Asset signed download
+
+CORE-AST-004 adds the Assets module's read flow — the "download URL requires
+authorization" step of the asset lifecycle (`docs/12_STORAGE_ASSETS.md`):
+
+| Method | Route                                   | Authorized callers                            |
+| ------ | --------------------------------------- | --------------------------------------------- |
+| `GET`  | `/api/v1/assets/{assetId}/download-url` | host-content viewers of the asset's workspace |
+
+The route path carries only the asset id, so the target organization is supplied as a
+required `?organizationSlug=` query parameter (resolved by the same
+token-claim-and-membership tenant check as the by-scene-id content-block route). The
+asset is then loaded **within** that resolved tenant, its own workspace is **discovered
+from the loaded row** after the tenant boundary is enforced, and the caller is authorized
+by their role in the asset's own workspace. A caller who cannot see the tenant, an unknown
+or cross-tenant asset, and a caller who is not a member of the asset's workspace are all
+hidden as `404` (never `403`); a known member who is not an authorized viewer is `403`.
+
+The authorized viewers are the host-content roles (`Owner`, `Admin`, `Host`, `CoHost` —
+the "View host-only content" capability of `docs/06_AUTHORIZATION_MATRIX.md`), reused
+through the central Visibility module's role classification so visibility logic is not
+duplicated. Audience roles (`Participant`, `Observer`) and the audit role are **denied
+fail-closed**: an asset becomes audience-visible only once it is linked to a visible
+content block or entity (CORE-AST-005), which does not exist yet, so until then only
+host-content roles may download (threat T4 "Asset leak"; threat T2 visibility leak).
+
+On success the endpoint mints a **short-lived, signed download URL** (and its expiry)
+through the `IAssetStorage` adapter and returns `200 OK`; the asset stays **private** —
+the only access handed out is that single signed URL, minted **only after** the
+permission check passes (the epic acceptance criterion; threat T4). The asset must be
+`Available`: a still-`Pending` asset (its upload not yet confirmed) is `409 Conflict`,
+reported only to an authorized viewer. When no object storage is configured the
+fail-closed `UnconfiguredAssetStorage` makes the request `503` and no URL is produced, so
+the private-by-default posture holds even unconfigured. Linking to content
 blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories.
 
 ## Container images

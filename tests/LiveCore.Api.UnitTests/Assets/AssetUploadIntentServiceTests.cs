@@ -161,6 +161,9 @@ public class AssetUploadIntentServiceTests
         public Task<Asset?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        public Task<Asset?> FindByIdInOrganizationAsync(Guid organizationId, Guid id, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         public Task<IReadOnlyList<Asset>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

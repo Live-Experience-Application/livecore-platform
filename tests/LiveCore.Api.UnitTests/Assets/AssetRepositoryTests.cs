@@ -251,6 +251,76 @@ public sealed class AssetRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task FindByIdInOrganization_returns_the_asset_within_its_tenant_regardless_of_workspace()
+    {
+        // The org-scoped lookup (CORE-AST-004) addresses an asset by id within a tenant only; the workspace
+        // is discovered from the returned row afterwards. An asset in any workspace of the organization is
+        // found, and its own workspace id is readable off the row so the caller can authorize against it.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var seeded = await SeedAssetAsync(organization.Id, workspace.Id, user.Id, "org/ws/a.bin");
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        var loaded = await repository.FindByIdInOrganizationAsync(
+            organization.Id, seeded.Id, CancellationToken.None);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(seeded.Id, loaded.Id);
+        Assert.Equal(organization.Id, loaded.OrganizationId);
+        // The workspace is discovered from the row (it is not part of the predicate).
+        Assert.Equal(workspace.Id, loaded.WorkspaceId);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_for_a_missing_asset_returns_null()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+        var loaded = await repository.FindByIdInOrganizationAsync(
+            organization.Id, Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_for_an_asset_in_organization_A_is_never_resolved_via_organization_B()
+    {
+        // Mandatory negative foreign-tenant test (threat T5): the org-scoped download lookup must lead with
+        // the organization id, so an asset owned by organization A is never returned through organization
+        // B's id even though the surrogate asset id is correct.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceInA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var inA = await SeedAssetAsync(organizationA.Id, workspaceInA.Id, user.Id, "org/ws/a.bin");
+
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+
+        var underA = await repository.FindByIdInOrganizationAsync(organizationA.Id, inA.Id, CancellationToken.None);
+        var underB = await repository.FindByIdInOrganizationAsync(organizationB.Id, inA.Id, CancellationToken.None);
+
+        Assert.NotNull(underA);
+        Assert.Null(underB);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new AssetRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ListByWorkspace_returns_only_the_workspace_assets_in_id_order()
     {
         var organization = await SeedOrganizationAsync(_organizationSlugA);

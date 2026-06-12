@@ -67,7 +67,8 @@ builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 // serving bytes some insecure way, so assets stay private by default even when storage is not configured
 // (the epic acceptance criterion; threat T4 "Asset leak"). It is stateless and needs no database, so it is
 // registered unconditionally next to the realtime backplane. The upload-intent flow (CORE-AST-003) and the
-// signed download flow with authorization (CORE-AST-004) consume this port; they are later stories.
+// signed download flow with authorization (CORE-AST-004) both consume this port to mint short-lived signed
+// upload/download URLs after their server-side permission checks.
 builder.Services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
 
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
@@ -479,11 +480,11 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // is METADATA ONLY — the binary content lives in private S3-compatible object storage, never in
     // PostgreSQL (docs/12_STORAGE_ASSETS.md; ADR 0006). The asset is PRIVATE BY DEFAULT: nothing on the
     // aggregate makes it publicly reachable, and the stored object is reached only through an authorized,
-    // short-lived signed URL after a permission check (threat T4 "Asset leak"). The storage adapter
-    // interface (CORE-AST-002), the signed download URL flow (CORE-AST-004 — the GET
-    // /api/v1/assets/{assetId}/download-url route in csv/api_routes.csv), linking to content
-    // blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories and are
-    // deliberately not wired here; the upload intent flow (CORE-AST-003) is wired below.
+    // short-lived signed URL after a permission check (threat T4 "Asset leak"). The repository's org-scoped
+    // FindByIdInOrganizationAsync backs the signed download route (CORE-AST-004), which discovers the
+    // asset's workspace from the loaded row before authorizing. Linking to content blocks/entities
+    // (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories and are deliberately not wired
+    // here; the upload intent flow (CORE-AST-003) and the signed download flow (CORE-AST-004) are wired below.
     builder.Services.AddScoped<IAssetRepository, AssetRepository>();
 
     // Asset storage naming (CORE-AST-003, the upload intent flow): the deployment's PRIVATE provider/bucket
@@ -503,8 +504,9 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // is minted before the row is persisted, so an unconfigured storage backend fails closed
     // (AssetStorageNotConfiguredException) leaving no orphan pending asset (the epic acceptance criterion;
     // threat T4 "Asset leak"). The endpoint authorizes the caller (role + tenant + workspace) BEFORE invoking
-    // it; the signed download URL flow (CORE-AST-004), linking (CORE-AST-005) and cleanup (CORE-AST-006) are
-    // later stories.
+    // it. The signed download URL flow (CORE-AST-004) needs no extra service: its endpoint reuses the asset
+    // repository, the tenant context resolver, the workspace member repository and the IAssetStorage adapter
+    // above. Linking (CORE-AST-005) and cleanup (CORE-AST-006) are later stories.
     builder.Services.AddScoped<AssetUploadIntentService>();
 
     // Gate readiness on database connectivity. The health response stays
@@ -614,17 +616,22 @@ app.MapSceneEndpoints();
 // (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
 
-// Asset upload-intent endpoint (CORE-AST-003): the Assets module's first HTTP route,
-// POST /api/v1/assets/upload-intent. It lives in an authenticated route group and fails
-// closed (503) when persistence is not configured, exactly like the reveal/scene
+// Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download): the Assets
+// module's HTTP routes, POST /api/v1/assets/upload-intent and
+// GET /api/v1/assets/{assetId}/download-url. They live in an authenticated route group and
+// fail closed (503) when persistence is not configured, exactly like the reveal/scene
 // endpoints. No new DI registration beyond the upload-intent service and storage location
-// above is required: the tenant context resolver and the workspace member repository it
-// reuses for authorization are already registered. It authorizes the caller server-side by
-// their role in the target workspace (Owner/Admin/Host/CoHost) within the resolved tenant
-// (every denial hidden as 404, an insufficient role as 403), mints server-side storage
-// coordinates, registers a PENDING asset and returns the short-lived signed upload URL; the
-// asset is private by default and an unconfigured storage backend fails closed with 503
-// (threat T4). The signed download URL flow (CORE-AST-004) is a later story.
+// above is required: the tenant context resolver, the asset repository, the workspace member
+// repository and the IAssetStorage adapter they reuse are already registered. Upload-intent
+// authorizes the caller by their role in the target workspace (Owner/Admin/Host/CoHost),
+// mints server-side storage coordinates, registers a PENDING asset and returns a short-lived
+// signed upload URL. The signed download flow resolves the asset within the query-supplied
+// organization, discovers its workspace from the loaded row, authorizes the caller as a
+// host-content viewer of that workspace (every denial hidden as 404, an insufficient role as
+// 403, a still-pending asset as 409) and returns a short-lived signed download URL. The asset
+// is private by default and an unconfigured storage backend fails closed with 503 in both
+// flows (threat T4 "Asset leak"). Linking (CORE-AST-005) and cleanup (CORE-AST-006) are later
+// stories.
 app.MapAssetEndpoints();
 
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires

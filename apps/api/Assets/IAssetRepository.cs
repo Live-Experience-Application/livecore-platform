@@ -45,6 +45,41 @@ public interface IAssetRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Finds the asset with exactly the given id WITHIN the given organization (tenant) ALONE — without a
+    /// workspace boundary — or <see langword="null"/> when no such asset exists in that organization
+    /// (CORE-AST-004).
+    ///
+    /// This lookup exists because the signed-download route
+    /// (<c>GET /api/v1/assets/{assetId}/download-url</c>) addresses an asset by id within a query-supplied
+    /// organization only: the route path carries no workspace, so the workspace boundary is not known up
+    /// front. The asset's own <see cref="Asset.WorkspaceId"/> is DISCOVERED from the returned row AFTER the
+    /// tenant boundary has been enforced, and the caller then authorizes against WORKSPACE membership in
+    /// exactly that workspace, mirroring
+    /// <see cref="Scenes.ISceneRepository.FindByIdInOrganizationAsync"/> and
+    /// <see cref="Sessions.ISessionRepository.FindByIdInOrganizationAsync"/>. The lookup is still
+    /// tenant-safe: the predicate leads with <c>organization_id</c>, so an asset in another organization is
+    /// NEVER returned even when the surrogate id matches, and the surrogate id alone never crosses the
+    /// tenant boundary (threat T5 in docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
+    /// authorization; docs/06_AUTHORIZATION_MATRIX.md: the organization boundary is checked before the
+    /// workspace boundary). Returning the metadata row is NOT the same as granting access to the stored
+    /// object: the object is reached only through an authorized, short-lived signed URL minted AFTER the
+    /// permission check passes (threat T4 "Asset leak").
+    ///
+    /// The two-boundary <see cref="FindByIdAsync(Guid, Guid, Guid, CancellationToken)"/> REMAINS the
+    /// workspace-scoped lookup and is the right choice whenever the workspace is already known from the
+    /// request. This org-only lookup is used only by the by-asset-id download route, where the workspace is
+    /// not in the path and must be discovered from the row inside the tenant boundary.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or asset id is empty. An empty id can never address a stored asset, so the
+    /// lookup is rejected instead of silently returning nothing.
+    /// </exception>
+    Task<Asset?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists every asset of the given workspace (owned by the given organization) in a deterministic
     /// order — sorted by the surrogate id, which is time-ordered (UUIDv7), so the sequence is stable and
     /// repeatable. The list is tenant- AND workspace-scoped: the predicate leads with

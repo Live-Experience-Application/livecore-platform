@@ -72,3 +72,55 @@ public sealed record UploadIntentResponse(
     public override string ToString()
         => $"UploadIntentResponse assetId={AssetId} status={Status} contentType={ContentType} expiresAt={ExpiresAt:O}";
 }
+
+/// <summary>
+/// Response body of the signed download flow (CORE-AST-004,
+/// <c>GET /api/v1/assets/{assetId}/download-url</c>, csv/api_routes.csv "Signed URL after permission
+/// check", authorized viewers). It returns the asset's id, lifecycle status and content type plus the
+/// short-lived, signed download URL (and its expiry) the authorized caller fetches the object's bytes
+/// with. The asset is PRIVATE: the only access this hands out is the single short-lived signed download
+/// URL, minted ONLY after the server-side permission check passes (the epic acceptance criterion:
+/// "Assets are private by default and accessed only through authorized signed URLs"; threat T4 "Asset
+/// leak"). The response carries no internal storage coordinates beyond what the signed URL itself embeds,
+/// and no authorization rationale (docs/08_API_CONTRACTS.md; threat T7).
+///
+/// The <see cref="DownloadUrl"/> is a secret (it embeds the object key and signature); it is delivered to
+/// the authorized caller over HTTPS and must never be logged. The auto-generated record <c>ToString</c>
+/// is overridden to exclude it (threats T4/T7), exactly as <see cref="UploadIntentResponse"/> excludes its
+/// upload URL.
+/// </summary>
+/// <param name="AssetId">The surrogate id of the asset whose object the URL downloads.</param>
+/// <param name="Status">The asset's lifecycle status name — always <c>Available</c> for a downloadable asset.</param>
+/// <param name="ContentType">The MIME content type of the stored object.</param>
+/// <param name="DownloadUrl">The short-lived, signed URL the client downloads the object from (a secret; never logged).</param>
+/// <param name="ExpiresAt">When the signed download URL stops being valid (UTC).</param>
+public sealed record DownloadUrlResponse(
+    Guid AssetId,
+    string Status,
+    string ContentType,
+    string DownloadUrl,
+    DateTimeOffset ExpiresAt)
+{
+    /// <summary>Projects an asset and its signed download URL into the response DTO.</summary>
+    public static DownloadUrlResponse From(Asset asset, SignedAssetUrl downloadUrl)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        ArgumentNullException.ThrowIfNull(downloadUrl);
+
+        return new DownloadUrlResponse(
+            asset.Id,
+            asset.Status.ToString(),
+            asset.ContentType,
+            downloadUrl.Url.ToString(),
+            downloadUrl.ExpiresAt);
+    }
+
+    /// <summary>
+    /// Log-safe representation: the asset id, status, content type and expiry only. The signed
+    /// <see cref="DownloadUrl"/> is a secret (it grants the download until it expires), so it is
+    /// deliberately EXCLUDED — a leaked log line must never be replayable as asset access (threats T4
+    /// "Asset leak" and T7 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// </summary>
+    public override string ToString()
+        => $"DownloadUrlResponse assetId={AssetId} status={Status} contentType={ContentType} expiresAt={ExpiresAt:O}";
+}
