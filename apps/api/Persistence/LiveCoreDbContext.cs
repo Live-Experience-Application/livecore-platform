@@ -2,6 +2,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
+using LiveCore.Api.Exports;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -31,8 +32,8 @@ namespace LiveCore.Api.Persistence;
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
 /// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
-/// Realtime <c>session_events</c> table and the Assets <c>assets</c> and
-/// <c>asset_links</c> tables)
+/// Realtime <c>session_events</c> table, the Assets <c>assets</c> and
+/// <c>asset_links</c> tables and the Exports <c>export_jobs</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -106,6 +107,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Asset-to-content/entity links owned by the Assets module.</summary>
     public DbSet<AssetLink> AssetLinks => Set<AssetLink>();
 
+    /// <summary>Async export jobs owned by the Exports module.</summary>
+    public DbSet<ExportJob> ExportJobs => Set<ExportJob>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -128,5 +132,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
         modelBuilder.ApplyConfiguration(new AssetConfiguration());
         modelBuilder.ApplyConfiguration(new AssetLinkConfiguration());
+        modelBuilder.ApplyConfiguration(new ExportJobConfiguration());
     }
 }

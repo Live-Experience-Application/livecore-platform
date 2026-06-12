@@ -841,6 +841,45 @@ deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Becaus
 reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
 `apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
 
+### Export jobs
+
+The Exports module owns generic, **asynchronous** data exports (`docs/05_MODULE_CONTRACTS.md`:
+the Exports module owns "export jobs", "user data export" and "workspace export";
+`docs/02_ARCHITECTURE.md`: the worker owns "background jobs, exports, cleanup, async
+processing"). CORE-AUD-002 adds the first piece — the `ExportJob` aggregate and its tenant-
+and workspace-scoped `export_jobs` table (`apps/api/Exports/`; the documented critical index is
+`export_jobs(workspace_id, id)`). It is the **job record only**: the explicit export `scope`,
+the lifecycle `status`, the `requested_by` requester and an optional generic `failure_reason`.
+The exported data is never stored on the row, and the produced export **manifest** is the later
+story (CORE-AUD-003).
+
+The job is **generic and authorized** (the epic acceptance criterion) along two immutable axes.
+It is workspace- and tenant-scoped, so every lookup is scoped by organization id then workspace
+id (the organization boundary is checked before the workspace boundary) and one workspace's
+export job can never be read through another workspace's or another tenant's id (threats T5/T1).
+And it carries an **explicit** `ExportScope` — `Workspace` (a full workspace export) or
+`UserData` (a single user's own data) — the "explicit host/admin export scopes" control for
+threat T8 ("Export leak"); the scope is decided at creation by the requester's authorization and
+can never be widened afterwards, so a user-data export is never silently promoted into hidden
+workspace content.
+
+A job is registered `Pending` (queued), a worker `Start`s it (`Pending` → `Running`), and it
+settles into exactly one **terminal** state — `Completed` on success or `Failed` (with a generic,
+log-safe reason) on error — through a guarded state machine: an out-of-order transition is
+rejected, not a no-op, so a finished export can never be silently re-run or overwritten. The
+optional `requested_by` user foreign key **sets null** on delete, so deleting the requesting user
+anonymizes the job record rather than deleting the audit trail of who requested an export
+(mirrors `assets.created_by`); the tenant and workspace foreign keys cascade.
+
+The Exports module also defines the **role-based export projection** (the "export role-based
+projection" control for threat T8): the full `ExportJobView` for host-capable / metadata roles
+(Owner/Admin/Host/CoHost/Auditor — the "View workspace metadata" = yes roles) versus the
+stripped, audience-safe `ExportJobSummaryView` (`{id, scope, status}` only) for audience roles,
+fail-closed to the summary shape for any undefined role. The projector decides the view **shape**,
+not access; the export-request/list HTTP route and its server-side access authorization are a
+later Exports story. CORE-AUD-002 is the export job model, its persistence and its EF migration
+only; there is no export HTTP route yet.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final
