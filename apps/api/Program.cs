@@ -254,6 +254,22 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // entity-instance schema-conformance is wired here (all out of scope).
     builder.Services.AddScoped<TemplateEntityTypeLoader>();
 
+    // Entity search service (CORE-ENT-005, the last story of the Entity System and Templates epic):
+    // searches a workspace's entities for a given workspace role WITH VISIBILITY FILTERING.
+    // Registered here, inside the persistence conditional, because it depends on the entity
+    // repository above (exactly like the join service depends on the session/participant
+    // repositories). It is a plain decision service: tenant id, workspace id, the caller's role and
+    // generic criteria in, the role-appropriate entity set out. The host-capable roles
+    // (Owner/Admin/Host/CoHost — "View host-only content" in docs/06_AUTHORIZATION_MATRIX.md) get
+    // every matching entity through the tenant- and workspace-scoped repository lookups (organization
+    // boundary before workspace boundary; threat T5); every other role gets the fail-closed empty
+    // audience view, deferring the audience-visible computation to the central Visibility engine
+    // (CORE-VIS) rather than duplicating visibility logic here (docs/02_ARCHITECTURE.md,
+    // docs/05_MODULE_CONTRACTS.md) — the same skeleton shape as the CORE-SES-005 participant-visible
+    // feed. There is NO HTTP endpoint (csv/api_routes.csv defines no entity route) and NO visibility
+    // rule engine in this story.
+    builder.Services.AddScoped<EntitySearchService>();
+
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
     // denial. Registered here because it depends on the organization, user
