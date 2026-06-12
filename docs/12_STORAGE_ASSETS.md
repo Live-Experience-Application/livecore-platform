@@ -32,6 +32,23 @@ object-storage SDK dependency and no credentials in source. Until one is wired, 
 default is a fail-closed adapter that denies every operation, so assets stay private
 by default even when storage is not configured.
 
+### Upload intent flow (CORE-AST-003)
+
+The first asset HTTP route, `POST /api/v1/assets/upload-intent`
+(`csv/api_routes.csv`, roles Owner/Admin/Host/CoHost), is the "Create upload intent"
+step of the lifecycle above. After authorizing the caller server-side (tenant +
+workspace role), the flow registers a new `Pending` asset and mints the short-lived,
+signed **upload** URL through the adapter port. The storage coordinates are minted
+**server-side**, never accepted from the client: the deployment's private provider
+and bucket (configuration `Assets:Storage:Provider` / `Assets:Storage:Bucket`, with
+safe private-by-default fallbacks — only the naming, no credentials) plus a tenant-
+and workspace-scoped, collision-free object key (`assets/{organizationId}/{workspaceId}/{uuid}`).
+A client can therefore never choose the bucket or point an upload at another tenant's
+or workspace's object (the storage-object-key uniqueness guarantee). The signed URL
+is minted before the metadata row is persisted, so an unconfigured storage backend
+fails closed (`503`) leaving no orphan pending asset — assets stay private by default
+even when storage is not configured.
+
 ## Security rules
 
 - buckets private by default

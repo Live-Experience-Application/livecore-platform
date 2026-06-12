@@ -673,6 +673,43 @@ some insecure way, so the private-by-default posture holds even when storage is
 not configured (mirroring how the host runs without a database connection string
 or OIDC authority and denies cleanly). There is no asset HTTP route yet.
 
+### Asset upload intent
+
+CORE-AST-003 adds the Assets module's first HTTP route — the upload-intent flow,
+the "Create upload intent" step of the asset lifecycle (`docs/12_STORAGE_ASSETS.md`):
+
+| Method | Route                          | Authorized callers                             |
+| ------ | ------------------------------ | ---------------------------------------------- |
+| `POST` | `/api/v1/assets/upload-intent` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The route has no path parameters, so the request body carries the
+`organizationSlug` (resolved to the tenant by the same token-claim-and-membership
+check as the other routes) and the target `workspaceId`, plus the `contentType`
+of the object the client intends to upload. The caller is authorized **server-side**
+by their role in that workspace: a caller who cannot see the tenant, or who is not
+a member of the target workspace, is hidden as `404` (never `403`), and a known
+member who lacks the upload role is `403`. Only after authorization is the
+`contentType` validated (`400` if missing or malformed).
+
+On success the command registers a new **`Pending`** `Asset` and returns `201` with
+the asset id, its status and a **short-lived, signed upload URL** (and its expiry)
+the client uploads the object to. The storage coordinates are minted **server-side**:
+the deployment's private provider and bucket (configured under `Assets:Storage:*`,
+with safe private-by-default fallbacks — only the naming, never credentials) plus a
+tenant- and workspace-scoped, collision-free object key. A client never supplies a
+bucket or object key, so an upload can never be pointed at another tenant's or
+workspace's object (threats T5/T1). The asset is **private by default**: the only
+access handed out is the single short-lived signed URL after the permission check
+(the epic acceptance criterion; threat T4 "Asset leak").
+
+The signed URL is minted through the `IAssetStorage` adapter **before** the metadata
+row is persisted, so when no object storage is configured the fail-closed
+`UnconfiguredAssetStorage` makes the request `503` and **no** orphan pending asset is
+left behind — the private-by-default posture holds even unconfigured, exactly as the
+host denies cleanly without a database or OIDC authority. The signed download URL flow
+(`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004), linking to content
+blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

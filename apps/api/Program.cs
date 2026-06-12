@@ -480,11 +480,32 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // PostgreSQL (docs/12_STORAGE_ASSETS.md; ADR 0006). The asset is PRIVATE BY DEFAULT: nothing on the
     // aggregate makes it publicly reachable, and the stored object is reached only through an authorized,
     // short-lived signed URL after a permission check (threat T4 "Asset leak"). The storage adapter
-    // interface (CORE-AST-002), the upload intent flow (CORE-AST-003), the signed download URL flow
-    // (CORE-AST-004 — the POST /api/v1/assets/upload-intent and GET /api/v1/assets/{assetId}/download-url
-    // routes in csv/api_routes.csv), linking to content blocks/entities (CORE-AST-005) and the cleanup job
-    // (CORE-AST-006) are later stories and are deliberately not wired here.
+    // interface (CORE-AST-002), the signed download URL flow (CORE-AST-004 — the GET
+    // /api/v1/assets/{assetId}/download-url route in csv/api_routes.csv), linking to content
+    // blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories and are
+    // deliberately not wired here; the upload intent flow (CORE-AST-003) is wired below.
     builder.Services.AddScoped<IAssetRepository, AssetRepository>();
+
+    // Asset storage naming (CORE-AST-003, the upload intent flow): the deployment's PRIVATE provider/bucket
+    // new assets are recorded against (docs/12_STORAGE_ASSETS.md metadata; docs/13_SELF_HOSTING_REQUIREMENTS.md
+    // "object storage endpoint and credentials"). Read once from configuration (Assets:Storage:*) with safe,
+    // private-by-default fallbacks so the host still runs without storage configuration — exactly as it runs
+    // without a database connection string or an OIDC authority. Only the NAMING is read here (no storage
+    // credentials, no SDK); the endpoint and credentials stay inside the deployment-supplied IAssetStorage
+    // adapter (threat T7). Registered as a singleton next to the asset repository because the upload-intent
+    // service consumes it.
+    builder.Services.AddSingleton(AssetStorageLocation.FromConfiguration(builder.Configuration));
+
+    // Asset upload-intent command (CORE-AST-003): registers a new PENDING asset with server-minted storage
+    // coordinates (reusing the CORE-AST-001 Asset aggregate) and mints the short-lived signed upload URL via
+    // the CORE-AST-002 IAssetStorage adapter port. Registered here because it depends on the asset repository,
+    // the storage location and the storage adapter above. The asset is private by default and the signed URL
+    // is minted before the row is persisted, so an unconfigured storage backend fails closed
+    // (AssetStorageNotConfiguredException) leaving no orphan pending asset (the epic acceptance criterion;
+    // threat T4 "Asset leak"). The endpoint authorizes the caller (role + tenant + workspace) BEFORE invoking
+    // it; the signed download URL flow (CORE-AST-004), linking (CORE-AST-005) and cleanup (CORE-AST-006) are
+    // later stories.
+    builder.Services.AddScoped<AssetUploadIntentService>();
 
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
@@ -592,6 +613,19 @@ app.MapSceneEndpoints();
 // host-vs-participant DTO projection (CORE-SCENE-004) and content validation/size limits
 // (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
+
+// Asset upload-intent endpoint (CORE-AST-003): the Assets module's first HTTP route,
+// POST /api/v1/assets/upload-intent. It lives in an authenticated route group and fails
+// closed (503) when persistence is not configured, exactly like the reveal/scene
+// endpoints. No new DI registration beyond the upload-intent service and storage location
+// above is required: the tenant context resolver and the workspace member repository it
+// reuses for authorization are already registered. It authorizes the caller server-side by
+// their role in the target workspace (Owner/Admin/Host/CoHost) within the resolved tenant
+// (every denial hidden as 404, an insufficient role as 403), mints server-side storage
+// coordinates, registers a PENDING asset and returns the short-lived signed upload URL; the
+// asset is private by default and an unconfigured storage backend fails closed with 503
+// (threat T4). The signed download URL flow (CORE-AST-004) is a later story.
+app.MapAssetEndpoints();
 
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires
 // authorization (the hub is [Authorize] and the mapping adds RequireAuthorization()), so an
