@@ -356,8 +356,10 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // audit_logs(organization_id, created_at). CORE-AUD-001 makes the log generic: the
     // AuditLogEntry.Create factory records any security-relevant AuditAction through this same append
     // contract (the reveal command below is the first producer, via the ForVisibilityRuleChange
-    // specialization). The audit query endpoint and its "View audit log" authorization (CORE-AUD-005)
-    // are a later story not wired here.
+    // specialization). CORE-AUD-005 adds the read-side "View audit log" authorization as the stateless
+    // AuditQueryPolicy (Owner/Admin/Auditor, fail-closed) plus the safe AuditLogEntryView read view; like
+    // the export/recap projectors it is a static policy, so it needs no DI registration, and there is no
+    // audit HTTP route (csv/api_routes.csv defines none).
     builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
     // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent

@@ -45,10 +45,11 @@ namespace LiveCore.Api.Audit;
 /// GENERIC, EXTENSIBLE SHAPE. The columns are generic on purpose (a generic action, an optional
 /// resource reference, an optional before/after state pair) so new actions extend this table by being
 /// recorded through the generic <see cref="Create"/> factory, not by reshaping it. CORE-AUD-001 adds
-/// that generic creation API; the audit query permissions story (CORE-AUD-005) adds the read path with
-/// its "View audit log" authorization (Owner/Admin/Auditor, docs/06_AUTHORIZATION_MATRIX.md). No HTTP
-/// read route is built here — the audit log is written as a side effect of already-authorized commands
-/// and read only through that later authorized endpoint.
+/// that generic creation API; the audit query permissions story (CORE-AUD-005) adds the read-side
+/// authorization — <see cref="AuditQueryPolicy"/>, the fail-closed "View audit log" decision
+/// (Owner/Admin/Auditor, docs/06_AUTHORIZATION_MATRIX.md) — and the safe <see cref="AuditLogEntryView"/>
+/// read view. No HTTP read route is built (csv/api_routes.csv defines none): the audit log is written as a
+/// side effect of already-authorized commands and read only through that authorized policy + projection.
 /// </summary>
 public sealed class AuditLogEntry
 {

@@ -14,8 +14,10 @@ namespace LiveCore.Api.Audit;
 /// list-everything method and no by-id-alone lookup.
 ///
 /// The per-action AUTHORIZATION of who may read the audit log ("View audit log" in
-/// docs/06_AUTHORIZATION_MATRIX.md — Owner/Admin/Auditor) is layered by the future audit query endpoint
-/// (CORE-AUD-005); this contract is the raw tenant-scoped persistence the policy sits on top of.
+/// docs/06_AUTHORIZATION_MATRIX.md — Owner/Admin/Auditor) is the <see cref="AuditQueryPolicy"/>
+/// (CORE-AUD-005); this contract is the raw tenant-scoped persistence that policy sits on top of. A future
+/// audit query endpoint composes the trusted tenant resolution, the policy and its projection over this
+/// read (csv/api_routes.csv defines no audit route yet, so none exists).
 /// </summary>
 public interface IAuditLogRepository
 {

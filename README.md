@@ -411,9 +411,27 @@ extensible without a schema change because the action persists by its stable nam
 each producer command wires its own action in its own story.
 
 The audit log is still written only as a side effect of an **already-authorized**
-command, so audit writes are inherently authorized. The audit **read** API with the
-"View audit log" authorization (Owner/Admin/Auditor) is the later audit query
-permissions story (CORE-AUD-005); there is no audit HTTP route yet.
+command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
+story) adds the **audit query permissions** that make the audit **read** path generic
+and authorized. `AuditQueryPolicy` is the reusable, fail-closed server-side decision of
+who may read the append-only log — the "View audit log" row of
+`docs/06_AUTHORIZATION_MATRIX.md`, whose secure default authorized set is exactly
+**Owner/Admin/Auditor**. The audit role (`Auditor`) is allowed here — this is the one
+place the matrix grants it a first-class `yes` (it is only `audit-only`, and denied, on
+the content/asset policies). `Host` is the matrix's deployment-`optional` grant and is
+**denied by Core's fail-closed default**; CoHost, the audience roles
+(Participant/Observer) and any undefined role are denied (deny-by-default; threats
+T1/T5). Because the audit read is a binary access grant rather than a host-vs-audience
+split, there is a **single** safe read view (`AuditLogEntryView`, identifiers/enums/state
+names only — never content, threat T7) handed to an authorized reader, and
+`AuditQueryPolicy.Project` yields the empty set to any unauthorized role (fail-closed
+defence in depth). The policy sits on top of the existing tenant-scoped read
+(`IAuditLogRepository.ListByOrganizationAsync`, which filters by `organization_id` so one
+tenant's records are never returned through another tenant's id — threat T5), so a future
+audit query endpoint composes the trusted tenant resolution, this permission and the
+projection exactly as the export/recap projectors are the reusable core their later
+endpoints sit on. `csv/api_routes.csv` defines no audit route, so there is still no audit
+HTTP route.
 
 ### Participant visible feed (skeleton)
 
