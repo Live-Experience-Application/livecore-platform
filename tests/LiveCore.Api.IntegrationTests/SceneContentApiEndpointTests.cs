@@ -30,6 +30,13 @@ namespace LiveCore.Api.IntegrationTests;
 ///   {Owner, Admin, Host, CoHost} vs denied {Participant, Observer, Auditor} -> 403, every
 ///   denial asserting NO side effect (nothing persisted).</item>
 ///   <item>GET list: any workspace member allowed; a non-member is 404-hidden.</item>
+///   <item>GET list HOST-VS-PARTICIPANT DTO PROJECTION (CORE-SCENE-004): the SAME route
+///   returns the FULL host shape to {Owner, Admin, Host, CoHost, Auditor} ("View
+///   workspace metadata" = yes) and the host-only-field-STRIPPED participant shape to
+///   {Participant, Observer} ("View workspace metadata" = limited). The participant
+///   response's EXACT top-level JSON property set is asserted to be {id, title, order},
+///   so the test FAILS if any host-only field (organization/workspace id, host
+///   timestamps) or any authorization rationale ever leaks into it (threats T2/T7).</item>
 ///   <item>TENANT + WORKSPACE + SCENE isolation negatives: cross-tenant (claim mismatch /
 ///   foreign org), cross-workspace (a Host of workspace X cannot create a scene in sibling
 ///   workspace Y, and cannot add a content block to a scene in sibling Y), unknown/foreign
@@ -119,20 +126,20 @@ public sealed class SceneContentApiEndpointTests
     // =====================================================================
 
     [Fact]
-    public async Task List_scenes_returns_the_workspaces_scenes_in_order_for_a_member()
+    public async Task List_scenes_returns_the_workspaces_scenes_in_order_for_a_host()
     {
         await using var factory = new WorkspaceApiFactory();
-        const string subject = "member-a";
+        const string subject = "host-a";
         Guid workspaceId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var user = await db.AddUserAsync(_issuer, subject);
             var org = await db.AddOrganizationAsync(_orgA);
-            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
             var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
             workspaceId = workspace.Id;
-            // Any membership role may list (workspace members); a Participant suffices.
-            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Participant);
+            // A Host receives the full HOST shape (CORE-SCENE-004 projection by role).
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
             // Seed out of order to prove the endpoint returns the (scene_order, id) order.
             await db.AddSceneAsync(org.Id, workspace.Id, "Third", 2);
             await db.AddSceneAsync(org.Id, workspace.Id, "First", 0);
@@ -144,12 +151,12 @@ public sealed class SceneContentApiEndpointTests
             $"/api/v1/workspaces/{workspaceId}/scenes?organizationSlug={_orgA}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var scenes = await ReadScenesAsync(response);
+        var scenes = await ReadHostScenesAsync(response);
         Assert.Equal(3, scenes.Length);
         // Deterministic ordering by Order.
         Assert.Equal(new[] { 0, 1, 2 }, scenes.Select(s => s.Order).ToArray());
         Assert.Equal(new[] { "First", "Second", "Third" }, scenes.Select(s => s.Title).ToArray());
-        // The generic DTO carries the boundaries + no hidden fields.
+        // The HOST shape carries the boundaries (the host-only fields).
         Assert.All(scenes, s => Assert.Equal(workspaceId, s.WorkspaceId));
         Assert.All(scenes, s => Assert.NotEqual(Guid.Empty, s.OrganizationId));
     }
@@ -175,8 +182,144 @@ public sealed class SceneContentApiEndpointTests
             $"/api/v1/workspaces/{workspaceId}/scenes?organizationSlug={_orgA}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var scenes = await ReadScenesAsync(response);
+        var scenes = await ReadHostScenesAsync(response);
         Assert.Empty(scenes);
+    }
+
+    // =====================================================================
+    // LIST — host-vs-participant DTO PROJECTION by workspace role
+    // (CORE-SCENE-004, csv/api_routes.csv line 15 "Projection by role").
+    // The SAME route returns a DIFFERENT DTO SHAPE depending on the caller's
+    // workspace role: the FULL host shape to the host-capable/metadata roles
+    // (Owner/Admin/Host/CoHost/Auditor, "View workspace metadata" = yes in
+    // docs/06) and the host-only-field-STRIPPED participant shape to the audience
+    // roles (Participant/Observer, "View workspace metadata" = limited). The SET of
+    // scenes is identical for every role — only the per-scene SHAPE differs.
+    // =====================================================================
+
+    /// <summary>
+    /// The workspace roles that receive the FULL host scene shape: docs/06 "View
+    /// workspace metadata" = yes (Owner, Admin, Host, CoHost AND Auditor).
+    /// </summary>
+    public static TheoryData<MembershipRole> HostShapeRoles =>
+    [
+        MembershipRole.Owner,
+        MembershipRole.Admin,
+        MembershipRole.Host,
+        MembershipRole.CoHost,
+        MembershipRole.Auditor,
+    ];
+
+    /// <summary>
+    /// The audience workspace roles that receive the STRIPPED participant scene
+    /// shape: docs/06 "View workspace metadata" = limited (Participant, Observer).
+    /// </summary>
+    public static TheoryData<MembershipRole> ParticipantShapeRoles =>
+    [
+        MembershipRole.Participant,
+        MembershipRole.Observer,
+    ];
+
+    [Theory]
+    [MemberData(nameof(HostShapeRoles))]
+    public async Task List_scenes_returns_the_host_shape_to_a_host_or_metadata_role(MembershipRole role)
+    {
+        await using var factory = new WorkspaceApiFactory();
+        var subject = $"member-{role}";
+        Guid workspaceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, role);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
+            await db.AddSceneAsync(org.Id, workspace.Id, "Opening", 0);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/workspaces/{workspaceId}/scenes?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // Read the body ONCE (the HttpContent stream is single-read), then parse the
+        // shape and the typed DTOs from it.
+        var body = await response.Content.ReadAsStringAsync();
+
+        // The host shape carries the host-only fields (the tenant/workspace boundary
+        // ids and the host preparation timestamps).
+        var properties = FirstScenePropertyNames(body);
+        Assert.Equal(
+            new[] { "id", "organizationId", "workspaceId", "title", "order", "createdAt", "updatedAt" }
+                .OrderBy(n => n, StringComparer.Ordinal),
+            properties.OrderBy(n => n, StringComparer.Ordinal));
+        // The full host DTO deserializes with its boundaries populated.
+        var scenes = Deserialize<SceneDto[]>(body);
+        var scene = Assert.Single(scenes);
+        Assert.Equal("Opening", scene.Title);
+        Assert.Equal(workspaceId, scene.WorkspaceId);
+        Assert.NotEqual(Guid.Empty, scene.OrganizationId);
+    }
+
+    [Theory]
+    [MemberData(nameof(ParticipantShapeRoles))]
+    public async Task List_scenes_returns_the_stripped_participant_shape_to_an_audience_role(MembershipRole role)
+    {
+        await using var factory = new WorkspaceApiFactory();
+        var subject = $"member-{role}";
+        Guid workspaceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, role);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
+            await db.AddSceneAsync(org.Id, workspace.Id, "Opening", 0);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/workspaces/{workspaceId}/scenes?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // Read the body ONCE (the HttpContent stream is single-read), then parse the
+        // shape and the typed DTOs from it.
+        var body = await response.Content.ReadAsStringAsync();
+
+        // The EXACT top-level JSON property set of the participant shape is
+        // {id, title, order} — and NOTHING else. This assertion FAILS if any
+        // host-only field (organizationId, workspaceId, createdAt, updatedAt) or any
+        // authorization-rationale field is ever added to the participant DTO
+        // (docs/08: "Participant DTOs must not contain hidden content fields";
+        // "Never include internal authorization rationale"; threats T2/T7).
+        var properties = FirstScenePropertyNames(body);
+        Assert.Equal(
+            new[] { "id", "title", "order" }.OrderBy(n => n, StringComparer.Ordinal),
+            properties.OrderBy(n => n, StringComparer.Ordinal));
+
+        // Explicitly assert NONE of the host-only fields leaked into the participant
+        // response body (a direct, field-by-field T2 leak guard).
+        Assert.DoesNotContain("organizationId", properties);
+        Assert.DoesNotContain("workspaceId", properties);
+        Assert.DoesNotContain("createdAt", properties);
+        Assert.DoesNotContain("updatedAt", properties);
+
+        // The whole body carries no authorization rationale wording (threat T7).
+        Assert.DoesNotContain("role", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("member", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("visib", body, StringComparison.OrdinalIgnoreCase);
+
+        // The participant shape still deserializes its audience-safe fields, and the
+        // participant still receives ALL of the workspace's scenes (the SET is
+        // unchanged; only the SHAPE is stripped).
+        var scenes = Deserialize<ParticipantSceneDto[]>(body);
+        var scene = Assert.Single(scenes);
+        Assert.Equal("Opening", scene.Title);
+        Assert.Equal(0, scene.Order);
+        Assert.NotEqual(Guid.Empty, scene.Id);
     }
 
     [Fact]
@@ -847,7 +990,7 @@ public sealed class SceneContentApiEndpointTests
         Assert.DoesNotContain("tenant", body, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static async Task<SceneDto[]> ReadScenesAsync(HttpResponseMessage response)
+    private static async Task<SceneDto[]> ReadHostScenesAsync(HttpResponseMessage response)
     {
         var dtos = await response.Content.ReadFromJsonAsync<SceneDto[]>(_json);
         Assert.NotNull(dtos);
@@ -859,6 +1002,28 @@ public sealed class SceneContentApiEndpointTests
         var dto = await response.Content.ReadFromJsonAsync<SceneDto>(_json);
         Assert.NotNull(dto);
         return dto;
+    }
+
+    /// <summary>Deserializes a scene-list response body that has already been read once.</summary>
+    private static T Deserialize<T>(string body)
+    {
+        var value = JsonSerializer.Deserialize<T>(body, _json);
+        Assert.NotNull(value);
+        return value;
+    }
+
+    /// <summary>
+    /// Returns the EXACT set of top-level JSON property names on the FIRST scene of a
+    /// scene-list response body (the body is a JSON array). This is the shape-leak guard
+    /// that fails if a host-only field is ever added to the participant projection.
+    /// </summary>
+    private static string[] FirstScenePropertyNames(string body)
+    {
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
+        var first = document.RootElement[0];
+        Assert.Equal(JsonValueKind.Object, first.ValueKind);
+        return first.EnumerateObject().Select(p => p.Name).ToArray();
     }
 
     private static async Task<ContentBlockDto> ReadContentBlockAsync(HttpResponseMessage response)
@@ -876,6 +1041,11 @@ public sealed class SceneContentApiEndpointTests
         int Order,
         DateTimeOffset CreatedAt,
         DateTimeOffset UpdatedAt);
+
+    private sealed record ParticipantSceneDto(
+        Guid Id,
+        string Title,
+        int Order);
 
     private sealed record ContentBlockDto(
         Guid Id,

@@ -20,11 +20,15 @@ namespace LiveCore.Api.Scenes;
 ///   <item><c>GET  /api/v1/workspaces/{workspaceId}/scenes</c> — module Scenes, roles
 ///   "workspace members". Lists the workspace's scenes in the deterministic
 ///   (scene_order, id) order via <see cref="ISceneRepository.ListByWorkspaceAsync"/>,
-///   returning a GENERIC scene DTO to ALL workspace members. The per-role /
-///   host-vs-participant projection (the "Projection by role" note in
-///   csv/api_routes.csv) is the later CORE-SCENE-004 story and is deliberately NOT
-///   built here — the same generic DTO is returned to every member, exactly like the
-///   workspace read-one route.</item>
+///   PROJECTED BY the caller's workspace role (CORE-SCENE-004, honoring the "Projection
+///   by role" note in csv/api_routes.csv line 15). <see cref="SceneProjection"/>
+///   returns the full host shape (<see cref="SceneResponse"/>) to the host-capable and
+///   metadata-entitled roles (Owner/Admin/Host/CoHost/Auditor) and the
+///   host-only-field-stripped participant shape (<see cref="ParticipantSceneResponse"/>)
+///   to the audience roles (Participant/Observer). Only the per-scene SHAPE changes by
+///   role — every member still receives ALL of the workspace's scenes; deciding WHICH
+///   scenes an audience may see (audience calculation, visibility filtering) is the
+///   Visibility module's later CORE-VIS-* concern, not this projection.</item>
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/scenes</c> — module Scenes, roles
 ///   "Host,CoHost,Owner,Admin". Creates a scene via <see cref="Scene.Create"/> +
 ///   <see cref="ISceneRepository.AddAsync"/>. The order is assigned SERVER-SIDE as
@@ -131,23 +135,36 @@ internal static class SceneEndpoints
         // The list is allowed to ANY membership role ("workspace members"), so any
         // membership suffices; a non-member is hidden as 404 (not 403) so resource
         // existence is not leaked — the same rule as the workspace read-one route
-        // (threats T1/T5).
-        var isMember = await deps.WorkspaceMembers
-            .IsMemberAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+        // (threats T1/T5). The member's actual workspace ROLE then drives the
+        // host-vs-participant projection below, so this loads the membership row
+        // (FindAsync) rather than the boolean IsMemberAsync — the same membership
+        // lookup the create handler uses.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
             .ConfigureAwait(false);
-        if (!isMember)
+        if (member is null)
         {
             return HiddenWorkspace();
         }
 
         // The scenes are returned in the deterministic (scene_order, id) order the
-        // repository enforces. The SAME generic DTO is returned to every member; the
-        // per-role projection is CORE-SCENE-004.
+        // repository enforces. The list is then PROJECTED BY ROLE (CORE-SCENE-004,
+        // csv/api_routes.csv line 15 "Projection by role"): host-capable and
+        // metadata-entitled roles (Owner/Admin/Host/CoHost/Auditor) receive the full
+        // host shape (SceneResponse); the audience roles (Participant/Observer, whose
+        // "View workspace metadata" is "limited" in docs/06_AUTHORIZATION_MATRIX.md)
+        // receive the host-only-field-stripped participant shape
+        // (ParticipantSceneResponse). Only the per-scene SHAPE changes by role — every
+        // member still receives ALL of the workspace's scenes (the SET is unchanged;
+        // deciding WHICH scenes an audience may see is the Visibility module's later
+        // concern, not this projection). MembershipRole is non-linear, so the
+        // classification is EXACT set membership, never a >/< comparison
+        // (SceneProjection.ReceivesHostShape).
         var scenes = await deps.Scenes
             .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
             .ConfigureAwait(false);
 
-        var response = scenes.Select(SceneResponse.From).ToArray();
+        var response = SceneProjection.Project(scenes, member.Role);
         return Results.Ok(response);
     }
 

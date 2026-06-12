@@ -391,9 +391,17 @@ role is `403`.
 Creating a scene assigns its ordering position server-side (appended after the
 current last scene in the workspace); clients never supply or reorder positions.
 Creating a content block stores it at its initial revision. Both creates return
-`201 Created`. The list returns the same generic scene projection to every
-member; the host-versus-participant DTO separation and content validation/size
-limits are later stories in this epic and are not applied yet.
+`201 Created`.
+
+The scene list projects by the caller's workspace role: host-capable and
+metadata roles (`Owner`, `Admin`, `Host`, `CoHost`, `Auditor`) receive the full
+scene metadata, while audience roles (`Participant`, `Observer`) receive a
+stripped, audience-safe projection (scene id, title and order only — no internal
+tenant/workspace ids, no host preparation timestamps, no authorization
+rationale). Only the response shape differs by role; every member still receives
+all of the workspace's scenes, since deciding which scenes an audience may
+actually see is the later Visibility epic. Content validation and size limits
+remain a later story in this epic.
 
 ## Container images
 
