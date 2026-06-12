@@ -505,10 +505,29 @@ Participant/Auditor member without a participant record) all **abort** the
 connection, indistinguishably. Anonymous-participant and auditor realtime channels
 are deferred (the group taxonomy defines neither).
 
-The hub still exposes no client-callable methods and sends no events, so it cannot
-leak one: this story sets up group **membership** only. Event append and delivery
-to these groups, per-recipient projection, reconnect replay and scale-out are
-later Realtime stories (`docs/11_REALTIME_SYNC.md`).
+**Event append and delivery (CORE-RT-003).** The Realtime module owns the
+session-scoped, append-only `session_events` table (the documented critical index
+is `session_events(session_id, created_at, event_id)`) — the durable event stream
+that reconnect replay later reconstructs from. When a command produces an event, the
+Realtime publisher **persists** it to that stream and then **delivers** a
+recipient-safe envelope over SignalR to the server-computed recipient groups
+(`docs/11_REALTIME_SYNC.md`: "command → authorize → persist event → compute
+recipients → … → send to recipient groups"; "Events are never broadcast blindly").
+
+The first producer is the reveal command (`POST …/reveal`): when a reveal actually
+changes visibility (the same change signal the audit uses, so a retry or no-op emits
+nothing), it appends a `ContentRevealed` event. A **selected-participant** reveal is
+delivered to that one participant's group plus the session hosts group — so the
+selected participant receives it, a non-selected participant (not in that group) does
+not, and the hosts get the confirmation. An **audience-wide** reveal is delivered to
+the hosts and observers groups. The delivered envelope carries resource identifiers
+only, never resolved content, and excludes the internal addressing fields of the
+stored event (the org/workspace ids, the actor and the routing target).
+
+Fanning an audience-wide event out to each participant with a per-recipient projected
+payload (the event catalog's `visibilityProjection`), wiring the remaining catalog
+events (`SessionStarted`/`SessionEnded`), reconnect replay and scale-out are later
+Realtime stories (`docs/11_REALTIME_SYNC.md`).
 
 ## Container images
 

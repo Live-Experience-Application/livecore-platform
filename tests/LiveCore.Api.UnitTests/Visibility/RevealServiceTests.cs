@@ -152,6 +152,8 @@ public sealed class RevealServiceTests : IDisposable
         var result = await RevealAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1");
 
         Assert.Equal(RevealOutcome.Applied, result.Outcome);
+        // A real change: a visible rule was created (the realtime event signal, CORE-RT-003).
+        Assert.True(result.VisibilityChanged);
         var rules = await ListRulesAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId);
         Assert.Single(rules);
         Assert.True(rules[0].IsVisibleToAudience());
@@ -183,6 +185,8 @@ public sealed class RevealServiceTests : IDisposable
         var result = await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-1");
 
         Assert.Equal(RevealOutcome.Applied, result.Outcome);
+        // Already visible: no change, so no realtime event is emitted (CORE-RT-003).
+        Assert.False(result.VisibilityChanged);
         var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Scene, resourceId);
         Assert.Single(rules);
         Assert.True(rules[0].IsVisibleToAudience());
@@ -201,6 +205,9 @@ public sealed class RevealServiceTests : IDisposable
 
         Assert.Equal(RevealOutcome.Applied, first.Outcome);
         Assert.Equal(RevealOutcome.AlreadyApplied, second.Outcome);
+        // The first call changed visibility (emit the event); the retry did not (emit nothing).
+        Assert.True(first.VisibilityChanged);
+        Assert.False(second.VisibilityChanged);
         // Exactly one visible rule: the retry produced no duplicate effect.
         var rules = await ListRulesAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId);
         Assert.Single(rules);

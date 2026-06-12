@@ -4,6 +4,7 @@ using LiveCore.Api.Entities;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.SystemModule;
@@ -28,7 +29,8 @@ namespace LiveCore.Api.Persistence;
 /// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table, the
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
-/// System <c>idempotency_keys</c> table and the Audit <c>audit_logs</c> table)
+/// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table and the
+/// Realtime <c>session_events</c> table)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -93,6 +95,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Append-only audit log entries owned by the Audit module.</summary>
     public DbSet<AuditLogEntry> AuditLogs => Set<AuditLogEntry>();
 
+    /// <summary>Append-only session events owned by the Realtime module.</summary>
+    public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -112,5 +117,6 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new VisibilityRuleConfiguration());
         modelBuilder.ApplyConfiguration(new IdempotencyKeyConfiguration());
         modelBuilder.ApplyConfiguration(new AuditLogConfiguration());
+        modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
     }
 }

@@ -397,6 +397,21 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // append/delivery to these groups is CORE-RT-003.
     builder.Services.AddScoped<RealtimeConnectionResolver>();
 
+    // Session event stream (CORE-RT-003): the Realtime module owns the session-scoped, append-only
+    // session_events table (csv/database_tables.csv: module Realtime, scope session, "Append-only event
+    // stream"; the documented critical index session_events(session_id, created_at, event_id)). The
+    // repository is append + tenant/session-scoped read only (no update/delete — events are immutable,
+    // docs/10_DATABASE_SCHEMA.md). The publisher composes it with IHubContext<SessionHub> (registered by
+    // AddSignalR above) to persist an event and deliver its recipient-safe envelope to the CORE-RT-002
+    // server-computed groups ("persist event -> compute recipients -> send to recipient groups",
+    // docs/11_REALTIME_SYNC.md). Registered here, inside the persistence conditional, because the
+    // repository depends on the DbContext; the reveal endpoint resolves the publisher and fails closed
+    // (503) when persistence is off. The reveal command is its first producer (the ContentRevealed
+    // event); the SessionStarted/Ended events and recipient-specific projection are later stories
+    // (CORE-RT-003 follow-up / CORE-RT-004).
+    builder.Services.AddScoped<ISessionEventRepository, SessionEventRepository>();
+    builder.Services.AddScoped<ISessionEventPublisher, SessionEventPublisher>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.

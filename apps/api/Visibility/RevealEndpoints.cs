@@ -1,6 +1,8 @@
+using System.Text.Json;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
@@ -212,6 +214,8 @@ internal static class RevealEndpoints
             targetParticipantId = requestedParticipantId;
         }
 
+        var now = timeProvider.GetUtcNow();
+
         var result = await deps.Reveal
             .RevealAsync(
                 context.OrganizationId,
@@ -221,12 +225,45 @@ internal static class RevealEndpoints
                 targetParticipantId,
                 context.UserProfileId,
                 idempotencyKey,
-                timeProvider.GetUtcNow(),
+                now,
                 cancellationToken)
             .ConfigureAwait(false);
 
+        // REALTIME EVENT (CORE-RT-003): emit the durable ContentRevealed event IFF the reveal actually
+        // changed visibility — the same change signal the audit uses (CORE-VIS-006), so a retry or a
+        // no-op reveal of an already-visible resource emits nothing. The Realtime publisher appends the
+        // event to the session's append-only stream and delivers it to the server-computed recipient
+        // groups (the selected participant, or the audience); a non-selected participant is not in the
+        // target group and so cannot receive it (threat T3). The payload carries resource IDENTIFIERS
+        // only, never resolved content (threat T7/T2).
+        if (result.VisibilityChanged)
+        {
+            var payload = JsonSerializer.Serialize(new RevealEventPayload(
+                result.ResourceType.ToString(),
+                result.ResourceId));
+
+            var sessionEvent = SessionEvent.Create(
+                context.OrganizationId,
+                session.WorkspaceId,
+                sessionGuid,
+                SessionEventTypes.ContentRevealed,
+                context.UserProfileId,
+                targetParticipantId,
+                payload,
+                schemaVersion: 1,
+                now);
+
+            await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        }
+
         return Results.Ok(RevealResponse.From(result));
     }
+
+    /// <summary>
+    /// The server-composed payload of a <c>ContentRevealed</c> event: the generic kind and id of the
+    /// revealed resource. Identifiers only — never the resolved content (threat T7).
+    /// </summary>
+    private sealed record RevealEventPayload(string ResourceType, Guid ResourceId);
 
     /// <summary>
     /// Reads the required <c>Idempotency-Key</c> header. Returns <see langword="false"/> when it is
@@ -280,18 +317,21 @@ internal static class RevealEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var participants = services.GetService<IParticipantRepository>();
         var reveal = services.GetService<RevealService>();
+        var eventPublisher = services.GetService<ISessionEventPublisher>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
             || participants is null
-            || reveal is null)
+            || reveal is null
+            || eventPublisher is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new RevealEndpointDependencies(resolver, sessions, workspaceMembers, participants, reveal);
+        dependencies = new RevealEndpointDependencies(
+            resolver, sessions, workspaceMembers, participants, reveal, eventPublisher);
         return true;
     }
 
@@ -351,5 +391,6 @@ internal static class RevealEndpoints
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         IParticipantRepository Participants,
-        RevealService Reveal);
+        RevealService Reveal,
+        ISessionEventPublisher EventPublisher);
 }

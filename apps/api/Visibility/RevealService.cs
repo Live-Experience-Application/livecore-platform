@@ -196,10 +196,12 @@ internal sealed class RevealService
             .ConfigureAwait(false);
 
         // A concurrent request recorded the same key first: report this one as an idempotent retry
-        // (the effect it applied is the same idempotent "ensure visible").
+        // (the effect it applied is the same idempotent "ensure visible"). On a first apply, surface
+        // whether the visibility ACTUALLY changed (the same signal the audit used) so the endpoint emits
+        // the durable ContentRevealed event exactly once per real change (CORE-RT-003).
         return recorded == IdempotencyKeyAddResult.Duplicate
             ? RevealResult.AlreadyApplied(resourceType, resourceId, targetParticipantId)
-            : RevealResult.Applied(resourceType, resourceId, targetParticipantId);
+            : RevealResult.Applied(resourceType, resourceId, targetParticipantId, visibilityChanged: change is not null);
     }
 
     /// <summary>

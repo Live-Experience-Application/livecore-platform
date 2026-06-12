@@ -1,0 +1,239 @@
+namespace LiveCore.Api.Realtime;
+
+/// <summary>
+/// An append-only session event (CORE-RT-003, "event append and delivery"). The Realtime module owns the
+/// session-scoped <c>session_events</c> table — the "Append-only event stream" that "drive[s] live state
+/// reconstruction" (csv/database_tables.csv: module Realtime, scope <c>session</c>;
+/// docs/09_EVENT_CATALOG.md; docs/10_DATABASE_SCHEMA.md: "session events are append-only"). A
+/// <see cref="SessionEvent"/> is the durable record of one thing that happened in a session; persisting
+/// it is the "persist event" step of the documented delivery flow ("command -> authorize -> persist
+/// event -> compute recipients -> project payload -> send to recipient groups", docs/11_REALTIME_SYNC.md).
+///
+/// FIELDS follow docs/09_EVENT_CATALOG.md's event principles: <see cref="Id"/> (eventId),
+/// <see cref="OrganizationId"/>, <see cref="WorkspaceId"/>, <see cref="SessionId"/>,
+/// <see cref="EventType"/>, <see cref="CreatedBy"/>, <see cref="CreatedAt"/>, <see cref="Payload"/> and
+/// <see cref="SchemaVersion"/>. The documented <c>visibilityProjection</c> field — the per-RECIPIENT
+/// payload projection — is the later recipient-specific projection story (CORE-RT-004); this story
+/// carries only <see cref="TargetParticipantId"/>, the coarse recipient routing (a single selected
+/// participant, or audience-wide when null) that decides which server-managed GROUPS the event is
+/// delivered to (the same routing the CORE-VIS-005 selected-participant reveal already uses).
+///
+/// APPEND-ONLY (docs/10_DATABASE_SCHEMA.md). Every property is get-only; there is no mutator, no setter
+/// and no delete on the repository. An event, once appended, is an immutable historical fact — that is
+/// what lets reconnect replay (CORE-RT-005) reconstruct state from the stream.
+///
+/// TENANT + SESSION boundary: the event is session-scoped, so it carries <see cref="OrganizationId"/>
+/// (the tenant, checked first), <see cref="WorkspaceId"/> and <see cref="SessionId"/>, mirroring every
+/// other workspace/session-scoped aggregate (threat T5 in docs/07_SECURITY_THREAT_MODEL.md). The
+/// documented critical index is <c>session_events(session_id, created_at, event_id)</c>
+/// (docs/10_DATABASE_SCHEMA.md). The surrogate id alone never authorizes access: every read is scoped by
+/// tenant and session.
+///
+/// NO SENSITIVE CONTENT BEYOND THE PAYLOAD (threat T7). The identifier/enum fields are log-safe; the
+/// <see cref="Payload"/> is a bounded, server-composed JSON document of resource IDENTIFIERS (never the
+/// resolved content body), so <see cref="ToString"/> excludes it.
+/// </summary>
+public sealed class SessionEvent
+{
+    /// <summary>Maximum stored length of the generic event-type name.</summary>
+    public const int MaxEventTypeLength = 64;
+
+    /// <summary>Maximum stored length of the server-composed JSON payload.</summary>
+    public const int MaxPayloadLength = 8192;
+
+    private SessionEvent(
+        Guid id,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        string eventType,
+        Guid? createdBy,
+        Guid? targetParticipantId,
+        string payload,
+        int schemaVersion,
+        DateTimeOffset createdAt)
+    {
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Session event id must not be empty.", nameof(id));
+        }
+
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        if (!IsValidEventType(eventType))
+        {
+            throw new ArgumentException("Event type violates the event-type invariants.", nameof(eventType));
+        }
+
+        // A null actor means a system-generated event; a SET actor must be a real user profile id.
+        if (createdBy == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Created-by user profile id must not be empty; pass null for a system event.",
+                nameof(createdBy));
+        }
+
+        // A null target means audience-wide; a SET target must be a real participant id.
+        if (targetParticipantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Target participant id must not be empty; pass null for an audience-wide event.",
+                nameof(targetParticipantId));
+        }
+
+        if (!IsValidPayload(payload))
+        {
+            throw new ArgumentException("Payload violates the payload invariants.", nameof(payload));
+        }
+
+        if (schemaVersion < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(schemaVersion),
+                schemaVersion,
+                "Schema version must be at least 1.");
+        }
+
+        Id = id;
+        OrganizationId = organizationId;
+        WorkspaceId = workspaceId;
+        SessionId = sessionId;
+        EventType = eventType;
+        CreatedBy = createdBy;
+        TargetParticipantId = targetParticipantId;
+        Payload = payload;
+        SchemaVersion = schemaVersion;
+        // Normalized to UTC so the persisted timestamptz value is offset-independent
+        // (docs/10_DATABASE_SCHEMA.md).
+        CreatedAt = createdAt.ToUniversalTime();
+    }
+
+    /// <summary>Materialization constructor for the persistence layer.</summary>
+    private SessionEvent()
+    {
+        EventType = null!;
+        Payload = null!;
+    }
+
+    /// <summary>Surrogate key of the event row (eventId; UUID version 7, time-ordered per docs/10).</summary>
+    public Guid Id { get; }
+
+    /// <summary>Tenant boundary of the event (the <c>organization_id</c> foreign key to <c>organizations</c>).</summary>
+    public Guid OrganizationId { get; }
+
+    /// <summary>Workspace boundary of the event (the <c>workspace_id</c> foreign key to <c>workspaces</c>).</summary>
+    public Guid WorkspaceId { get; }
+
+    /// <summary>The session whose append-only stream this event belongs to (the <c>session_id</c> foreign key).</summary>
+    public Guid SessionId { get; }
+
+    /// <summary>
+    /// The generic event type (docs/09_EVENT_CATALOG.md), a product-neutral Core event name such as
+    /// <c>ContentRevealed</c>. Stored as a string so new event types need no schema change.
+    /// </summary>
+    public string EventType { get; }
+
+    /// <summary>
+    /// The user profile that produced the event (docs/09_EVENT_CATALOG.md <c>createdBy</c>), or
+    /// <see langword="null"/> for a system-generated event.
+    /// </summary>
+    public Guid? CreatedBy { get; }
+
+    /// <summary>
+    /// The single participant this event is routed to (a selected-participant event, CORE-VIS-005), or
+    /// <see langword="null"/> for an audience-wide event. This is the coarse recipient routing the
+    /// delivery uses to pick the server-managed group(s); the per-recipient payload projection is
+    /// CORE-RT-004.
+    /// </summary>
+    public Guid? TargetParticipantId { get; }
+
+    /// <summary>
+    /// The server-composed JSON payload of the event — resource IDENTIFIERS only, never resolved content
+    /// (threat T7). Bounded by <see cref="MaxPayloadLength"/>.
+    /// </summary>
+    public string Payload { get; }
+
+    /// <summary>
+    /// The payload schema version (docs/09_EVENT_CATALOG.md: "Breaking event payload changes require a
+    /// new schema version"). At least 1.
+    /// </summary>
+    public int SchemaVersion { get; }
+
+    /// <summary>When the event happened (UTC). Part of the critical index with the session.</summary>
+    public DateTimeOffset CreatedAt { get; }
+
+    /// <summary>Whether this event is routed to a single selected participant rather than the audience.</summary>
+    public bool IsForSelectedParticipant => TargetParticipantId is not null;
+
+    /// <summary>
+    /// Appends a new session event to the given session's stream (owned by the given workspace and
+    /// tenant). The caller (a Realtime publisher invoked by a command) supplies the already-resolved ids,
+    /// the event type, the optional actor, the optional recipient participant, the server-composed
+    /// payload and the schema version.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, an optional id is explicitly empty, or the event type / payload violates an
+    /// invariant.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The schema version is below 1.</exception>
+    public static SessionEvent Create(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        string eventType,
+        Guid? createdBy,
+        Guid? targetParticipantId,
+        string payload,
+        int schemaVersion,
+        DateTimeOffset createdAt)
+        => new(
+            Guid.CreateVersion7(),
+            organizationId,
+            workspaceId,
+            sessionId,
+            eventType?.Trim() ?? string.Empty,
+            createdBy,
+            targetParticipantId,
+            payload ?? string.Empty,
+            schemaVersion,
+            createdAt);
+
+    /// <summary>
+    /// Whether the given value is a valid event type: non-blank, within the length bound and free of
+    /// control characters.
+    /// </summary>
+    public static bool IsValidEventType(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= MaxEventTypeLength
+            && !value.Any(char.IsControl);
+
+    /// <summary>
+    /// Whether the given value is a valid payload: non-null and within the length bound. The content is
+    /// server-composed (resource ids), so only structural bounds are enforced here.
+    /// </summary>
+    public static bool IsValidPayload(string? value)
+        => value is not null && value.Length <= MaxPayloadLength;
+
+    /// <summary>
+    /// Identifier-only representation safe for structured logs: event id, type, tenant, workspace,
+    /// session, actor, target and schema version. The payload is excluded so it cannot leak through logs
+    /// (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// </summary>
+    public override string ToString()
+        => $"SessionEvent {Id} type={EventType} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
+            + $"by={(CreatedBy is { } actor ? actor.ToString() : "system")} "
+            + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")} v={SchemaVersion}";
+}

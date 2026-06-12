@@ -4,6 +4,7 @@ using System.Text.Json;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using Microsoft.EntityFrameworkCore;
@@ -100,6 +101,15 @@ public sealed class RevealEndpointTests
         Assert.Null(entry.TargetParticipantId);
         Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
         Assert.Equal(await SingleHostProfileIdAsync(factory), entry.ActorUserProfileId);
+
+        // CORE-RT-003: the reveal appended a durable ContentRevealed event to the session's stream
+        // (audience-wide, since no participant was targeted), carrying the resource ids in its payload.
+        var events = await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId);
+        var sessionEvent = Assert.Single(events);
+        Assert.Equal(SessionEventTypes.ContentRevealed, sessionEvent.EventType);
+        Assert.Equal(seed.SessionId, sessionEvent.SessionId);
+        Assert.Null(sessionEvent.TargetParticipantId);
+        Assert.Contains(resourceId.ToString(), sessionEvent.Payload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -124,6 +134,9 @@ public sealed class RevealEndpointTests
 
         // Exactly one rule: the retry produced no duplicate effect.
         Assert.Equal(1, await RuleCountAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.ContentBlock, resourceId));
+
+        // CORE-RT-003: exactly ONE ContentRevealed event — the idempotent retry emitted no second event.
+        Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
     }
 
     [Theory]
@@ -317,6 +330,13 @@ public sealed class RevealEndpointTests
         // The selected participant can see it; the other participant cannot — the crown jewel.
         Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, selected, VisibilityResourceType.Entity, resourceId));
         Assert.False(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, other, VisibilityResourceType.Entity, resourceId));
+
+        // CORE-RT-003: the ContentRevealed event is routed to the SELECTED participant, so the publisher
+        // delivers it to that participant's group only (verified at the service level in
+        // SessionEventPublisherTests); a non-selected participant is not in that group.
+        var sessionEvent = Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
+        Assert.Equal(SessionEventTypes.ContentRevealed, sessionEvent.EventType);
+        Assert.Equal(selected, sessionEvent.TargetParticipantId);
     }
 
     [Fact]
@@ -493,6 +513,20 @@ public sealed class RevealEndpointTests
         using var scope = factory.Services.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
         return await context.UserProfiles.AsNoTracking().Select(profile => profile.Id).SingleAsync();
+    }
+
+    private static async Task<IReadOnlyList<SessionEvent>> SessionEventsAsync(
+        WorkspaceApiFactory factory,
+        Guid organizationId,
+        Guid sessionId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        return await context.SessionEvents.AsNoTracking()
+            .Where(sessionEvent => sessionEvent.OrganizationId == organizationId
+                && sessionEvent.SessionId == sessionId)
+            .OrderBy(sessionEvent => sessionEvent.Id)
+            .ToListAsync();
     }
 
     private readonly record struct SeedResult(Guid OrganizationId, Guid WorkspaceId, Guid SessionId);
