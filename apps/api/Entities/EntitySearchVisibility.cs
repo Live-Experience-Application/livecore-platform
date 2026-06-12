@@ -1,4 +1,5 @@
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Visibility;
 
 namespace LiveCore.Api.Entities;
 
@@ -56,15 +57,15 @@ internal static class EntitySearchVisibility
 {
     /// <summary>
     /// Whether the given workspace role receives the HOST-ONLY-CONTENT view of entity search (every
-    /// matching workspace entity) rather than the audience (visibility-filtered) view. EXACT set
-    /// membership over the roles whose "View host-only content" is <c>yes</c> in
-    /// docs/06_AUTHORIZATION_MATRIX.md: Owner, Admin, Host, CoHost. Every other role — Participant
-    /// and Observer (<c>no</c>), Auditor (<c>audit-only</c>) and any undefined value — is denied the
-    /// host view and falls closed to the audience view. Never a &gt;/&lt; comparison.
+    /// matching workspace entity) rather than the audience (visibility-filtered) view. This DELEGATES
+    /// to the central Visibility module's canonical "View host-only content" classification
+    /// (<see cref="VisibilityRoles.ViewsHostOnlyContent"/>, CORE-VIS-002) so the host-content role set
+    /// (Owner/Admin/Host/CoHost) is defined in ONE place and never duplicated
+    /// (docs/05_MODULE_CONTRACTS.md: visibility logic is not duplicated elsewhere;
+    /// docs/02_ARCHITECTURE.md). Every other role — Participant and Observer (audience), Auditor
+    /// (<c>audit-only</c>) and any undefined value — is denied the host view and falls closed to the
+    /// audience view. The classification is EXACT set membership, never a &gt;/&lt; comparison.
     /// </summary>
     public static bool ViewsHostOnlyContent(MembershipRole role)
-        => role is MembershipRole.Owner
-            or MembershipRole.Admin
-            or MembershipRole.Host
-            or MembershipRole.CoHost;
+        => VisibilityRoles.ViewsHostOnlyContent(role);
 }

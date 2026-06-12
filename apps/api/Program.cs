@@ -260,6 +260,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // not wired here.
     builder.Services.AddScoped<IVisibilityRuleRepository, VisibilityRuleRepository>();
 
+    // Visibility access policy (CORE-VIS-002): the Visibility module's CanViewResource decision —
+    // "may this viewer see this resource?" — over the CORE-VIS-001 visibility rules. Registered here,
+    // inside the persistence conditional, because it depends on the visibility rule repository above
+    // (exactly like the entity search service depends on the entity repository). It is a plain,
+    // fail-closed decision service: tenant id, workspace id, the caller's role and the resource
+    // (type + id) in, an allow/deny decision out. Host-content roles (Owner/Admin/Host/CoHost — "View
+    // host-only content" in docs/06_AUTHORIZATION_MATRIX.md) see the resource regardless of rules
+    // (short-circuit, no DB read); audience roles (Participant/Observer) see it only when a rule makes
+    // it visible (rule lookup leads with organization_id then workspace_id; threat T5); the audit role
+    // and any undefined role are denied by default. This is THE central place visibility is decided
+    // (docs/05_MODULE_CONTRACTS.md: do not duplicate visibility logic elsewhere) — the Entities
+    // module's entity-search role split now delegates to this module's VisibilityRoles. There is NO
+    // HTTP endpoint (csv/api_routes.csv defines no CanViewResource route), and preview-as-participant
+    // (CORE-VIS-003), the reveal command (CORE-VIS-004), selected-participant reveal (CORE-VIS-005)
+    // and audit records (CORE-VIS-006) are later stories not wired here.
+    builder.Services.AddScoped<VisibilityPolicy>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities
