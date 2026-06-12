@@ -1,4 +1,5 @@
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -107,6 +108,11 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
             .HasColumnName("updated_at")
             .IsRequired();
 
+        // Selected-participant target (CORE-VIS-005): NULL = audience-wide, a set value scopes the
+        // rule to one participant. A real column (not JSON), nullable.
+        builder.Property(rule => rule.TargetParticipantId)
+            .HasColumnName("target_participant_id");
+
         // Documented critical index visibility_rules(workspace_id, resource_type, resource_id):
         // resource reads lead with the workspace column (docs/10_DATABASE_SCHEMA.md). NON-unique on
         // purpose (a resource may accumulate multiple rules; see the type summary).
@@ -133,6 +139,19 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
             .WithMany()
             .HasForeignKey(rule => rule.WorkspaceId)
             .HasConstraintName("fk_visibility_rules_workspaces_workspace_id")
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Selected-participant foreign key (CORE-VIS-005): a participant-scoped rule references one
+        // participant. It CASCADES on delete — a participant-scoped rule has no meaning without its
+        // target participant, and cascade (not set-null) is the SAFE behavior: set-null would silently
+        // turn a participant-scoped rule into an audience-wide one, over-sharing the resource (threat
+        // T5). An audience-wide rule has a NULL target and is unaffected. EF maps the auto-index for
+        // the foreign key. The same-workspace coupling (the target participant is in the rule's own
+        // workspace) is enforced by the reveal application flow, mirroring resource_id.
+        builder.HasOne<Participant>()
+            .WithMany()
+            .HasForeignKey(rule => rule.TargetParticipantId)
+            .HasConstraintName("fk_visibility_rules_participants_target_participant_id")
             .OnDelete(DeleteBehavior.Cascade);
 
         // NOTE: resource_id is deliberately NOT mapped as a foreign key — the reference is

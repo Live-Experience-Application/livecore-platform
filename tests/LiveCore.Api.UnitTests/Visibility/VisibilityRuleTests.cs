@@ -194,4 +194,65 @@ public sealed class VisibilityRuleTests
         Assert.Contains(_resourceId.ToString(), text, StringComparison.Ordinal);
         Assert.Contains("Visible", text, StringComparison.Ordinal);
     }
+
+    // --- Selected-participant target (CORE-VIS-005) ----------------------------
+
+    [Fact]
+    public void Create_is_audience_wide_with_no_target()
+    {
+        var rule = CreateRule();
+
+        Assert.Null(rule.TargetParticipantId);
+        Assert.True(rule.IsAudienceWide);
+        Assert.False(rule.TargetsParticipant(Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void CreateForParticipant_scopes_the_rule_to_the_participant()
+    {
+        var participantId = Guid.NewGuid();
+
+        var rule = VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, participantId,
+            VisibilityState.Visible, _createdAt);
+
+        Assert.Equal(participantId, rule.TargetParticipantId);
+        Assert.False(rule.IsAudienceWide);
+        Assert.True(rule.TargetsParticipant(participantId));
+        Assert.False(rule.TargetsParticipant(Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void CreateForParticipant_rejects_an_empty_participant_id()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, Guid.Empty,
+            VisibilityState.Visible, _createdAt));
+        Assert.Equal("targetParticipantId", exception.ParamName);
+    }
+
+    [Fact]
+    public void IsVisibleTo_respects_the_audience_wide_and_participant_dimensions()
+    {
+        var selected = Guid.NewGuid();
+        var other = Guid.NewGuid();
+
+        // An audience-wide visible rule is visible to anyone.
+        var audienceWide = CreateRule(visibility: VisibilityState.Visible);
+        Assert.True(audienceWide.IsVisibleTo(selected));
+        Assert.True(audienceWide.IsVisibleTo(other));
+
+        // A participant-scoped visible rule is visible ONLY to its target.
+        var targeted = VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, selected,
+            VisibilityState.Visible, _createdAt);
+        Assert.True(targeted.IsVisibleTo(selected));
+        Assert.False(targeted.IsVisibleTo(other));
+
+        // A hidden rule is visible to no one, regardless of target.
+        var hidden = VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, selected,
+            VisibilityState.Hidden, _createdAt);
+        Assert.False(hidden.IsVisibleTo(selected));
+    }
 }

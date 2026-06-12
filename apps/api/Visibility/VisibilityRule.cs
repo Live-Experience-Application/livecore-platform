@@ -67,6 +67,7 @@ public sealed class VisibilityRule
         VisibilityResourceType resourceType,
         Guid resourceId,
         VisibilityState visibility,
+        Guid? targetParticipantId,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt)
     {
@@ -106,6 +107,16 @@ public sealed class VisibilityRule
                 "Visibility is not a defined visibility state.");
         }
 
+        // A null target means audience-wide; a SET target must be a real participant id. An empty
+        // target id can never address a participant, so it is rejected (it must not silently degrade
+        // to an audience-wide rule, which would over-share — threat T5).
+        if (targetParticipantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Target participant id must not be empty; pass null for an audience-wide rule.",
+                nameof(targetParticipantId));
+        }
+
         if (updatedAt < createdAt)
         {
             throw new ArgumentException(
@@ -119,6 +130,7 @@ public sealed class VisibilityRule
         ResourceType = resourceType;
         ResourceId = resourceId;
         Visibility = visibility;
+        TargetParticipantId = targetParticipantId;
         // Timestamps are normalized to UTC so the persisted timestamptz values are
         // offset-independent (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -170,10 +182,20 @@ public sealed class VisibilityRule
     public Guid ResourceId { get; }
 
     /// <summary>
-    /// Base audience visibility state of the governed resource — Hidden from the audience or Visible
-    /// to it (<see cref="VisibilityState"/>). Mutable only through <see cref="ChangeVisibility"/>.
+    /// Base visibility state of the governed resource — Hidden or Visible
+    /// (<see cref="VisibilityState"/>). Mutable only through <see cref="ChangeVisibility"/>.
     /// </summary>
     public VisibilityState Visibility { get; private set; }
+
+    /// <summary>
+    /// The participant this rule is scoped to (CORE-VIS-005), or <see langword="null"/> for an
+    /// AUDIENCE-WIDE rule that applies to the whole audience. When set (the <c>target_participant_id</c>
+    /// foreign key to the <c>participants</c> table), the rule's visibility applies ONLY to that
+    /// participant — a selected-participant reveal: a non-selected participant must not see it (threat
+    /// T5; docs/06_AUTHORIZATION_MATRIX.md "Send private content"; docs/09_EVENT_CATALOG.md
+    /// "selected recipients"). Immutable; a rule's target is fixed for its whole life.
+    /// </summary>
+    public Guid? TargetParticipantId { get; }
 
     /// <summary>When this rule was first created (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
@@ -209,8 +231,48 @@ public sealed class VisibilityRule
             resourceType,
             resourceId,
             visibility,
+            targetParticipantId: null,
             createdAt,
             createdAt);
+
+    /// <summary>
+    /// Creates a new visibility rule scoped to a SINGLE participant (CORE-VIS-005) — a
+    /// selected-participant reveal. Identical to <see cref="Create"/> except the rule's visibility
+    /// applies ONLY to <paramref name="targetParticipantId"/>, not the whole audience. The caller is
+    /// responsible for having resolved the participant through a workspace-scoped lookup so the
+    /// participant is in the rule's own workspace (mirrors the resource same-workspace coupling).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id, resource id or target participant id is empty.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The resource type or the visibility state is not defined.
+    /// </exception>
+    public static VisibilityRule CreateForParticipant(
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid targetParticipantId,
+        VisibilityState visibility,
+        DateTimeOffset createdAt)
+    {
+        if (targetParticipantId == Guid.Empty)
+        {
+            throw new ArgumentException("Target participant id must not be empty.", nameof(targetParticipantId));
+        }
+
+        return new(
+            Guid.CreateVersion7(),
+            organizationId,
+            workspaceId,
+            resourceType,
+            resourceId,
+            visibility,
+            targetParticipantId,
+            createdAt,
+            createdAt);
+    }
 
     /// <summary>
     /// Whether this rule belongs to exactly the given organization. Empty ids match nothing. This is
@@ -261,6 +323,31 @@ public sealed class VisibilityRule
     public bool IsVisibleToAudience() => Visibility == VisibilityState.Visible;
 
     /// <summary>
+    /// Whether this rule applies to the WHOLE audience (its <see cref="TargetParticipantId"/> is
+    /// <see langword="null"/>) rather than a single selected participant (CORE-VIS-005).
+    /// </summary>
+    public bool IsAudienceWide => TargetParticipantId is null;
+
+    /// <summary>
+    /// Whether this rule is scoped to exactly the given participant. An empty id matches nothing, and
+    /// an audience-wide rule (no target) targets no specific participant, so it returns
+    /// <see langword="false"/> here (use <see cref="IsAudienceWide"/> for the audience-wide case).
+    /// </summary>
+    public bool TargetsParticipant(Guid participantId)
+        => participantId != Guid.Empty && TargetParticipantId == participantId;
+
+    /// <summary>
+    /// Whether the governed resource is visible to the given participant by THIS rule: the rule must
+    /// be Visible AND either audience-wide (visible to everyone) or scoped to exactly this participant.
+    /// A Visible rule scoped to a DIFFERENT participant is NOT visible to this one — the
+    /// selected-participant guarantee (threat T5). Deciding a participant's overall visibility across
+    /// all of a resource's rules is <c>CanParticipantViewResource</c> (CORE-VIS-005), not this single
+    /// rule.
+    /// </summary>
+    public bool IsVisibleTo(Guid participantId)
+        => IsVisibleToAudience() && (IsAudienceWide || TargetsParticipant(participantId));
+
+    /// <summary>
     /// Changes the base audience visibility state of the governed resource — the state-transition
     /// PRIMITIVE the later reveal command (CORE-VIS-004) builds on (analogous to
     /// <c>Session.Start</c>/<c>Session.End</c>). The tenant boundary, the workspace, the id and the
@@ -306,5 +393,6 @@ public sealed class VisibilityRule
     /// </summary>
     public override string ToString()
         => $"VisibilityRule {Id} org={OrganizationId} ws={WorkspaceId} "
-            + $"resource={ResourceType}:{ResourceId} visibility={Visibility}";
+            + $"resource={ResourceType}:{ResourceId} visibility={Visibility} "
+            + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")}";
 }

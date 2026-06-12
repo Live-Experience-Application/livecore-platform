@@ -29,11 +29,16 @@ public enum RevealOutcome
 /// </summary>
 public sealed class RevealResult
 {
-    private RevealResult(RevealOutcome outcome, VisibilityResourceType resourceType, Guid resourceId)
+    private RevealResult(
+        RevealOutcome outcome,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId)
     {
         Outcome = outcome;
         ResourceType = resourceType;
         ResourceId = resourceId;
+        TargetParticipantId = targetParticipantId;
     }
 
     /// <summary>Whether the reveal was newly applied or recognized as an idempotent retry.</summary>
@@ -45,11 +50,23 @@ public sealed class RevealResult
     /// <summary>The surrogate id of the resource that was revealed.</summary>
     public Guid ResourceId { get; }
 
+    /// <summary>
+    /// The participant the resource was revealed to (a selected-participant reveal, CORE-VIS-005), or
+    /// <see langword="null"/> when it was revealed to the whole audience.
+    /// </summary>
+    public Guid? TargetParticipantId { get; }
+
     /// <summary>Builds a result for a reveal that was applied for the first time.</summary>
-    public static RevealResult Applied(VisibilityResourceType resourceType, Guid resourceId)
-        => new(RevealOutcome.Applied, resourceType, resourceId);
+    public static RevealResult Applied(
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId)
+        => new(RevealOutcome.Applied, resourceType, resourceId, targetParticipantId);
 
     /// <summary>Builds a result for an idempotent retry (the reveal was already applied).</summary>
-    public static RevealResult AlreadyApplied(VisibilityResourceType resourceType, Guid resourceId)
-        => new(RevealOutcome.AlreadyApplied, resourceType, resourceId);
+    public static RevealResult AlreadyApplied(
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId)
+        => new(RevealOutcome.AlreadyApplied, resourceType, resourceId, targetParticipantId);
 }

@@ -1,4 +1,5 @@
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
@@ -95,6 +96,29 @@ public sealed class VisibilityPolicyTests : IDisposable
         VisibilityState visibility)
     {
         var rule = VisibilityRule.Create(organizationId, workspaceId, resourceType, resourceId, visibility, _createdAt);
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+        Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
+    }
+
+    private async Task<Participant> SeedParticipantAsync(Guid organizationId, Guid workspaceId)
+    {
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId: null, "Participant", _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(ParticipantAddResult.Added, await new ParticipantRepository(context).AddAsync(participant, CancellationToken.None));
+        return participant;
+    }
+
+    private async Task SeedParticipantRuleAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid targetParticipantId,
+        VisibilityState visibility)
+    {
+        var rule = VisibilityRule.CreateForParticipant(
+            organizationId, workspaceId, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
         Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
@@ -295,6 +319,97 @@ public sealed class VisibilityPolicyTests : IDisposable
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
+    }
+
+    // --- Selected-participant visibility (CORE-VIS-005) ------------------------
+
+    [Fact]
+    public async Task A_selected_participant_sees_a_reveal_targeted_at_them()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.True(await policy.CanParticipantViewResourceAsync(
+            org, ws, selected, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_non_selected_participant_does_not_see_a_targeted_reveal()
+    {
+        // THE crown jewel: a resource revealed ONLY to participant `selected` must not be visible to a
+        // different participant `other`.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        var other = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanParticipantViewResourceAsync(
+            org, ws, other, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task An_audience_wide_reveal_is_visible_to_any_participant()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        // Any participant sees an audience-wide visible resource.
+        Assert.True(await policy.CanParticipantViewResourceAsync(
+            org, ws, Guid.NewGuid(), VisibilityResourceType.Scene, resourceId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_targeted_reveal_is_not_visible_at_the_role_level()
+    {
+        // CanViewResource is role-level (no participant): a participant-scoped visible rule does NOT
+        // make the resource visible to a generic audience role — only audience-wide rules do.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, selected, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        var decision = await policy.CanViewResourceAsync(
+            org, ws, MembershipRole.Participant, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+        Assert.False(decision.CanView);
+        Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
+
+        // ...but a host still sees it (host-only content access).
+        var hostDecision = await policy.CanViewResourceAsync(
+            org, ws, MembershipRole.Host, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+        Assert.True(hostDecision.CanView);
+    }
+
+    [Fact]
+    public async Task CanParticipantViewResource_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+        var id = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
+            Guid.Empty, id, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
+            id, Guid.Empty, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
+            id, id, Guid.Empty, VisibilityResourceType.Entity, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
+            id, id, id, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
     }
 
     // --- Guards ----------------------------------------------------------------

@@ -362,9 +362,15 @@ client retry safe. The first call applies the reveal (the resource's visibility
 rule becomes `Visible`) and returns `Applied`; a repeat with the same key returns
 `AlreadyApplied` and produces no duplicate effect (the System module's
 `idempotency_keys` table records processed keys, and the visibility change is
-itself idempotent). The durable `ContentRevealed` event and its realtime delivery
-belong to the later realtime event stream and are not emitted yet; restricting a
-reveal to selected participants is a later visibility story.
+itself idempotent).
+
+By default the reveal is **audience-wide** (visible to the whole audience). An
+optional `participantId` in the body makes it a **selected-participant** reveal —
+the resource becomes visible only to that participant, and a non-selected
+participant cannot see it. The target must be a participant of the session's own
+workspace (otherwise the request is hidden as `404`). The durable
+`ContentRevealed` event and its realtime delivery belong to the later realtime
+event stream and are not emitted yet.
 
 ### Participant visible feed (skeleton)
 

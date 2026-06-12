@@ -117,17 +117,71 @@ internal sealed class VisibilityPolicy
             return ResourceVisibilityDecision.Deny(VisibilityAccessReason.DeniedRoleNotPermitted);
         }
 
-        // AUDIENCE role: ALLOW iff a visibility rule makes the resource visible to the audience. The
-        // lookup is tenant- and workspace-scoped (organization boundary before workspace boundary;
-        // resource-level visibility checked last — docs/06 authorization principles), so a rule in
-        // another tenant or workspace can never make this resource visible (threat T5). Any visible
-        // rule grants visibility (the index is non-unique).
+        // AUDIENCE role (role-level, no specific participant): ALLOW iff an AUDIENCE-WIDE visibility
+        // rule makes the resource visible. The lookup is tenant- and workspace-scoped (organization
+        // boundary before workspace boundary; resource-level visibility checked last — docs/06
+        // authorization principles), so a rule in another tenant or workspace can never make this
+        // resource visible (threat T5). A rule scoped to a SPECIFIC participant (CORE-VIS-005) does
+        // NOT grant visibility at this role level — only the audience-wide rules do — because a
+        // role-level check does not identify a participant; whether a specific participant may see a
+        // selected-participant reveal is <see cref="CanParticipantViewResourceAsync"/>.
         var rules = await _rules
             .ListByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
-        return rules.Any(rule => rule.IsVisibleToAudience())
+        return rules.Any(rule => rule.IsVisibleToAudience() && rule.IsAudienceWide)
             ? ResourceVisibilityDecision.Allow(VisibilityAccessReason.GrantedByVisibleRule)
             : ResourceVisibilityDecision.Deny(VisibilityAccessReason.DeniedNotVisible);
+    }
+
+    /// <summary>
+    /// Decides whether a SPECIFIC participant may see the given resource (CORE-VIS-005) — the
+    /// participant-level visibility behind the participant-visible feed. A participant sees a resource
+    /// iff some visibility rule makes it visible to THEM: either an AUDIENCE-WIDE visible rule (visible
+    /// to everyone) or a visible rule scoped to exactly this participant (a selected-participant
+    /// reveal). A visible rule scoped to a DIFFERENT participant does NOT grant access — the
+    /// selected-participant guarantee: a non-selected participant must not see a private reveal (threat
+    /// T5; docs/06 "Send private content"; docs/09 "selected recipients"). The lookup is tenant- and
+    /// workspace-scoped, so a rule in another tenant or workspace never contributes (the organization
+    /// boundary is checked before the workspace boundary). This is a per-participant content check, NOT
+    /// a role check; the caller establishes that the participant is entitled to a feed.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id, participant id or resource id is empty.
+    /// </exception>
+    public async Task<bool> CanParticipantViewResourceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid participantId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (participantId == Guid.Empty)
+        {
+            throw new ArgumentException("Participant id must not be empty.", nameof(participantId));
+        }
+
+        if (resourceId == Guid.Empty)
+        {
+            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
+        }
+
+        var rules = await _rules
+            .ListByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Visible to THIS participant iff some rule is visible AND (audience-wide OR scoped to them).
+        return rules.Any(rule => rule.IsVisibleTo(participantId));
     }
 }

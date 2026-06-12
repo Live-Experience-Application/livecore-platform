@@ -281,12 +281,111 @@ public sealed class RevealEndpointTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    // --- Selected-participant reveal (CORE-VIS-005) ----------------------------
+
+    [Fact]
+    public async Task Host_reveals_to_a_selected_participant_and_only_they_can_see_it()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var resourceId = Guid.CreateVersion7();
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        var selected = await SeedParticipantAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+        var other = await SeedParticipantAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRevealAsync(
+            client, seed.SessionId, BodyForParticipant(_orgA, "Entity", resourceId, selected), "key-1");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<RevealDto>(_json);
+        Assert.Equal(selected, body!.ParticipantId);
+
+        // The selected participant can see it; the other participant cannot — the crown jewel.
+        Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, selected, VisibilityResourceType.Entity, resourceId));
+        Assert.False(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, other, VisibilityResourceType.Entity, resourceId));
+    }
+
+    [Fact]
+    public async Task Reveal_to_a_participant_of_another_workspace_is_404()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var resourceId = Guid.CreateVersion7();
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        // A participant in a DIFFERENT workspace of the same org.
+        Guid foreignParticipant = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var otherWorkspace = await db.AddWorkspaceAsync(seed.OrganizationId, "other-ws", "Other");
+            var participant = await db.AddParticipantAsync(seed.OrganizationId, otherWorkspace.Id, userProfileId: null);
+            foreignParticipant = participant.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRevealAsync(
+            client, seed.SessionId, BodyForParticipant(_orgA, "Entity", resourceId, foreignParticipant), "key-1");
+
+        // The target participant is not in the session's workspace: hidden as 404, no rule created.
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(0, await RuleCountAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Entity, resourceId));
+    }
+
+    [Fact]
+    public async Task Reveal_with_an_empty_participant_id_is_400()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRevealAsync(
+            client, seed.SessionId, BodyForParticipant(_orgA, "Entity", Guid.CreateVersion7(), Guid.Empty), "key-1");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     // =====================================================================
     // Helpers.
     // =====================================================================
 
     private static object Body(string? organizationSlug, string resourceType, Guid resourceId)
         => new { organizationSlug, resourceType, resourceId };
+
+    private static object BodyForParticipant(string? organizationSlug, string resourceType, Guid resourceId, Guid participantId)
+        => new { organizationSlug, resourceType, resourceId, participantId };
+
+    private static async Task<Guid> SeedParticipantAsync(WorkspaceApiFactory factory, Guid organizationId, Guid workspaceId)
+    {
+        Guid participantId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var participant = await db.AddParticipantAsync(organizationId, workspaceId, userProfileId: null);
+            participantId = participant.Id;
+        });
+        return participantId;
+    }
+
+    private static async Task<bool> ParticipantCanViewAsync(
+        WorkspaceApiFactory factory,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid participantId,
+        VisibilityResourceType resourceType,
+        Guid resourceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        var rules = await context.VisibilityRules.AsNoTracking()
+            .Where(rule => rule.OrganizationId == organizationId
+                && rule.WorkspaceId == workspaceId
+                && rule.ResourceType == resourceType
+                && rule.ResourceId == resourceId)
+            .ToListAsync();
+        // Uses the public aggregate predicate: visible iff some rule is visible AND (audience-wide OR
+        // scoped to this participant) — the same rule the Visibility policy applies.
+        return rules.Any(rule => rule.IsVisibleTo(participantId));
+    }
 
     private static async Task<HttpResponseMessage> PostRevealAsync(
         HttpClient client,
@@ -362,5 +461,5 @@ public sealed class RevealEndpointTests
 
     private readonly record struct SeedResult(Guid OrganizationId, Guid WorkspaceId, Guid SessionId);
 
-    private sealed record RevealDto(string ResourceType, Guid ResourceId, bool Visible, string Outcome);
+    private sealed record RevealDto(string ResourceType, Guid ResourceId, bool Visible, string Outcome, Guid? ParticipantId);
 }

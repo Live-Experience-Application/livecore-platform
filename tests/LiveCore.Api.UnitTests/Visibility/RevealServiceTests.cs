@@ -1,4 +1,5 @@
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.SystemModule;
 using LiveCore.Api.Visibility;
@@ -103,11 +104,25 @@ public sealed class RevealServiceTests : IDisposable
             .ListByResourceAsync(org, ws, type, resourceId, CancellationToken.None);
     }
 
-    private async Task<RevealResult> RevealAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId, string key)
+    private async Task<RevealResult> RevealAsync(
+        Guid org,
+        Guid ws,
+        VisibilityResourceType type,
+        Guid resourceId,
+        string key,
+        Guid? targetParticipantId = null)
     {
         await using var context = CreateContext();
         var service = CreateService(context);
-        return await service.RevealAsync(org, ws, type, resourceId, key, _now, CancellationToken.None);
+        return await service.RevealAsync(org, ws, type, resourceId, targetParticipantId, key, _now, CancellationToken.None);
+    }
+
+    private async Task<Participant> SeedParticipantAsync(Guid org, Guid ws)
+    {
+        var participant = Participant.Create(org, ws, userProfileId: null, "Participant", _now);
+        await using var context = CreateContext();
+        Assert.Equal(ParticipantAddResult.Added, await new ParticipantRepository(context).AddAsync(participant, CancellationToken.None));
+        return participant;
     }
 
     // --- State change ----------------------------------------------------------
@@ -193,6 +208,77 @@ public sealed class RevealServiceTests : IDisposable
         Assert.Single(rules);
     }
 
+    // --- Selected-participant reveal (CORE-VIS-005) ----------------------------
+
+    [Fact]
+    public async Task Selected_reveal_creates_a_participant_scoped_visible_rule()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        var result = await RevealAsync(
+            org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1", participant.Id);
+
+        Assert.Equal(RevealOutcome.Applied, result.Outcome);
+        Assert.Equal(participant.Id, result.TargetParticipantId);
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId);
+        Assert.Single(rules);
+        Assert.True(rules[0].IsVisibleToAudience());
+        Assert.Equal(participant.Id, rules[0].TargetParticipantId);
+        Assert.False(rules[0].IsAudienceWide);
+    }
+
+    [Fact]
+    public async Task A_selected_reveal_does_not_create_an_audience_wide_rule()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1", participant.Id);
+
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        // The only rule is participant-scoped; there is NO audience-wide rule, so the whole audience
+        // is not granted visibility by this private reveal.
+        Assert.Single(rules);
+        Assert.False(rules[0].IsAudienceWide);
+    }
+
+    [Fact]
+    public async Task Audience_wide_and_selected_reveals_are_independent_dimensions()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        // An audience-wide reveal and a selected reveal of the SAME resource create two distinct rules
+        // (one audience-wide, one participant-scoped) — they never collapse into one.
+        await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-aud");
+        await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-sel", participant.Id);
+
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Scene, resourceId);
+        Assert.Equal(2, rules.Count);
+        Assert.Contains(rules, r => r.IsAudienceWide && r.IsVisibleToAudience());
+        Assert.Contains(rules, r => r.TargetsParticipant(participant.Id) && r.IsVisibleToAudience());
+    }
+
+    [Fact]
+    public async Task Repeating_a_selected_reveal_key_is_idempotent()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        var first = await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1", participant.Id);
+        var second = await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1", participant.Id);
+
+        Assert.Equal(RevealOutcome.Applied, first.Outcome);
+        Assert.Equal(RevealOutcome.AlreadyApplied, second.Outcome);
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+    }
+
     // --- Isolation -------------------------------------------------------------
 
     [Fact]
@@ -221,13 +307,16 @@ public sealed class RevealServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            Guid.Empty, ws, VisibilityResourceType.Entity, Guid.NewGuid(), "key", _now, CancellationToken.None));
+            Guid.Empty, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), "key", _now, CancellationToken.None));
+            org, Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.Empty, "key", _now, CancellationToken.None));
+            org, ws, VisibilityResourceType.Entity, Guid.Empty, null, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), "  ", _now, CancellationToken.None));
+            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, "  ", _now, CancellationToken.None));
+        // An explicitly empty (non-null) target participant id is rejected.
+        await Assert.ThrowsAsync<ArgumentException>(() => service.RevealAsync(
+            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), Guid.Empty, "key", _now, CancellationToken.None));
     }
 
     [Fact]
@@ -238,6 +327,6 @@ public sealed class RevealServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.RevealAsync(
-            org, ws, (VisibilityResourceType)999, Guid.NewGuid(), "key", _now, CancellationToken.None));
+            org, ws, (VisibilityResourceType)999, Guid.NewGuid(), null, "key", _now, CancellationToken.None));
     }
 }

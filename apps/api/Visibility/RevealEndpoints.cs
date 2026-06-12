@@ -1,5 +1,6 @@
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
@@ -184,12 +185,37 @@ internal static class RevealEndpoints
             return ValidationError("The 'resourceId' value is required.");
         }
 
+        // Optional SELECTED-participant target (CORE-VIS-005). Absent/null -> reveal to the whole
+        // audience. A present-but-empty id is a 400. A set id must be a participant of the SESSION'S
+        // OWN workspace: it is resolved within the resolved tenant and its workspace is verified, so a
+        // cross-tenant or cross-workspace (or unknown) participant is hidden as 404 — a host must not
+        // be able to target, or probe for, a participant outside the session's workspace (threat T5).
+        Guid? targetParticipantId = null;
+        if (request.ParticipantId is { } requestedParticipantId)
+        {
+            if (requestedParticipantId == Guid.Empty)
+            {
+                return ValidationError("The 'participantId' value must not be empty.");
+            }
+
+            var participant = await deps.Participants
+                .FindByIdInOrganizationAsync(context.OrganizationId, requestedParticipantId, cancellationToken)
+                .ConfigureAwait(false);
+            if (participant is null || participant.WorkspaceId != session.WorkspaceId)
+            {
+                return HiddenSession();
+            }
+
+            targetParticipantId = requestedParticipantId;
+        }
+
         var result = await deps.Reveal
             .RevealAsync(
                 context.OrganizationId,
                 session.WorkspaceId,
                 resourceType,
                 request.ResourceId,
+                targetParticipantId,
                 idempotencyKey,
                 timeProvider.GetUtcNow(),
                 cancellationToken)
@@ -248,18 +274,20 @@ internal static class RevealEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var participants = services.GetService<IParticipantRepository>();
         var reveal = services.GetService<RevealService>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
+            || participants is null
             || reveal is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new RevealEndpointDependencies(resolver, sessions, workspaceMembers, reveal);
+        dependencies = new RevealEndpointDependencies(resolver, sessions, workspaceMembers, participants, reveal);
         return true;
     }
 
@@ -318,5 +346,6 @@ internal static class RevealEndpoints
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
+        IParticipantRepository Participants,
         RevealService Reveal);
 }

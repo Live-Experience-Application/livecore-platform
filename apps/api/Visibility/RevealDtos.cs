@@ -23,7 +23,17 @@ namespace LiveCore.Api.Visibility;
 /// (Scene/ContentBlock/Entity). Parsed by name; a numeric or unknown value is a 400.
 /// </param>
 /// <param name="ResourceId">The surrogate id of the resource to reveal.</param>
-public sealed record RevealRequest(string? OrganizationSlug, string? ResourceType, Guid ResourceId);
+/// <param name="ParticipantId">
+/// Optional target of a SELECTED-participant reveal (CORE-VIS-005): when set, the resource is
+/// revealed ONLY to that participant; when omitted/<see langword="null"/>, it is revealed to the
+/// whole audience. A present-but-empty value is a 400; a set value must be a participant of the
+/// session's workspace (otherwise hidden as 404).
+/// </param>
+public sealed record RevealRequest(
+    string? OrganizationSlug,
+    string? ResourceType,
+    Guid ResourceId,
+    Guid? ParticipantId = null);
 
 /// <summary>
 /// Response body of the reveal command (CORE-VIS-004). It echoes the revealed resource (kind + id),
@@ -39,7 +49,16 @@ public sealed record RevealRequest(string? OrganizationSlug, string? ResourceTyp
 /// Whether the reveal was newly applied or recognized as an idempotent retry (the
 /// <see cref="RevealOutcome"/> name).
 /// </param>
-public sealed record RevealResponse(string ResourceType, Guid ResourceId, bool Visible, string Outcome)
+/// <param name="ParticipantId">
+/// The participant the resource was revealed to (a selected-participant reveal), or
+/// <see langword="null"/> when it was revealed to the whole audience.
+/// </param>
+public sealed record RevealResponse(
+    string ResourceType,
+    Guid ResourceId,
+    bool Visible,
+    string Outcome,
+    Guid? ParticipantId)
 {
     /// <summary>Projects a <see cref="RevealResult"/> into its response DTO.</summary>
     public static RevealResponse From(RevealResult result)
@@ -50,6 +69,7 @@ public sealed record RevealResponse(string ResourceType, Guid ResourceId, bool V
             result.ResourceType.ToString(),
             result.ResourceId,
             Visible: true,
-            result.Outcome.ToString());
+            result.Outcome.ToString(),
+            result.TargetParticipantId);
     }
 }

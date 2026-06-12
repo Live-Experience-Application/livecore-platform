@@ -65,11 +65,17 @@ internal sealed class RevealService
     /// <param name="workspaceId">The session's workspace the resource belongs to.</param>
     /// <param name="resourceType">The kind of resource to reveal.</param>
     /// <param name="resourceId">The surrogate id of the resource to reveal.</param>
+    /// <param name="targetParticipantId">
+    /// The participant to reveal to (a SELECTED-participant reveal, CORE-VIS-005), or
+    /// <see langword="null"/> to reveal to the WHOLE audience. When set it must be a real participant
+    /// id; the caller is responsible for having resolved it within the resource's workspace.
+    /// </param>
     /// <param name="idempotencyKey">The client <c>Idempotency-Key</c> header value.</param>
     /// <param name="now">The command timestamp.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id or resource id is empty, or the idempotency key is blank.
+    /// The organization id, workspace id or resource id is empty, the target participant id is empty,
+    /// or the idempotency key is blank.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The resource type is not defined.</exception>
     public async Task<RevealResult> RevealAsync(
@@ -77,6 +83,7 @@ internal sealed class RevealService
         Guid workspaceId,
         VisibilityResourceType resourceType,
         Guid resourceId,
+        Guid? targetParticipantId,
         string idempotencyKey,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -104,6 +111,13 @@ internal sealed class RevealService
             throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
         }
 
+        if (targetParticipantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Target participant id must not be empty; pass null to reveal to the whole audience.",
+                nameof(targetParticipantId));
+        }
+
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
             throw new ArgumentException("Idempotency key must not be empty.", nameof(idempotencyKey));
@@ -116,13 +130,14 @@ internal sealed class RevealService
         var existing = await _idempotency.FindAsync(scope, idempotencyKey, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
-            return RevealResult.AlreadyApplied(resourceType, resourceId);
+            return RevealResult.AlreadyApplied(resourceType, resourceId, targetParticipantId);
         }
 
         // Apply the (state-idempotent) effect, then record the key. Recording after the effect means
         // a crash between the two leaves the key unrecorded, so a retry safely re-ensures visibility
         // (the effect is idempotent) rather than skipping it.
-        await EnsureVisibleAsync(organizationId, workspaceId, resourceType, resourceId, now, cancellationToken)
+        await EnsureVisibleAsync(
+                organizationId, workspaceId, resourceType, resourceId, targetParticipantId, now, cancellationToken)
             .ConfigureAwait(false);
 
         var recorded = await _idempotency
@@ -132,21 +147,26 @@ internal sealed class RevealService
         // A concurrent request recorded the same key first: report this one as an idempotent retry
         // (the effect it applied is the same idempotent "ensure visible").
         return recorded == IdempotencyKeyAddResult.Duplicate
-            ? RevealResult.AlreadyApplied(resourceType, resourceId)
-            : RevealResult.Applied(resourceType, resourceId);
+            ? RevealResult.AlreadyApplied(resourceType, resourceId, targetParticipantId)
+            : RevealResult.Applied(resourceType, resourceId, targetParticipantId);
     }
 
     /// <summary>
-    /// Ensures the given resource is visible to the audience, idempotently: if a visibility rule
-    /// already makes it visible, does nothing; otherwise flips an existing (hidden) rule to visible,
-    /// or creates a visible rule when the resource has none. All reads/writes are tenant- and
-    /// workspace-scoped.
+    /// Ensures the given resource is visible IN THE TARGET DIMENSION, idempotently. The target
+    /// dimension is either audience-wide (<paramref name="targetParticipantId"/> is
+    /// <see langword="null"/>) or one selected participant; the two are independent — an audience-wide
+    /// reveal never touches a participant-scoped rule and vice versa, so a private reveal to one
+    /// participant never widens visibility for anyone else. Within the matching dimension: if a rule
+    /// already makes the resource visible, does nothing; otherwise flips an existing (hidden) rule in
+    /// that dimension to visible, or creates a visible rule when none exists for it. All reads/writes
+    /// are tenant- and workspace-scoped.
     /// </summary>
     private async Task EnsureVisibleAsync(
         Guid organizationId,
         Guid workspaceId,
         VisibilityResourceType resourceType,
         Guid resourceId,
+        Guid? targetParticipantId,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -154,15 +174,21 @@ internal sealed class RevealService
             .ListByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
-        // Already visible: nothing to do (state-level idempotence).
-        if (rules.Any(rule => rule.IsVisibleToAudience()))
+        // Only the rules in the SAME target dimension are relevant: audience-wide rules for an
+        // audience-wide reveal, or rules scoped to exactly this participant for a selected reveal.
+        var inDimension = rules
+            .Where(rule => rule.TargetParticipantId == targetParticipantId)
+            .ToArray();
+
+        // Already visible in this dimension: nothing to do (state-level idempotence).
+        if (inDimension.Any(rule => rule.IsVisibleToAudience()))
         {
             return;
         }
 
-        // A hidden rule exists for the resource: flip it to visible (the CORE-VIS-001 primitive)
+        // A hidden rule exists in this dimension: flip it to visible (the CORE-VIS-001 primitive)
         // rather than accumulating a second rule.
-        var hiddenRule = rules.Count > 0 ? rules[0] : null;
+        var hiddenRule = inDimension.Length > 0 ? inDimension[0] : null;
         if (hiddenRule is not null)
         {
             hiddenRule.ChangeVisibility(VisibilityState.Visible, now);
@@ -170,9 +196,13 @@ internal sealed class RevealService
             return;
         }
 
-        // No rule for the resource yet: create a visible one.
-        var created = VisibilityRule.Create(
-            organizationId, workspaceId, resourceType, resourceId, VisibilityState.Visible, now);
+        // No rule in this dimension yet: create a visible one — audience-wide or scoped to the
+        // participant, per the target.
+        var created = targetParticipantId is { } participantId
+            ? VisibilityRule.CreateForParticipant(
+                organizationId, workspaceId, resourceType, resourceId, participantId, VisibilityState.Visible, now)
+            : VisibilityRule.Create(
+                organizationId, workspaceId, resourceType, resourceId, VisibilityState.Visible, now);
         await _rules.AddAsync(created, cancellationToken).ConfigureAwait(false);
     }
 
