@@ -622,6 +622,26 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // commands (session.active.max, the session's workspace subject); no new HTTP route is added.
     builder.Services.AddScoped<QuotaEnforcementService>();
 
+    // Purchase transaction persistence and audit trail (CORE-STORE-002, the second story of the "Store Purchase
+    // Verification" epic): the Store module owns the purchase_transactions table (the persisted verified purchase,
+    // keyed idempotently on the provider + provider_transaction_id pair) and the append-only purchase_events table
+    // (the audit trail of purchase state changes) — docs/05_MODULE_CONTRACTS.md;
+    // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md "Database additions"; csv/database_tables.csv: module Store.
+    // Registered here, inside the persistence conditional, exactly like the entitlement repositories above, because
+    // the repositories depend on the DbContext. CORE-STORE-001 modeled the provider abstraction and deferred
+    // "persistence of the verified transaction" to here; the PurchaseTransactionService records a verified purchase
+    // IDEMPOTENTLY (the unique purchase_transactions(provider, provider_transaction_id) index makes a client retry,
+    // a replayed proof or a duplicate notification a safe no-op — "Store notifications must be idempotent", docs/21)
+    // and appends a purchase_events entry for every purchase STATE CHANGE, so "all purchase state changes are
+    // persisted and auditable" (the story acceptance criterion). Authorization is upstream of this service: the
+    // Apple (CORE-STORE-003) and Google (CORE-STORE-004) verification endpoints authorize the caller server-side and
+    // verify the proof BEFORE recording, and the store-notification handler (CORE-STORE-005) drives the status
+    // changes and their entitlement effects; this story supplies the generic persistence + audit primitives only,
+    // and adds no store HTTP route.
+    builder.Services.AddScoped<IPurchaseTransactionRepository, PurchaseTransactionRepository>();
+    builder.Services.AddScoped<IPurchaseEventRepository, PurchaseEventRepository>();
+    builder.Services.AddScoped<PurchaseTransactionService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.

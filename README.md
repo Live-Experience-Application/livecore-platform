@@ -1184,6 +1184,47 @@ there is **no** store HTTP route, table or migration yet. Persisting the verifie
 (CORE-STORE-002), the Apple (CORE-STORE-003) and Google (CORE-STORE-004) verification endpoint contracts, and
 idempotent store notifications (CORE-STORE-005) are later stories.
 
+### Purchase transaction persistence and audit trail
+
+CORE-STORE-002 (the next story of the `Store Purchase Verification` epic) persists the verified purchase
+CORE-STORE-001 produced and records its lifecycle as an audit trail — the acceptance criterion **"Purchase state
+changes are persisted and auditable"** (`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`: "Backend persists
+PurchaseTransaction"; "All purchase state changes must be auditable"). CORE-STORE-001 modeled the provider
+abstraction and explicitly deferred "persistence of the verified transaction" to here. It adds two of the Store
+module's tables (`apps/api/Store/`; `csv/database_tables.csv`: module Store) and the recording service over them;
+there is still **no** store HTTP route (the verification endpoints are CORE-STORE-003/004).
+
+A `PurchaseTransaction` is the persisted record of one verified purchase: the `provider`, the provider-assigned
+`provider_transaction_id`, the `product_reference`, the current lifecycle `status` and the record/update
+timestamps. It is built **only** from a `VerifiedPurchase` a provider adapter already verified server-side, so Core
+never trusts a client (`docs/21` "Never trust client-side premium flags"). The buyer/subject linkage — which user
+or workspace the purchase grants premium to — is the separate `billing_account_links` table (a later story), not a
+column here, so the transaction carries no `organization_id` and no buyer column. The stored identifiers are not
+secrets; only the raw verification proof is, and the proof is **never persisted** (threat T7).
+
+The purchase is named **idempotently** by the `(provider, provider_transaction_id)` pair — a provider transaction
+id is unique within its provider — so the unique `purchase_transactions(provider, provider_transaction_id)` index
+makes recording the same verified purchase twice (a client retry, a replayed proof, a duplicate notification) a
+safe no-op that creates no second row and no duplicate audit event (`docs/21` "Store notifications must be
+idempotent"), the persistence analogue of the unique `idempotency_keys(scope, key)` index.
+
+`PurchaseEvent` is the append-only `purchase_events` trail (mirrors the append-only `audit_logs` and
+`session_events`): each row records one state change as a `previous_status` (NULL for the initial recording) →
+`new_status` pair, so a purchase's lifecycle is fully reconstructable from immutable facts. The
+`purchase_transaction_id` foreign key **cascades** — the trail is part of the transaction's own history; the
+documented critical index is `purchase_events(purchase_transaction_id, created_at)`.
+
+A verified purchase is recorded `Active`; the generic states `Active`/`Cancelled`/`Refunded`/`InGracePeriod` model
+renewals, cancellations, refunds and grace periods (grace periods represented **explicitly**, `docs/21`).
+`PurchaseTransactionService` records a verified purchase (writing the initial audit event) and audits each status
+change, idempotently — recording an already-recorded purchase returns `AlreadyRecorded` and a change to the current
+status writes no event, and a change to an unknown purchase fails closed. **Which** provider notification drives
+**which** transition, the idempotent ingestion of those notifications and the entitlement downgrade/revocation a
+refund or cancellation causes are the later store-notification story (CORE-STORE-005); authorization is upstream of
+this service (the Apple CORE-STORE-003 and Google CORE-STORE-004 verification endpoints authorize the caller and
+verify the proof **before** recording). This story supplies the generic, reusable persistence + audit primitives
+they build on.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

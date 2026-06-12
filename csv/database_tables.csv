@@ -28,4 +28,6 @@ plan_entitlements,Entitlements,global,Plan-to-entitlement grant
 subject_entitlements,Entitlements,subject,Per-subject entitlement assignment
 quota_definitions,Entitlements,global,Generic quota measurement definition
 quota_usage,Entitlements,subject,Per-subject recorded quota usage
+purchase_transactions,Store,global,Verified store purchase (idempotent on provider+provider_transaction_id)
+purchase_events,Store,purchase,Append-only purchase state-change audit trail
 idempotency_keys,System,scope,Retry safety

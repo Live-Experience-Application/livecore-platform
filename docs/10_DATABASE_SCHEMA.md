@@ -73,6 +73,8 @@ recaps(session_id, id)
 entitlement_definitions(key) unique
 plan_definitions(key) unique
 plan_entitlements(plan_definition_id, entitlement_definition_id) unique
+purchase_transactions(provider, provider_transaction_id) unique
+purchase_events(purchase_transaction_id, created_at)
 idempotency_keys(scope, key)
 ```
 

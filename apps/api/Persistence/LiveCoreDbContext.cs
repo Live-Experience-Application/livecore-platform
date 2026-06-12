@@ -11,6 +11,7 @@ using LiveCore.Api.Realtime;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Store;
 using LiveCore.Api.SystemModule;
 using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
@@ -39,7 +40,8 @@ namespace LiveCore.Api.Persistence;
 /// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
 /// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c>,
 /// <c>plan_entitlements</c>, <c>subject_entitlements</c>, <c>quota_definitions</c>
-/// and <c>quota_usage</c> tables)
+/// and <c>quota_usage</c> tables and the Store <c>purchase_transactions</c> and
+/// <c>purchase_events</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -143,6 +145,12 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Per-subject quota usage owned by the Entitlements module.</summary>
     public DbSet<QuotaUsage> QuotaUsage => Set<QuotaUsage>();
 
+    /// <summary>Verified store purchase transactions owned by the Store module.</summary>
+    public DbSet<PurchaseTransaction> PurchaseTransactions => Set<PurchaseTransaction>();
+
+    /// <summary>Append-only purchase state-change audit events owned by the Store module.</summary>
+    public DbSet<PurchaseEvent> PurchaseEvents => Set<PurchaseEvent>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -175,5 +183,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new SubjectEntitlementConfiguration());
         modelBuilder.ApplyConfiguration(new QuotaDefinitionConfiguration());
         modelBuilder.ApplyConfiguration(new QuotaUsageConfiguration());
+        modelBuilder.ApplyConfiguration(new PurchaseTransactionConfiguration());
+        modelBuilder.ApplyConfiguration(new PurchaseEventConfiguration());
     }
 }

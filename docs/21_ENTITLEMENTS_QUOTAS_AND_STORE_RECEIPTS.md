@@ -157,6 +157,46 @@ logic is isolated from Core domain logic** (the `Store Purchase Verification` ep
   endpoints authorize the caller server-side, then resolve the adapter and verify. CORE-STORE-001 is the
   abstraction only — no store route, table or migration; persistence of the verified transaction is CORE-STORE-002.
 
+## Purchase transaction persistence and audit trail (CORE-STORE-002)
+
+CORE-STORE-001 produced a verified, provider-neutral `VerifiedPurchase` and deferred "persistence of the verified
+transaction" to here. CORE-STORE-002 persists it and records its lifecycle as an audit trail, so **purchase state
+changes are persisted and auditable** (the story's acceptance criterion; the "All purchase state changes must be
+auditable" security requirement below). It adds two of the module's "Database additions" — `purchase_transactions`
+and `purchase_events` (`apps/api/Store/`) — and the recording service over them, but **no** store HTTP route (the
+verification endpoints are CORE-STORE-003/004).
+
+- `PurchaseTransaction` is the persisted record of one verified purchase: the `provider`, the provider-assigned
+  `provider_transaction_id`, the `product_reference`, the current lifecycle `status` and the record/update
+  timestamps. It is created **only** from a `VerifiedPurchase` a provider adapter already verified server-side, so
+  Core never trusts a client flag ("Never trust client-side premium flags"; "Never unlock limits before server
+  verification succeeds").
+- **Idempotent.** A purchase is named idempotently by the (`provider`, `provider_transaction_id`) pair — a
+  provider transaction id is unique within its provider — so the unique
+  `purchase_transactions(provider, provider_transaction_id)` index makes recording the same verified purchase
+  twice (a client retry, a replayed proof, a duplicate notification) a safe no-op that creates no second row and
+  no duplicate audit event ("Store notifications must be idempotent"). This is the persistence analogue of the
+  unique `idempotency_keys(scope, key)` index.
+- **Auditable.** `PurchaseEvent` is the append-only `purchase_events` trail: each row records one state change as
+  a `previous_status` (NULL for the initial recording) → `new_status` pair, so a purchase's lifecycle is fully
+  reconstructable from immutable facts (mirrors the append-only `audit_logs` and `session_events`). The
+  `purchase_transaction_id` foreign key cascades — the trail is part of the transaction's own history.
+- **Status lifecycle.** A verified purchase is recorded `Active`; the generic states `Active`/`Cancelled`/`Refunded`/
+  `InGracePeriod` model renewals, cancellations, refunds and grace periods (grace periods represented **explicitly**
+  per the security requirements). `PurchaseTransactionService` records a verified purchase and audits each status
+  change; a no-op change (to the status the transaction is already in) writes no event. **Which** provider
+  notification drives **which** transition, the idempotent ingestion of those notifications, and the entitlement
+  downgrade/revocation a refund or cancellation causes are the later store-notification story (CORE-STORE-005); this
+  story models only the persisted state and its auditable change.
+- **Not tenant content, no buyer column.** `purchase_transactions` carries no `organization_id` and no buyer
+  column: a purchase is named globally by its (`provider`, `provider_transaction_id`) pair, and the buyer/subject
+  linkage is the separate `billing_account_links` table (a later story), exactly as this document lists the two as
+  distinct "Database additions". The stored identifiers are not secrets — only the raw proof is, and the proof is
+  **never persisted** (threat T7).
+- Authorization is upstream: the verification endpoints (CORE-STORE-003/004) authorize the caller server-side and
+  verify the proof **before** recording, and the store-notification handler (CORE-STORE-005) drives the status
+  changes; this story supplies the generic, reusable persistence + audit primitives they build on.
+
 ## Security requirements
 
 - Never trust client-side premium flags.
