@@ -88,6 +88,21 @@ builder.Services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
 // adapter and verify; persistence of the verified transaction (CORE-STORE-002) is a later story.
 builder.Services.AddSingleton<PurchaseVerificationProviderResolver>();
 
+// Store notification parser seam (CORE-STORE-005, the "Store Notifications" epic). IStoreNotificationParser is
+// the single port between Core and a store's server-to-server notification format; one adapter serves one
+// provider (Apple/Google), VALIDATES the inbound payload's signature/source and reduces it to a provider-neutral
+// StoreNotificationParseResult, so provider logic stays isolated from Core domain logic (the verification
+// abstraction's seam, applied to notifications). The concrete, credential-bearing validators (signing keys /
+// source verification) are supplied by the deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md; threat T7), exactly
+// as the purchase verifier, the S3-compatible IAssetStorage and the Valkey/Redis IRealtimeBackplane are. The
+// StoreNotificationParserResolver is registered here unconditionally (it is stateless and needs no database, like
+// the seams above); Core registers NO parser adapter, so the resolver FAILS CLOSED with
+// StoreNotificationParserNotConfiguredException for every provider until a deployment wires one. Because the
+// store notification routes are unauthenticated server-to-server callbacks (csv/mobile_store_api_routes.csv:
+// auth_required=false), this fail-closed default is what stops an unvalidated payload from ever changing a
+// purchase: with nothing configured an inbound notification is 503 and nothing happens.
+builder.Services.AddSingleton<StoreNotificationParserResolver>();
+
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
 // (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
@@ -642,6 +657,21 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IPurchaseEventRepository, PurchaseEventRepository>();
     builder.Services.AddScoped<PurchaseTransactionService>();
 
+    // Idempotent store notification handling (CORE-STORE-005, the "Store Notifications" epic): the Store module
+    // owns the append-only store_notification_events table (the dedup ledger + audit fact of every handled store
+    // notification) — docs/05_MODULE_CONTRACTS.md; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md "Database
+    // additions"; csv/database_tables.csv: module Store. Registered here, inside the persistence conditional, like
+    // the purchase repositories above, because the repository depends on the DbContext. The StoreNotificationService
+    // is handed an already-validated, normalized notification (the deployment parser validates signature/source
+    // upstream), deduplicates it by its (provider, provider_notification_id) pair (the unique index makes a
+    // re-delivered notification a safe no-op — "Store notifications must be idempotent", docs/21) and drives the
+    // affected purchase's lifecycle by REUSING the CORE-STORE-002 PurchaseTransactionService.ChangeStatusAsync, so a
+    // renewal/cancellation/refund/grace period updates the server-side purchase status (the source of truth for
+    // premium state) safely and auditably (the story acceptance criterion). The two unauthenticated store
+    // notification endpoints sit on this service.
+    builder.Services.AddScoped<IStoreNotificationEventRepository, StoreNotificationEventRepository>();
+    builder.Services.AddScoped<StoreNotificationService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
@@ -813,6 +843,20 @@ app.MapApplePurchaseEndpoints();
 // recorded purchase and the buyer linkage (billing_account_links) are later stories; idempotent store
 // notifications are CORE-STORE-005.
 app.MapGooglePurchaseEndpoints();
+
+// Store notification endpoints (CORE-STORE-005): the Store module's notification-handling routes,
+// POST /api/v1/store-notifications/apple and POST /api/v1/store-notifications/google/rtdn. Unlike the
+// verification routes these are UNAUTHENTICATED server-to-server callbacks (csv/mobile_store_api_routes.csv:
+// auth_required=false), mapped AllowAnonymous; authenticity comes from the deployment-supplied parser adapter
+// validating the payload's signature/source, not from an OIDC token. They fail closed (503) when persistence is
+// not configured, and (503) when no parser is configured for the provider, so an unauthenticated payload never
+// changes a purchase without a real validator behind it. A forged/unparseable payload is 400 and records
+// nothing; a validated, normalized notification is deduplicated and drives the affected purchase's lifecycle
+// (idempotently and auditably, reusing CORE-STORE-002), so "Renewals, cancellations, refunds and grace periods
+// update entitlements safely" (the story acceptance criterion; docs/21). No new DI registration is required: the
+// StoreNotificationParserResolver (registered unconditionally above) and the StoreNotificationService +
+// TimeProvider (registered in the persistence conditional) it reuses are already registered.
+app.MapStoreNotificationEndpoints();
 
 // Realtime session hub (CORE-RT-001): the Realtime module's SignalR hub at /hubs/session. It requires
 // authorization (the hub is [Authorize] and the mapping adds RequireAuthorization()), so an

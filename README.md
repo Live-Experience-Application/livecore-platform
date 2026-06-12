@@ -1287,6 +1287,49 @@ recorded purchase and linking the buyer (`billing_account_links`) are later stor
 notifications are CORE-STORE-005. This story adds no new table and no EF migration (it reuses
 `purchase_transactions` and `purchase_events`).
 
+### Store notifications
+
+CORE-STORE-005 adds the Store module's idempotent **store-notification handling** — the realization of step 7 of
+the receipt-verification flow ("Store server notifications update entitlement state on renewals, cancellations,
+refunds and grace periods") — so that **renewals, cancellations, refunds and grace periods update entitlements
+safely** (the story's acceptance criterion):
+
+| Method | Route                                     | Authorized callers                         |
+| ------ | ----------------------------------------- | ------------------------------------------ |
+| `POST` | `/api/v1/store-notifications/apple`       | none — an Apple server-to-server callback  |
+| `POST` | `/api/v1/store-notifications/google/rtdn` | none — a Google RTDN Pub/Sub push callback |
+
+Unlike the verification routes these are **unauthenticated** server-to-server callbacks
+(`csv/mobile_store_api_routes.csv`: `auth_required=false`), mapped `AllowAnonymous`. A store notification endpoint
+carries no OIDC token, so the **only** thing that makes an inbound payload trustworthy is the deployment-supplied
+`IStoreNotificationParser` adapter validating its **signature/source** — the notification analogue of the
+`IPurchaseVerificationProvider` port (CORE-STORE-001): one adapter per provider, it validates the opaque raw
+payload and reduces it to a provider-neutral `StoreNotification` (provider + the store's unique notification id +
+the actionable type + the affected purchase's provider transaction id). The concrete, credential-bearing validators
+(signing keys / source verification) are **deployment-supplied** (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat
+T7); Core carries no store SDK and no signing keys. Until one is wired the `StoreNotificationParserResolver`
+**fails closed**, so an inbound notification is `503` and **never changes a purchase without a real validator
+behind it**. A forged/unparseable payload is `400` (records nothing); an authentic but non-actionable payload is
+acknowledged `200` (records nothing).
+
+Handling is **idempotent** ("Store notifications must be idempotent") in two layers: the **dedup ledger** — the
+append-only `store_notification_events` table, keyed by the unique
+`store_notification_events(provider, provider_notification_id)` index — recognizes a re-delivered notification and
+ignores it with no second effect (the same idempotency shape as `purchase_transactions(provider,
+provider_transaction_id)`); and the **idempotent effect** — the purchase status change it drives **reuses**
+`PurchaseTransactionService.ChangeStatusAsync` (CORE-STORE-002), which writes no purchase event for a no-op
+transition. The notification's actionable type maps to exactly one target purchase status: a **renewal**
+keeps/reactivates `Active`, a **cancellation** downgrades to `Cancelled`, a **refund/chargeback** revokes to
+`Refunded`, and a **grace period** moves to the explicit `InGracePeriod` state. The persisted purchase status is
+the **server-side source of truth** for premium state, so updating it is the safe entitlement update; it is
+audited twice over (the `purchase_events` trail for the purchase-side change and the append-only
+`store_notification_events` row for the notification's arrival/effect). A notification for a purchase Core never
+recorded is `TransactionNotFound` — nothing is fabricated — but its arrival is still recorded so it is auditable
+and not reprocessed. The row stores only **normalized identifiers**, never the raw notification body (which may
+embed signed receipt content — threat T7). Granting/revoking the linked `SubjectEntitlement` (which requires the
+buyer linkage `billing_account_links` plus the product → plan → entitlement mapping) is a later story that consumes
+this purchase status as its trigger.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

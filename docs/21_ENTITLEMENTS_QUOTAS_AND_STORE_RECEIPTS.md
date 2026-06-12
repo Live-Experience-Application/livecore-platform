@@ -271,6 +271,60 @@ abstraction and CORE-STORE-002 persistence, differing only in the provider and t
   that drives renewals / cancellations / refunds / grace periods is CORE-STORE-005. This story adds no new table and
   no EF migration (it reuses the CORE-STORE-002 `purchase_transactions` and `purchase_events`).
 
+## Idempotent store notification handling (CORE-STORE-005)
+
+CORE-STORE-002 modeled the persisted purchase and its append-only `purchase_events` audit trail and deferred "the
+idempotent ingestion of those notifications, and the entitlement downgrade/revocation a refund or cancellation
+causes" to here. CORE-STORE-005 is that ingestion: it implements the **store-notification handler** that realizes
+step 7 of the "Receipt verification" flow above — "Store server notifications update entitlement state on
+renewals, cancellations, refunds and grace periods" — so that **renewals, cancellations, refunds and grace
+periods update entitlements safely** (the story's acceptance criterion). It adds the module's last documented
+"Database addition" — `store_notification_events` (`apps/api/Store/`) — and the two store-notification HTTP routes.
+
+- `POST /api/v1/store-notifications/apple` (Apple App Store Server Notifications) and
+  `POST /api/v1/store-notifications/google/rtdn` (Google Real-time Developer Notifications via Pub/Sub push) —
+  the routes of `csv/mobile_store_api_routes.csv`, surfaced under the Core `/api/v1` prefix `docs/08_API_CONTRACTS.md`
+  mandates and added to `csv/api_routes.csv`. They live in `apps/api/Store/StoreNotificationEndpoints.cs`.
+- **Unauthenticated at the HTTP layer, authentic via signature/source.** A store delivers these notifications
+  server-to-server, so the routes carry no OIDC bearer token (`csv/mobile_store_api_routes.csv`:
+  `auth_required=false`) and are mapped `AllowAnonymous`. The **only** thing that makes an inbound payload
+  trustworthy is the deployment-supplied `IStoreNotificationParser` adapter validating its **signature/source**
+  ("Must validate signature/idempotency" / "Must validate source/idempotency"). This is the notification analogue
+  of the CORE-STORE-001 `IPurchaseVerificationProvider` port: one adapter per provider, validates and reduces the
+  opaque raw payload to a provider-neutral `StoreNotification` (provider + the store's unique notification id +
+  the actionable type + the affected purchase's provider transaction id), so **provider logic is isolated from
+  Core domain logic**. The concrete, credential-bearing validators are deployment-supplied
+  (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat T7); Core carries no store SDK and no signing keys. Until one is
+  wired the `StoreNotificationParserResolver` **fails closed** (`StoreNotificationParserNotConfiguredException`),
+  so an inbound notification is `503` and **never changes a purchase without a real validator behind it** — the
+  notification analogue of the unconfigured asset storage and the unconfigured purchase verifier. A payload the
+  adapter rejects as forged/unparseable is `400` and records nothing; an authentic but non-actionable payload is
+  acknowledged `200` and records nothing.
+- **Idempotent (the headline requirement; "Store notifications must be idempotent").** Idempotency is two-layered:
+  the **dedup ledger** — `store_notification_events`, keyed by the unique
+  `store_notification_events(provider, provider_notification_id)` index (the store's own notification id is unique
+  within its provider) — recognizes a re-delivered notification and ignores it with no second effect, exactly as
+  the unique `purchase_transactions(provider, provider_transaction_id)` and `idempotency_keys(scope, key)` indexes
+  work; and the **idempotent effect** — the purchase status change it drives **reuses**
+  `PurchaseTransactionService.ChangeStatusAsync` (CORE-STORE-002), which writes no purchase event for a no-op
+  transition — so even two notifications that race past the dedup apply at most one real change and one audit event.
+- **Safe entitlement update / downgrade path.** The notification's actionable type maps to exactly one target
+  purchase status: a **renewal** keeps/reactivates `Active`, a **cancellation** downgrades to `Cancelled`, a
+  **refund/chargeback** revokes to `Refunded`, and a **grace period** moves to the explicit `InGracePeriod` state
+  ("Refunds and chargebacks must revoke or downgrade entitlements"; "Grace periods must be represented
+  explicitly"). The persisted purchase status is the **server-side source of truth** for premium state ("User-visible
+  premium state must come from server entitlements"), so updating it **is** the safe entitlement update. The change
+  is audited twice over: the purchase-side fact is the `purchase_events` trail (CORE-STORE-002) and the
+  notification-side fact is the append-only `store_notification_events` row (the event catalog's
+  `StoreNotificationProcessed`). A notification for a purchase Core never recorded is `TransactionNotFound` —
+  nothing is fabricated (fail-closed) — but its arrival is still recorded so it is auditable and not reprocessed.
+- **Out of scope (a later story).** Granting/revoking the linked `SubjectEntitlement` from a purchase requires the
+  buyer linkage (the separate `billing_account_links` "Database addition", which `purchase_transactions` deliberately
+  has no column for) plus the product → plan → entitlement mapping; both are deferred. CORE-STORE-005 delivers the
+  idempotent notification → purchase-status pipeline (the server-side source of truth) that a future grant/revoke
+  story consumes as its trigger. The `store_notification_events` row stores only the **normalized** identifiers,
+  never the raw notification body (which may embed signed receipt content — threat T7).
+
 ## Security requirements
 
 - Never trust client-side premium flags.

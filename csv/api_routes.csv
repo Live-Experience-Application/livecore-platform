@@ -23,3 +23,5 @@ GET,/api/v1/me/quota-status,Entitlements,authenticated user,Server-calculated qu
 GET,/api/v1/workspaces/{workspaceId}/quota-status,Entitlements,"Host,CoHost,Owner,Admin",Server-calculated workspace quota status; membership authorized
 POST,/api/v1/purchases/apple/transactions,Store,authenticated user,Verify Apple transaction server-side before granting entitlements; service account denied
 POST,/api/v1/purchases/google/tokens,Store,authenticated user,Verify Google purchase token server-side before granting entitlements; service account denied
+POST,/api/v1/store-notifications/apple,Store,none (provider callback),Receive Apple App Store Server Notifications; signature validated by deployment adapter; idempotent
+POST,/api/v1/store-notifications/google/rtdn,Store,none (provider callback),Receive Google RTDN via Pub/Sub push; source validated by deployment adapter; idempotent
