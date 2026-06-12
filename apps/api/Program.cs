@@ -1,5 +1,6 @@
 using LiveCore.Api;
 using LiveCore.Api.Content;
+using LiveCore.Api.Entities;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -154,6 +155,27 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (CORE-SCENE-004) and content validation/size limits (CORE-SCENE-005) are later
     // stories and are deliberately not wired here.
     builder.Services.AddScoped<IContentBlockRepository, ContentBlockRepository>();
+
+    // Entity type persistence (CORE-ENT-001, first story of the Entity System and
+    // Templates epic): the Entities module owns the workspace-scoped, tenant-scoped
+    // entity_types table that holds the generic, template-defined entity TYPE
+    // definitions (docs/05_MODULE_CONTRACTS.md: the Entities module owns "entity types"
+    // but may not implement any vertical-specific entity behavior directly;
+    // csv/database_tables.csv: entity_types, module Entities/Templates, scope
+    // workspace/template, "Template-defined types"). Registered here, inside the
+    // persistence conditional, exactly like the scene and content-block repositories
+    // above; the repository's lookups are scoped by organization id then workspace id
+    // (the organization boundary is checked before the workspace boundary; threat T5),
+    // there is NO list-everything method, and ListByWorkspaceAsync returns a workspace's
+    // types in deterministic type-key order. The type is fully DATA-DRIVEN: the type key,
+    // display name and attribute schema are stored verbatim and the source contains no
+    // type-specific logic (THE TEMPLATE BOUNDARY, docs/04_PRODUCT_BOUNDARIES.md). The
+    // attribute schema is validated only for JSON well-formedness here; full template
+    // schema validation and the template_id linkage are CORE-ENT-004 (no templates table
+    // exists yet). Entity instances (CORE-ENT-002), relationships (CORE-ENT-003), search
+    // with visibility filtering (CORE-ENT-005) and any HTTP endpoint (csv/api_routes.csv
+    // defines no entity-type route) are later stories and are deliberately not wired here.
+    builder.Services.AddScoped<IEntityTypeRepository, EntityTypeRepository>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
