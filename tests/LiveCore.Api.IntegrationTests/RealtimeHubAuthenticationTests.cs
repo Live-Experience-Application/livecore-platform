@@ -13,9 +13,12 @@ namespace LiveCore.Api.IntegrationTests;
 /// (test authentication scheme), so the negotiate gate is exercised end-to-end without a real identity
 /// provider.
 ///
-/// The hub carries no groups or events yet (those are CORE-RT-002/003+), so the only behavior to assert
-/// here is the authentication gate. Connection-level fail-closed admission (aborting a connected but
-/// unmappable principal) is covered at the unit level by RealtimeConnectionPolicyTests.
+/// The negotiate endpoint enforces only authentication; it does NOT run the hub's
+/// <c>OnConnectedAsync</c> (that runs when the transport connection is established). The connect-time
+/// authorization — resolving the caller's session context and joining the SERVER-MANAGED groups, or
+/// aborting fail-closed (CORE-RT-002) — is covered at the unit level by RealtimeConnectionResolverTests;
+/// its end-to-end, over-the-wire coverage arrives with event delivery (CORE-RT-003), where group
+/// membership becomes observable through a received event.
 /// </summary>
 public sealed class RealtimeHubAuthenticationTests
 {

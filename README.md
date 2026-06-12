@@ -480,15 +480,35 @@ added. The hub is `[Authorize]` and mapped with `RequireAuthorization()`, so its
 set the `Authorization` header, the OIDC bearer token is also accepted from the
 `access_token` query-string parameter — but **only** for hub paths (under
 `/hubs`), never for the REST API, so a token is never read from a non-hub URL.
-The token is fully validated by the same JWT bearer pipeline either way. On
-connect the hub additionally fails closed, aborting any connection whose
-authenticated principal does not normalize to a valid OIDC principal.
+The token is fully validated by the same JWT bearer pipeline either way.
 
-This story (CORE-RT-001) delivers the authenticated hub only: it exposes no
-client-callable methods and joins no groups, so it never sends an event. The
-server-managed connection groups, event append and delivery, per-recipient
-projection, reconnect replay and scale-out are later Realtime stories
-(`docs/11_REALTIME_SYNC.md`).
+**Server-managed groups (CORE-RT-002).** On connect, a connection declares which
+session it is joining through query-string identifiers —
+`?organizationSlug=…&sessionId=…` and, for a participant, `&participantId=…` — and
+the server resolves the caller's authorized relationship to that session and joins
+the **server-computed** groups for it. Clients supply identifiers, never group
+names (`docs/11_REALTIME_SYNC.md`: "Do not let clients choose arbitrary group
+names"). The relationship maps to the minimal groups it needs:
+
+| Relationship                                  | Groups joined                                             |
+| --------------------------------------------- | --------------------------------------------------------- |
+| Host-capable member (Owner/Admin/Host/CoHost) | `org:{org}`, `workspace:{ws}:hosts`, `session:{id}:hosts` |
+| Observer member                               | `session:{id}:observers`                                  |
+| Participant (owns an active record)           | `session:{id}:participant:{participantId}` only           |
+
+A participant joins **only its own** participant group — a caller can never join a
+participant group they do not own, so they can never subscribe to another
+participant's feed. The whole connect is fail-closed: an unauthenticated or
+unmappable principal, a denied tenant, an unknown session, a foreign/removed/
+anonymous participant, or a workspace role with no defined realtime group (a
+Participant/Auditor member without a participant record) all **abort** the
+connection, indistinguishably. Anonymous-participant and auditor realtime channels
+are deferred (the group taxonomy defines neither).
+
+The hub still exposes no client-callable methods and sends no events, so it cannot
+leak one: this story sets up group **membership** only. Event append and delivery
+to these groups, per-recipient projection, reconnect replay and scale-out are
+later Realtime stories (`docs/11_REALTIME_SYNC.md`).
 
 ## Container images
 

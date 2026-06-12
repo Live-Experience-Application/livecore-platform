@@ -385,6 +385,18 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // epic / Participants-owned work) and are deliberately not wired here.
     builder.Services.AddScoped<SessionParticipantJoinService>();
 
+    // Realtime connection resolver (CORE-RT-002): resolves which SERVER-MANAGED groups a SignalR hub
+    // connection joins (or a fail-closed denial). Registered here because it composes the tenant context
+    // resolver, the session repository, the workspace member repository and the participant repository
+    // above — all registered only when a database connection string is configured. The SessionHub
+    // resolves it from the request services on connect and aborts when it is absent (persistence off),
+    // exactly as the REST endpoints fail closed with 503. It supersedes the RT-001 authenticated-
+    // connection placeholder: the connection supplies only identifiers (organizationSlug, sessionId,
+    // optional participantId) and the server computes the group names, so a client can never choose a
+    // group or subscribe to another participant's feed (docs/11_REALTIME_SYNC.md; threat T3). Event
+    // append/delivery to these groups is CORE-RT-003.
+    builder.Services.AddScoped<RealtimeConnectionResolver>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
