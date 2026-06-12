@@ -593,6 +593,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IQuotaUsageRepository, QuotaUsageRepository>();
     builder.Services.AddScoped<QuotaStatusCalculator>();
 
+    // Quota ENFORCEMENT on protected commands (CORE-ENTL-004, the quota enforcement story of the "Entitlements and
+    // Quotas" epic): the Entitlements module's server-side gate that rejects a protected workspace/session command
+    // when it would exceed a subject's free limit, and increments the recorded usage when it succeeds (releasing it
+    // when a counted resource is freed). Registered here, inside the persistence conditional, because it composes the
+    // quota-definition catalog read, the CORE-ENTL-002 entitlement resolver, the per-subject usage repository and the
+    // TimeProvider above. It REUSES QuotaStatus.Calculate (the single quota math the quota-status read uses), so a
+    // command's allow/deny can never diverge from the reported status; it is FAIL-CLOSED (a subject not entitled to a
+    // defined quota has no allowance) and computed entirely server-side, so "Free limits cannot be bypassed by
+    // clients" (the epic acceptance criterion; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). It is consumed by
+    // the workspace-create command (workspace.active.max, the creating user subject) and the session start/end
+    // commands (session.active.max, the session's workspace subject); no new HTTP route is added.
+    builder.Services.AddScoped<QuotaEnforcementService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.

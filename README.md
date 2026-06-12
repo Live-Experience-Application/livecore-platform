@@ -1121,7 +1121,36 @@ host-capable role is `403`, since a workspace's limits/usage are management meta
 **client-safe**: only the generic quota key, unit and computed numbers — no subject id, no internal ids, no
 authorization rationale (a vertical maps the key to its own paywall copy in its UI). **Enforcing** quotas on
 protected workspace/session commands (incrementing usage and rejecting over-limit) is the next story
-(CORE-ENTL-004).
+(CORE-ENTL-004, below).
+
+### Quota enforcement on protected commands
+
+CORE-ENTL-004 (the final story of the `Entitlements and Quotas` epic) turns the recorded usage and status
+calculation into **server-side enforcement** at the protected commands — the acceptance criterion **"Free limits
+cannot be bypassed by clients"** (`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`: "Limits ... must be enforced
+server-side. Otherwise users can bypass mobile UI restrictions"). The Entitlements module's
+`QuotaEnforcementService` is the reusable gate: a protected command asks it whether a subject may consume one unit
+of a quota **before** doing any work, and records the consumption **only after** the work succeeds (a command that
+frees a counted resource releases the unit). The decision **reuses** the single `QuotaStatus.Calculate` math the
+quota-status read uses, so a command's allow/deny can never diverge from what `GET …/quota-status` reports, and it
+is **fail-closed**: a subject not entitled to a defined quota has no allowance, and the decision is computed
+entirely server-side from the catalog limit and recorded usage — a client supplies no part of it.
+
+| Command                            | Quota key (generic)    | Quota subject           | Behavior                                      |
+| ---------------------------------- | ---------------------- | ----------------------- | --------------------------------------------- |
+| `POST /api/v1/workspaces`          | `workspace.active.max` | the creating user       | increments on create                          |
+| `POST /api/v1/sessions/{id}/start` | `session.active.max`   | the session's workspace | increments on start                           |
+| `POST /api/v1/sessions/{id}/end`   | `session.active.max`   | the session's workspace | releases (decrements, clamped at zero) on end |
+
+The check runs **after** the command's existing role/tenant authorization (so quota state is never consulted for an
+unauthorized caller) and **after** the session state guard, so an unauthorized caller (`403`/`404`) or an
+out-of-state transition (`409`) is rejected without ever consuming the quota. A command that would exceed the
+subject's limit is rejected with **`409 Conflict`** whose detail names only the generic quota key (the same key the
+quota-status read returns, so a vertical can map it to paywall copy) and leaks no internal id or rationale. Core
+enforces only quotas that **exist**: when a deployment defines no matching `QuotaDefinition`, the command proceeds
+unchanged — a deployment that wants a free limit defines the quota definition and grants the free entitlement. No
+new HTTP route, table or migration is added; enforcement reads and writes the existing `quota_definitions` /
+`quota_usage` tables.
 
 ## Container images
 

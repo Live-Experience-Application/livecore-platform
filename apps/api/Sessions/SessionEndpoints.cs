@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Workspaces;
@@ -233,6 +234,14 @@ internal static class SessionEndpoints
         // these commands will eventually emit are deferred to the Realtime epic
         // (there is no event store/transport yet); the persisted status transition
         // is the behavior delivered here.
+        //
+        // Quota enforcement (CORE-ENTL-004): starting a session consumes one unit of the session's WORKSPACE's
+        // session.active.max quota, and ending it releases that unit, so the quota reflects the workspace's CURRENT
+        // count of live sessions. The check runs AFTER role authorization and the state guard, and BEFORE the
+        // transition is persisted; it is computed entirely server-side and is fail-closed, so a free workspace
+        // cannot run more concurrent sessions than its plan allows ("Free limits cannot be bypassed by clients";
+        // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). When no quota governs the deployment the command
+        // proceeds unchanged.
         var now = timeProvider.GetUtcNow();
         switch (command)
         {
@@ -242,7 +251,32 @@ internal static class SessionEndpoints
                     return CannotStartConflict();
                 }
 
+                var quotaDecision = await deps.QuotaEnforcement
+                    .CheckAsync(
+                        EntitlementSubjectType.Workspace,
+                        session.WorkspaceId,
+                        QuotaEntitlementKeys.SessionActiveMax,
+                        amount: 1,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!quotaDecision.IsAllowed)
+                {
+                    return QuotaExceeded(quotaDecision);
+                }
+
                 session.Start(now);
+                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
+
+                // Record the consumption only after the start is persisted, so a failed start never increments the
+                // count.
+                await deps.QuotaEnforcement
+                    .RecordConsumptionAsync(
+                        EntitlementSubjectType.Workspace,
+                        session.WorkspaceId,
+                        QuotaEntitlementKeys.SessionActiveMax,
+                        amount: 1,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 break;
 
             case SessionLifecycleCommand.End:
@@ -252,6 +286,18 @@ internal static class SessionEndpoints
                 }
 
                 session.End(now);
+                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
+
+                // Ending a live session frees the workspace's active-session slot, so release the unit consumed at
+                // start (clamped at zero; a no-op when nothing was recorded).
+                await deps.QuotaEnforcement
+                    .ReleaseAsync(
+                        EntitlementSubjectType.Workspace,
+                        session.WorkspaceId,
+                        QuotaEntitlementKeys.SessionActiveMax,
+                        amount: 1,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 break;
 
             default:
@@ -259,8 +305,6 @@ internal static class SessionEndpoints
                 // closed rather than silently succeeding.
                 return ServiceUnavailable();
         }
-
-        await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
 
         return Results.Ok(SessionResponse.From(session));
     }
@@ -283,16 +327,18 @@ internal static class SessionEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var quotaEnforcement = services.GetService<QuotaEnforcementService>();
 
         if (resolver is null
             || sessions is null
-            || workspaceMembers is null)
+            || workspaceMembers is null
+            || quotaEnforcement is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new SessionEndpointDependencies(resolver, sessions, workspaceMembers);
+        dependencies = new SessionEndpointDependencies(resolver, sessions, workspaceMembers, quotaEnforcement);
         return true;
     }
 
@@ -332,6 +378,16 @@ internal static class SessionEndpoints
             statusCode: StatusCodes.Status403Forbidden,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
+
+    // Starting the session was refused because it would exceed a server-enforced quota (docs/08: 409 conflict). The
+    // detail names only the generic quota key (the same key the workspace quota-status read returns, so a vertical
+    // can map it to paywall copy) and never leaks an internal id or rationale (threat T7). The caller is authorized
+    // by role; the limit, not the caller, is the reason, so this is a 409 rather than a 403.
+    private static IResult QuotaExceeded(QuotaEnforcementDecision decision)
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
@@ -373,5 +429,6 @@ internal static class SessionEndpoints
     private readonly record struct SessionEndpointDependencies(
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        QuotaEnforcementService QuotaEnforcement);
 }
