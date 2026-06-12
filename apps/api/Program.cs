@@ -200,6 +200,28 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // wired here.
     builder.Services.AddScoped<IEntityRepository, EntityRepository>();
 
+    // Entity relationship persistence (CORE-ENT-003, third story of the Entity System and
+    // Templates epic): the Entities module owns the workspace-scoped, tenant-scoped
+    // entity_relationships table that holds the generic GRAPH EDGES between two entity instances
+    // (docs/05_MODULE_CONTRACTS.md: the Entities module owns "entity relationships" but may not
+    // implement any vertical-specific entity behavior directly; csv/database_tables.csv:
+    // entity_relationships, module Entities, scope workspace, "Graph edges"). Registered here,
+    // inside the persistence conditional, exactly like the entity and entity-type repositories
+    // above; the repository's lookups are scoped by organization id then workspace id (the
+    // organization boundary is checked before the workspace boundary; threat T5), there is NO
+    // list-everything method, and ListByWorkspace/ListBySource/ListByEntity return a workspace's
+    // edges in deterministic (time-ordered surrogate id) order. The edge is DIRECTED (source ->
+    // target) and carries a generic relationship_kind: the kind is stored verbatim and the source
+    // contains no kind-specific logic (THE TEMPLATE BOUNDARY, docs/04_PRODUCT_BOUNDARIES.md). The
+    // source_entity_id and target_entity_id foreign keys guarantee the endpoints exist but not that
+    // they are in the edge's workspace; the same-workspace-endpoints coupling is the responsibility
+    // of the future create-relationship application flow (mirrors Entity/entity_type_id,
+    // ContentBlock/scene_id). The aggregate is immutable, so there is no UpdateAsync. Template
+    // loading (CORE-ENT-004), search with visibility filtering / graph traversal (CORE-ENT-005) and
+    // any HTTP endpoint (csv/api_routes.csv defines no entity-relationship route) are later stories
+    // and are deliberately not wired here.
+    builder.Services.AddScoped<IEntityRelationshipRepository, EntityRelationshipRepository>();
+
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
     // denial. Registered here because it depends on the organization, user
