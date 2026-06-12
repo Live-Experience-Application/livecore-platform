@@ -547,8 +547,34 @@ realtime recipient set can never diverge from the REST visibility decision. An e
 no visibility subject (a later unconditional audience event such as `SessionStarted`) is
 not gated.
 
-Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`), reconnect replay
-and scale-out are later Realtime stories (`docs/11_REALTIME_SYNC.md`).
+**Reconnect replay with filtering (CORE-RT-005).** A client that reconnects rebuilds its
+live state from the durable stream over a REST route, with the same per-recipient filter
+applied again so "reconnect replay filters events again" (`docs/07_SECURITY_THREAT_MODEL.md`
+threat T3; `docs/09_EVENT_CATALOG.md` "Reconnect replay"):
+
+| Method | Route                                 | Authorized callers                                       |
+| ------ | ------------------------------------- | -------------------------------------------------------- |
+| `GET`  | `/api/v1/sessions/{sessionId}/events` | the session audience (host, observer or own-participant) |
+
+The session id in the path pins the workspace; the target organization is the required
+`?organizationSlug=` query parameter, and a participant replaying its own feed identifies
+itself with `?participantId=` exactly like the hub connection. The caller's authorized
+relationship to the session — and the **server-managed groups** it maps to — is resolved by
+the **same** connection resolver the live hub uses (CORE-RT-002), so a host replays as a
+host, an observer as an observer, and a participant **only its own** feed (a caller can
+never replay another participant's feed). The replay then re-runs the **live** recipient
+computation (CORE-RT-004) for each event after the acknowledged cursor and keeps only the
+deliveries addressed to the caller's own groups, with the same host-vs-audience projection
+live delivery uses — so a replayed item is the projection the recipient would have received
+live, and a hidden event is never replayed. The optional `?afterEventId=` is the caller's
+last acknowledged event id; events strictly after it are replayed (an unknown cursor
+replays the whole stream, which the client deduplicates per `docs/11_REALTIME_SYNC.md`).
+Like the participant-visible feed, the stream is private: every denial — a foreign tenant,
+an unknown session, a caller with no legitimate relationship, or a `participantId` the
+caller does not own — is hidden as `404` (never `403`).
+
+Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`) and scale-out are
+later Realtime stories (`docs/11_REALTIME_SYNC.md`).
 
 ## Container images
 

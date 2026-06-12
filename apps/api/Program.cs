@@ -431,6 +431,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<ISessionEventRecipientResolver, SessionEventRecipientResolver>();
     builder.Services.AddScoped<ISessionEventPublisher, SessionEventPublisher>();
 
+    // Reconnect replay filter (CORE-RT-005): the Realtime module's reconnect replay (it owns "reconnect
+    // replay", docs/05_MODULE_CONTRACTS.md). Registered here, inside the persistence conditional, because
+    // it depends on the append-only session event repository and the CORE-RT-004 recipient resolver above.
+    // It re-runs the SAME live recipient computation per event and keeps only the deliveries addressed to
+    // the reconnecting caller's own groups, so reconnect replay re-filters every event through the central
+    // Visibility engine and never leaks a hidden event (threat T3; docs/09_EVENT_CATALOG.md step 5,
+    // docs/11_REALTIME_SYNC.md). The GET /api/v1/sessions/{sessionId}/events endpoint resolves it from the
+    // request services and fails closed (503) when persistence is off.
+    builder.Services.AddScoped<SessionReplayService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
@@ -501,6 +511,16 @@ app.MapVisibilityEndpoints();
 // to the reveal roles (Owner/Admin/Host/CoHost) in the session's own workspace exactly like the
 // session start/end commands. The durable reveal event emission is deferred to the Realtime epic.
 app.MapRevealEndpoints();
+
+// Session event reconnect-replay endpoint (CORE-RT-005): the Realtime module's reconnect replay route,
+// GET /api/v1/sessions/{sessionId}/events. It lives in an authenticated route group and fails closed (503)
+// when persistence is not configured, exactly like the reveal/session endpoints. No new persistence
+// registration beyond SessionReplayService above is required: the tenant context resolver and the realtime
+// connection resolver it reuses for authorization are already registered. It authorizes the caller exactly
+// as the live hub connection does (the same connection resolver and server-managed groups) and replays
+// only the events delivered to the caller's groups, re-filtered through the central Visibility engine, so
+// reconnect replay never leaks a hidden event (threat T3; docs/09_EVENT_CATALOG.md "Reconnect replay").
+app.MapSessionEventReplayEndpoints();
 
 // Scene content endpoints (CORE-SCENE-003): the Scenes module's first HTTP routes,
 // GET/POST /api/v1/workspaces/{workspaceId}/scenes. They live in an authenticated
