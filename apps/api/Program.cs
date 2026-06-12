@@ -177,6 +177,29 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // defines no entity-type route) are later stories and are deliberately not wired here.
     builder.Services.AddScoped<IEntityTypeRepository, EntityTypeRepository>();
 
+    // Entity instance persistence (CORE-ENT-002, second story of the Entity System and
+    // Templates epic): the Entities module owns the workspace-scoped, tenant-scoped entities
+    // table that holds the generic entity INSTANCES — one concrete object of an entity type
+    // (docs/05_MODULE_CONTRACTS.md: the Entities module owns "generic entities" but may not
+    // implement any vertical-specific entity behavior directly; csv/database_tables.csv:
+    // entities, module Entities, scope workspace, "Generic objects"). Registered here, inside the
+    // persistence conditional, exactly like the entity-type and content-block repositories above;
+    // the repository's lookups are scoped by organization id then workspace id (the organization
+    // boundary is checked before the workspace boundary; threat T5), there is NO list-everything
+    // method, and ListByWorkspace/ListByType return a workspace's entities in deterministic
+    // (time-ordered surrogate id) order. The entity is fully DATA-DRIVEN: its name and attribute
+    // values are stored verbatim and the source contains no type-specific logic (THE TEMPLATE
+    // BOUNDARY, docs/04_PRODUCT_BOUNDARIES.md). The attribute values are validated only for JSON
+    // well-formedness here; validating them against the entity type's attribute schema
+    // (schema-conformance) is the template engine / CORE-ENT-004. The entity_type_id foreign key
+    // guarantees the referenced type exists but not that it is in the entity's workspace; the
+    // same-workspace-type coupling is the responsibility of the future create-entity application
+    // flow (mirrors ContentBlock/scene_id). Entity relationships (CORE-ENT-003), template loading
+    // (CORE-ENT-004), search with visibility filtering (CORE-ENT-005) and any HTTP endpoint
+    // (csv/api_routes.csv defines no entity route) are later stories and are deliberately not
+    // wired here.
+    builder.Services.AddScoped<IEntityRepository, EntityRepository>();
+
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
     // denial. Registered here because it depends on the organization, user
