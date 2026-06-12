@@ -136,6 +136,27 @@ POST /v1/store-notifications/google/rtdn
 
 Apple/Google names are allowed here as infrastructure provider names, not product vertical names.
 
+## Purchase provider abstraction (CORE-STORE-001)
+
+The Store module isolates provider-specific verification behind a single port so that **Apple/Google provider
+logic is isolated from Core domain logic** (the `Store Purchase Verification` epic's first acceptance criterion).
+
+- `IPurchaseVerificationProvider` (`apps/api/Store/`) is the port: one adapter serves one `PurchaseProvider`
+  (`Apple`/`Google`) and verifies an opaque proof against that store's server APIs.
+- The abstraction is provider-neutral at both ends. Input is a `PurchaseVerificationRequest` (the provider plus
+  the opaque proof — a transaction token / JWS / purchase token — and an optional opaque product reference);
+  output is a `PurchaseVerificationResult` that is either `Verified`, carrying a normalized `VerifiedPurchase`
+  (provider + provider transaction id + product reference), or `Rejected`, carrying a generic, log-safe reason and
+  no purchase. Core never parses, trusts or logs the proof (`PurchaseVerificationRequest.ToString` excludes it).
+- `PurchaseVerificationProviderResolver` selects an adapter by the generic `PurchaseProvider`. It is **fail-closed**:
+  Core registers no adapter, so verification throws `PurchaseProviderNotConfiguredException` for every provider
+  until a deployment wires one — the verification analogue of the fail-closed `UnconfiguredAssetStorage`
+  (CORE-AST-002). The concrete, credential-bearing adapters (store SDK + keys) are deployment-supplied
+  (`docs/13_SELF_HOSTING_REQUIREMENTS.md`); Core carries no native store SDK dependency and no store credentials.
+- Authorization is upstream of the port: the later Apple (CORE-STORE-003) and Google (CORE-STORE-004) verification
+  endpoints authorize the caller server-side, then resolve the adapter and verify. CORE-STORE-001 is the
+  abstraction only — no store route, table or migration; persistence of the verified transaction is CORE-STORE-002.
+
 ## Security requirements
 
 - Never trust client-side premium flags.

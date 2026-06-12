@@ -1152,6 +1152,38 @@ unchanged — a deployment that wants a free limit defines the quota definition 
 new HTTP route, table or migration is added; enforcement reads and writes the existing `quota_definitions` /
 `quota_usage` tables.
 
+### Purchase provider abstraction
+
+The Store module owns generic, server-side **store purchase verification** so that the client never becomes the
+source of truth for premium access (`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md` "Receipt verification":
+the backend verifies a proof with Apple/Google server APIs **before** granting any entitlement). CORE-STORE-001
+(the first story of the `Store Purchase Verification` epic) adds the first piece — the **provider abstraction**,
+whose acceptance criterion is that **Apple/Google provider logic is isolated from Core domain logic**.
+
+`IPurchaseVerificationProvider` (`apps/api/Store/`) is the single **port** between Core and a store's own server
+APIs: one adapter serves one `PurchaseProvider` (`Apple` or `Google` — infrastructure provider names allowed here
+per `docs/21`/`docs/22`, never vertical vocabulary) and reduces that store's raw response to a **provider-neutral**
+`PurchaseVerificationResult` — a normalized `VerifiedPurchase` (provider + provider transaction id + product
+reference) on success, or a generic, log-safe rejection otherwise. Core domain logic builds one neutral
+`PurchaseVerificationRequest` (the provider plus the **opaque** proof — a transaction token / JWS / purchase token
+Core never parses or trusts) and branches on one neutral result, so the provider differences live entirely behind
+the port. The submitted proof is a secret: `PurchaseVerificationRequest.ToString` excludes it, so an unverified,
+possibly forged token is never logged (threat T7).
+
+Like the S3-compatible `IAssetStorage` adapter (CORE-AST-002) and the Valkey/Redis `IRealtimeBackplane`
+(CORE-RT-006), the concrete, **credential-bearing** verification adapters (the store SDK and keys) are supplied by
+the deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat T7) — Core carries no native store SDK dependency
+and no store credentials. The `PurchaseVerificationProviderResolver` selects an adapter by the generic
+`PurchaseProvider`, and it is **fail-closed**: Core registers no adapter, so every provider throws
+`PurchaseProviderNotConfiguredException` until a deployment wires one — Core never trusts a client's unverified
+proof and never grants premium state without a real verification ("Never unlock limits before server verification
+succeeds", `docs/21`). This is the purchase-verification analogue of the fail-closed `UnconfiguredAssetStorage`.
+
+CORE-STORE-001 is the abstraction (the port, its provider-neutral value types and the fail-closed resolver) only;
+there is **no** store HTTP route, table or migration yet. Persisting the verified transaction and its audit trail
+(CORE-STORE-002), the Apple (CORE-STORE-003) and Google (CORE-STORE-004) verification endpoint contracts, and
+idempotent store notifications (CORE-STORE-005) are later stories.
+
 ## Container images
 
 Both hosts ship a multi-stage Dockerfile (SDK build stage, runtime-only final

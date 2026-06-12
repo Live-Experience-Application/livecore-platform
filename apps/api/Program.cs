@@ -11,6 +11,7 @@ using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Store;
 using LiveCore.Api.SystemModule;
 using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
@@ -71,6 +72,21 @@ builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 // signed download flow with authorization (CORE-AST-004) both consume this port to mint short-lived signed
 // upload/download URLs after their server-side permission checks.
 builder.Services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
+
+// Purchase verification provider seam (CORE-STORE-001, the first story of the "Store Purchase Verification"
+// epic). IPurchaseVerificationProvider is the single port between Core and a store's own server APIs that
+// verify a purchase proof; one adapter serves one provider (Apple/Google) and reduces its raw response to a
+// provider-neutral PurchaseVerificationResult, so "Apple/Google provider logic is isolated from Core domain
+// logic" (the epic acceptance criterion). The concrete, credential-bearing adapters (the store SDK and keys)
+// are supplied by the deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md; threat T7), exactly as the
+// S3-compatible IAssetStorage adapter and the Valkey/Redis IRealtimeBackplane are. The
+// PurchaseVerificationProviderResolver is registered here unconditionally (it is stateless and needs no
+// database, like the seams above); Core registers NO provider adapter, so the resolver FAILS CLOSED with
+// PurchaseProviderNotConfiguredException for every provider until a deployment wires one — Core never trusts a
+// client's unverified proof ("Never unlock limits before server verification succeeds", docs/21). The Apple and
+// Google verification endpoints (CORE-STORE-003/004) authorize the caller server-side and only then resolve the
+// adapter and verify; persistence of the verified transaction (CORE-STORE-002) is a later story.
+builder.Services.AddSingleton<PurchaseVerificationProviderResolver>();
 
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
