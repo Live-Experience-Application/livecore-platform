@@ -110,6 +110,11 @@ public sealed class RevealEndpointTests
         Assert.Equal(seed.SessionId, sessionEvent.SessionId);
         Assert.Null(sessionEvent.TargetParticipantId);
         Assert.Contains(resourceId.ToString(), sessionEvent.Payload, StringComparison.Ordinal);
+
+        // CORE-RT-004: the revealed resource is recorded as the event's visibility subject, so the
+        // recipient resolver can project per-recipient through the Visibility engine.
+        Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
+        Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
     }
 
     [Fact]
@@ -331,12 +336,47 @@ public sealed class RevealEndpointTests
         Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, selected, VisibilityResourceType.Entity, resourceId));
         Assert.False(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, other, VisibilityResourceType.Entity, resourceId));
 
-        // CORE-RT-003: the ContentRevealed event is routed to the SELECTED participant, so the publisher
-        // delivers it to that participant's group only (verified at the service level in
-        // SessionEventPublisherTests); a non-selected participant is not in that group.
+        // CORE-RT-003/004: the ContentRevealed event is routed to the SELECTED participant, so the
+        // recipient resolver delivers it to that participant's group (plus hosts) only — a non-selected
+        // participant is neither in that group nor passes the per-participant visibility gate (verified at
+        // the service level in SessionEventRecipientResolverTests). The revealed resource is recorded as
+        // the event's visibility subject.
         var sessionEvent = Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
         Assert.Equal(SessionEventTypes.ContentRevealed, sessionEvent.EventType);
         Assert.Equal(selected, sessionEvent.TargetParticipantId);
+        Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
+        Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
+    }
+
+    [Fact]
+    public async Task An_audience_wide_reveal_with_active_participants_present_succeeds_end_to_end()
+    {
+        // CORE-RT-004: drive the full HTTP -> publish -> recipient-projection path with several active
+        // participants present, so the audience-wide FAN-OUT (enumerate active participants -> gate each
+        // through the real Visibility engine -> deliver) runs end-to-end. The audience-wide reveal makes
+        // the resource visible to the whole audience, so every active participant may see it.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var resourceId = Guid.CreateVersion7();
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        var participantOne = await SeedParticipantAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+        var participantTwo = await SeedParticipantAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRevealAsync(client, seed.SessionId, Body(_orgA, "Entity", resourceId), "key-1");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // One durable audience-wide event with the resource recorded as its visibility subject.
+        var sessionEvent = Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
+        Assert.Null(sessionEvent.TargetParticipantId);
+        Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
+        Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
+
+        // Both active participants may see an audience-wide reveal (the per-participant gate the fan-out
+        // applies allows them).
+        Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, participantOne, VisibilityResourceType.Entity, resourceId));
+        Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, participantTwo, VisibilityResourceType.Entity, resourceId));
     }
 
     [Fact]

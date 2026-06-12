@@ -301,6 +301,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // records (CORE-VIS-006) are also later stories not wired here.
     builder.Services.AddScoped<VisibilityPreviewService>();
 
+    // Per-recipient event-visibility decision (CORE-RT-004): the Visibility module's
+    // IEventRecipientVisibility — "may this realtime recipient see the resource this event is about?".
+    // Registered here, inside the persistence conditional, because it reuses the VisibilityPolicy above
+    // (it is a thin, fail-closed adapter that parses the event's subject resource kind and DELEGATES to
+    // CanViewResource / CanParticipantViewResource). This keeps the "recipient calculation in Visibility
+    // module" (threat T3 in docs/07_SECURITY_THREAT_MODEL.md), so the realtime recipient set never
+    // diverges from the REST visibility decision (docs/05_MODULE_CONTRACTS.md: do not duplicate
+    // visibility logic elsewhere). It is consumed by the Realtime recipient resolver below.
+    builder.Services.AddScoped<IEventRecipientVisibility, EventRecipientVisibility>();
+
     // Idempotency key store (CORE-VIS-004): the System module's generic retry-safety store over the
     // idempotency_keys table (csv/database_tables.csv: module System, "Retry safety"). Registered here,
     // inside the persistence conditional, because it depends on the DbContext. The unique
@@ -401,15 +411,24 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // session_events table (csv/database_tables.csv: module Realtime, scope session, "Append-only event
     // stream"; the documented critical index session_events(session_id, created_at, event_id)). The
     // repository is append + tenant/session-scoped read only (no update/delete — events are immutable,
-    // docs/10_DATABASE_SCHEMA.md). The publisher composes it with IHubContext<SessionHub> (registered by
-    // AddSignalR above) to persist an event and deliver its recipient-safe envelope to the CORE-RT-002
-    // server-computed groups ("persist event -> compute recipients -> send to recipient groups",
-    // docs/11_REALTIME_SYNC.md). Registered here, inside the persistence conditional, because the
+    // docs/10_DATABASE_SCHEMA.md). Registered here, inside the persistence conditional, because the
     // repository depends on the DbContext; the reveal endpoint resolves the publisher and fails closed
-    // (503) when persistence is off. The reveal command is its first producer (the ContentRevealed
-    // event); the SessionStarted/Ended events and recipient-specific projection are later stories
-    // (CORE-RT-003 follow-up / CORE-RT-004).
+    // (503) when persistence is off.
     builder.Services.AddScoped<ISessionEventRepository, SessionEventRepository>();
+
+    // Recipient-specific event projection (CORE-RT-004): the Realtime module's recipient resolver
+    // computes the per-recipient deliveries of an event (which server-computed groups receive it and the
+    // host vs audience projection each gets), FANNING an audience-wide event out to each active
+    // participant's group and gating every recipient through the central Visibility engine
+    // (IEventRecipientVisibility above + the participant repository), so realtime delivery never leaks a
+    // hidden event (threat T3; docs/11_REALTIME_SYNC.md "Events are never broadcast blindly"). The
+    // publisher composes the repository, IHubContext<SessionHub> (registered by AddSignalR above) and the
+    // resolver to persist an event and then send each computed delivery ("persist event -> compute
+    // recipients -> project payload -> send to recipient groups", docs/11_REALTIME_SYNC.md). The reveal
+    // command is the first producer (the ContentRevealed event, carrying the revealed resource as its
+    // visibility subject); the SessionStarted/Ended events and reconnect replay (CORE-RT-005) are later
+    // stories.
+    builder.Services.AddScoped<ISessionEventRecipientResolver, SessionEventRecipientResolver>();
     builder.Services.AddScoped<ISessionEventPublisher, SessionEventPublisher>();
 
     // Gate readiness on database connectivity. The health response stays

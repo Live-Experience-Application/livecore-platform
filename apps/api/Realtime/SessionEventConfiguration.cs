@@ -23,12 +23,15 @@ namespace LiveCore.Api.Realtime;
 /// <c>audit_logs</c> — a long-retained security log whose references are recorded facts — the session
 /// event stream is operational live-session state, so it is coupled to and removed with its session.
 ///
-/// REAL COLUMNS, NO JSON for the addressing fields: the event type is a string column and the recipient
-/// routing (<c>target_participant_id</c>) is a real nullable column, not buried in the payload. Only the
-/// server-composed <c>payload</c> is free-form JSON text — resource identifiers, never resolved content
-/// (threat T7). The <c>created_by</c> and <c>target_participant_id</c> columns are recorded references
-/// and are intentionally NOT foreign keys (an event is an immutable historical fact that must survive a
-/// later user/participant deletion, mirroring <c>visibility_rules.resource_id</c> and the audit log's
+/// REAL COLUMNS, NO JSON for the addressing fields: the event type is a string column, the recipient
+/// routing (<c>target_participant_id</c>) is a real nullable column, and the visibility subject
+/// (<c>visibility_subject_type</c> + <c>visibility_subject_id</c>, CORE-RT-004) is a real nullable
+/// (type-name, id) pair — none of these is buried in the payload. Only the server-composed <c>payload</c>
+/// is free-form JSON text — resource identifiers, never resolved content (threat T7). The
+/// <c>created_by</c>, <c>target_participant_id</c> and <c>visibility_subject_id</c> columns are recorded
+/// references and are intentionally NOT foreign keys (an event is an immutable historical fact that must
+/// survive a later user/participant/resource deletion, and <c>visibility_subject_id</c> is polymorphic
+/// across three resource tables — mirroring <c>visibility_rules.resource_id</c> and the audit log's
 /// recorded references).
 /// </summary>
 internal sealed class SessionEventConfiguration : IEntityTypeConfiguration<SessionEvent>
@@ -70,6 +73,18 @@ internal sealed class SessionEventConfiguration : IEntityTypeConfiguration<Sessi
             .HasColumnName("payload")
             .HasMaxLength(SessionEvent.MaxPayloadLength)
             .IsRequired();
+
+        // Visibility subject (CORE-RT-004): the resource whose audience visibility gates who may receive
+        // the event — a REAL nullable (type-name string, id) pair, not buried in the payload. The type is
+        // a string so the Realtime module stays decoupled from the Visibility enum, and the id is a
+        // polymorphic, non-FK reference (see the column note below). Both are nullable: an event either
+        // carries a subject (both set) or none (both null).
+        builder.Property(sessionEvent => sessionEvent.VisibilitySubjectType)
+            .HasColumnName("visibility_subject_type")
+            .HasMaxLength(SessionEvent.MaxVisibilitySubjectTypeLength);
+
+        builder.Property(sessionEvent => sessionEvent.VisibilitySubjectId)
+            .HasColumnName("visibility_subject_id");
 
         builder.Property(sessionEvent => sessionEvent.SchemaVersion)
             .HasColumnName("schema_version")

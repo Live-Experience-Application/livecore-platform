@@ -516,18 +516,39 @@ recipients → … → send to recipient groups"; "Events are never broadcast bl
 
 The first producer is the reveal command (`POST …/reveal`): when a reveal actually
 changes visibility (the same change signal the audit uses, so a retry or no-op emits
-nothing), it appends a `ContentRevealed` event. A **selected-participant** reveal is
-delivered to that one participant's group plus the session hosts group — so the
-selected participant receives it, a non-selected participant (not in that group) does
-not, and the hosts get the confirmation. An **audience-wide** reveal is delivered to
-the hosts and observers groups. The delivered envelope carries resource identifiers
-only, never resolved content, and excludes the internal addressing fields of the
-stored event (the org/workspace ids, the actor and the routing target).
+nothing), it appends a `ContentRevealed` event. The delivered envelope carries resource
+identifiers only, never resolved content, and excludes the internal addressing fields of
+the stored event (the org/workspace ids, the actor and the routing target).
 
-Fanning an audience-wide event out to each participant with a per-recipient projected
-payload (the event catalog's `visibilityProjection`), wiring the remaining catalog
-events (`SessionStarted`/`SessionEnded`), reconnect replay and scale-out are later
-Realtime stories (`docs/11_REALTIME_SYNC.md`).
+**Recipient-specific event projection (CORE-RT-004).** Delivery now computes recipients
+**per recipient** so that "Realtime delivery never leaks hidden events"
+(`docs/07_SECURITY_THREAT_MODEL.md` threat T3; `docs/11_REALTIME_SYNC.md`). Each event
+records its **visibility subject** — the resource (kind + id) whose audience visibility
+gates who may receive it (the event catalog's `visibilityProjection`, stored as new
+nullable `session_events(visibility_subject_type, visibility_subject_id)` columns) — and
+the Realtime recipient resolver turns it into a set of deliveries:
+
+- The **session hosts** group always receives the event, with the **host** projection,
+  which carries the routing target (the "to whom" confirmation hosts are entitled to).
+- A **selected-participant** event reaches **only** that one participant's group (plus
+  hosts), and only when they may see the subject; observers and other participants are
+  never targeted (a non-selected participant is neither in that group nor passes the
+  per-participant gate — the crown jewel).
+- An **audience-wide** event is delivered to the **observers** group when the audience
+  may see the subject, and is **fanned out to each active participant** of the session's
+  workspace whose own per-participant visibility allows it (the connection model has no
+  all-participants group, so the audience reaches participants only through their
+  individual groups). The **audience** projection omits the routing target, so a
+  participant never learns who else was targeted.
+
+Every per-recipient and audience decision is delegated to the central Visibility engine
+(`CanViewResource` / `CanParticipantViewResource`, reused — not duplicated), so the
+realtime recipient set can never diverge from the REST visibility decision. An event with
+no visibility subject (a later unconditional audience event such as `SessionStarted`) is
+not gated.
+
+Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`), reconnect replay
+and scale-out are later Realtime stories (`docs/11_REALTIME_SYNC.md`).
 
 ## Container images
 

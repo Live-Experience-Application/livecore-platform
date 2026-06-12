@@ -116,6 +116,50 @@ public sealed class SessionEventTests
         => Assert.Throws<ArgumentOutOfRangeException>(() => SessionEvent.Create(
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed, null, null, "{}", 0, _now));
 
+    // --- Visibility subject (CORE-RT-004) --------------------------------------
+
+    [Fact]
+    public void Create_without_a_subject_has_no_visibility_subject()
+    {
+        var sessionEvent = CreateAudienceWide();
+
+        Assert.False(sessionEvent.HasVisibilitySubject);
+        Assert.Null(sessionEvent.VisibilitySubjectType);
+        Assert.Null(sessionEvent.VisibilitySubjectId);
+    }
+
+    [Fact]
+    public void Create_with_a_subject_records_the_pair()
+    {
+        var subjectId = Guid.NewGuid();
+        var sessionEvent = SessionEvent.Create(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed, null, null,
+            "{}", 1, _now, visibilitySubjectType: "Entity", visibilitySubjectId: subjectId);
+
+        Assert.True(sessionEvent.HasVisibilitySubject);
+        Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
+        Assert.Equal(subjectId, sessionEvent.VisibilitySubjectId);
+    }
+
+    [Fact]
+    public void Create_rejects_a_half_set_visibility_subject()
+    {
+        // The subject travels as a pair: a type without an id (or an id without a type) cannot gate
+        // recipients and is rejected rather than silently degraded.
+        Assert.Throws<ArgumentException>(() => SessionEvent.Create(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed, null, null,
+            "{}", 1, _now, visibilitySubjectType: "Entity", visibilitySubjectId: null));
+        Assert.Throws<ArgumentException>(() => SessionEvent.Create(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed, null, null,
+            "{}", 1, _now, visibilitySubjectType: null, visibilitySubjectId: Guid.NewGuid()));
+    }
+
+    [Fact]
+    public void Create_rejects_an_explicitly_empty_visibility_subject_id()
+        => Assert.Throws<ArgumentException>(() => SessionEvent.Create(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed, null, null,
+            "{}", 1, _now, visibilitySubjectType: "Entity", visibilitySubjectId: Guid.Empty));
+
     [Fact]
     public void ToString_excludes_the_payload()
     {

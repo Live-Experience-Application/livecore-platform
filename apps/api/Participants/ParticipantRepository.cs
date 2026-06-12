@@ -94,6 +94,39 @@ internal sealed class ParticipantRepository : IParticipantRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Participant>> ListActiveByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's participants, so the
+        // lookup fails fast instead of returning an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // The predicate leads with the tenant column, then matches the workspace and
+        // the Active status, so the list is exactly tenant- and workspace-scoped and
+        // excludes soft-removed participants (threat T5/T1). The order is by the
+        // time-ordered surrogate id (UUIDv7), which is chronological and
+        // provider-independent — SQLite cannot ORDER BY a DateTimeOffset — matching
+        // the other repositories' ordering convention.
+        return await _dbContext.Participants
+            .Where(participant => participant.OrganizationId == organizationId
+                && participant.WorkspaceId == workspaceId
+                && participant.Status == ParticipantStatus.Active)
+            .OrderBy(participant => participant.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<Participant?> FindByUserAsync(
         Guid organizationId,
         Guid workspaceId,

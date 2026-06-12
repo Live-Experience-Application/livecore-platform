@@ -3,42 +3,41 @@ using Microsoft.AspNetCore.SignalR;
 namespace LiveCore.Api.Realtime;
 
 /// <summary>
-/// Appends a session event and delivers it to its recipient groups (CORE-RT-003,
-/// <see cref="ISessionEventPublisher"/>). It realizes the documented flow "persist event -> compute
-/// recipients -> send to recipient groups" (docs/11_REALTIME_SYNC.md): first the event is appended to the
-/// durable, append-only stream (<see cref="ISessionEventRepository"/>) — the source of truth that
-/// reconnect replay (CORE-RT-005) reconstructs from — and only then is the recipient-safe envelope sent
-/// over SignalR to the SERVER-COMPUTED groups (<see cref="RealtimeGroups"/>), never to client-chosen
-/// names.
+/// Appends a session event and delivers it to its recipients (CORE-RT-003, <see cref="ISessionEventPublisher"/>;
+/// recipient-specific projection added in CORE-RT-004). It realizes the documented flow "persist event ->
+/// compute recipients -> project payload -> send to recipient groups" (docs/11_REALTIME_SYNC.md): first
+/// the event is appended to the durable, append-only stream (<see cref="ISessionEventRepository"/>) — the
+/// source of truth that reconnect replay (CORE-RT-005) reconstructs from — and only then are the
+/// per-recipient deliveries computed (<see cref="ISessionEventRecipientResolver"/>) and sent over SignalR.
 ///
-/// RECIPIENT GROUPS (the "compute recipients" step) follow the event's routing:
-/// <list type="bullet">
-///   <item>A SELECTED-participant event (<see cref="SessionEvent.TargetParticipantId"/> set) is delivered
-///   to that ONE participant's group plus the session hosts group — the selected participant receives it,
-///   a non-selected participant (who is not in that group, CORE-RT-002) does NOT, and the hosts get the
-///   confirmation (docs/11_REALTIME_SYNC.md test "host receives audit/confirmation event"; threat T3).</item>
-///   <item>An AUDIENCE-WIDE event is delivered to the session hosts and observers groups. Fanning an
-///   audience-wide event out to EACH participant's group with a per-recipient projected payload is the
-///   recipient-specific projection story (CORE-RT-004); this story does not enumerate participants, so an
-///   audience-wide event reaches hosts and observers here and the per-participant fan-out is deferred.</item>
-/// </list>
+/// The publisher itself is deliberately THIN: WHO receives the event, WHICH server-managed group they are
+/// in, and WHICH projection they get (the host projection vs the recipient-safe audience projection, and
+/// only for recipients allowed to see the event's visibility subject) are all decided by the recipient
+/// resolver, so the anti-leak logic lives in one tested place ("Events are never broadcast blindly",
+/// docs/11_REALTIME_SYNC.md; threat T3). The publisher just appends, then sends each computed delivery to
+/// its group.
 ///
-/// The payload delivered is the recipient-safe <see cref="SessionEventEnvelope"/>, the SAME for every
-/// recipient group (per-recipient payload projection is CORE-RT-004). Delivery is best-effort: the
-/// append already committed the durable event, so a transient transport failure loses only the live push,
-/// not the recorded fact (a reconnecting client replays it later, CORE-RT-005).
+/// Delivery is best-effort: the append already committed the durable event, so a transient transport
+/// failure loses only the live push, not the recorded fact (a reconnecting client replays it later,
+/// CORE-RT-005).
 /// </summary>
 internal sealed class SessionEventPublisher : ISessionEventPublisher
 {
     private readonly ISessionEventRepository _events;
     private readonly IHubContext<SessionHub> _hub;
+    private readonly ISessionEventRecipientResolver _recipients;
 
-    public SessionEventPublisher(ISessionEventRepository events, IHubContext<SessionHub> hub)
+    public SessionEventPublisher(
+        ISessionEventRepository events,
+        IHubContext<SessionHub> hub,
+        ISessionEventRecipientResolver recipients)
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(hub);
+        ArgumentNullException.ThrowIfNull(recipients);
         _events = events;
         _hub = hub;
+        _recipients = recipients;
     }
 
     /// <inheritdoc />
@@ -49,31 +48,16 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
         // 1. Persist the durable event first (the source of truth for replay).
         await _events.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
 
-        // 2. Deliver the recipient-safe envelope to the server-computed recipient groups.
-        var envelope = SessionEventEnvelope.From(sessionEvent);
-        foreach (var group in ComputeRecipientGroups(sessionEvent))
+        // 2. Compute the per-recipient deliveries (groups + projected envelopes) and send each. The
+        //    resolver omits any recipient that may not see the event's subject, so the send never leaks a
+        //    hidden event (threat T3).
+        var deliveries = await _recipients.ResolveAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        foreach (var delivery in deliveries)
         {
             await _hub.Clients
-                .Group(group)
-                .SendAsync(SessionEventEnvelope.ClientMethod, envelope, cancellationToken)
+                .Group(delivery.Group)
+                .SendAsync(SessionEventEnvelope.ClientMethod, delivery.Envelope, cancellationToken)
                 .ConfigureAwait(false);
         }
     }
-
-    /// <summary>
-    /// Computes the server-managed groups an event is delivered to from its routing (see the type
-    /// summary). The group NAMES come only from <see cref="RealtimeGroups"/>, never from any client input.
-    /// </summary>
-    private static IReadOnlyList<string> ComputeRecipientGroups(SessionEvent sessionEvent)
-        => sessionEvent.TargetParticipantId is { } participantId
-            ? new[]
-            {
-                RealtimeGroups.SessionParticipant(sessionEvent.SessionId, participantId),
-                RealtimeGroups.SessionHosts(sessionEvent.SessionId),
-            }
-            : new[]
-            {
-                RealtimeGroups.SessionHosts(sessionEvent.SessionId),
-                RealtimeGroups.SessionObservers(sessionEvent.SessionId),
-            };
 }

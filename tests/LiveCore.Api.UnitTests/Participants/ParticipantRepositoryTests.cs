@@ -252,6 +252,72 @@ public sealed class ParticipantRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ListActiveByWorkspace_returns_active_participants_in_append_order_and_excludes_removed()
+    {
+        // The Realtime audience fan-out (CORE-RT-004) lists the session's audience — the workspace's
+        // ACTIVE participants — so a removed participant must be excluded and the order must be
+        // deterministic (by the time-ordered surrogate id).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var first = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 1");
+        var second = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 2");
+        var removed = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Gone");
+
+        await using (var context = CreateContext())
+        {
+            var repository = new ParticipantRepository(context);
+            var loaded = await repository.FindByIdAsync(organization.Id, workspace.Id, removed.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            loaded.Remove(_updatedAt);
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using var readContext = CreateContext();
+        var readRepository = new ParticipantRepository(readContext);
+        var active = await readRepository.ListActiveByWorkspaceAsync(organization.Id, workspace.Id, CancellationToken.None);
+
+        Assert.Equal(new[] { first.Id, second.Id }, active.Select(participant => participant.Id));
+        Assert.DoesNotContain(active, participant => participant.Id == removed.Id);
+    }
+
+    [Fact]
+    public async Task ListActiveByWorkspace_excludes_other_workspaces_and_tenants()
+    {
+        // Isolation (threat T5): the audience list of one workspace must never include another
+        // workspace's or another tenant's participants, even with the same surrogate ids addressable.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceA1 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspaceA2 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugB);
+        var workspaceB = await SeedWorkspaceAsync(organizationB.Id, _workspaceSlugA);
+        var inA1 = await SeedParticipantAsync(organizationA.Id, workspaceA1.Id, userProfileId: null, "A1");
+        await SeedParticipantAsync(organizationA.Id, workspaceA2.Id, userProfileId: null, "A2");
+        await SeedParticipantAsync(organizationB.Id, workspaceB.Id, userProfileId: null, "B");
+
+        await using var context = CreateContext();
+        var repository = new ParticipantRepository(context);
+
+        var inWorkspaceA1 = await repository.ListActiveByWorkspaceAsync(organizationA.Id, workspaceA1.Id, CancellationToken.None);
+        Assert.Equal(new[] { inA1.Id }, inWorkspaceA1.Select(participant => participant.Id));
+
+        // The same workspace id under the wrong tenant returns nothing (organization boundary first).
+        var underWrongTenant = await repository.ListActiveByWorkspaceAsync(organizationB.Id, workspaceA1.Id, CancellationToken.None);
+        Assert.Empty(underWrongTenant);
+    }
+
+    [Fact]
+    public async Task ListActiveByWorkspace_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new ParticipantRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListActiveByWorkspaceAsync(Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListActiveByWorkspaceAsync(Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task FindById_for_a_missing_participant_returns_null()
     {
         var organization = await SeedOrganizationAsync(_organizationSlugA);

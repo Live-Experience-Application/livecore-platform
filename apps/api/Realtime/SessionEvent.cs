@@ -12,11 +12,25 @@ namespace LiveCore.Api.Realtime;
 /// FIELDS follow docs/09_EVENT_CATALOG.md's event principles: <see cref="Id"/> (eventId),
 /// <see cref="OrganizationId"/>, <see cref="WorkspaceId"/>, <see cref="SessionId"/>,
 /// <see cref="EventType"/>, <see cref="CreatedBy"/>, <see cref="CreatedAt"/>, <see cref="Payload"/> and
-/// <see cref="SchemaVersion"/>. The documented <c>visibilityProjection</c> field — the per-RECIPIENT
-/// payload projection — is the later recipient-specific projection story (CORE-RT-004); this story
-/// carries only <see cref="TargetParticipantId"/>, the coarse recipient routing (a single selected
-/// participant, or audience-wide when null) that decides which server-managed GROUPS the event is
-/// delivered to (the same routing the CORE-VIS-005 selected-participant reveal already uses).
+/// <see cref="SchemaVersion"/>. <see cref="TargetParticipantId"/> is the coarse recipient routing (a
+/// single selected participant, or audience-wide when null) that decides which server-managed GROUPS the
+/// event is delivered to (the same routing the CORE-VIS-005 selected-participant reveal already uses).
+///
+/// VISIBILITY SUBJECT (CORE-RT-004, the documented <c>visibilityProjection</c> input). The event also
+/// records the Core resource whose audience visibility GATES who may receive it —
+/// <see cref="VisibilitySubjectType"/> (the generic resource kind name, e.g. <c>Entity</c>) and
+/// <see cref="VisibilitySubjectId"/>. This is what lets the Realtime delivery compute recipients
+/// per-RECIPIENT through the central Visibility engine: an audience-wide event is fanned out to each
+/// active participant only when that participant may see the subject, and a private event reaches only
+/// its selected participant (threat T3 "per-recipient event projection", docs/07_SECURITY_THREAT_MODEL.md;
+/// docs/11_REALTIME_SYNC.md "Participant events must contain only data visible to that participant"). The
+/// subject is recorded as a (type-NAME string, id) pair — the resource kind is a string so the Realtime
+/// module stays DECOUPLED from the Visibility enum (mirroring the Audit log's recorded resource type),
+/// and the id is a polymorphic surrogate (a scene/content-block/entity), intentionally NOT a foreign key
+/// (mirroring <c>visibility_rules.resource_id</c>). Both are nullable and travel TOGETHER: an event
+/// either carries a subject (both set) or none (both null, an unconditional audience event such as a
+/// later <c>SessionStarted</c>). The subject is server-composed identifiers only — never resolved
+/// content (threat T7) — and is internal addressing, so it is excluded from the recipient-safe envelope.
 ///
 /// APPEND-ONLY (docs/10_DATABASE_SCHEMA.md). Every property is get-only; there is no mutator, no setter
 /// and no delete on the repository. An event, once appended, is an immutable historical fact — that is
@@ -38,6 +52,9 @@ public sealed class SessionEvent
     /// <summary>Maximum stored length of the generic event-type name.</summary>
     public const int MaxEventTypeLength = 64;
 
+    /// <summary>Maximum stored length of the visibility-subject resource-type name.</summary>
+    public const int MaxVisibilitySubjectTypeLength = 64;
+
     /// <summary>Maximum stored length of the server-composed JSON payload.</summary>
     public const int MaxPayloadLength = 8192;
 
@@ -51,6 +68,8 @@ public sealed class SessionEvent
         Guid? targetParticipantId,
         string payload,
         int schemaVersion,
+        string? visibilitySubjectType,
+        Guid? visibilitySubjectId,
         DateTimeOffset createdAt)
     {
         if (id == Guid.Empty)
@@ -107,6 +126,39 @@ public sealed class SessionEvent
                 "Schema version must be at least 1.");
         }
 
+        // The visibility subject (type + id) is a pair that travels together: an event either carries a
+        // subject (both set) or none (both null). A half-set subject could not gate recipients correctly,
+        // so it is rejected rather than silently degraded (threat T3). A set subject must name a real
+        // resource: a non-blank, valid type and a non-empty id.
+        var normalizedSubjectType = string.IsNullOrWhiteSpace(visibilitySubjectType)
+            ? null
+            : visibilitySubjectType.Trim();
+        var hasSubjectType = normalizedSubjectType is not null;
+        var hasSubjectId = visibilitySubjectId is not null;
+        if (hasSubjectType != hasSubjectId)
+        {
+            throw new ArgumentException(
+                "The visibility subject type and id must be provided together (both set) or both omitted.",
+                nameof(visibilitySubjectType));
+        }
+
+        if (hasSubjectId)
+        {
+            if (visibilitySubjectId == Guid.Empty)
+            {
+                throw new ArgumentException(
+                    "Visibility subject id must not be empty; pass null for an event with no subject.",
+                    nameof(visibilitySubjectId));
+            }
+
+            if (!IsValidVisibilitySubjectType(normalizedSubjectType))
+            {
+                throw new ArgumentException(
+                    "Visibility subject type violates the subject-type invariants.",
+                    nameof(visibilitySubjectType));
+            }
+        }
+
         Id = id;
         OrganizationId = organizationId;
         WorkspaceId = workspaceId;
@@ -116,6 +168,8 @@ public sealed class SessionEvent
         TargetParticipantId = targetParticipantId;
         Payload = payload;
         SchemaVersion = schemaVersion;
+        VisibilitySubjectType = normalizedSubjectType;
+        VisibilitySubjectId = visibilitySubjectId;
         // Normalized to UTC so the persisted timestamptz value is offset-independent
         // (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -167,6 +221,24 @@ public sealed class SessionEvent
     public string Payload { get; }
 
     /// <summary>
+    /// The generic kind NAME of the Core resource whose audience visibility GATES who may receive this
+    /// event (CORE-RT-004, the <c>visibilityProjection</c> input of docs/09_EVENT_CATALOG.md), or
+    /// <see langword="null"/> when the event has no visibility subject (an unconditional audience event).
+    /// Stored as a string to keep the Realtime module decoupled from the Visibility resource-type enum
+    /// (mirrors the Audit log's recorded resource type). Always paired with <see cref="VisibilitySubjectId"/>.
+    /// </summary>
+    public string? VisibilitySubjectType { get; }
+
+    /// <summary>
+    /// The surrogate id of the resource whose audience visibility gates who may receive this event
+    /// (CORE-RT-004), or <see langword="null"/> when the event has no visibility subject. A polymorphic
+    /// reference across <c>scenes</c>/<c>content_blocks</c>/<c>entities</c>, intentionally NOT a foreign
+    /// key (mirrors <c>visibility_rules.resource_id</c>). Always paired with
+    /// <see cref="VisibilitySubjectType"/>.
+    /// </summary>
+    public Guid? VisibilitySubjectId { get; }
+
+    /// <summary>
     /// The payload schema version (docs/09_EVENT_CATALOG.md: "Breaking event payload changes require a
     /// new schema version"). At least 1.
     /// </summary>
@@ -179,14 +251,23 @@ public sealed class SessionEvent
     public bool IsForSelectedParticipant => TargetParticipantId is not null;
 
     /// <summary>
+    /// Whether this event carries a visibility subject (CORE-RT-004): a Core resource (type + id) whose
+    /// audience visibility gates who may receive the event. When <see langword="false"/> the event has no
+    /// subject and is delivered to the audience unconditionally.
+    /// </summary>
+    public bool HasVisibilitySubject => VisibilitySubjectType is not null && VisibilitySubjectId is not null;
+
+    /// <summary>
     /// Appends a new session event to the given session's stream (owned by the given workspace and
     /// tenant). The caller (a Realtime publisher invoked by a command) supplies the already-resolved ids,
     /// the event type, the optional actor, the optional recipient participant, the server-composed
-    /// payload and the schema version.
+    /// payload and the schema version. The optional visibility subject (CORE-RT-004) — the resource kind
+    /// NAME and id whose audience visibility gates who may receive the event — defaults to none (an
+    /// unconditional audience event) and must be passed as a pair (both set or both omitted).
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// A required id is empty, an optional id is explicitly empty, or the event type / payload violates an
-    /// invariant.
+    /// A required id is empty, an optional id is explicitly empty, the event type / payload violates an
+    /// invariant, or only one of the visibility-subject type / id is supplied.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The schema version is below 1.</exception>
     public static SessionEvent Create(
@@ -198,7 +279,9 @@ public sealed class SessionEvent
         Guid? targetParticipantId,
         string payload,
         int schemaVersion,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        string? visibilitySubjectType = null,
+        Guid? visibilitySubjectId = null)
         => new(
             Guid.CreateVersion7(),
             organizationId,
@@ -209,6 +292,8 @@ public sealed class SessionEvent
             targetParticipantId,
             payload ?? string.Empty,
             schemaVersion,
+            visibilitySubjectType,
+            visibilitySubjectId,
             createdAt);
 
     /// <summary>
@@ -228,12 +313,24 @@ public sealed class SessionEvent
         => value is not null && value.Length <= MaxPayloadLength;
 
     /// <summary>
+    /// Whether the given value is a valid visibility-subject resource-type name: non-blank, within the
+    /// length bound and free of control characters (same shape as the event type). The value is a
+    /// server-composed resource kind name, so only structural bounds are enforced here.
+    /// </summary>
+    public static bool IsValidVisibilitySubjectType(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= MaxVisibilitySubjectTypeLength
+            && !value.Any(char.IsControl);
+
+    /// <summary>
     /// Identifier-only representation safe for structured logs: event id, type, tenant, workspace,
-    /// session, actor, target and schema version. The payload is excluded so it cannot leak through logs
-    /// (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// session, actor, target, visibility subject and schema version. The payload is excluded so it
+    /// cannot leak through logs (threat T7 in docs/07_SECURITY_THREAT_MODEL.md); the subject is
+    /// identifiers only.
     /// </summary>
     public override string ToString()
         => $"SessionEvent {Id} type={EventType} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
             + $"by={(CreatedBy is { } actor ? actor.ToString() : "system")} "
-            + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")} v={SchemaVersion}";
+            + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")} "
+            + $"subject={(HasVisibilitySubject ? $"{VisibilitySubjectType}:{VisibilitySubjectId}" : "none")} v={SchemaVersion}";
 }

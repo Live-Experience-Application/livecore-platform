@@ -93,6 +93,32 @@ public interface IParticipantRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists every ACTIVE participant of the given workspace (owned by the given
+    /// organization) in deterministic append order — by the time-ordered surrogate
+    /// id (UUIDv7), which is provider-independent (SQLite cannot ORDER BY a
+    /// DateTimeOffset). This is the session AUDIENCE: participants are
+    /// workspace-scoped (CORE-SES-001), so a session's audience is its workspace's
+    /// active participants — the same population a participant realtime connection is
+    /// admitted from (CORE-RT-002). It is consumed by the Realtime recipient resolver
+    /// (CORE-RT-004) to FAN an audience-wide event out to each participant's own
+    /// group, each delivery then gated by the Visibility engine. Removed participants
+    /// are excluded (a soft-deleted participant has left the audience). The list is
+    /// tenant- AND workspace-scoped: the predicate leads with
+    /// <c>organization_id</c> and matches <c>workspace_id</c>, so a foreign tenant's
+    /// or workspace's participants are NEVER returned even when their ids would
+    /// otherwise be addressable (threat T5/T1).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or workspace id is empty. An empty id can never address a
+    /// stored workspace's participants, so the lookup is rejected instead of silently
+    /// returning nothing.
+    /// </exception>
+    Task<IReadOnlyList<Participant>> ListActiveByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Finds the participant linked to exactly the given user WITHIN the given
     /// organization and workspace, or <see langword="null"/> when the user has no
     /// participant there. Only user-linked participants are addressed by this

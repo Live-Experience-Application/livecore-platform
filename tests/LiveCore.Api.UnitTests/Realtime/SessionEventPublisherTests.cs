@@ -4,96 +4,94 @@ using Microsoft.AspNetCore.SignalR;
 namespace LiveCore.Api.UnitTests.Realtime;
 
 /// <summary>
-/// Tests for <see cref="SessionEventPublisher"/> (CORE-RT-003) — append + deliver. They use a fake
-/// append-only repository (recording the appended event) and a recording <see cref="IHubContext{SessionHub}"/>
-/// (recording which GROUP each send targeted), so the test observes exactly the "persist event ->
-/// compute recipients -> send to recipient groups" flow (docs/11_REALTIME_SYNC.md) deterministically,
-/// without a live connection.
+/// Tests for <see cref="SessionEventPublisher"/> (CORE-RT-003 append + deliver; CORE-RT-004 delegates the
+/// recipient computation to <see cref="ISessionEventRecipientResolver"/>). They use a fake append-only
+/// repository (recording the appended event), a fake recipient resolver (returning a fixed delivery plan)
+/// and a recording <see cref="IHubContext{SessionHub}"/> (recording which GROUP each send targeted and the
+/// payload), so the test observes exactly the "persist event -> compute recipients -> send to recipient
+/// groups" flow (docs/11_REALTIME_SYNC.md) deterministically, without a live connection.
 ///
-/// The security-critical property (the epic's "selected/unselected participants" requirement) is the
-/// recipient-group computation: a SELECTED-participant event is delivered to that ONE participant's group
-/// (plus the hosts group), so — combined with CORE-RT-002, where a participant joins ONLY its own group —
-/// a non-selected participant cannot receive it (threat T3). All group NAMES come from
-/// <see cref="RealtimeGroups"/>. All fixtures are generic (AGENTS.md).
+/// The publisher is deliberately THIN: WHO receives an event and WHICH projection they get is the
+/// resolver's job (covered by <see cref="SessionEventRecipientResolverTests"/>); the publisher only
+/// appends once and then sends each computed delivery to its group. These tests pin exactly that. All
+/// fixtures are generic (AGENTS.md).
 /// </summary>
 public sealed class SessionEventPublisherTests
 {
     private static readonly DateTimeOffset _now = new(2026, 6, 12, 9, 0, 0, TimeSpan.Zero);
 
-    private static SessionEvent Event(Guid session, Guid? target)
+    private static SessionEvent Event()
         => SessionEvent.Create(
-            Guid.NewGuid(), Guid.NewGuid(), session, SessionEventTypes.ContentRevealed,
-            Guid.NewGuid(), target, "{\"resourceId\":\"x\"}", 1, _now);
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), SessionEventTypes.ContentRevealed,
+            Guid.NewGuid(), targetParticipantId: null, "{\"resourceId\":\"x\"}", 1, _now,
+            visibilitySubjectType: "Entity", visibilitySubjectId: Guid.NewGuid());
 
     [Fact]
-    public async Task A_selected_event_is_delivered_to_the_participant_and_hosts_groups_only()
+    public async Task It_appends_the_event_once_then_sends_each_resolved_delivery()
     {
-        var session = Guid.NewGuid();
-        var participant = Guid.NewGuid();
         var repository = new RecordingEventRepository();
         var hub = new RecordingHubContext();
-        var publisher = new SessionEventPublisher(repository, hub);
-        var sessionEvent = Event(session, participant);
+        var sessionEvent = Event();
+        var hosts = new SessionEventDelivery("session:hosts", SessionEventEnvelope.ForHost(sessionEvent));
+        var audience = new SessionEventDelivery("session:participant:1", SessionEventEnvelope.ForAudience(sessionEvent));
+        var resolver = new FixedRecipientResolver([hosts, audience]);
+        var publisher = new SessionEventPublisher(repository, hub, resolver);
 
         await publisher.PublishAsync(sessionEvent, CancellationToken.None);
 
-        // Appended exactly once.
+        // Persisted exactly once, BEFORE any delivery is computed.
         Assert.Single(repository.Appended);
         Assert.Equal(sessionEvent.Id, repository.Appended[0].Id);
+        Assert.Same(sessionEvent, resolver.Resolved);
 
-        // Delivered to exactly the selected participant's group and the session hosts group — NOT to
-        // the observers group, and NOT to any other participant's group.
+        // Delivered to exactly the resolver's groups, in order, each on the SessionEvent client method
+        // with the envelope the resolver chose for that group.
         Assert.Equal(
-            new[]
-            {
-                RealtimeGroups.SessionParticipant(session, participant),
-                RealtimeGroups.SessionHosts(session),
-            },
+            new[] { "session:hosts", "session:participant:1" },
             hub.Clients.GroupSends.Select(send => send.Group));
-
-        // The envelope is the recipient-safe projection, delivered on the SessionEvent client method.
-        var (_, method, payload) = hub.Clients.GroupSends[0];
-        Assert.Equal(SessionEventEnvelope.ClientMethod, method);
-        var envelope = Assert.IsType<SessionEventEnvelope>(payload);
-        Assert.Equal(sessionEvent.Id, envelope.EventId);
-        Assert.Equal(session, envelope.SessionId);
+        Assert.All(hub.Clients.GroupSends, send => Assert.Equal(SessionEventEnvelope.ClientMethod, send.Method));
+        Assert.Same(hosts.Envelope, hub.Clients.GroupSends[0].Payload);
+        Assert.Same(audience.Envelope, hub.Clients.GroupSends[1].Payload);
     }
 
     [Fact]
-    public async Task An_audience_wide_event_is_delivered_to_the_hosts_and_observers_groups()
+    public async Task It_appends_before_resolving_recipients()
     {
-        var session = Guid.NewGuid();
+        // The durable append is the source of truth and must happen before delivery is even computed, so a
+        // reconnecting client can replay an event whose live push failed (CORE-RT-005).
         var repository = new RecordingEventRepository();
-        var hub = new RecordingHubContext();
-        var publisher = new SessionEventPublisher(repository, hub);
+        var resolver = new FixedRecipientResolver([]) { AppendCountSource = () => repository.Appended.Count };
+        var publisher = new SessionEventPublisher(repository, new RecordingHubContext(), resolver);
 
-        await publisher.PublishAsync(Event(session, target: null), CancellationToken.None);
+        await publisher.PublishAsync(Event(), CancellationToken.None);
 
-        Assert.Equal(
-            new[]
-            {
-                RealtimeGroups.SessionHosts(session),
-                RealtimeGroups.SessionObservers(session),
-            },
-            hub.Clients.GroupSends.Select(send => send.Group));
-    }
-
-    [Fact]
-    public async Task A_non_selected_participant_group_is_never_targeted_by_a_selected_event()
-    {
-        var session = Guid.NewGuid();
-        var selected = Guid.NewGuid();
-        var other = Guid.NewGuid();
-        var hub = new RecordingHubContext();
-        var publisher = new SessionEventPublisher(new RecordingEventRepository(), hub);
-
-        await publisher.PublishAsync(Event(session, selected), CancellationToken.None);
-
-        // The other participant's group is never among the delivery targets (crown jewel, threat T3).
-        Assert.DoesNotContain(RealtimeGroups.SessionParticipant(session, other), hub.Clients.GroupSends.Select(s => s.Group));
+        // When the resolver ran, the event had already been appended.
+        Assert.Equal(1, resolver.AppendCountAtResolve);
     }
 
     // --- Test doubles ----------------------------------------------------------
+
+    private sealed class FixedRecipientResolver : ISessionEventRecipientResolver
+    {
+        private readonly IReadOnlyList<SessionEventDelivery> _deliveries;
+
+        public FixedRecipientResolver(IReadOnlyList<SessionEventDelivery> deliveries) => _deliveries = deliveries;
+
+        public SessionEvent? Resolved { get; private set; }
+
+        public Func<int>? AppendCountSource { get; set; }
+
+        public int AppendCountAtResolve { get; private set; }
+
+        public Task<IReadOnlyList<SessionEventDelivery>> ResolveAsync(
+            SessionEvent sessionEvent,
+            CancellationToken cancellationToken)
+        {
+            Resolved = sessionEvent;
+            AppendCountAtResolve = AppendCountSource?.Invoke() ?? 0;
+            return Task.FromResult(_deliveries);
+        }
+    }
 
     private sealed class RecordingEventRepository : ISessionEventRepository
     {

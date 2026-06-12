@@ -232,14 +232,19 @@ internal static class RevealEndpoints
         // REALTIME EVENT (CORE-RT-003): emit the durable ContentRevealed event IFF the reveal actually
         // changed visibility — the same change signal the audit uses (CORE-VIS-006), so a retry or a
         // no-op reveal of an already-visible resource emits nothing. The Realtime publisher appends the
-        // event to the session's append-only stream and delivers it to the server-computed recipient
-        // groups (the selected participant, or the audience); a non-selected participant is not in the
-        // target group and so cannot receive it (threat T3). The payload carries resource IDENTIFIERS
-        // only, never resolved content (threat T7/T2).
+        // event to the session's append-only stream and delivers it to the server-computed recipients; a
+        // non-selected participant is not in the target group and so cannot receive it (threat T3). The
+        // payload carries resource IDENTIFIERS only, never resolved content (threat T7/T2).
+        //
+        // The revealed resource is also recorded as the event's VISIBILITY SUBJECT (CORE-RT-004): the
+        // (resource kind name, id) whose audience visibility gates who may receive the event, so the
+        // recipient resolver can project per-recipient through the Visibility engine (an audience-wide
+        // reveal is fanned out only to participants who may see the resource).
         if (result.VisibilityChanged)
         {
+            var resourceTypeName = result.ResourceType.ToString();
             var payload = JsonSerializer.Serialize(new RevealEventPayload(
-                result.ResourceType.ToString(),
+                resourceTypeName,
                 result.ResourceId));
 
             var sessionEvent = SessionEvent.Create(
@@ -251,7 +256,9 @@ internal static class RevealEndpoints
                 targetParticipantId,
                 payload,
                 schemaVersion: 1,
-                now);
+                now,
+                visibilitySubjectType: resourceTypeName,
+                visibilitySubjectId: result.ResourceId);
 
             await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
