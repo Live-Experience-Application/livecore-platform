@@ -6,6 +6,7 @@ using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.Hosting;
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Observability;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
@@ -40,6 +41,19 @@ builder.Logging.AddJsonConsole(options =>
 builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
 builder.Services.AddHealthChecks();
+
+// Operational metrics (CORE-OBS-001). LiveCoreMetrics owns the eight signals docs/15_OBSERVABILITY.md
+// requires (request duration/error rate, realtime connections, reveal latency, event-delivery failures,
+// asset failures, database failures, background-job failures) on a single OpenTelemetry-collected meter, and
+// this wires the MeterProvider plus the Prometheus exporter that backs the /metrics scrape endpoint
+// (mapped below). It is registered UNCONDITIONALLY (no persistence/identity needed), so the surface exists
+// even when the host runs without a database, exactly like the health endpoints. The instrumentation seams
+// (the request middleware, the realtime hub, the reveal command, the event publisher, the asset storage
+// decorator and the EF Core command interceptor) all record onto the same LiveCoreMetrics singleton. The
+// scrape endpoint is unauthenticated by convention and carries only low-cardinality aggregates, never content
+// or identifiers (threat T7 in docs/07_SECURITY_THREAT_MODEL.md; restricted at the edge per
+// docs/13_SELF_HOSTING_REQUIREMENTS.md).
+builder.Services.AddLiveCorePrometheusMetrics();
 
 // CORS allow-list for browser/PWA clients (CORE-OPS-003). One named policy
 // (CorsConfiguration.PolicyName) is applied to BOTH the REST API and the SignalR
@@ -92,6 +106,14 @@ builder.Services.AddLiveCoreRealtime(builder.Configuration);
 // download flow with authorization (CORE-AST-004) both consume this port to mint short-lived signed
 // upload/download URLs after their server-side permission checks.
 builder.Services.AddAssetStorage(builder.Configuration);
+
+// Asset upload/download failure metering (CORE-OBS-001): wraps WHICHEVER IAssetStorage adapter the
+// conditional selection above chose (the concrete S3-compatible adapter or the fail-closed default) with the
+// transparent MeteredAssetStorage decorator, so a failed upload/download against a CONFIGURED backend
+// increments the documented "asset failures" metric (the fail-closed "storage not configured" outcome is
+// expected and not counted). It changes no storage behavior and leaves the security-critical selection logic
+// untouched (docs/15_OBSERVABILITY.md; threat T4).
+builder.Services.AddLiveCoreAssetStorageMetrics();
 
 // Purchase verification provider seam (CORE-STORE-001, the first story of the "Store Purchase Verification"
 // epic). IPurchaseVerificationProvider is the single port between Core and a store's own server APIs that
@@ -148,7 +170,14 @@ var oidcConfigured = builder.Services.AddOidcAuthentication(builder.Configuratio
 var databaseConnectionString = builder.Configuration.GetConnectionString("Database");
 if (!string.IsNullOrWhiteSpace(databaseConnectionString))
 {
-    builder.Services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(databaseConnectionString));
+    // Database query-failure metering (CORE-OBS-001): an EF Core command interceptor counts every failed
+    // database command onto LiveCoreMetrics (the documented "database failures" signal), uniformly across all
+    // query paths, recording only a count — never the SQL or parameters (threat T7). Registered as a
+    // singleton and attached to the DbContext below.
+    builder.Services.AddSingleton<DatabaseFailureMetricsInterceptor>();
+    builder.Services.AddDbContext<LiveCoreDbContext>((serviceProvider, options) => options
+        .UseNpgsql(databaseConnectionString)
+        .AddInterceptors(serviceProvider.GetRequiredService<DatabaseFailureMetricsInterceptor>()));
     builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddScoped<IUserProfileRepository, UserProfileRepository>();
     builder.Services.AddScoped<UserProfileReferenceService>();
@@ -837,6 +866,13 @@ if (missingRequiredSettings.Count > 0)
 // an untrusted client cannot spoof the scheme (threat T7).
 app.UseForwardedHeaders();
 
+// Request metrics (CORE-OBS-001) run first among the application middleware so they time the WHOLE request
+// (including authentication and authorization) and record its duration and server-error count onto
+// LiveCoreMetrics — the documented "API request duration" and "API error rate" signals. The middleware tags
+// the measurement with the route TEMPLATE (never the concrete path) and skips the /metrics scrape endpoint
+// itself (docs/15_OBSERVABILITY.md; threat T7).
+app.UseMiddleware<RequestMetricsMiddleware>();
+
 // CORS runs before authentication so a browser preflight (an OPTIONS request that
 // carries no credentials) is answered by the CORS middleware itself rather than
 // being challenged with 401. The single named policy (CorsConfiguration.PolicyName)
@@ -856,6 +892,14 @@ app.UseAuthorization();
 
 // Health endpoints (CORE-FND-004): unauthenticated by convention.
 app.MapLiveCoreHealthEndpoints();
+
+// Prometheus metrics scrape endpoint (CORE-OBS-001): GET /metrics, serving the OpenTelemetry-collected
+// LiveCoreMetrics series in the Prometheus exposition format. Unauthenticated by convention (a Prometheus
+// server scrapes it from inside the deployment network, exactly as orchestration probes /health/*), it
+// exposes only low-cardinality aggregates — never content or identifiers (threat T7) — and a deployment
+// restricts it at the reverse-proxy/network edge (docs/13_SELF_HOSTING_REQUIREMENTS.md). Mapped
+// unconditionally; it needs no database.
+app.MapLiveCoreMetricsEndpoint();
 
 // Current-principal endpoint (CORE-API-002): GET /api/v1/me, the IdentityAccess
 // module's read of the authenticated caller's principal context (their user

@@ -1,3 +1,4 @@
+using LiveCore.Api.Observability;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 
@@ -34,6 +35,19 @@ namespace LiveCore.Api.Realtime;
 [Authorize]
 internal sealed class SessionHub : Hub
 {
+    // Marks a connection that was COUNTED on the live realtime-connection gauge, kept in the per-connection
+    // Context.Items so the disconnect handler decrements only a connection it incremented (an aborted
+    // connection is never counted, so the gauge never drifts).
+    private const string _meteredConnectionKey = "livecore.realtime.metered";
+
+    private readonly LiveCoreMetrics _metrics;
+
+    public SessionHub(LiveCoreMetrics metrics)
+    {
+        ArgumentNullException.ThrowIfNull(metrics);
+        _metrics = metrics;
+    }
+
     /// <summary>
     /// Resolves the connection's server-managed groups and joins them, or aborts the connection
     /// fail-closed. The authenticated principal and the connection's identifiers
@@ -79,7 +93,31 @@ internal sealed class SessionHub : Hub
             await Groups.AddToGroupAsync(Context.ConnectionId, group, Context.ConnectionAborted).ConfigureAwait(false);
         }
 
+        // Count the admitted connection on the live realtime-connection gauge (CORE-OBS-001, the docs/15
+        // "realtime connections" signal). Only the success path reaches here — an aborted connection returned
+        // above and is never counted — and the marker lets OnDisconnectedAsync decrement exactly this
+        // connection, so the gauge stays balanced.
+        Context.Items[_meteredConnectionKey] = true;
+        _metrics.RecordRealtimeConnectionOpened();
+
         await base.OnConnectedAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Decrements the live realtime-connection gauge when an admitted connection disconnects. It decrements
+    /// only a connection that was counted on connect (the <see cref="_meteredConnectionKey"/> marker), so a
+    /// connection aborted during <see cref="OnConnectedAsync"/> — which was never counted — never drives the
+    /// gauge negative.
+    /// </summary>
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        if (Context.Items.ContainsKey(_meteredConnectionKey))
+        {
+            Context.Items.Remove(_meteredConnectionKey);
+            _metrics.RecordRealtimeConnectionClosed();
+        }
+
+        await base.OnDisconnectedAsync(exception).ConfigureAwait(false);
     }
 
     /// <summary>

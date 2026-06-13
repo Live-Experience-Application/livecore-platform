@@ -30,6 +30,47 @@ Track:
 - database query failures
 - background job failures
 
+### Implementation (CORE-OBS-001)
+
+The eight signals above are implemented with OpenTelemetry metrics over the vendor-neutral
+`System.Diagnostics.Metrics` API. A single owner, `LiveCoreMetrics` (`apps/api/Observability/`), defines one
+meter named `LiveCore` carrying all eight instruments, and the existing seams record onto it: a request
+middleware (request duration + error rate), the realtime hub (connections), the reveal endpoint (reveal
+latency), the session-event publisher (event-delivery failures), a transparent `IAssetStorage` decorator
+(asset upload/download failures), an EF Core command interceptor (database failures) and the worker's
+background job (job failures).
+
+The API host exposes a **Prometheus scrape endpoint** at `GET /metrics` (the OpenTelemetry Prometheus
+exporter). It is registered unconditionally — like the health endpoints, it needs no database or identity
+provider. The instruments and their exported Prometheus series:
+
+| Signal                       | Instrument                          | Kind          | Exported series (prefix)              |
+| ---------------------------- | ----------------------------------- | ------------- | ------------------------------------- |
+| API request duration         | `livecore.api.request.duration`     | histogram (s) | `livecore_api_request_duration_seconds` |
+| API error rate               | `livecore.api.request.errors`       | counter       | `livecore_api_request_errors_total`   |
+| Realtime connections         | `livecore.realtime.connections`     | up/down gauge | `livecore_realtime_connections`       |
+| Reveal command latency       | `livecore.reveal.duration`          | histogram (s) | `livecore_reveal_duration_seconds`    |
+| Event delivery failures      | `livecore.event.delivery.failures`  | counter       | `livecore_event_delivery_failures_total` |
+| Asset upload/download failures| `livecore.asset.failures`          | counter       | `livecore_asset_failures_total`       |
+| Database query failures      | `livecore.database.failures`        | counter       | `livecore_database_failures_total`    |
+| Background job failures      | `livecore.job.failures`             | counter       | `livecore_job_failures_total`         |
+
+Dimensions are kept **low-cardinality and non-sensitive** (threat T7): the request duration is tagged with
+the HTTP method, the route **template** (never the concrete path, so no resource id becomes a label) and the
+status code; the others carry only a coarse `operation`/`job` name. The error counter increments only for
+server errors (5xx); the fail-closed 401/403/404 the authorization model returns by design are client-side
+statuses and are not counted as errors.
+
+The `/metrics` endpoint is **unauthenticated by convention** — a Prometheus server scrapes it from inside the
+deployment network, exactly as orchestration probes the unauthenticated `/health/*` endpoints — and carries
+only aggregate series, never content. A deployment restricts it at the reverse-proxy/network edge
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+The background **worker** records job failures onto the same `LiveCore` meter, but as a non-HTTP host it does
+not yet expose its own scrape surface; surfacing the worker's metrics over a scrape/OTLP endpoint is a
+follow-up (the API host owns the `/metrics` surface today). Likewise, an OTLP push exporter is a configuration
+follow-up — the instruments are export-agnostic.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

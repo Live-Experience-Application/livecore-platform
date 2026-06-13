@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using LiveCore.Api.Observability;
 
 namespace LiveCore.Worker;
 
@@ -28,6 +29,13 @@ public static class WorkerHostFactory
             options.UseUtcTimestamp = true;
             options.TimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fff'Z'";
         });
+
+        // Operational metrics instrument set (CORE-OBS-001). The worker records the docs/15_OBSERVABILITY.md
+        // "background job failures" signal onto the shared LiveCoreMetrics when a cleanup sweep throws.
+        // Registered unconditionally (recording to an unobserved meter is a cheap no-op); the worker is a
+        // non-HTTP background host, so it does not expose its own scrape endpoint — surfacing the worker's
+        // metrics over a scrape/OTLP surface is a documented follow-up. The API host owns the /metrics surface.
+        builder.Services.AddLiveCoreMetrics();
 
         // Asset cleanup job (CORE-AST-006). AddAssetCleanup registers the Assets module's cleanup
         // dependencies (the EF Core DbContext, the asset repository, the fail-closed IAssetStorage default,

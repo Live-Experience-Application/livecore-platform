@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using LiveCore.Api.Observability;
 using LiveCore.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -65,7 +66,8 @@ public class WorkerHeartbeatTests
             var heartbeat = new WorkerHeartbeat(
                 new WorkerHeartbeatOptions(path), TimeProvider.System, NullLogger<WorkerHeartbeat>.Instance);
             var service = new AssetCleanupBackgroundService(
-                scopeFactory, options, heartbeat, NullLogger<AssetCleanupBackgroundService>.Instance);
+                scopeFactory, options, heartbeat, new LiveCoreMetrics(),
+                NullLogger<AssetCleanupBackgroundService>.Instance);
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await ((IHostedService)service).StartAsync(timeout.Token);

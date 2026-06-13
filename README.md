@@ -365,6 +365,39 @@ environment-aware posture as the OIDC audience guard, CORE-OPS-004). The respons
 stays status-only, so which dependency is missing never leaks to the unauthenticated
 endpoint.
 
+### Metrics endpoint
+
+The API host exposes operational metrics on a Prometheus scrape endpoint
+(CORE-OBS-001):
+
+| Endpoint   | Purpose                                                                                      |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| `/metrics` | OpenTelemetry-collected operational metrics in the Prometheus exposition format (scrape it). |
+
+`docs/15_OBSERVABILITY.md` mandates eight operational signals; they are
+implemented with OpenTelemetry over the vendor-neutral `System.Diagnostics.Metrics`
+API. A single owner, `LiveCoreMetrics`, defines one `LiveCore` meter carrying all
+eight instruments — **API request duration** and **error rate** (a request
+middleware), **realtime connections** (the SignalR hub), **reveal command latency**
+(the reveal endpoint), **event-delivery failures** (the session-event publisher),
+**asset upload/download failures** (a transparent `IAssetStorage` decorator),
+**database query failures** (an EF Core command interceptor) and **background job
+failures** (the worker's cleanup job). The OpenTelemetry SDK aggregates them and the
+Prometheus exporter serves `/metrics`.
+
+Like `/health/*`, `/metrics` is **unauthenticated by convention** — a Prometheus
+server scrapes it from inside the deployment network — and a deployment restricts it
+at the reverse-proxy/network edge. It carries only low-cardinality aggregate series
+(method, route **template**, status code, a coarse operation/job name); no tenant
+identifier, token, asset coordinate or resource content is ever a metric label, so
+the surface cannot leak content (threat T7 in `docs/07_SECURITY_THREAT_MODEL.md`).
+The error counter counts only server errors (5xx); the fail-closed `401`/`403`/`404`
+the authorization model returns by design are not counted as errors. Two new
+dependencies are added to `apps/api`: `OpenTelemetry.Extensions.Hosting` (the SDK +
+host integration) and `OpenTelemetry.Exporter.Prometheus.AspNetCore` (the scrape
+endpoint). The background worker records job failures onto the same meter; surfacing
+the worker's own metrics over a scrape/OTLP endpoint is a follow-up.
+
 ### Structured logging
 
 Both hosts write structured, single-line JSON log entries to stdout using the

@@ -1,3 +1,5 @@
+using LiveCore.Api.Observability;
+
 namespace LiveCore.Api.Realtime;
 
 /// <summary>
@@ -29,18 +31,22 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
     private readonly ISessionEventRepository _events;
     private readonly IRealtimeBackplane _backplane;
     private readonly ISessionEventRecipientResolver _recipients;
+    private readonly LiveCoreMetrics _metrics;
 
     public SessionEventPublisher(
         ISessionEventRepository events,
         IRealtimeBackplane backplane,
-        ISessionEventRecipientResolver recipients)
+        ISessionEventRecipientResolver recipients,
+        LiveCoreMetrics metrics)
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(backplane);
         ArgumentNullException.ThrowIfNull(recipients);
+        ArgumentNullException.ThrowIfNull(metrics);
         _events = events;
         _backplane = backplane;
         _recipients = recipients;
+        _metrics = metrics;
     }
 
     /// <inheritdoc />
@@ -57,9 +63,21 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
         var deliveries = await _recipients.ResolveAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         foreach (var delivery in deliveries)
         {
-            await _backplane
-                .SendToGroupAsync(delivery.Group, SessionEventEnvelope.ClientMethod, delivery.Envelope, cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                await _backplane
+                    .SendToGroupAsync(delivery.Group, SessionEventEnvelope.ClientMethod, delivery.Envelope, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Record the docs/15_OBSERVABILITY.md "event delivery failures" signal (CORE-OBS-001), then
+                // rethrow unchanged: the durable event is already persisted, so behavior is unaltered and a
+                // reconnecting client replays it later (CORE-RT-005). Counting only — no event content is
+                // ever attached to the metric (threat T7).
+                _metrics.RecordEventDeliveryFailure();
+                throw;
+            }
         }
     }
 }

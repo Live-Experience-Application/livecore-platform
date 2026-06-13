@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Text.Json;
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Observability;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Realtime;
@@ -223,6 +225,12 @@ internal static class RevealEndpoints
 
         var now = timeProvider.GetUtcNow();
 
+        // Time the reveal command (CORE-OBS-001, the docs/15_OBSERVABILITY.md "reveal command latency"
+        // signal). LiveCoreMetrics is always registered (unconditional), so it is resolved here rather than
+        // gated with the persistence-dependent reveal dependencies above.
+        var metrics = httpContext.RequestServices.GetRequiredService<LiveCoreMetrics>();
+        var revealStartTimestamp = Stopwatch.GetTimestamp();
+
         var result = await deps.Reveal
             .RevealAsync(
                 context.OrganizationId,
@@ -235,6 +243,10 @@ internal static class RevealEndpoints
                 now,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        metrics.RecordRevealCommand(
+            Stopwatch.GetElapsedTime(revealStartTimestamp).TotalSeconds,
+            operation: "reveal");
 
         // REALTIME EVENT (CORE-RT-003): emit the durable ContentRevealed event IFF the reveal actually
         // changed visibility — the same change signal the audit uses (CORE-VIS-006), so a retry or a

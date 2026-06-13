@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using LiveCore.Api.Observability;
 
 namespace LiveCore.Worker;
 
@@ -29,25 +30,31 @@ namespace LiveCore.Worker;
 /// </summary>
 internal sealed class AssetCleanupBackgroundService : BackgroundService
 {
+    private const string _jobName = "asset-cleanup";
+
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly AssetCleanupOptions _options;
     private readonly WorkerHeartbeat _heartbeat;
+    private readonly LiveCoreMetrics _metrics;
     private readonly ILogger<AssetCleanupBackgroundService> _logger;
 
     public AssetCleanupBackgroundService(
         IServiceScopeFactory scopeFactory,
         AssetCleanupOptions options,
         WorkerHeartbeat heartbeat,
+        LiveCoreMetrics metrics,
         ILogger<AssetCleanupBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(heartbeat);
+        ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
         _heartbeat = heartbeat;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -109,8 +116,11 @@ internal sealed class AssetCleanupBackgroundService : BackgroundService
         }
         catch (Exception exception)
         {
-            // A failed sweep must never crash the worker; log it (no storage coordinates are involved here)
-            // and let the next tick try again.
+            // A failed sweep must never crash the worker; record the docs/15_OBSERVABILITY.md "background job
+            // failures" signal (CORE-OBS-001), log it (no storage coordinates are involved here) and let the
+            // next tick try again. Counting only — the exception detail goes to the structured log, never a
+            // metric label (threat T7).
+            _metrics.RecordBackgroundJobFailure(_jobName);
             _logger.LogError(exception, "Asset cleanup sweep failed; it will be retried on the next interval.");
         }
     }
