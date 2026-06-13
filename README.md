@@ -600,6 +600,49 @@ an append-only audit record of the change (see "Audit log" below). A reveal that
 an idempotent retry, or that finds the resource already visible, changes nothing and
 so writes no audit record.
 
+### Hide (un-reveal) command
+
+The Visibility module's hide command is the **inverse** of reveal (CORE-REV-001, the
+"Reveal Lifecycle" hide / un-reveal): a host can take a reveal back so a previously
+visible resource becomes `Hidden` again and the audience (or the selected
+participant) stops seeing it.
+
+| Method | Route                               | Authorized callers                             |
+| ------ | ----------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/hide` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The route, request body (`organizationSlug`, `resourceType`, `resourceId`, optional
+`participantId`), tenant resolution and authorization are identical to the reveal
+command — the same fail-closed `404`/`403`/`400` mapping and the same reveal roles,
+hidden as `404` for a caller who cannot see the tenant or is not a member of the
+session's workspace. The endpoint reuses the **same** `RevealService` (and so the
+same `idempotency_keys` store and audit producer), so hide is not a parallel
+duplicate of reveal — the two are one idempotent command with opposite target
+states acting in the same dimension (an audience-wide hide flips the audience-wide
+rule; a selected-participant hide flips only that participant's rule, leaving the
+audience and other participants untouched).
+
+The command is **idempotent**: a required `Idempotency-Key` request header makes a
+client retry safe. The first call applies the hide (the resource's visibility rule
+becomes `Hidden`) and returns `Applied`; a repeat with the same key returns
+`AlreadyApplied` and produces no duplicate effect. The hide uses its **own**
+per-tenant idempotency scope (distinct from reveal), so a client may reuse the same
+key value for a matching reveal/hide pair without one short-circuiting the other.
+Because an absent rule already means hidden, hiding a resource that has no visible
+rule (or whose rule is already hidden) is a **no-op**: it changes nothing, writes no
+audit record and emits no event.
+
+When — and only when — a hide **actually changes** a resource's visibility, the
+command appends an append-only `VisibilityRuleChanged` audit record of the
+`Visible → Hidden` transition (see "Audit log" below) and emits a durable
+`ContentHidden` session event. Unlike a reveal, the hide event carries **no
+visibility subject**: the resource is now hidden, so a subject-gated projection
+would (correctly, for a reveal) exclude the very recipients who must be told to
+remove it. Instead the event is routed by its coarse target — a selected-participant
+hide reaches only that participant (plus hosts), an audience-wide hide reaches the
+observers and every active participant — carrying resource **identifiers only**,
+never resolved content.
+
 ### Audit log
 
 The Audit module owns the tenant-scoped, append-only `audit_logs` table (the

@@ -15,4 +15,16 @@ public static class SessionEventTypes
     /// reveal actually changes visibility.
     /// </summary>
     public const string ContentRevealed = "ContentRevealed";
+
+    /// <summary>
+    /// A host hid (un-revealed) a resource — the inverse of <see cref="ContentRevealed"/>, instructing
+    /// recipients who could see the resource to stop showing it (docs/09_EVENT_CATALOG.md:
+    /// "ContentHidden"). Emitted by the hide command (CORE-REV-001) when a hide actually changes
+    /// visibility. Unlike a reveal, a hide event carries NO visibility subject: the resource is now hidden,
+    /// so a subject-gated projection would (correctly, for a reveal) exclude the very audience that must be
+    /// told to remove it; instead the event is routed by its coarse target — a selected-participant hide
+    /// reaches only that participant (plus hosts), an audience-wide hide reaches the observers and every
+    /// active participant — and carries resource IDENTIFIERS only, never content (threats T2/T3/T7).
+    /// </summary>
+    public const string ContentHidden = "ContentHidden";
 }

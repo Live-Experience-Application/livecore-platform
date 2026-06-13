@@ -47,6 +47,7 @@ POST   /api/v1/sessions/{sessionId}/start
 POST   /api/v1/sessions/{sessionId}/end
 GET    /api/v1/sessions/{sessionId}/events
 POST   /api/v1/sessions/{sessionId}/reveal
+POST   /api/v1/sessions/{sessionId}/hide
 GET    /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes
 GET    /api/v1/scenes/{sceneId}
@@ -67,6 +68,7 @@ POST   /api/v1/assets/{assetId}/links
 
 ## Idempotency
 
-Reveal execution must be idempotent for client retry.
+Reveal and hide (un-reveal) execution must be idempotent for client retry.
 
-A repeated reveal request with the same idempotency key must not create duplicate events.
+A repeated reveal or hide request with the same idempotency key must not create duplicate events.
+Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.

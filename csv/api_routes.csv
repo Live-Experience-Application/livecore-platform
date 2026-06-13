@@ -12,6 +12,7 @@ POST,/api/v1/sessions/{sessionId}/start,Sessions,"Host,CoHost,Owner,Admin",Emits
 POST,/api/v1/sessions/{sessionId}/end,Sessions,"Host,CoHost,Owner,Admin",Emits SessionEnded; releases session.active.max quota
 GET,/api/v1/sessions/{sessionId}/events,Realtime,session audience,Filtered replay
 POST,/api/v1/sessions/{sessionId}/reveal,Visibility,"Host,CoHost,Owner,Admin",Idempotent reveal
+POST,/api/v1/sessions/{sessionId}/hide,Visibility,"Host,CoHost,Owner,Admin",Idempotent hide/un-reveal; emits ContentHidden
 GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection by role
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
 GET,/api/v1/scenes/{sceneId},Scenes,workspace members,Projection by role

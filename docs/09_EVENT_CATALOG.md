@@ -31,6 +31,7 @@ Each event has:
 | ContentBlockCreated | Host/CoHost | Host/CoHost | yes | prep only by default |
 | VisibilityRuleChanged | Host/CoHost | Host/CoHost/Audit | yes | security-relevant |
 | ContentRevealed | Host/CoHost | selected recipients | yes | central event |
+| ContentHidden | Host/CoHost | selected recipients | yes | un-reveal; inverse of ContentRevealed |
 | PrivateMessageSent | Host/CoHost | selected recipients | yes | content filtered per recipient |
 | AssetRevealed | Host/CoHost | selected recipients | yes | signed URL requested separately |
 | SessionNoteCreated | Host/CoHost | Host/CoHost | yes | never participant-visible by default |

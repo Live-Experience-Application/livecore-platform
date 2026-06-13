@@ -8,6 +8,7 @@ SceneActivated,Host/CoHost,authorized session audience,yes,Scene switch
 ContentBlockCreated,Host/CoHost,Host/CoHost,yes,Prep event
 VisibilityRuleChanged,Host/CoHost,Host/CoHost/Auditor,yes,Security relevant
 ContentRevealed,Host/CoHost,selected recipients,yes,Central reveal event
+ContentHidden,Host/CoHost,selected recipients,yes,Inverse of ContentRevealed; un-reveal removes visibility
 PrivateMessageSent,Host/CoHost,selected recipients,yes,Recipient-specific projection
 AssetRevealed,Host/CoHost,selected recipients,yes,Asset metadata only; URL separate
 SessionNoteCreated,Host/CoHost,Host/CoHost,yes,Host-only by default

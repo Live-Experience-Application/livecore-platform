@@ -785,6 +785,16 @@ app.MapVisibilityEndpoints();
 // session start/end commands. The durable reveal event emission is deferred to the Realtime epic.
 app.MapRevealEndpoints();
 
+// Hide (un-reveal) command endpoint (CORE-REV-001, the "Reveal Lifecycle" hide): the inverse of the
+// reveal route, POST /api/v1/sessions/{sessionId}/hide. It takes a reveal back so a previously visible
+// resource becomes Hidden again (audience and selected participants stop seeing it), idempotently (its
+// own Idempotency-Key scope, distinct from reveal) and with the same authz (Owner/Admin/Host/CoHost in
+// the session's own workspace). It reuses the SAME RevealService and audit producer, appends a
+// VisibilityRuleChanged audit record on a real change, and emits a durable ContentHidden event IFF
+// visibility actually changed. No new persistence registration is required (RevealService is already
+// registered for the reveal route above).
+app.MapHideEndpoints();
+
 // Session event reconnect-replay endpoint (CORE-RT-005): the Realtime module's reconnect replay route,
 // GET /api/v1/sessions/{sessionId}/events. It lives in an authenticated route group and fails closed (503)
 // when persistence is not configured, exactly like the reveal/session endpoints. No new persistence
