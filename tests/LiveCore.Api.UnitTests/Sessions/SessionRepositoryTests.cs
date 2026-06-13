@@ -99,9 +99,10 @@ public sealed class SessionRepositoryTests : IDisposable
         return workspace;
     }
 
-    private async Task<Session> SeedSessionAsync(Guid organizationId, Guid workspaceId, string title)
+    private async Task<Session> SeedSessionAsync(
+        Guid organizationId, Guid workspaceId, string title, DateTimeOffset? createdAt = null)
     {
-        var session = Session.Create(organizationId, workspaceId, title, _createdAt);
+        var session = Session.Create(organizationId, workspaceId, title, createdAt ?? _createdAt);
         await using var context = CreateContext();
         var repository = new SessionRepository(context);
         Assert.Equal(SessionAddResult.Added, await repository.AddAsync(session, CancellationToken.None));
@@ -324,15 +325,18 @@ public sealed class SessionRepositoryTests : IDisposable
         // The list backing GET /api/v1/workspaces/{workspaceId}/sessions (CORE-API-003)
         // is tenant- and workspace-scoped and ordered by the time-ordered surrogate id
         // (UUIDv7), so it is chronological and deterministic. A sibling workspace's
-        // session is never borrowed into the list (threat T5/T1).
+        // session is never borrowed into the list (threat T5/T1). The three sessions are
+        // seeded at distinct, increasing times so the UUIDv7 ids are strictly monotonic:
+        // within a single timestamp tick UUIDv7's trailing bits are random (not a
+        // monotonic counter), so same-instant ids would order arbitrarily.
         var organization = await SeedOrganizationAsync(_organizationSlugA);
         var workspace1 = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
         var workspace2 = await SeedWorkspaceAsync(organization.Id, _workspaceSlugB);
-        var first = await SeedSessionAsync(organization.Id, workspace1.Id, "First");
-        var second = await SeedSessionAsync(organization.Id, workspace1.Id, "Second");
-        var third = await SeedSessionAsync(organization.Id, workspace1.Id, "Third");
+        var first = await SeedSessionAsync(organization.Id, workspace1.Id, "First", _createdAt);
+        var second = await SeedSessionAsync(organization.Id, workspace1.Id, "Second", _createdAt.AddSeconds(1));
+        var third = await SeedSessionAsync(organization.Id, workspace1.Id, "Third", _createdAt.AddSeconds(2));
         // A session in a sibling workspace that must NOT appear in workspace1's list.
-        await SeedSessionAsync(organization.Id, workspace2.Id, "Other");
+        await SeedSessionAsync(organization.Id, workspace2.Id, "Other", _createdAt.AddSeconds(3));
 
         await using var context = CreateContext();
         var repository = new SessionRepository(context);
