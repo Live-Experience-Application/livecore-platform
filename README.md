@@ -493,6 +493,7 @@ The workspace routes implemented so far:
 | `POST`   | `/api/v1/workspaces`                                  | organization `Owner` or `Admin`                                     |
 | `GET`    | `/api/v1/workspaces/{workspaceId}`                    | members of that workspace                                           |
 | `PUT`    | `/api/v1/workspaces/{workspaceId}`                    | organization `Owner` or `Admin` (rename)                            |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`            | organization `Owner` (archive — see below)                          |
 | `POST`   | `/api/v1/workspaces/{workspaceId}/members`            | organization `Owner` or `Admin` (create invite)                     |
 | `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)         |
 
@@ -547,6 +548,55 @@ the authenticated **actor** (the admin who removed the member), the removed
 membership and the revoked role — never any token or content (threats T1/T6/T7).
 The audit record is a recorded fact, so it survives the now-deleted membership it
 references.
+
+### Workspace archive (lifecycle end-state)
+
+An owner can archive a workspace so it becomes read-only and drops out of active
+lists (CORE-LIFE-009):
+
+| Method | Route                                      | Authorized callers   |
+| ------ | ------------------------------------------ | -------------------- |
+| `POST` | `/api/v1/workspaces/{workspaceId}/archive` | organization `Owner` |
+
+A workspace previously had create/read/update but **no lifecycle end-state**. The
+decision recorded for this story is a **soft archive** — a `status` on the
+`Workspace` aggregate (`Active` → `Archived`), not a hard delete — because a
+workspace owns child sessions, scenes, content, entities, assets and an
+append-only audit trail whose history must survive. Archiving flips the status
+through a status transition like `Participant.Remove`/`Session.Start` and
+preserves every child row. Archive is **clearly terminal**: there is no
+un-archive command (a re-activate, if ever needed, is a separate, explicitly
+scoped story), and archiving an already-archived workspace is a `409 Conflict`
+that changes nothing and writes no duplicate audit fact.
+
+The route carries only the `{workspaceId}`, so the tenant comes from a required
+`?organizationSlug=` query parameter (resolved by the same
+token-claim-and-membership tenant check as the other workspace by-id routes).
+Authorization is **Owner-only** — the **"Delete workspace"** matrix row, whose
+fail-closed Core default is `Owner` (`docs/06_AUTHORIZATION_MATRIX.md` grants
+`Admin` only an _optional_ slot, so Core denies it) — matched exactly
+(`MembershipRole` is non-linear). Every step is fail-closed and hidden as `404`
+for a caller who cannot see the tenant or names an unknown/cross-tenant
+workspace; a known tenant member who is not an `Owner` (including an `Admin`) is
+`403`.
+
+Once archived, the workspace is **read-only**: its authoring mutations are
+rejected with `409 Conflict` — rename (`PUT /workspaces/{id}`), member invite
+(`POST .../members`), session create (`POST .../sessions`) and scene create
+(`POST .../scenes`) — while reads still succeed and **member removal stays
+available** (revoking access is a safety operation, not authoring). The archived
+workspace is **excluded from the active list** (`GET /api/v1/workspaces` filters
+to `Active`) but remains reachable through the by-id read, which now carries the
+lifecycle `status`. Extending the read-only guard to deeper child-resource
+mutations (content blocks, entities, reveals/hides, asset links) is a follow-up;
+those are governed transitively today (no new sessions or scenes can be created
+to host new content) and the authoritative archived state lives on the aggregate.
+
+Every successful archive appends an append-only `WorkspaceArchived` audit record
+(see "Audit log" below) capturing the tenant, the workspace, the authenticated
+**actor** (the owner who archived it) and the `Active → Archived` status
+transition — never any content (threats T1/T5/T7). Unlike a deletion, the archive
+records the before/after status because the workspace survives.
 
 ### Session create and list
 
@@ -715,9 +765,9 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`) is extensible without
-a schema change because the action persists by its stable name; each producer command wires its own action in
-its own story. The member-removal command (CORE-LIFE-001) is the first wired producer of
+`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`) is
+extensible without a schema change because the action persists by its stable name; each producer command wires its
+own action in its own story. The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
 workspace or organization member (the threat-model control for access revocation).
 The entity-deletion command (CORE-LIFE-003) wires `EntityDeleted`, appending an entry
@@ -732,7 +782,10 @@ child content blocks, visibility rules and asset links and the remaining scenes'
 consequences of the one action. The host-initiated asset-deletion command (CORE-LIFE-006) wires `AssetDeleted`
 the same way — one append-only fact per asset deletion, its cascaded asset links and the removed storage object
 being consequences of the one action; the storage object key is never recorded (only the asset id; threats
-T4/T7).
+T4/T7). The workspace-archive command (CORE-LIFE-009) wires `WorkspaceArchived` — but unlike the deletion
+producers it records a real STATE TRANSITION (the workspace survives), so the entry carries the before/after
+status names (`Active` → `Archived`) like a visibility change, capturing the owner who archived the workspace
+and the archived workspace itself.
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final

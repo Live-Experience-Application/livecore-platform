@@ -30,6 +30,16 @@ export const MembershipRoles = [
 /** A generic Core membership role name. */
 export type MembershipRole = (typeof MembershipRoles)[number];
 
+/**
+ * Lifecycle status of a workspace (`Active` until an owner archives it). An
+ * archived workspace is read-only and excluded from the active workspace list
+ * (CORE-LIFE-009).
+ */
+export const WorkspaceStatuses = ["Active", "Archived"] as const;
+
+/** A workspace lifecycle status name. */
+export type WorkspaceStatus = (typeof WorkspaceStatuses)[number];
+
 /** Lifecycle status of a workspace member invitation. */
 export const WorkspaceInvitationStatuses = [
   "Pending",

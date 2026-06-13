@@ -24,7 +24,15 @@ namespace LiveCore.Api.Workspaces;
 ///   <item><c>GET  /api/v1/workspaces/{workspaceId}</c> — read, workspace
 ///   members only; non-member or cross-tenant is hidden as 404.</item>
 ///   <item><c>PUT  /api/v1/workspaces/{workspaceId}</c> — rename (the update
-///   slice), "Manage workspace settings" (Owner or Admin).</item>
+///   slice), "Manage workspace settings" (Owner or Admin). Rejected with 409 when
+///   the workspace is archived (read-only; CORE-LIFE-009).</item>
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/archive</c> — archive the
+///   workspace (CORE-LIFE-009), the "Delete workspace" matrix row, OWNER-ONLY. A
+///   soft, audited, terminal status transition (Active -> Archived) that makes the
+///   workspace read-only and excludes it from the active list while preserving its
+///   children and audit trail; an already-archived workspace is a 409. Appends a
+///   <see cref="AuditAction.WorkspaceArchived"/> audit record. Fail-closed and
+///   hidden as 404 for a cross-tenant/unknown workspace.</item>
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/members</c> — invite a
 ///   member (CORE-WS-004), "Manage members" (Owner or Admin). Creates a scoped,
 ///   single-use invite token and returns the plaintext token exactly once; only
@@ -86,6 +94,7 @@ internal static class WorkspaceEndpoints
         group.MapPost("/", CreateWorkspaceAsync);
         group.MapGet("/{workspaceId}", GetWorkspaceAsync);
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
+        group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
@@ -390,12 +399,131 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
+        // Read-only when archived (CORE-LIFE-009): an archived workspace rejects
+        // authoring mutations, so a rename is a 409 Conflict that changes nothing.
+        // The caller is authorized; the lifecycle state, not the caller, is the
+        // reason, so this is a 409 rather than a 403 (it is placed AFTER the role
+        // check so a non-Owner/Admin still gets a 403 and never learns the
+        // archived state). The detail names only the generic state (threat T7).
+        if (workspace.IsArchived)
+        {
+            return ArchivedReadOnly();
+        }
+
         // Rename only: the organization, slug and id are immutable, so the
         // workspace never moves tenant (threat T5).
         var now = timeProvider.GetUtcNow();
         workspace.Rename(request.Name!.Trim(), now);
         await deps.Workspaces.UpdateAsync(workspace, cancellationToken).ConfigureAwait(false);
 
+        return Results.Ok(WorkspaceResponse.From(workspace));
+    }
+
+    // POST /api/v1/workspaces/{workspaceId}/archive?organizationSlug={slug}
+    //
+    // Archives a workspace (CORE-LIFE-009, the "Resource Lifecycle and Deletion" epic): a SOFT, audited,
+    // OWNER-ONLY status transition (Active -> Archived) that makes the workspace read-only and excludes it
+    // from the active list, while preserving its children and audit trail. The flow mirrors the workspace
+    // by-id write routes (fail-closed, load-then-authorize, hidden-404): the tenant comes from the required
+    // ?organizationSlug=, the workspace is loaded within that tenant, the caller is authorized as the
+    // organization Owner, and only then is the status transition applied and the archive audited.
+    private static async Task<IResult> ArchiveWorkspaceAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the member-removal and other workspace
+        // by-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404), never
+        // echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is indistinguishable
+            // from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant or
+        // unknown workspace is never revealed; threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Archiving is the "Delete workspace" matrix row, which is OWNER-ONLY for Core's fail-closed default
+        // (docs/06_AUTHORIZATION_MATRIX.md grants Owner "yes" and Admin only an "optional"; the story scopes
+        // this Owner-only). The caller is a known member of the tenant and the workspace exists, so an
+        // insufficient role is a 403. Exact, non-linear role check: ONLY Owner, never an ordering comparison
+        // and never Admin.
+        if (!context.HasRole(MembershipRole.Owner))
+        {
+            return Forbidden();
+        }
+
+        // The archive is terminal: an already-archived workspace cannot be archived again. The caller is
+        // authorized; the lifecycle state, not the caller, is the reason, so this is a 409 Conflict that
+        // changes nothing and writes no duplicate audit fact (CanArchive is the Active-only guard). Placed
+        // AFTER the role check so a non-Owner gets a 403 and never learns the archived state (threat T7).
+        if (!workspace.CanArchive)
+        {
+            return AlreadyArchivedConflict();
+        }
+
+        // Capture the previous status name BEFORE the transition for the audit record (the in-memory object
+        // survives, but capturing first keeps the audited "before" state independent of the mutation below).
+        var previousStatus = workspace.Status.ToString();
+
+        var now = timeProvider.GetUtcNow();
+        workspace.Archive(now);
+        await deps.Workspaces.UpdateAsync(workspace, cancellationToken).ConfigureAwait(false);
+
+        // AUDIT: an archive is a security-relevant lifecycle change, so append an append-only audit record
+        // capturing the actor (the owner who archived it), the archived workspace and the Active -> Archived
+        // status transition (threats T1/T5). Unlike a deletion, an archive records the before/after status
+        // because the workspace survives the transition.
+        var entry = AuditLogEntry.ForWorkspaceArchive(
+            context.OrganizationId,
+            workspace.Id,
+            context.UserProfileId,
+            nameof(Workspace),
+            previousStatus,
+            workspace.Status.ToString(),
+            now);
+        await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+
+        // The workspace survives the archive (it is now read-only), so the updated DTO is returned with its
+        // new lifecycle status, mirroring the session start/end status-transition commands.
         return Results.Ok(WorkspaceResponse.From(workspace));
     }
 
@@ -481,6 +609,14 @@ internal static class WorkspaceEndpoints
         if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
         {
             return Forbidden();
+        }
+
+        // Read-only when archived (CORE-LIFE-009): an archived workspace rejects authoring mutations, so
+        // inviting a new member is a 409 Conflict that creates nothing. Placed AFTER the role check so a
+        // non-Owner/Admin still gets a 403 and never learns the archived state (threat T7).
+        if (workspace.IsArchived)
+        {
+            return ArchivedReadOnly();
         }
 
         // Create the invitation. The aggregate generates the scoped token with a
@@ -750,6 +886,25 @@ internal static class WorkspaceEndpoints
             statusCode: StatusCodes.Status409Conflict,
             title: "Conflict",
             detail: "The last Owner of the workspace cannot be removed.");
+
+    // The workspace is archived and therefore read-only (CORE-LIFE-009), so an authoring mutation (rename,
+    // member invite) is refused. The caller is authorized; the lifecycle state, not the caller, is the
+    // reason, so this is a 409 Conflict. The detail names only the generic state and leaks no tenant data
+    // (threat T7).
+    private static IResult ArchivedReadOnly()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The workspace is archived and is read-only.");
+
+    // The workspace is already archived, so a second archive changes nothing (the archive is terminal). The
+    // caller is authorized; the lifecycle state, not the caller, is the reason, so this is a 409 Conflict
+    // (docs/08_API_CONTRACTS.md). The detail names only the generic state and leaks no tenant data (threat T7).
+    private static IResult AlreadyArchivedConflict()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The workspace is already archived.");
 
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");

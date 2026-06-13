@@ -43,7 +43,9 @@ namespace LiveCore.Api.Scenes;
 ///   <see cref="ISceneRepository.AddAsync"/>. The order is assigned SERVER-SIDE as
 ///   append-to-end (the next order after the current maximum in the workspace; an empty
 ///   workspace gets order 0), so a client can never choose, skip or collide a position.
-///   No reorder route exists in csv/api_routes.csv, so reorder is out of scope.</item>
+///   No reorder route exists in csv/api_routes.csv, so reorder is out of scope.
+///   Rejected with 409 when the parent workspace is archived (read-only;
+///   CORE-LIFE-009).</item>
 ///   <item><c>GET  /api/v1/scenes/{sceneId}</c> — module Scenes, roles "workspace members"
 ///   (CORE-API-007, the documented-not-built by-scene-id read of docs/08_API_CONTRACTS.md).
 ///   Reads ONE scene by id within the query-supplied organization via
@@ -363,6 +365,24 @@ internal static class SceneEndpoints
             return Forbidden();
         }
 
+        // Read-only when the parent workspace is archived (CORE-LIFE-009): creating a scene is an authoring
+        // mutation, so an archived workspace rejects it with a 409 Conflict that creates nothing. The workspace
+        // is loaded within the resolved tenant (the membership above already proves it exists, so a null here is
+        // defensive and hidden as 404); the check is placed AFTER role authorization so a member who lacks the
+        // create role still gets a 403 and never learns the archived state (threat T7).
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (workspace.IsArchived)
+        {
+            return ArchivedReadOnly();
+        }
+
         // Append-to-end ordering (CORE-SCENE-001 deferred this to the endpoint story):
         // the new scene's position is the next order after the current maximum in the
         // workspace. An empty workspace gets the first order (0). The order is assigned
@@ -499,18 +519,21 @@ internal static class SceneEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var scenes = services.GetService<ISceneRepository>();
         var sceneDeletion = services.GetService<SceneDeletionService>();
+        var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
 
         if (resolver is null
             || scenes is null
             || sceneDeletion is null
+            || workspaces is null
             || workspaceMembers is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new SceneEndpointDependencies(resolver, scenes, sceneDeletion, workspaceMembers);
+        dependencies = new SceneEndpointDependencies(
+            resolver, scenes, sceneDeletion, workspaces, workspaceMembers);
         return true;
     }
 
@@ -551,6 +574,15 @@ internal static class SceneEndpoints
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
+    // The parent workspace is archived and therefore read-only (CORE-LIFE-009), so creating a scene in it is
+    // refused. The caller is authorized; the workspace's lifecycle state, not the caller, is the reason, so this
+    // is a 409 Conflict. The detail names only the generic state and leaks no tenant data (threat T7).
+    private static IResult ArchivedReadOnly()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The workspace is archived and is read-only.");
+
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
@@ -583,5 +615,6 @@ internal static class SceneEndpoints
         TenantContextResolver Resolver,
         ISceneRepository Scenes,
         SceneDeletionService SceneDeletion,
+        IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers);
 }

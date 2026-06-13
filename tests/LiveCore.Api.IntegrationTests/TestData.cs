@@ -60,14 +60,27 @@ internal static class TestData
         return member;
     }
 
-    /// <summary>Creates and persists a workspace.</summary>
+    /// <summary>
+    /// Creates and persists a workspace. The workspace is created Active by the real
+    /// aggregate factory; when <paramref name="archived"/> is <see langword="true"/>
+    /// it is then soft-archived through <see cref="Workspace.Archive"/>, so the seeded
+    /// row has exactly the status the production archive transition would produce
+    /// (CORE-LIFE-009).
+    /// </summary>
     public static async Task<Workspace> AddWorkspaceAsync(
         this LiveCoreDbContext context,
         Guid organizationId,
         string slug,
-        string name)
+        string name,
+        bool archived = false)
     {
         var workspace = Workspace.Create(organizationId, slug, name, SeedTime);
+
+        if (archived)
+        {
+            workspace.Archive(SeedTime);
+        }
+
         context.Workspaces.Add(workspace);
         await context.SaveChangesAsync();
         return workspace;

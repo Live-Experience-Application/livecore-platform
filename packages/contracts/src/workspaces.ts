@@ -1,4 +1,8 @@
-import type { MembershipRole, WorkspaceInvitationStatus } from "./enums.js";
+import type {
+  MembershipRole,
+  WorkspaceInvitationStatus,
+  WorkspaceStatus,
+} from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
 
 /**
@@ -36,6 +40,12 @@ export interface WorkspaceResponse {
   slug: string;
   /** Human-readable display name. */
   name: string;
+  /**
+   * Lifecycle status of the workspace (`Active` or `Archived`). An archived
+   * workspace is read-only and excluded from the active workspace list
+   * (CORE-LIFE-009).
+   */
+  status: WorkspaceStatus;
   /** When the workspace was created (UTC). */
   createdAt: IsoDateTimeString;
   /** When the workspace was last updated (UTC). */

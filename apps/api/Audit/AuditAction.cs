@@ -141,4 +141,18 @@ public enum AuditAction
     /// is never recorded — only identifiers, never a means to reach private content (threats T4/T7).
     /// </summary>
     AssetDeleted = 9,
+
+    /// <summary>
+    /// An owner archived a workspace, taking it out of active use — the workspace archive command
+    /// (CORE-LIFE-009, the "Resource Lifecycle and Deletion" epic). Until now a workspace had create/read/update
+    /// but no lifecycle end-state; this records the soft, terminal Active -&gt; Archived transition. Auditing the
+    /// archive satisfies the story's "audited" criterion: it records that an authorized owner took a workspace
+    /// read-only (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). Unlike the deletion actions, an archive is
+    /// a real STATE TRANSITION (the workspace survives), so it records the before/after status NAMES
+    /// (<c>Active</c> -&gt; <c>Archived</c>) exactly like <see cref="VisibilityRuleChanged"/> records a
+    /// visibility transition; its actor is the owner who archived the workspace and its resource is the workspace
+    /// itself (its generic kind name and surrogate id). A generic, workspace-scoped audit fact
+    /// (<see cref="AuditLogEntry.ForWorkspaceArchive"/>).
+    /// </summary>
+    WorkspaceArchived = 10,
 }

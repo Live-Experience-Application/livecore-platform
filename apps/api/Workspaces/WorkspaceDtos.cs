@@ -57,6 +57,12 @@ public sealed record UpdateWorkspaceRequest(string? OrganizationSlug, string? Na
 /// <param name="OrganizationId">Tenant the workspace belongs to.</param>
 /// <param name="Slug">Per-tenant natural key of the workspace.</param>
 /// <param name="Name">Human-readable display name.</param>
+/// <param name="Status">
+/// Lifecycle status name of the workspace (<c>Active</c> or <c>Archived</c>;
+/// CORE-LIFE-009). An archived workspace is read-only and excluded from the
+/// active workspace list, so a client renders it accordingly. Serialized as the
+/// stable enum name, exactly like the session lifecycle status.
+/// </param>
 /// <param name="CreatedAt">When the workspace was created (UTC).</param>
 /// <param name="UpdatedAt">When the workspace was last updated (UTC).</param>
 public sealed record WorkspaceResponse(
@@ -64,12 +70,14 @@ public sealed record WorkspaceResponse(
     Guid OrganizationId,
     string Slug,
     string Name,
+    string Status,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
 {
     /// <summary>
     /// Projects a <see cref="Workspace"/> aggregate into its response DTO. Only
-    /// the generic, non-sensitive fields are copied.
+    /// the generic, non-sensitive fields are copied; the lifecycle status is
+    /// emitted by its stable name.
     /// </summary>
     public static WorkspaceResponse From(Workspace workspace)
     {
@@ -80,6 +88,7 @@ public sealed record WorkspaceResponse(
             workspace.OrganizationId,
             workspace.Slug,
             workspace.Name,
+            workspace.Status.ToString(),
             workspace.CreatedAt,
             workspace.UpdatedAt);
     }

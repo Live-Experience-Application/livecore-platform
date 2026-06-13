@@ -61,17 +61,20 @@ public interface IWorkspaceRepository
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Lists the workspaces in the given organization that the given subject is a
-    /// member of (CORE-WS-003: <c>GET /api/v1/workspaces</c>, "Filtered by
+    /// Lists the ACTIVE workspaces in the given organization that the given subject
+    /// is a member of (CORE-WS-003: <c>GET /api/v1/workspaces</c>, "Filtered by
     /// membership"). The lookup is scoped to exactly one organization and joins
     /// the <c>workspace_members</c> table, so it returns only the workspaces in
     /// that tenant for which a membership row exists for the subject: a workspace
     /// the subject is not a member of, and any workspace in another organization,
     /// are never returned (deny-by-default; threat T5 in
     /// docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
-    /// authorization). Results are ordered by the workspace surrogate id (UUIDv7,
-    /// time-ordered) so the listing is stable. An empty list (the subject is a
-    /// member of no workspace in that tenant) is a normal, non-error result.
+    /// authorization). ARCHIVED workspaces are excluded: this is the active list,
+    /// and an archived workspace is "excluded from active lists" (CORE-LIFE-009) —
+    /// it remains reachable through the by-id read, which is read-only. Results are
+    /// ordered by the workspace surrogate id (UUIDv7, time-ordered) so the listing
+    /// is stable. An empty list (the subject is a member of no active workspace in
+    /// that tenant) is a normal, non-error result.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The organization id or subject id is empty. An empty id can never address

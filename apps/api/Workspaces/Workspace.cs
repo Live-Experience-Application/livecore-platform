@@ -46,6 +46,16 @@ namespace LiveCore.Api.Workspaces;
 /// never an identity, never an authorization input, and never a tenant
 /// boundary: two workspaces may legitimately share a display name while staying
 /// fully isolated because their organization id, slug and id differ.
+///
+/// Lifecycle invariant: a workspace is created <see cref="WorkspaceStatus.Active"/>
+/// and is taken out of active use by a status transition (<see cref="Archive"/>),
+/// a SOFT archive rather than a hard delete (CORE-LIFE-009;
+/// docs/10_DATABASE_SCHEMA.md: avoid hard-delete for business data). Archiving
+/// preserves the workspace and all of its children — sessions, scenes, content,
+/// entities, assets and the append-only audit trail — and only flips the status;
+/// it never moves the workspace to another tenant. Archive is the clearly
+/// TERMINAL end-state for this story: there is no un-archive transition, and an
+/// already-archived workspace is never archived again.
 /// </summary>
 public sealed class Workspace
 {
@@ -82,6 +92,7 @@ public sealed class Workspace
         Guid organizationId,
         string slug,
         string name,
+        WorkspaceStatus status,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt)
     {
@@ -105,6 +116,11 @@ public sealed class Workspace
             throw new ArgumentException("Name violates the name invariants.", nameof(name));
         }
 
+        if (!IsValidStatus(status))
+        {
+            throw new ArgumentOutOfRangeException(nameof(status), status, "Status is not a defined workspace status.");
+        }
+
         if (updatedAt < createdAt)
         {
             throw new ArgumentException(
@@ -116,6 +132,7 @@ public sealed class Workspace
         OrganizationId = organizationId;
         Slug = slug;
         Name = name;
+        Status = status;
         // Timestamps are normalized to UTC so the persisted timestamptz values
         // are offset-independent (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -160,6 +177,14 @@ public sealed class Workspace
     /// </summary>
     public string Name { get; private set; }
 
+    /// <summary>
+    /// Lifecycle status of the workspace (CORE-LIFE-009). A workspace is created
+    /// <see cref="WorkspaceStatus.Active"/> and is taken out of active use by the
+    /// soft, terminal <see cref="Archive"/> transition to
+    /// <see cref="WorkspaceStatus.Archived"/>.
+    /// </summary>
+    public WorkspaceStatus Status { get; private set; }
+
     /// <summary>When this workspace was first created (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
 
@@ -167,10 +192,24 @@ public sealed class Workspace
     public DateTimeOffset UpdatedAt { get; private set; }
 
     /// <summary>
+    /// Whether this workspace is archived (read-only and excluded from active
+    /// lists; CORE-LIFE-009).
+    /// </summary>
+    public bool IsArchived => Status == WorkspaceStatus.Archived;
+
+    /// <summary>
+    /// Whether this workspace may be archived right now: a workspace may be
+    /// archived only from <see cref="WorkspaceStatus.Active"/>. Lets the
+    /// application layer branch (returning a 409 conflict for an already-archived
+    /// workspace) without catching the guard exception in <see cref="Archive"/>.
+    /// </summary>
+    public bool CanArchive => Status == WorkspaceStatus.Active;
+
+    /// <summary>
     /// Creates a new workspace in the given organization. The slug is
     /// canonicalized to lower case once here so the persisted value and every
     /// later comparison stay consistent; an already-canonical slug is
-    /// unchanged.
+    /// unchanged. The workspace starts <see cref="WorkspaceStatus.Active"/>.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The organization id is empty, or the slug or name violates an invariant.
@@ -188,6 +227,7 @@ public sealed class Workspace
             organizationId,
             canonicalSlug,
             name?.Trim() ?? string.Empty,
+            WorkspaceStatus.Active,
             createdAt,
             createdAt);
     }
@@ -243,6 +283,34 @@ public sealed class Workspace
     }
 
     /// <summary>
+    /// Archives the workspace (CORE-LIFE-009): transitions
+    /// <see cref="WorkspaceStatus.Active"/> -&gt; <see cref="WorkspaceStatus.Archived"/>
+    /// and stamps <see cref="UpdatedAt"/>. This is a SOFT archive — the workspace
+    /// and all of its children are preserved; only the status changes — and a
+    /// CLEARLY TERMINAL end-state: there is no un-archive transition. The
+    /// organization, slug and id are immutable, so archiving never moves the
+    /// workspace to another tenant (threat T5). Archiving an already-archived
+    /// workspace is an invalid transition, NOT a no-op: the application layer
+    /// pre-checks <see cref="CanArchive"/> and reports a 409 conflict, so a second
+    /// archive never writes a duplicate audit fact for a state that did not change.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The workspace is not <see cref="WorkspaceStatus.Active"/> (it is already
+    /// archived). This is a defensive guard; callers pre-check
+    /// <see cref="CanArchive"/>.
+    /// </exception>
+    public void Archive(DateTimeOffset updatedAt)
+    {
+        if (!CanArchive)
+        {
+            throw new InvalidOperationException("Only an active workspace can be archived.");
+        }
+
+        Status = WorkspaceStatus.Archived;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
     /// Whether the given value is a valid canonical slug: lower-case,
     /// dash-separated alphanumeric groups, within the length bounds and free of
     /// control characters. Validation does not mutate; callers pass an
@@ -262,6 +330,12 @@ public sealed class Workspace
         => !string.IsNullOrWhiteSpace(value)
             && value.Length <= MaxNameLength
             && !value.Any(char.IsControl);
+
+    /// <summary>
+    /// Whether the given value is a defined <see cref="WorkspaceStatus"/>. Used to
+    /// reject undefined enum values that a cast could otherwise smuggle in.
+    /// </summary>
+    public static bool IsValidStatus(WorkspaceStatus status) => Enum.IsDefined(status);
 
     /// <summary>
     /// Canonicalizes a slug to its stored form (trimmed and lower-cased using
@@ -289,5 +363,5 @@ public sealed class Workspace
     /// it cannot leak through logs (threat T7: logs carry identifiers, not
     /// free-form metadata content).
     /// </summary>
-    public override string ToString() => $"Workspace {Id} org={OrganizationId} slug={Slug}";
+    public override string ToString() => $"Workspace {Id} org={OrganizationId} slug={Slug} status={Status}";
 }

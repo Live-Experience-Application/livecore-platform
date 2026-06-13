@@ -41,6 +41,7 @@ DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}
 GET    /api/v1/workspaces
 POST   /api/v1/workspaces
 GET    /api/v1/workspaces/{workspaceId}
+POST   /api/v1/workspaces/{workspaceId}/archive
 POST   /api/v1/workspaces/{workspaceId}/members
 GET    /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/workspaces/{workspaceId}/sessions

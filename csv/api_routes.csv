@@ -9,6 +9,7 @@ POST,/api/v1/workspaces,Workspaces,"Owner,Admin",Creates generic workspace; enfo
 GET,/api/v1/workspaces/{workspaceId},Workspaces,workspace members,Projection depends on role
 POST,/api/v1/workspaces/{workspaceId}/members,Workspaces,"Owner,Admin",Invite/add member
 DELETE,/api/v1/workspaces/{workspaceId}/members/{memberId},Workspaces,"Owner,Admin",Remove workspace member; revokes access; last Owner cannot be removed; audited; hidden-404
+POST,/api/v1/workspaces/{workspaceId}/archive,Workspaces,Owner,Archive workspace; soft terminal status transition (Active->Archived); read-only (rejects rename/invite/session/scene create) and excluded from active lists; preserves child sessions/scenes/audit; Owner-only; audited; hidden-404
 GET,/api/v1/workspaces/{workspaceId}/sessions,Sessions,workspace members,Filtered
 POST,/api/v1/workspaces/{workspaceId}/sessions,Sessions,"Owner,Admin,Host,CoHost",Create session
 POST,/api/v1/sessions/{sessionId}/start,Sessions,"Host,CoHost,Owner,Admin",Emits SessionStarted; enforces session.active.max quota

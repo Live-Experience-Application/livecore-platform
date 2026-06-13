@@ -715,6 +715,81 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a workspace archive (<see cref="AuditAction.WorkspaceArchived"/>) — the audit fact written when
+    /// an authorized owner archives a workspace, taking it read-only and out of the active list (CORE-LIFE-009).
+    /// A thin specialization of <see cref="Create"/> that pins the action and applies the archive producer's
+    /// stricter contract: the tenant, the archived workspace, the authenticated actor (the owner who archived it)
+    /// and the workspace resource (its generic kind name and surrogate id) are all REQUIRED, where the generic
+    /// factory leaves them optional. Unlike the deletion factories, an archive is a real STATE TRANSITION — the
+    /// workspace survives — so it records the before/after status NAMES (e.g. <c>Active</c> -&gt; <c>Archived</c>),
+    /// exactly as <see cref="ForVisibilityRuleChange"/> records a visibility transition. The archived workspace is
+    /// both the scope (<paramref name="workspaceId"/>) and the governed resource (its id), because the action is
+    /// performed ON the workspace. The resource kind and the state names are passed as generic strings so the
+    /// Audit module does not depend on the Workspaces module's types. Every value is an identifier, an enum or a
+    /// generic state name — never free-form content (threat T7) — and the audit row outlives any later change to
+    /// the workspace it references because the reference is a recorded fact, not a foreign key (see the type
+    /// summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the archive happened in (required).</param>
+    /// <param name="workspaceId">The workspace that was archived (required for this action).</param>
+    /// <param name="actorUserProfileId">The owner who performed the archive (required; the audited actor).</param>
+    /// <param name="workspaceResourceType">The archived workspace's generic kind name (e.g. Workspace).</param>
+    /// <param name="previousState">The lifecycle status name before the archive (e.g. Active; required).</param>
+    /// <param name="newState">The lifecycle status name after the archive (e.g. Archived; required).</param>
+    /// <param name="createdAt">When the archive happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the workspace resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForWorkspaceArchive(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string workspaceResourceType,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(workspaceResourceType))
+        {
+            throw new ArgumentException("Workspace resource type must not be empty.", nameof(workspaceResourceType));
+        }
+
+        // An archive is a real state transition, so both before and after status names are required even though
+        // the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.WorkspaceArchived,
+            actorUserProfileId,
+            workspaceResourceType,
+            workspaceId,
+            targetParticipantId: null,
+            previousState: previousState,
+            newState: newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

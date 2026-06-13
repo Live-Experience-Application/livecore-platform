@@ -72,6 +72,16 @@ internal sealed class WorkspaceConfiguration : IEntityTypeConfiguration<Workspac
             .HasMaxLength(Workspace.MaxNameLength)
             .IsRequired();
 
+        builder.Property(workspace => workspace.Status)
+            .HasColumnName("status")
+            // Persist the lifecycle status as its stable name (not its numeric
+            // value) so the stored value stays readable and is not coupled to the
+            // declaration-order integers, which exist only as in-memory storage
+            // discriminators (mirrors SessionStatus / ParticipantStatus).
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .IsRequired();
+
         builder.Property(workspace => workspace.CreatedAt)
             .HasColumnName("created_at")
             .IsRequired();

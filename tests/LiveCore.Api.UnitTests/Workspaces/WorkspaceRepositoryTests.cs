@@ -356,12 +356,13 @@ public sealed class WorkspaceRepositoryTests : IDisposable
             // serializes them with the SAME conversion the organizations row
             // used; otherwise the organization foreign key would not match.
             await seedContext.Database.ExecuteSqlRawAsync(
-                "INSERT INTO workspaces (id, organization_id, slug, name, created_at, updated_at) "
-                    + "VALUES ({0}, {1}, {2}, {3}, {4}, {4})",
+                "INSERT INTO workspaces (id, organization_id, slug, name, status, created_at, updated_at) "
+                    + "VALUES ({0}, {1}, {2}, {3}, {4}, {5}, {5})",
                 Guid.CreateVersion7(),
                 organization.Id,
                 _slug.ToUpperInvariant(),
                 _name,
+                nameof(WorkspaceStatus.Active),
                 _createdAt.UtcDateTime.ToString("o"));
         }
 

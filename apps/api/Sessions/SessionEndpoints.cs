@@ -22,7 +22,9 @@ namespace LiveCore.Api.Sessions;
 ///   session-control roles "Owner,Admin,Host,CoHost". The workspace's
 ///   <c>session.active.max</c> quota is enforced on create via the existing
 ///   <see cref="Entitlements.QuotaEnforcementService"/> (see <c>CreateSessionAsync</c>
-///   for why the create CHECKS the quota but does not RECORD consumption — start does).</item>
+///   for why the create CHECKS the quota but does not RECORD consumption — start does).
+///   Rejected with 409 when the parent workspace is archived (read-only;
+///   CORE-LIFE-009).</item>
 ///   <item><c>GET /api/v1/workspaces/{workspaceId}/sessions</c> (CORE-API-003) —
 ///   lists the route workspace's sessions (via
 ///   <see cref="ISessionRepository.ListByWorkspaceAsync"/>), authorized to "workspace
@@ -277,6 +279,24 @@ internal static class SessionEndpoints
             || member.HasRole(MembershipRole.CoHost)))
         {
             return Forbidden();
+        }
+
+        // Read-only when the parent workspace is archived (CORE-LIFE-009): creating a session is an authoring
+        // mutation, so an archived workspace rejects it with a 409 Conflict that creates nothing. The workspace
+        // is loaded within the resolved tenant (the membership above already proves it exists, so a null here is
+        // defensive and hidden as 404); the check is placed AFTER role authorization so a member who lacks the
+        // create role still gets a 403 and never learns the archived state (threat T7).
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (workspace.IsArchived)
+        {
+            return ArchivedReadOnly();
         }
 
         // Quota enforcement (CORE-API-003): creating a session is gated by the
@@ -552,11 +572,13 @@ internal static class SessionEndpoints
         var services = httpContext.RequestServices;
         var resolver = services.GetService<TenantContextResolver>();
         var sessions = services.GetService<ISessionRepository>();
+        var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
 
         if (resolver is null
             || sessions is null
+            || workspaces is null
             || workspaceMembers is null
             || quotaEnforcement is null)
         {
@@ -564,7 +586,8 @@ internal static class SessionEndpoints
             return false;
         }
 
-        dependencies = new SessionEndpointDependencies(resolver, sessions, workspaceMembers, quotaEnforcement);
+        dependencies = new SessionEndpointDependencies(
+            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement);
         return true;
     }
 
@@ -615,6 +638,15 @@ internal static class SessionEndpoints
             title: "Conflict",
             detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
+    // The parent workspace is archived and therefore read-only (CORE-LIFE-009), so creating a session in it is
+    // refused. The caller is authorized; the workspace's lifecycle state, not the caller, is the reason, so this
+    // is a 409 Conflict. The detail names only the generic state and leaks no tenant data (threat T7).
+    private static IResult ArchivedReadOnly()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The workspace is archived and is read-only.");
+
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
@@ -662,6 +694,7 @@ internal static class SessionEndpoints
     private readonly record struct SessionEndpointDependencies(
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
+        IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers,
         QuotaEnforcementService QuotaEnforcement);
 }

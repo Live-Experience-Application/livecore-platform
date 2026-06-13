@@ -121,6 +121,7 @@ export const workspaceExample: WorkspaceResponse = {
   organizationId: "0190f1d4-9b6e-7c3a-8a1e-0c2b3d4e5f61",
   slug: "demo",
   name: "Demo",
+  status: "Active",
   createdAt: "2026-06-13T00:00:00+00:00",
   updatedAt: "2026-06-13T00:00:00+00:00",
 };

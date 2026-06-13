@@ -100,11 +100,15 @@ internal sealed class WorkspaceRepository : IWorkspaceRepository
         // is not a member of, or any workspace in another organization, is never
         // returned (deny-by-default; threat T5/T1). The membership row's own
         // organization_id is matched as well so a membership can never bridge a
-        // workspace from a foreign tenant. Ordering by the (time-ordered) UUIDv7
-        // id keeps the listing stable.
+        // workspace from a foreign tenant. The status predicate (translated to
+        // status = 'Active' through the string value converter) EXCLUDES archived
+        // workspaces, because this is the ACTIVE workspace list (CORE-LIFE-009: an
+        // archived workspace is "excluded from active lists"). Ordering by the
+        // (time-ordered) UUIDv7 id keeps the listing stable.
         return await _dbContext.Workspaces
             .AsNoTracking()
             .Where(workspace => workspace.OrganizationId == organizationId
+                && workspace.Status == WorkspaceStatus.Active
                 && _dbContext.WorkspaceMembers.Any(member =>
                     member.WorkspaceId == workspace.Id
                     && member.OrganizationId == organizationId

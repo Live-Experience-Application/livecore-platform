@@ -226,6 +226,74 @@ public class WorkspaceTests
         Assert.Equal(_createdAt, workspace.UpdatedAt);
     }
 
+    [Fact]
+    public void Create_starts_active()
+    {
+        // A new workspace is in active use: it accepts authoring mutations and
+        // appears in the active list (CORE-LIFE-009).
+        var workspace = Workspace.Create(_organizationId, _slug, _name, _createdAt);
+
+        Assert.Equal(WorkspaceStatus.Active, workspace.Status);
+        Assert.False(workspace.IsArchived);
+        Assert.True(workspace.CanArchive);
+    }
+
+    [Fact]
+    public void Archive_transitions_active_to_archived_and_stamps_updated_at()
+    {
+        var workspace = Workspace.Create(_organizationId, _slug, _name, _createdAt);
+        var originalId = workspace.Id;
+
+        workspace.Archive(_updatedAt);
+
+        Assert.Equal(WorkspaceStatus.Archived, workspace.Status);
+        Assert.True(workspace.IsArchived);
+        Assert.False(workspace.CanArchive);
+        Assert.Equal(_updatedAt, workspace.UpdatedAt);
+        // Archiving is a soft, in-place transition: it never moves the workspace
+        // (organization, slug and id are immutable; threat T5).
+        Assert.Equal(_createdAt, workspace.CreatedAt);
+        Assert.Equal(_slug, workspace.Slug);
+        Assert.Equal(originalId, workspace.Id);
+        Assert.Equal(_organizationId, workspace.OrganizationId);
+    }
+
+    [Fact]
+    public void Archive_normalizes_updated_at_to_utc()
+    {
+        var workspace = Workspace.Create(_organizationId, _slug, _name, _createdAt);
+        var localUpdatedAt = new DateTimeOffset(2026, 6, 11, 12, 0, 0, TimeSpan.FromHours(2));
+
+        workspace.Archive(localUpdatedAt);
+
+        Assert.Equal(TimeSpan.Zero, workspace.UpdatedAt.Offset);
+        Assert.Equal(localUpdatedAt.ToUniversalTime(), workspace.UpdatedAt);
+    }
+
+    [Fact]
+    public void Archive_is_terminal_archiving_an_archived_workspace_throws()
+    {
+        // Archive is the clearly-terminal end-state: a second archive is an invalid
+        // transition, not a no-op, so the application layer can surface a 409
+        // instead of writing a duplicate audit fact (CORE-LIFE-009).
+        var workspace = Workspace.Create(_organizationId, _slug, _name, _createdAt);
+        workspace.Archive(_updatedAt);
+
+        Assert.Throws<InvalidOperationException>(() => workspace.Archive(_updatedAt));
+        // The status and timestamp are unchanged by the rejected second archive.
+        Assert.Equal(WorkspaceStatus.Archived, workspace.Status);
+        Assert.Equal(_updatedAt, workspace.UpdatedAt);
+    }
+
+    [Fact]
+    public void ToString_includes_the_lifecycle_status()
+    {
+        var workspace = Workspace.Create(_organizationId, _slug, _name, _createdAt);
+        workspace.Archive(_updatedAt);
+
+        Assert.Contains(WorkspaceStatus.Archived.ToString(), workspace.ToString(), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("ab")]
     [InlineData("summer-show")]
