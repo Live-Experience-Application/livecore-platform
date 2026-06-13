@@ -420,20 +420,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // entity-instance schema-conformance is wired here (all out of scope).
     builder.Services.AddScoped<TemplateEntityTypeLoader>();
 
-    // Entity search service (CORE-ENT-005, the last story of the Entity System and Templates epic):
-    // searches a workspace's entities for a given workspace role WITH VISIBILITY FILTERING.
-    // Registered here, inside the persistence conditional, because it depends on the entity
-    // repository above (exactly like the join service depends on the session/participant
-    // repositories). It is a plain decision service: tenant id, workspace id, the caller's role and
+    // Entity search service (CORE-ENT-005, retrofitted by CORE-API-006 to apply the real audience
+    // filter): searches a workspace's entities for a given workspace role WITH VISIBILITY FILTERING.
+    // Registered here, inside the persistence conditional, because it depends on the entity repository
+    // and the central VisibilityPolicy above (exactly like the join service depends on the
+    // session/participant repositories and VisibilityPreviewService depends on the policy). It is a
+    // plain decision service: tenant id, workspace id, the caller's role, the calling participant and
     // generic criteria in, the role-appropriate entity set out. The host-capable roles
-    // (Owner/Admin/Host/CoHost — "View host-only content" in docs/06_AUTHORIZATION_MATRIX.md) get
-    // every matching entity through the tenant- and workspace-scoped repository lookups (organization
-    // boundary before workspace boundary; threat T5); every other role gets the fail-closed empty
-    // audience view, deferring the audience-visible computation to the central Visibility engine
-    // (CORE-VIS) rather than duplicating visibility logic here (docs/02_ARCHITECTURE.md,
-    // docs/05_MODULE_CONTRACTS.md) — the same skeleton shape as the CORE-SES-005 participant-visible
-    // feed. There is NO HTTP endpoint (csv/api_routes.csv defines no entity route) and NO visibility
-    // rule engine in this story.
+    // (Owner/Admin/Host/CoHost — "View host-only content" in docs/06_AUTHORIZATION_MATRIX.md) get every
+    // matching entity through the tenant- and workspace-scoped repository lookups (organization boundary
+    // before workspace boundary; threat T5); an audience PARTICIPANT (Participant/Observer with an
+    // identified participant) gets exactly the entities revealed to them, decided per candidate by
+    // VisibilityPolicy.CanParticipantViewResourceAsync — the SAME participant-aware primitive the
+    // participant-visible feed and realtime recipient resolver use, so entity search never diverges and
+    // visibility is decided in ONE place (docs/02_ARCHITECTURE.md, docs/05_MODULE_CONTRACTS.md); every
+    // other caller (the audit role, any undefined role, an audience role with no participant) fails
+    // closed to the empty view before any query. There is NO HTTP endpoint (csv/api_routes.csv defines
+    // no entity route) and NO parallel visibility engine in this story.
     builder.Services.AddScoped<EntitySearchService>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal

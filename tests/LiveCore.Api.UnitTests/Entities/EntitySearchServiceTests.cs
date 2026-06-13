@@ -1,6 +1,8 @@
 using LiveCore.Api.Entities;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -8,30 +10,33 @@ using Microsoft.EntityFrameworkCore;
 namespace LiveCore.Api.UnitTests.Entities;
 
 /// <summary>
-/// Tests for <see cref="EntitySearchService"/> (CORE-ENT-005, the last story of the "Entity System
-/// and Templates" epic) — entity search within a workspace WITH VISIBILITY FILTERING. They mirror
-/// the precedent of <c>SessionParticipantJoinService</c>'s tests: the service is a
-/// plain decision service over the real EF Core repository, driven against an in-memory SQLite
-/// database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>), so the tenant/workspace
-/// scoping, the type filter and the deterministic ordering all run against genuinely persisted
-/// state.
+/// Tests for <see cref="EntitySearchService"/> (CORE-ENT-005, retrofitted by CORE-API-006 to apply the
+/// REAL audience visibility filter) — entity search within a workspace WITH VISIBILITY FILTERING. They
+/// mirror the precedent of <c>SessionParticipantJoinService</c> and
+/// <see cref="VisibilityPreviewService"/>'s tests: the service is a plain decision service over the
+/// real EF Core repositories and the central <see cref="VisibilityPolicy"/>, driven against an
+/// in-memory SQLite database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>), so the
+/// tenant/workspace scoping, the type filter, the deterministic ordering and the per-participant
+/// visibility decision all run against genuinely persisted state.
 ///
-/// The story's required tests are "Template validation tests and visibility tests"; this is finally
-/// the story where the VISIBILITY tests apply:
+/// The behaviors covered:
 /// <list type="bullet">
 ///   <item>HOST view: the host-capable roles (Owner/Admin/Host/CoHost — "View host-only content" =
-///   yes, docs/06_AUTHORIZATION_MATRIX.md) get every matching workspace entity.</item>
-///   <item>AUDIENCE fail-closed: Participant/Observer (and the audit role Auditor, and any undefined
-///   role) get the EMPTY visibility-filtered view — even when entities exist — because the
-///   audience-visible subset is computed by the future Visibility engine (CORE-VIS), not here. No
-///   entity existence leaks to an audience caller (threats T1/T5 in
-///   docs/07_SECURITY_THREAT_MODEL.md). This mirrors the CORE-SES-005 participant-visible feed
-///   skeleton.</item>
+///   yes, docs/06_AUTHORIZATION_MATRIX.md) get every matching workspace entity, regardless of any
+///   visibility rule.</item>
+///   <item>AUDIENCE-PARTICIPANT view (CORE-API-006): an audience participant (Participant/Observer with
+///   an identified participant) gets exactly the entities REVEALED to them — an audience-wide visible
+///   rule, or a visible rule scoped to exactly them. The crown jewel: a participant never sees an
+///   entity revealed only to a DIFFERENT participant (the selected-participant guarantee; threat T5).
+///   Hidden, unruled and foreign-tenant entities are excluded.</item>
+///   <item>FAIL-CLOSED (threats T1/T5): the audit role, any undefined role, and an audience role with
+///   no identified participant get the EMPTY view even when entities are revealed — no entity existence
+///   leaks to a caller with no content-view standing.</item>
 ///   <item>FILTERING: the generic name substring (ordinal, case-insensitive) and the optional type
-///   filter narrow the host result.</item>
+///   filter narrow both the host and the audience result.</item>
 ///   <item>TENANT/WORKSPACE ISOLATION (threat T5; organization boundary checked before workspace
-///   boundary, docs/06): a host search in one organization/workspace never returns another
-///   organization's or another workspace's entities, in both directions.</item>
+///   boundary, docs/06): a search in one organization/workspace never returns another organization's or
+///   another workspace's entities, in both directions, for both the host and the audience path.</item>
 /// </list>
 ///
 /// THE TEMPLATE BOUNDARY (docs/04_PRODUCT_BOUNDARIES.md): every fixture name/value is GENERIC and
@@ -78,7 +83,10 @@ public sealed class EntitySearchServiceTests : IDisposable
     }
 
     private EntitySearchService CreateService(LiveCoreDbContext context)
-        => new(new EntityRepository(context));
+    {
+        var rules = new VisibilityRuleRepository(context);
+        return new EntitySearchService(new EntityRepository(context), new VisibilityPolicy(rules));
+    }
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
     {
@@ -121,6 +129,47 @@ public sealed class EntitySearchServiceTests : IDisposable
         return entity;
     }
 
+    private async Task<Participant> SeedParticipantAsync(Guid organizationId, Guid workspaceId)
+    {
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId: null, "Participant", _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(
+            ParticipantAddResult.Added,
+            await new ParticipantRepository(context).AddAsync(participant, CancellationToken.None));
+        return participant;
+    }
+
+    /// <summary>Seeds an AUDIENCE-WIDE visibility rule for the given resource (visible to everyone).</summary>
+    private async Task SeedRuleAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid resourceId,
+        VisibilityState visibility)
+    {
+        var rule = VisibilityRule.Create(
+            organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, visibility, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(
+            VisibilityRuleAddResult.Added,
+            await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
+    /// <summary>Seeds a SELECTED-PARTICIPANT visibility rule (visible only to one participant).</summary>
+    private async Task SeedParticipantRuleAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid resourceId,
+        Guid targetParticipantId,
+        VisibilityState visibility)
+    {
+        var rule = VisibilityRule.CreateForParticipant(
+            organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, targetParticipantId, visibility, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(
+            VisibilityRuleAddResult.Added,
+            await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
     /// <summary>Seeds one organization + workspace + entity type and returns their ids.</summary>
     private async Task<(Guid OrganizationId, Guid WorkspaceId, Guid EntityTypeId)> SeedWorkspaceWithTypeAsync(
         string organizationSlug = _organizationSlugA,
@@ -150,13 +199,35 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var result = await service.SearchAsync(
-            org, ws, role, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            org, ws, role, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
 
         Assert.Equal(EntitySearchView.HostOnlyContent, result.View);
         Assert.True(result.IsHostView);
         Assert.Equal(2, result.Items.Count);
         Assert.Contains(result.Items, e => e.Id == a.Id);
         Assert.Contains(result.Items, e => e.Id == b.Id);
+    }
+
+    [Fact]
+    public async Task Host_capable_role_sees_every_entity_even_hidden_or_unruled_ones()
+    {
+        // A host sees host-only content: a hidden entity and an unruled entity are both returned. A
+        // participant would see neither (see the audience tests) — this is the host/audience contrast.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var hidden = await SeedEntityAsync(org, ws, typeId, "hidden");
+        var unruled = await SeedEntityAsync(org, ws, typeId, "unruled");
+        await SeedRuleAsync(org, ws, hidden.Id, VisibilityState.Hidden);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Host, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.HostOnlyContent, result.View);
+        Assert.Equal(2, result.Items.Count);
+        Assert.Contains(result.Items, e => e.Id == hidden.Id);
+        Assert.Contains(result.Items, e => e.Id == unruled.Id);
     }
 
     [Fact]
@@ -178,50 +249,276 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var result = await service.SearchAsync(
-            org, ws, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            org, ws, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
 
         Assert.Equal(expected, result.Items.Select(entity => entity.Id).ToArray());
     }
 
-    // --- Audience fail-closed: no host-only content, no existence leak --------------
+    // --- Audience-participant view: only entities revealed to the participant --------
 
-    [Theory]
-    [InlineData(MembershipRole.Participant)]
-    [InlineData(MembershipRole.Observer)]
-    [InlineData(MembershipRole.Auditor)]
-    public async Task Audience_and_audit_roles_get_empty_view_even_when_entities_exist(MembershipRole role)
+    [Fact]
+    public async Task Audience_participant_sees_an_audience_wide_revealed_entity()
     {
         var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
-        await SeedEntityAsync(org, ws, typeId, "alpha");
-        await SeedEntityAsync(org, ws, typeId, "beta");
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedEntityAsync(org, ws, typeId, "beta"); // unruled -> not visible
+        await SeedRuleAsync(org, ws, revealed.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
 
         await using var context = CreateContext();
         var service = CreateService(context);
 
         var result = await service.SearchAsync(
-            org, ws, role, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            org, ws, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
 
-        // Fail-closed: the audience view is empty (the audience-visible subset is CORE-VIS), and the
-        // entities that genuinely exist never leak to a non-host caller (threats T1/T5).
+        // The audience view is now the REAL filtered set (not a hard-coded empty set): the participant
+        // sees the audience-wide revealed entity, and not the unruled one.
         Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
         Assert.False(result.IsHostView);
+        Assert.Single(result.Items);
+        Assert.Equal(revealed.Id, result.Items[0].Id);
+    }
+
+    [Fact]
+    public async Task An_observer_with_a_participant_id_is_filtered_like_a_participant()
+    {
+        // Observer is an audience role (docs/06): with an identified participant it takes the same
+        // visibility-filtered path, so an audience-wide revealed entity is visible to it.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedRuleAsync(org, ws, revealed.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Observer, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
+        Assert.Single(result.Items);
+        Assert.Equal(revealed.Id, result.Items[0].Id);
+    }
+
+    [Fact]
+    public async Task Audience_participant_sees_only_entities_revealed_to_them()
+    {
+        // THE crown jewel: an entity revealed ONLY to `selected` is in their result but NOT in a
+        // different participant `other`'s result — the selected-participant guarantee (threat T5).
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var forSelected = await SeedEntityAsync(org, ws, typeId, "alpha");
+        var forOther = await SeedEntityAsync(org, ws, typeId, "beta");
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        var other = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, forSelected.Id, selected, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, forOther.Id, other, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var selectedResult = await service.SearchAsync(
+            org, ws, MembershipRole.Participant, selected, EntitySearchCriteria.MatchAll, CancellationToken.None);
+        var otherResult = await service.SearchAsync(
+            org, ws, MembershipRole.Participant, other, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Single(selectedResult.Items);
+        Assert.Equal(forSelected.Id, selectedResult.Items[0].Id);
+        Assert.DoesNotContain(selectedResult.Items, e => e.Id == forOther.Id);
+
+        Assert.Single(otherResult.Items);
+        Assert.Equal(forOther.Id, otherResult.Items[0].Id);
+        Assert.DoesNotContain(otherResult.Items, e => e.Id == forSelected.Id);
+    }
+
+    [Fact]
+    public async Task Audience_participant_sees_both_audience_wide_and_their_own_private_reveal()
+    {
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var audienceWide = await SeedEntityAsync(org, ws, typeId, "wide");
+        var privateToSelected = await SeedEntityAsync(org, ws, typeId, "mine");
+        var privateToOther = await SeedEntityAsync(org, ws, typeId, "theirs");
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        var other = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedRuleAsync(org, ws, audienceWide.Id, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, privateToSelected.Id, selected, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, privateToOther.Id, other, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Participant, selected, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(2, result.Items.Count);
+        Assert.Contains(result.Items, e => e.Id == audienceWide.Id);
+        Assert.Contains(result.Items, e => e.Id == privateToSelected.Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == privateToOther.Id);
+    }
+
+    [Fact]
+    public async Task Audience_participant_does_not_see_hidden_or_unruled_entities()
+    {
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var unruled = await SeedEntityAsync(org, ws, typeId, "unruled");
+        var hidden = await SeedEntityAsync(org, ws, typeId, "hidden");
+        var visible = await SeedEntityAsync(org, ws, typeId, "visible");
+        await SeedRuleAsync(org, ws, hidden.Id, VisibilityState.Hidden);
+        await SeedRuleAsync(org, ws, visible.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Single(result.Items);
+        Assert.Equal(visible.Id, result.Items[0].Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == unruled.Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == hidden.Id);
+    }
+
+    [Fact]
+    public async Task Audience_participant_with_a_hidden_private_reveal_sees_nothing()
+    {
+        // A participant-scoped rule that is Hidden grants nothing — fail-closed even for its target.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var entity = await SeedEntityAsync(org, ws, typeId, "alpha");
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, entity.Id, selected, VisibilityState.Hidden);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Participant, selected, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
         Assert.Empty(result.Items);
     }
 
     [Fact]
-    public async Task Undefined_role_fails_closed_to_empty_audience_view()
+    public async Task Audience_participant_sees_nothing_when_no_entity_is_revealed()
     {
+        // Entities exist but carry no rule (host-only by default): a participant sees nothing, and no
+        // entity existence leaks. The view is the filtered audience view, not the host view.
         var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
         await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedEntityAsync(org, ws, typeId, "beta");
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
 
         await using var context = CreateContext();
         var service = CreateService(context);
 
         var result = await service.SearchAsync(
-            org, ws, (MembershipRole)999, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            org, ws, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
 
         Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
         Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Audience_participant_view_combines_name_and_type_filters_with_visibility()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var typeAlpha = await SeedEntityTypeAsync(organization.Id, workspace.Id, "type-alpha");
+        var typeBeta = await SeedEntityTypeAsync(organization.Id, workspace.Id, "type-beta");
+        // The only entity that is the right type AND matches the name AND is revealed.
+        var match = await SeedEntityAsync(organization.Id, workspace.Id, typeAlpha.Id, "shared-name");
+        // Right name, revealed, but wrong type -> excluded by the type filter.
+        var wrongType = await SeedEntityAsync(organization.Id, workspace.Id, typeBeta.Id, "shared-name");
+        // Right type, revealed, but wrong name -> excluded by the name filter.
+        var wrongName = await SeedEntityAsync(organization.Id, workspace.Id, typeAlpha.Id, "other");
+        // Right type and name but NOT revealed -> excluded by the visibility filter.
+        var notRevealed = await SeedEntityAsync(organization.Id, workspace.Id, typeAlpha.Id, "shared-extra");
+        await SeedRuleAsync(organization.Id, workspace.Id, match.Id, VisibilityState.Visible);
+        await SeedRuleAsync(organization.Id, workspace.Id, wrongType.Id, VisibilityState.Visible);
+        await SeedRuleAsync(organization.Id, workspace.Id, wrongName.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(organization.Id, workspace.Id)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            organization.Id,
+            workspace.Id,
+            MembershipRole.Participant,
+            participant,
+            EntitySearchCriteria.Create("shared", typeAlpha.Id),
+            CancellationToken.None);
+
+        Assert.Single(result.Items);
+        Assert.Equal(match.Id, result.Items[0].Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == wrongType.Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == wrongName.Id);
+        Assert.DoesNotContain(result.Items, e => e.Id == notRevealed.Id);
+    }
+
+    // --- Fail-closed: no content-view standing --------------------------------------
+
+    [Fact]
+    public async Task Auditor_fails_closed_even_when_an_entity_is_revealed()
+    {
+        // Auditor is "audit-only" on the content rows (docs/06), so it is NOT an audience role: even
+        // with a participant id and an audience-wide visible entity, it gets the empty view.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedRuleAsync(org, ws, revealed.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, MembershipRole.Auditor, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Undefined_role_fails_closed_even_when_an_entity_is_revealed()
+    {
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedRuleAsync(org, ws, revealed.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.SearchAsync(
+            org, ws, (MembershipRole)999, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, result.View);
+        Assert.Empty(result.Items);
+    }
+
+    [Theory]
+    [InlineData(MembershipRole.Participant)]
+    [InlineData(MembershipRole.Observer)]
+    public async Task Audience_role_without_a_participant_fails_closed(MembershipRole role)
+    {
+        // An audience role with NO identified participant has no participant to compute visibility for,
+        // so it fails closed to the empty view even when an entity is revealed audience-wide — and a
+        // null vs an empty participant id behave identically (fail-closed, never a throw).
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        await SeedRuleAsync(org, ws, revealed.Id, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var nullResult = await service.SearchAsync(
+            org, ws, role, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
+        var emptyResult = await service.SearchAsync(
+            org, ws, role, Guid.Empty, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, nullResult.View);
+        Assert.Empty(nullResult.Items);
+        Assert.Equal(EntitySearchView.AudienceVisibilityFiltered, emptyResult.View);
+        Assert.Empty(emptyResult.Items);
     }
 
     // --- Name filter (host view) ----------------------------------------------------
@@ -239,7 +536,7 @@ public sealed class EntitySearchServiceTests : IDisposable
 
         // "ALP" matches "alpha" and "Alphabet" case-insensitively, not "beta".
         var result = await service.SearchAsync(
-            org, ws, MembershipRole.Host, EntitySearchCriteria.Create("ALP"), CancellationToken.None);
+            org, ws, MembershipRole.Host, participantId: null, EntitySearchCriteria.Create("ALP"), CancellationToken.None);
 
         Assert.Equal(EntitySearchView.HostOnlyContent, result.View);
         Assert.Equal(2, result.Items.Count);
@@ -257,7 +554,7 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var result = await service.SearchAsync(
-            org, ws, MembershipRole.Host, EntitySearchCriteria.Create("gamma"), CancellationToken.None);
+            org, ws, MembershipRole.Host, participantId: null, EntitySearchCriteria.Create("gamma"), CancellationToken.None);
 
         // No match is still the HOST view (the caller is host-capable) — just empty. This is
         // distinct from the empty AUDIENCE view, which a non-host role receives regardless of matches.
@@ -285,6 +582,7 @@ public sealed class EntitySearchServiceTests : IDisposable
             organization.Id,
             workspace.Id,
             MembershipRole.Owner,
+            participantId: null,
             EntitySearchCriteria.Create(entityTypeId: typeAlpha.Id),
             CancellationToken.None);
 
@@ -314,6 +612,7 @@ public sealed class EntitySearchServiceTests : IDisposable
             organization.Id,
             workspace.Id,
             MembershipRole.Owner,
+            participantId: null,
             EntitySearchCriteria.Create("shared", typeAlpha.Id),
             CancellationToken.None);
 
@@ -337,20 +636,20 @@ public sealed class EntitySearchServiceTests : IDisposable
 
         // Searching tenant A's workspace returns only A's entity, never B's — even as Owner.
         var resultA = await service.SearchAsync(
-            orgA, wsA, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            orgA, wsA, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
         Assert.Single(resultA.Items);
         Assert.Equal(entityA.Id, resultA.Items[0].Id);
 
         // And the reverse: tenant B's workspace returns only B's entity.
         var resultB = await service.SearchAsync(
-            orgB, wsB, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            orgB, wsB, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
         Assert.Single(resultB.Items);
         Assert.Equal(entityB.Id, resultB.Items[0].Id);
 
         // Cross-tenant addressing is hidden: tenant B's id with tenant A's workspace returns nothing
         // (the organization boundary is checked before the workspace boundary; threat T5).
         var crossTenant = await service.SearchAsync(
-            orgB, wsA, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            orgB, wsA, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
         Assert.Empty(crossTenant.Items);
     }
 
@@ -369,7 +668,64 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var resultX = await service.SearchAsync(
-            organization.Id, workspaceX.Id, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None);
+            organization.Id, workspaceX.Id, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        Assert.Single(resultX.Items);
+        Assert.Equal(entityX.Id, resultX.Items[0].Id);
+        Assert.DoesNotContain(resultX.Items, e => e.Id == entityY.Id);
+    }
+
+    // --- Tenant + workspace isolation (audience-participant view) --------------------
+
+    [Fact]
+    public async Task Audience_participant_search_never_returns_another_tenants_entities()
+    {
+        // Tenant A and tenant B each have an entity revealed audience-wide in their own workspace.
+        var (orgA, wsA, typeA) = await SeedWorkspaceWithTypeAsync(_organizationSlugA, _workspaceSlugA, "type-alpha");
+        var entityA = await SeedEntityAsync(orgA, wsA, typeA, "alpha");
+        await SeedRuleAsync(orgA, wsA, entityA.Id, VisibilityState.Visible);
+        var participantA = (await SeedParticipantAsync(orgA, wsA)).Id;
+
+        var (orgB, wsB, typeB) = await SeedWorkspaceWithTypeAsync(_organizationSlugB, _workspaceSlugB, "type-beta");
+        var entityB = await SeedEntityAsync(orgB, wsB, typeB, "beta");
+        await SeedRuleAsync(orgB, wsB, entityB.Id, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        // Tenant A's participant searching A's workspace sees only A's entity, never B's.
+        var resultA = await service.SearchAsync(
+            orgA, wsA, MembershipRole.Participant, participantA, EntitySearchCriteria.MatchAll, CancellationToken.None);
+        Assert.Single(resultA.Items);
+        Assert.Equal(entityA.Id, resultA.Items[0].Id);
+        Assert.DoesNotContain(resultA.Items, e => e.Id == entityB.Id);
+
+        // Cross-tenant addressing is hidden: tenant B's id with tenant A's workspace returns nothing
+        // (the organization boundary is checked before the workspace boundary; threat T5).
+        var crossTenant = await service.SearchAsync(
+            orgB, wsA, MembershipRole.Participant, participantA, EntitySearchCriteria.MatchAll, CancellationToken.None);
+        Assert.Empty(crossTenant.Items);
+    }
+
+    [Fact]
+    public async Task Audience_participant_search_never_returns_another_workspaces_entities()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspaceX = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var workspaceY = await SeedWorkspaceAsync(organization.Id, _workspaceSlugB);
+        var typeX = await SeedEntityTypeAsync(organization.Id, workspaceX.Id, "type-alpha");
+        var typeY = await SeedEntityTypeAsync(organization.Id, workspaceY.Id, "type-beta");
+        var entityX = await SeedEntityAsync(organization.Id, workspaceX.Id, typeX.Id, "alpha");
+        var entityY = await SeedEntityAsync(organization.Id, workspaceY.Id, typeY.Id, "beta");
+        await SeedRuleAsync(organization.Id, workspaceX.Id, entityX.Id, VisibilityState.Visible);
+        await SeedRuleAsync(organization.Id, workspaceY.Id, entityY.Id, VisibilityState.Visible);
+        var participantX = (await SeedParticipantAsync(organization.Id, workspaceX.Id)).Id;
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var resultX = await service.SearchAsync(
+            organization.Id, workspaceX.Id, MembershipRole.Participant, participantX, EntitySearchCriteria.MatchAll, CancellationToken.None);
 
         Assert.Single(resultX.Items);
         Assert.Equal(entityX.Id, resultX.Items[0].Id);
@@ -385,7 +741,7 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(() => service.SearchAsync(
-            Guid.Empty, Guid.NewGuid(), MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None));
+            Guid.Empty, Guid.NewGuid(), MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None));
         Assert.Equal("organizationId", exception.ParamName);
     }
 
@@ -396,7 +752,7 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(() => service.SearchAsync(
-            Guid.NewGuid(), Guid.Empty, MembershipRole.Owner, EntitySearchCriteria.MatchAll, CancellationToken.None));
+            Guid.NewGuid(), Guid.Empty, MembershipRole.Owner, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None));
         Assert.Equal("workspaceId", exception.ParamName);
     }
 
@@ -407,6 +763,6 @@ public sealed class EntitySearchServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => service.SearchAsync(
-            Guid.NewGuid(), Guid.NewGuid(), MembershipRole.Owner, null!, CancellationToken.None));
+            Guid.NewGuid(), Guid.NewGuid(), MembershipRole.Owner, participantId: null, null!, CancellationToken.None));
     }
 }
