@@ -7,13 +7,22 @@ using Microsoft.AspNetCore.Mvc;
 namespace LiveCore.Api.Scenes;
 
 /// <summary>
-/// HTTP endpoints of the Scenes module's scene content APIs (CORE-SCENE-003:
-/// "Implement scene content APIs"). These are the FIRST HTTP endpoints of the Scenes
-/// module. They realize the documented request flow end-to-end for the two
-/// workspace-scoped scene routes: "authentication middleware -> tenant/workspace
-/// context resolver -> endpoint -> authorization policy"
+/// HTTP endpoints of the Scenes module. The scene content read/create routes are CORE-SCENE-003
+/// ("Implement scene content APIs") and the by-scene-id read is CORE-API-007; the scene DELETE route is
+/// CORE-LIFE-005 ("Implement scene deletion", the "Resource Lifecycle and Deletion" epic). They realize the
+/// documented request flow end-to-end for the workspace-scoped and by-scene-id scene routes:
+/// "authentication middleware -> tenant/workspace context resolver -> endpoint -> authorization policy"
 /// (docs/02_ARCHITECTURE.md), mirroring <see cref="Workspaces.WorkspaceEndpoints"/>'s
 /// <c>{workspaceId}</c>-in-path routes exactly.
+///
+/// The DELETE route (CORE-LIFE-005) — <c>DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}</c>,
+/// roles "Host,CoHost,Owner,Admin" — deletes ONE scene, addressed within its parent workspace, cascading
+/// its child content blocks and the dependent visibility rules / asset links, RE-PACKING the remaining
+/// scenes' ordering so there is no gap (the SCENE-001 ordering logic, reused) and appending an append-only
+/// <see cref="LiveCore.Api.Audit.AuditAction.SceneDeleted"/> audit record, all atomically through
+/// <see cref="SceneDeletionService"/> (cascade, not block;
+/// docs/adr/0012-resource-deletion-cascades-dependents.md). Returns <c>204 No Content</c> on success;
+/// deleting a non-existent scene is a safe hidden-404.
 ///
 /// Routes owned by this story (csv/api_routes.csv lines 15-16):
 /// <list type="bullet">
@@ -94,6 +103,7 @@ internal static class SceneEndpoints
 
         workspaceScopedGroup.MapGet("/{workspaceId}/scenes", ListScenesAsync);
         workspaceScopedGroup.MapPost("/{workspaceId}/scenes", CreateSceneAsync);
+        workspaceScopedGroup.MapDelete("/{workspaceId}/scenes/{sceneId}", DeleteSceneAsync);
 
         // The by-scene-id read group (CORE-API-007): the route path carries only the
         // {sceneId}, so the target organization is a required ?organizationSlug= query
@@ -379,6 +389,105 @@ internal static class SceneEndpoints
         return Results.Created($"/api/v1/scenes/{scene.Id}", response);
     }
 
+    // DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}?organizationSlug={slug}
+    //
+    // Deletes ONE scene from its parent workspace (CORE-LIFE-005, the "Resource Lifecycle and Deletion"
+    // epic). The flow mirrors the create handler above (the same fail-closed, load-then-authorize,
+    // hidden-404 shape) and the entity deletion route: the parent workspace is resolved FIRST (the route
+    // pins {workspaceId}, the tenant comes from the required ?organizationSlug=), the caller is authorized by
+    // their role in that workspace, and only then is the scene deleted (its child content blocks and the
+    // dependent visibility rules / asset links cascaded, the remaining scenes' ordering re-packed and the
+    // deletion audited) atomically through the tenant- and workspace-scoped deletion service.
+    private static async Task<IResult> DeleteSceneAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string sceneId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the entity deletion and the other workspace
+        // by-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace or scene id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 so a foreign or non-existent tenant is
+            // indistinguishable from a missing scene (threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace (the parent workspace,
+        // resolved first). A caller who is a member of the tenant but NOT of the workspace must not learn the
+        // workspace's scenes exist, so a missing membership is hidden as 404 (not 403) — the same rule as the
+        // create route and the entity deletion route (threats T1/T5). The member's workspace role then drives
+        // the role check below.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // The caller is a known member of the workspace, so an insufficient role is a 403 (authorized to know
+        // the workspace exists, but not to delete its scenes). Scenes are host-prepared content, governed by
+        // the host-capable roles Owner/Admin/Host/CoHost (csv/api_routes.csv; docs/06_AUTHORIZATION_MATRIX.md),
+        // the same set that creates scenes/content blocks and deletes entities/content blocks. MembershipRole
+        // is non-linear, so this is an EXACT set membership check, never a >/< ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized: delete the scene (cascade its child content blocks + dependents, re-pack the remaining
+        // scenes' ordering, append the audit record) atomically. The service loads the scene through the
+        // tenant- AND workspace-scoped FindByIdAsync, so a scene in another workspace or tenant is never
+        // deleted even when its id is known; an unknown id is a SAFE 404 that changes nothing (threats T1/T5).
+        var now = timeProvider.GetUtcNow();
+        var result = await deps.SceneDeletion
+            .DeleteAsync(context.OrganizationId, workspaceGuid, sceneGuid, context.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result == SceneDeletionResult.Deleted
+            ? Results.NoContent()
+            : HiddenScene();
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They exist
     /// only when a database connection string is configured; when absent, the endpoint
@@ -389,17 +498,19 @@ internal static class SceneEndpoints
         var services = httpContext.RequestServices;
         var resolver = services.GetService<TenantContextResolver>();
         var scenes = services.GetService<ISceneRepository>();
+        var sceneDeletion = services.GetService<SceneDeletionService>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
 
         if (resolver is null
             || scenes is null
+            || sceneDeletion is null
             || workspaceMembers is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new SceneEndpointDependencies(resolver, scenes, workspaceMembers);
+        dependencies = new SceneEndpointDependencies(resolver, scenes, sceneDeletion, workspaceMembers);
         return true;
     }
 
@@ -471,5 +582,6 @@ internal static class SceneEndpoints
     private readonly record struct SceneEndpointDependencies(
         TenantContextResolver Resolver,
         ISceneRepository Scenes,
+        SceneDeletionService SceneDeletion,
         IWorkspaceMemberRepository WorkspaceMembers);
 }

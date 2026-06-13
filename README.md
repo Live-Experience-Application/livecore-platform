@@ -715,9 +715,9 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`) is extensible without a schema change because the
-action persists by its stable name; each producer command wires its own action in its own story.
-The member-removal command (CORE-LIFE-001) is the first wired producer of
+`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`) is extensible without a schema
+change because the action persists by its stable name; each producer command wires its own action in its own
+story. The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
 workspace or organization member (the threat-model control for access revocation).
 The entity-deletion command (CORE-LIFE-003) wires `EntityDeleted`, appending an entry
@@ -726,7 +726,10 @@ control); the dependents it cascades are consequences of the one action and are 
 separately audited. The content-block-deletion command (CORE-LIFE-004) wires
 `ContentBlockDeleted` the same way — one append-only fact per content-block deletion, its cascaded
 visibility rules and asset links being consequences of the one action — the consistent application of
-`docs/adr/0012-resource-deletion-cascades-dependents.md` ("audit the deletion").
+`docs/adr/0012-resource-deletion-cascades-dependents.md` ("audit the deletion"). The scene-deletion command
+(CORE-LIFE-005) wires `SceneDeleted` identically — one append-only fact per scene deletion, its cascaded
+child content blocks, visibility rules and asset links and the remaining scenes' order re-pack being
+consequences of the one action.
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
@@ -958,6 +961,60 @@ capturing the tenant, the workspace, the authenticated **actor** (the host who d
 content block — never any content body (threats T1/T5/T7). The audit record is a recorded fact, so it
 survives the now-deleted content block it references. Faithful to the entity-deletion precedent, the
 deletion emits no realtime session event (the event catalog defines none for content block deletion).
+
+### Scene deletion
+
+A host can delete a scene; the remaining scenes re-pack their ordering and the scene's child content is
+cleaned up consistently (CORE-LIFE-005, the "Resource Lifecycle and Deletion" epic):
+
+| Method   | Route                                               | Authorized callers                        |
+| -------- | --------------------------------------------------- | ----------------------------------------- |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/scenes/{sceneId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+The route pins the `{workspaceId}` in its path (pairing with the scene create route
+`POST /api/v1/workspaces/{workspaceId}/scenes`) and resolves the target organization from a required
+`?organizationSlug=` query parameter (the same token-claim-and-membership tenant check as the other
+workspace by-id routes). The **parent workspace is resolved first**, the caller is authorized by their role
+in that workspace, and the scene is then loaded through the tenant- **and** workspace-scoped repository
+lookup — so a scene that lives in another workspace, or in a workspace owned by another tenant, is never
+reachable to delete even when its id is known (threats T1/T5).
+
+**Cascade, not block** (`docs/adr/0012-resource-deletion-cascades-dependents.md`), handled consistently
+with the entity (CORE-LIFE-003) and content-block (CORE-LIFE-004) deletions. Deleting a scene removes it
+**together with** its dependents, atomically in one transaction:
+
+- its **child content blocks** reference the scene through a real foreign key (`scene_id`,
+  `ON DELETE CASCADE`), so the database would itself cascade them; the deletion removes them **explicitly**
+  first (the cascade stays deterministic and provider-independent) **and** removes each child block's own
+  **polymorphic** `visibility_rules` and `asset_links` — the same per-content-block cleanup CORE-LIFE-004
+  performs, which the database cannot cascade — so no dangling rule/link is ever left behind (threats
+  T2/T4/T5). A block's revision history is inline on its row, so it goes with the row;
+- the scene's **own `visibility_rules`** (the audience-wide rule and every selected-participant rule
+  governing the scene) reference it **polymorphically** (`resource_id` is not a foreign key), so they are
+  removed explicitly too. A scene is **not** an asset-link target (only content blocks and entities are), so
+  the scene itself has no asset links to clean up. Only the link/rule rows are removed — the linked
+  **assets** are untouched.
+
+After the scene is gone, the **remaining scenes re-pack their ordering without gaps**: the survivors are
+re-numbered to a contiguous `scene_order` (`0, 1, 2, …`) in their existing deterministic order, reusing the
+SCENE-001 ordering logic (`Scene.Reorder` over the `(scene_order, id)` listing). Their relative order is
+preserved; only the gap the deleted scene left is closed.
+
+The removals, the scene delete, the order re-pack and the audit append run inside a **single database
+transaction**, so a deletion is applied whole or not at all.
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, is not a member
+of the route's workspace, or names a scene that belongs to another workspace/tenant — and **deleting a
+non-existent scene is a safe `404`** (it reveals nothing and changes nothing). A known workspace member who
+lacks the delete role is `403`; scenes are host-prepared content, so the delete role set is the host-capable
+`Owner`/`Admin`/`Host`/`CoHost` (the same set that creates scenes and deletes entities and content blocks),
+matched exactly (`MembershipRole` is non-linear).
+
+Every successful deletion appends an append-only `SceneDeleted` audit record (see "Audit log" above)
+capturing the tenant, the workspace, the authenticated **actor** (the host who deleted) and the deleted
+scene — never any content (threats T1/T5/T7). The audit record is a recorded fact, so it survives the
+now-deleted scene it references. Faithful to the entity- and content-block-deletion precedents, the deletion
+emits no realtime session event (the event catalog defines none for scene deletion).
 
 ### Realtime hub
 

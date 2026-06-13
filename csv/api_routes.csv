@@ -17,6 +17,7 @@ POST,/api/v1/sessions/{sessionId}/reveal,Visibility,"Host,CoHost,Owner,Admin",Id
 POST,/api/v1/sessions/{sessionId}/hide,Visibility,"Host,CoHost,Owner,Admin",Idempotent hide/un-reveal; emits ContentHidden
 GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection by role
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
+DELETE,/api/v1/workspaces/{workspaceId}/scenes/{sceneId},Scenes,"Host,CoHost,Owner,Admin",Delete scene; cascade child content blocks/visibility rules/asset links; re-pack remaining scene ordering without gaps; workspace-scoped lookup; audited; hidden-404
 GET,/api/v1/scenes/{sceneId},Scenes,workspace members,Projection by role
 POST,/api/v1/scenes/{sceneId}/content-blocks,Content,"Host,CoHost,Owner,Admin",Create content block
 DELETE,/api/v1/scenes/{sceneId}/content-blocks/{contentBlockId},Content,"Host,CoHost,Owner,Admin",Delete content block; cascade dependent visibility rules/asset links (revisions inline on row); scene/workspace-scoped lookup; audited; hidden-404

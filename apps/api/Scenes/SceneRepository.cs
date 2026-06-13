@@ -149,4 +149,21 @@ internal sealed class SceneRepository : ISceneRepository
         _dbContext.Scenes.Update(scene);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(Scene scene, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+
+        // The caller resolved this exact row through the tenant- and workspace-scoped
+        // FindByIdAsync, so removing the loaded scene deletes precisely that one scene.
+        // The database FK cascades this delete to the scene's child content blocks
+        // (content_blocks.scene_id ON DELETE CASCADE); the SceneDeletionService removes
+        // those content blocks AND every polymorphic visibility_rule / asset_link the
+        // database cannot cascade in the same unit of work BEFORE this call, so the
+        // cascade is deterministic and nothing dangles. See
+        // docs/adr/0012-resource-deletion-cascades-dependents.md.
+        _dbContext.Scenes.Remove(scene);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

@@ -122,7 +122,30 @@ public interface ISceneRepository
     /// organization, workspace and id of a scene are immutable (<see cref="Scene"/>),
     /// so an update only ever changes the title, the order and the update timestamp; it
     /// can never move the scene to another tenant or workspace (threat T5). The caller
-    /// is responsible for having loaded the scene through a tenant-scoped lookup.
+    /// is responsible for having loaded the scene through a tenant-scoped lookup. The
+    /// scene deletion command (CORE-LIFE-005) reuses this to RE-PACK the remaining
+    /// scenes' ordering after a deletion (each repositioned scene is moved through
+    /// <see cref="Scene.Reorder"/>, the SCENE-001 ordering logic, then persisted here).
     /// </summary>
     Task UpdateAsync(Scene scene, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES the given scene row (CORE-LIFE-005, the "Resource Lifecycle and
+    /// Deletion" epic). The caller (<see cref="SceneDeletionService"/>) is responsible
+    /// for having loaded the scene through the tenant- AND workspace-scoped
+    /// <see cref="FindByIdAsync(Guid, Guid, Guid, CancellationToken)"/> first, so a
+    /// foreign tenant's or workspace's scene is never reachable to remove (threat
+    /// T5/T1); this method removes exactly the row it is handed. The scene's child
+    /// <c>content_blocks</c> reference it through a real foreign key
+    /// (<c>scene_id</c>, <c>ON DELETE CASCADE</c>), so the database would itself cascade
+    /// them — but the <see cref="SceneDeletionService"/> removes them (and their own
+    /// polymorphic <c>visibility_rules</c> and <c>asset_links</c>, which the database can
+    /// NOT cascade) explicitly in the SAME unit of work BEFORE this call, so the cascade
+    /// is deterministic and no dangling rule/link is left behind. The scene's OWN
+    /// polymorphic <c>visibility_rules</c> are likewise removed by that service first
+    /// (a scene is a <see cref="Visibility.VisibilityResourceType.Scene"/> but never an
+    /// asset-link target). See docs/adr/0012-resource-deletion-cascades-dependents.md.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The scene is null.</exception>
+    Task RemoveAsync(Scene scene, CancellationToken cancellationToken);
 }

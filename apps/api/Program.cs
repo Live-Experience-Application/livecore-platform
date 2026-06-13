@@ -600,6 +600,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId} (wired by MapContentBlockEndpoints).
     builder.Services.AddScoped<ContentBlockDeletionService>();
 
+    // Scene deletion command (CORE-LIFE-005, the "Resource Lifecycle and Deletion" epic): the Scenes module's
+    // "a host can delete a scene" command. Registered here, inside the persistence conditional, because it
+    // composes the scene, content-block, visibility-rule, asset-link and audit repositories (all registered
+    // above) plus the shared DbContext for a single transaction. It loads the scene through the tenant- AND
+    // workspace-scoped ISceneRepository.FindByIdAsync FIRST (a scene in another workspace/tenant is never
+    // reachable; threats T1/T5), then CASCADES its dependents — its child content blocks (and their inline
+    // revisions) plus the POLYMORPHIC (non-FK) visibility_rules and asset_links the database cannot cascade —
+    // RE-PACKS the remaining scenes' ordering so there is no gap (reusing the SCENE-001 ordering logic) and
+    // appends a SceneDeleted audit record, all atomically (cascade, not block; handled consistently with the
+    // entity and content-block deletions, docs/adr/0012-resource-deletion-cascades-dependents.md). Consumed
+    // by DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId} (wired by MapSceneEndpoints).
+    builder.Services.AddScoped<SceneDeletionService>();
+
     // Entitlement and plan definition catalog (CORE-ENTL-001, the first story of the "Entitlements and Quotas"
     // epic): the Entitlements module — FIRST appearing here — owns the GLOBAL entitlement_definitions,
     // plan_definitions and plan_entitlements tables that hold the deployment-wide monetization catalog
@@ -830,19 +843,25 @@ app.MapHideEndpoints();
 // reconnect replay never leaks a hidden event (threat T3; docs/09_EVENT_CATALOG.md "Reconnect replay").
 app.MapSessionEventReplayEndpoints();
 
-// Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read):
-// the Scenes module's HTTP routes, GET/POST /api/v1/workspaces/{workspaceId}/scenes and
-// GET /api/v1/scenes/{sceneId}. They live in authenticated route groups and fail closed
-// (503) when persistence is not configured, exactly like the workspace endpoints. No new
-// DI registration is required: the tenant context resolver, the scene repository and the
-// workspace member repository they consume are already registered above inside the
-// persistence conditional. The GET list and the GET by-id both PROJECT BY ROLE through the
-// same SceneProjection (the host shape to host-capable/metadata roles, the stripped
-// participant shape to audience roles — the "Projection by role" route note, CORE-SCENE-004).
-// The by-id read resolves the scene within the query-supplied organization, discovers its
-// workspace from the loaded row and authorizes the caller's membership there (every denial
-// hidden as 404). The POST assigns the scene order server-side as append-to-end (no
-// client-supplied order, no reorder route).
+// Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read; CORE-LIFE-005 adds the
+// DELETE): the Scenes module's HTTP routes, GET/POST /api/v1/workspaces/{workspaceId}/scenes,
+// GET /api/v1/scenes/{sceneId} and DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}. They live in
+// authenticated route groups and fail closed (503) when persistence is not configured, exactly like the
+// workspace endpoints. No new DI registration beyond the SceneDeletionService above is required: the tenant
+// context resolver, the scene repository and the workspace member repository they consume are already
+// registered above inside the persistence conditional. The GET list and the GET by-id both PROJECT BY ROLE
+// through the same SceneProjection (the host shape to host-capable/metadata roles, the stripped participant
+// shape to audience roles — the "Projection by role" route note, CORE-SCENE-004). The by-id read resolves
+// the scene within the query-supplied organization, discovers its workspace from the loaded row and
+// authorizes the caller's membership there (every denial hidden as 404). The POST assigns the scene order
+// server-side as append-to-end (no client-supplied order, no reorder route). The DELETE resolves the parent
+// workspace first (the route pins {workspaceId}, the tenant comes from the required ?organizationSlug=),
+// authorizes the caller's role in that workspace (Owner/Admin/Host/CoHost), then loads the scene through the
+// tenant- and workspace-scoped lookup, CASCADES its child content blocks and the dependent visibility rules
+// / asset links, RE-PACKS the remaining scenes' ordering so there is no gap and appends a SceneDeleted audit
+// record, all atomically (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md).
+// Deleting a non-existent scene is a safe 404. The reorder route remains out of scope (none in
+// csv/api_routes.csv).
 app.MapSceneEndpoints();
 
 // Scene content-block endpoints: the Content module's HTTP routes,

@@ -582,6 +582,73 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a scene deletion (<see cref="AuditAction.SceneDeleted"/>) — the audit fact written when an
+    /// authorized host deletes a scene from a workspace, removing it (together with its child content blocks
+    /// and their inline revision history) and its dependent visibility rules and asset links, after which the
+    /// remaining scenes re-pack their ordering (CORE-LIFE-005). It is the scene counterpart of
+    /// <see cref="ForEntityDeletion"/> and <see cref="ForContentBlockDeletion"/> and, like them, a thin
+    /// specialization of <see cref="Create"/> that pins the action and applies the deletion producer's
+    /// stricter contract: the tenant, the workspace the scene belonged to, the authenticated actor (the host
+    /// who deleted the scene) and the deleted scene resource (its generic kind name and surrogate id) are all
+    /// REQUIRED, where the generic factory leaves them optional. A deletion is a removal rather than a
+    /// transition, and a scene has no lifecycle state, so there is NO before/after state pair (both null). The
+    /// resource kind is passed as a generic NAME string (e.g. <c>Scene</c>) so the Audit module does not
+    /// depend on the Scenes module's types, exactly like <see cref="ForVisibilityRuleChange"/> takes
+    /// visibility state names as strings. Every value is an identifier or a generic name — never free-form
+    /// content (threat T7) — and the audit row outlives the now-deleted scene it references because the
+    /// reference is a recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the deletion happened in (required).</param>
+    /// <param name="workspaceId">The workspace the deleted scene belonged to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the deletion (required; the audited actor).</param>
+    /// <param name="sceneResourceType">The deleted scene's generic kind name (e.g. Scene).</param>
+    /// <param name="sceneId">The deleted scene's surrogate id.</param>
+    /// <param name="createdAt">When the deletion happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the scene resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForSceneDeletion(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string sceneResourceType,
+        Guid sceneId,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(sceneResourceType))
+        {
+            throw new ArgumentException("Scene resource type must not be empty.", nameof(sceneResourceType));
+        }
+
+        if (sceneId == Guid.Empty)
+        {
+            throw new ArgumentException("Scene id must not be empty.", nameof(sceneId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.SceneDeleted,
+            actorUserProfileId,
+            sceneResourceType,
+            sceneId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in
