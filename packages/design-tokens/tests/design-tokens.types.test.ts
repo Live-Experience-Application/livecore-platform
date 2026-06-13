@@ -17,7 +17,7 @@ import type {
   Theme,
   ThemeTokens,
 } from "../src/index.js";
-import { baseTheme, defineTheme } from "../src/index.js";
+import { VERSION, baseTheme, defineTheme } from "../src/index.js";
 
 /** `true` only when `X` and `Y` are the exact same type. */
 type Equal<X, Y> =
@@ -27,6 +27,23 @@ type Equal<X, Y> =
 
 /** Compiles only when its argument resolves to the literal `true`. */
 type Assert<T extends true> = T;
+
+// --- The exported VERSION is a stable, well-formed SemVer string literal. -------
+// (CORE-SDK-005.) The version is part of the package's typed surface, so a
+// consumer can rely on its shape at compile time; the runtime agreement between
+// VERSION, package.json and CHANGELOG.md is checked by the package-build test.
+
+/** `true` only when `V` is a literal type, not the widened `string`. */
+type IsStringLiteral<V extends string> = string extends V ? false : true;
+
+/** `true` only when `V` has the SemVer `MAJOR.MINOR.PATCH` core shape. */
+type IsSemanticVersion<V extends string> =
+  V extends `${number}.${number}.${number}` ? true : false;
+
+export type VersionIsStringLiteral = Assert<IsStringLiteral<typeof VERSION>>;
+export type VersionIsSemanticVersion = Assert<
+  IsSemanticVersion<typeof VERSION>
+>;
 
 // --- Scale unions are the exact stable key set. --------------------------------
 

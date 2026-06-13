@@ -1,6 +1,6 @@
 {
   "name": "@livecore/design-tokens",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Generic, product-neutral design tokens and theme contracts for LiveCore vertical apps: the token contract (color, spacing, typography, radius, shadow, breakpoint, motion), the stable scale keys, a neutral base theme and a type-safe theme authoring helper.",
   "license": "AGPL-3.0-or-later",
@@ -8,7 +8,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -266,6 +266,35 @@ compile-time types. Its `test` script builds the package, type-checks the
 compile-time type assertions (`tsconfig.test.json`) and runs package-build tests
 against the compiled output with the Node built-in test runner.
 
+### Package versioning and changelog
+
+So vertical apps can consume **stable, typed** Core packages with predictable
+upgrade semantics, the four published packages (`@livecore/contracts`,
+`@livecore/sdk-ts`, `@livecore/design-tokens`, `@livecore/ui-core`) follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) and are released
+**together** (lockstep), so they always share one version (CORE-SDK-005). The
+full process — what makes a major/minor/patch change, how a release is cut and
+how it is enforced — is documented in `docs/23_PACKAGE_VERSIONING.md`.
+
+Each package exports its release as a stable runtime value next to its
+`PACKAGE_NAME`, so a consumer can introspect exactly which Core release it is
+running against:
+
+```ts
+import { PACKAGE_NAME, VERSION } from "@livecore/contracts";
+```
+
+Every notable change is recorded in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+format: each package keeps its own `CHANGELOG.md` (shipped with the package via
+its `files` list) and the repository root keeps a workspace-level `CHANGELOG.md`
+summarizing the release across all four packages. The agreement between the
+`VERSION` constant, the package manifest version and the changelog's top entry is
+not left to convention — each package's type tests check `VERSION` is a
+well-formed, non-widened SemVer literal, and its package-build tests check
+`VERSION` equals `package.json` and that `CHANGELOG.md` documents it — so a
+release with the version, manifest or changelog out of step fails CI rather than
+shipping.
+
 ### Boundary scan
 
 Run the boundary scan (fails with a non-zero exit code if any forbidden

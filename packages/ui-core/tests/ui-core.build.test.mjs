@@ -7,6 +7,7 @@
  * `dist/` first, then runs this file with `node --test`.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -23,6 +24,7 @@ import {
   SurfaceLevels,
   TextWeights,
   Tones,
+  VERSION,
   resolveVariant,
 } from "../dist/index.js";
 
@@ -111,4 +113,35 @@ test("resolveVariant() is pure and does not mutate its argument", () => {
   const resolved = resolveVariant(selection);
   assert.deepEqual(selection, { tone: "success" });
   assert.notEqual(resolved, selection);
+});
+
+// --- Package versioning and changelog process (CORE-SDK-005). ------------------
+// The runtime VERSION, the package manifest and the CHANGELOG must all agree, so
+// a release cannot ship with the version constant, package.json or the changelog
+// out of step. The packages are versioned together (lockstep); see
+// docs/23_PACKAGE_VERSIONING.md.
+
+const PACKAGE_DIR = new URL("../", import.meta.url);
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const manifest = JSON.parse(
+  readFileSync(new URL("package.json", PACKAGE_DIR), "utf8"),
+);
+const changelog = readFileSync(new URL("CHANGELOG.md", PACKAGE_DIR), "utf8");
+
+test("the built package exposes a well-formed SemVer version", () => {
+  assert.equal(typeof VERSION, "string");
+  assert.match(VERSION, SEMVER);
+});
+
+test("the exported VERSION matches the package manifest version", () => {
+  assert.equal(VERSION, manifest.version);
+});
+
+test("the CHANGELOG documents the current version and ships with the package", () => {
+  const heading = new RegExp(`^## \\[${VERSION.replace(/\./g, "\\.")}\\]`, "m");
+  assert.match(changelog, heading);
+  assert.ok(
+    manifest.files.includes("CHANGELOG.md"),
+    "package.json files must include CHANGELOG.md so it ships to consumers",
+  );
 });

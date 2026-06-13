@@ -18,6 +18,16 @@
 /** The npm package name, exported as a stable runtime value. */
 export const PACKAGE_NAME = "@livecore/sdk-ts";
 
+/**
+ * The package version, exported as a stable runtime value so a vertical app can
+ * introspect which Core package release it is running against. The Core SDK and
+ * UI packages are versioned together (lockstep) and follow Semantic Versioning;
+ * this literal is kept in lockstep with `package.json` (a package-build test
+ * fails if they drift) and with the top entry of this package's `CHANGELOG.md`.
+ * See the versioning and changelog process in `docs/23_PACKAGE_VERSIONING.md`.
+ */
+export const VERSION = "0.1.0";
+
 export { LiveCoreClient } from "./client.js";
 export {
   LiveCoreError,
