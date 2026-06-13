@@ -70,6 +70,7 @@ eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
+apps/api/Migrations.Dockerfile  one-shot migrations runner image (applies EF Core migrations before API rollout)
 apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup job
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
@@ -391,6 +392,32 @@ pinned `dotnet-ef` local tool:
 dotnet tool restore
 dotnet ef migrations add <Name> --project apps/api
 ```
+
+### Applying migrations (deployment step)
+
+The API host **never** applies migrations implicitly on startup (an implicit
+startup migration is unsafe for a multi-instance deployment, where replicas would
+race to migrate). The schema is applied by a separate, run-to-completion
+**migrations runner** that must finish before the API rolls out (CORE-OPS-001).
+
+`apps/api/Migrations.Dockerfile` builds the runner image: a self-applying EF Core
+migrations bundle that applies every pending migration to the database named by
+`ConnectionStrings__Database` and then exits (idempotent; no credentials are
+baked in). Build and run it:
+
+```bash
+docker build -f apps/api/Migrations.Dockerfile -t livecore-migrations .
+docker run --rm \
+  -e ConnectionStrings__Database="Host=<db-host>;Port=5432;Database=<db>;Username=<user>;Password=<password>" \
+  livecore-migrations
+```
+
+The same path runs without Docker via `dotnet ef database update --project apps/api`
+against a configured `ConnectionStrings__Database`. The exact command, how to gate
+an API rollout on it (Kubernetes Job / init container, a Compose `migrate` service,
+a Railway pre-deploy command) and the standalone-bundle alternative are documented
+in `docs/13_SELF_HOSTING_REQUIREMENTS.md`. CI's `migrations` job applies all
+migrations to an empty PostgreSQL database on every change.
 
 ### Tenant model and HTTP API
 

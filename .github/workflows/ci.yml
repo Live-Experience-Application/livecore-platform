@@ -1,11 +1,12 @@
 # CI pipeline for livecore-platform (CORE-FND-003, docker job: CORE-FND-005).
 #
-# Runs the commands documented in README.md verbatim. Five independent jobs:
+# Runs the commands documented in README.md verbatim. Six independent jobs:
 #   dotnet          - build, smoke tests, format/code-style verification
 #   typescript      - pnpm install, lint, format check, package builds/tests
 #   boundary-scan   - forbidden vertical term scan (pwsh on Linux)
 #   powershell-lint - PSScriptAnalyzer over scripts/*.ps1
 #   docker          - image builds and container smoke tests (no push)
+#   migrations      - apply all migrations to an empty Postgres (CORE-OPS-001)
 #
 # No deployment, no registry push, no product features: foundation quality
 # gates only.
@@ -152,3 +153,48 @@ jobs:
             exit 1
           }
           Write-Output 'PSScriptAnalyzer: no findings in scripts/.'
+
+  migrations:
+    name: Database migrations apply to an empty database
+    runs-on: ubuntu-latest
+    # Proves the CORE-OPS-001 acceptance criterion: a fresh deploy's schema is
+    # applied deterministically by the shipped migrations runner image
+    # (apps/api/Migrations.Dockerfile) against an empty PostgreSQL database. This
+    # gate is what an API rollout depends on; the API host never migrates on
+    # startup (see docs/13_SELF_HOSTING_REQUIREMENTS.md, "Database migrations").
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: livecore_migrations_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # No credentials in the repository: this is a throwaway CI database whose
+      # password is defined here only for the ephemeral service container.
+      MIGRATIONS_CONNECTION_STRING: "Host=localhost;Port=5432;Database=livecore_migrations_ci;Username=postgres;Password=postgres"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build migrations runner image
+        run: docker build --file apps/api/Migrations.Dockerfile --tag livecore-migrations:ci .
+
+      - name: Apply all migrations to the empty database
+        run: |
+          docker run --rm --network host \
+            --env ConnectionStrings__Database="$MIGRATIONS_CONNECTION_STRING" \
+            livecore-migrations:ci
+
+      - name: Re-running the runner is an idempotent no-op
+        run: |
+          docker run --rm --network host \
+            --env ConnectionStrings__Database="$MIGRATIONS_CONNECTION_STRING" \
+            livecore-migrations:ci

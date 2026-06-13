@@ -100,14 +100,28 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
                     .RequireAuthenticatedUser()
                     .Build());
 
-            // Create the schema and enforce foreign keys, mirroring the repository
-            // tests' SQLite setup.
+            // Initialize the test database (by default: create the schema and
+            // enforce foreign keys, mirroring the repository tests' SQLite setup).
             using var provider = services.BuildServiceProvider();
             using var scope = provider.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
-            context.Database.EnsureCreated();
-            context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
+            InitializeDatabase(context);
         });
+    }
+
+    /// <summary>
+    /// Prepares the swapped-in SQLite database for the test host. The default
+    /// creates the schema with <c>EnsureCreated</c> and turns foreign keys on, so
+    /// every test sees the full schema. A derived factory can override this seam
+    /// (for example, to leave the schema absent and assert that the application's
+    /// own startup never implicitly creates or migrates it).
+    /// </summary>
+    protected virtual void InitializeDatabase(LiveCoreDbContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        context.Database.EnsureCreated();
+        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
     }
 
     /// <summary>
