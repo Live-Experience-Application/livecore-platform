@@ -376,6 +376,80 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a member removal (<see cref="AuditAction.MemberRemoved"/>) — the audit fact written when an
+    /// authorized admin removes a workspace or organization member, revoking the subject's access
+    /// (CORE-LIFE-001). A thin specialization of <see cref="Create"/> that pins the action and applies the
+    /// removal producer's stricter contract: the tenant, the authenticated actor (the admin who removed the
+    /// member), the removed member resource (its generic kind name and surrogate id) and the removed role
+    /// are all REQUIRED, where the generic factory leaves them optional. The removed role is recorded as the
+    /// PREVIOUS state — the access that was revoked — and there is no new state, because a removal is a
+    /// deletion rather than a transition (so <paramref name="removedRole"/> maps to <c>previousState</c> and
+    /// <c>newState</c> is null). The workspace is set for a workspace member removal and null for an
+    /// organization-level one. The role is passed as a generic NAME string so the Audit module does not
+    /// depend on the Organizations role enum, exactly like <see cref="ForVisibilityRuleChange"/> takes
+    /// visibility state names as strings. Every value is an identifier or a generic name — never free-form
+    /// content (threat T7) — and the audit row outlives the now-deleted membership it references because the
+    /// reference is a recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the removal happened in (required).</param>
+    /// <param name="workspaceId">
+    /// The workspace the removed membership belonged to for a workspace member removal, or
+    /// <see langword="null"/> for an organization member removal (organization-level).
+    /// </param>
+    /// <param name="actorUserProfileId">The admin who performed the removal (required; the audited actor).</param>
+    /// <param name="memberResourceType">The removed membership's generic kind name (e.g. WorkspaceMember / OrganizationMember).</param>
+    /// <param name="memberId">The removed membership's surrogate id.</param>
+    /// <param name="removedRole">The generic role NAME the removed member held — the revoked access (required).</param>
+    /// <param name="createdAt">When the removal happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, an optional id is explicitly empty, or the member resource type / removed role
+    /// is blank.
+    /// </exception>
+    public static AuditLogEntry ForMemberRemoval(
+        Guid organizationId,
+        Guid? workspaceId,
+        Guid actorUserProfileId,
+        string memberResourceType,
+        Guid memberId,
+        string removedRole,
+        DateTimeOffset createdAt)
+    {
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(memberResourceType))
+        {
+            throw new ArgumentException("Member resource type must not be empty.", nameof(memberResourceType));
+        }
+
+        if (memberId == Guid.Empty)
+        {
+            throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+        }
+
+        // A real removal always revokes a known role, so the producer requires it (recorded as the previous
+        // state) even though the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(removedRole))
+        {
+            throw new ArgumentException("Removed role must not be empty.", nameof(removedRole));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.MemberRemoved,
+            actorUserProfileId,
+            memberResourceType,
+            memberId,
+            targetParticipantId: null,
+            previousState: removedRole,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

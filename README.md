@@ -461,12 +461,13 @@ authorization rationale (threat T7).
 
 The Organizations module exposes the tenant create/read API (CORE-API-001):
 
-| Method | Route                   | Authorized callers                                             |
-| ------ | ----------------------- | -------------------------------------------------------------- |
-| `GET`  | `/api/v1/organizations` | any authenticated user (only the organizations they belong to) |
-| `POST` | `/api/v1/organizations` | any authenticated user (becomes the new tenant's `Owner`)      |
+| Method   | Route                                                         | Authorized callers                                             |
+| -------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
+| `GET`    | `/api/v1/organizations`                                       | any authenticated user (only the organizations they belong to) |
+| `POST`   | `/api/v1/organizations`                                       | any authenticated user (becomes the new tenant's `Owner`)      |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)    |
 
-Both routes are user-tenant operations, so a service-account principal is denied
+The create and list routes are user-tenant operations, so a service-account principal is denied
 `403` (only a human user holds an organization membership). The tenant boundary
 is the token's organization claim, matched exactly — the same token-asserted
 boundary the `TenantContextResolver` enforces:
@@ -486,13 +487,14 @@ boundary the `TenantContextResolver` enforces:
 
 The workspace routes implemented so far:
 
-| Method | Route                                      | Authorized callers                                                  |
-| ------ | ------------------------------------------ | ------------------------------------------------------------------- |
-| `GET`  | `/api/v1/workspaces`                       | any workspace member (results filtered to the caller's memberships) |
-| `POST` | `/api/v1/workspaces`                       | organization `Owner` or `Admin`                                     |
-| `GET`  | `/api/v1/workspaces/{workspaceId}`         | members of that workspace                                           |
-| `PUT`  | `/api/v1/workspaces/{workspaceId}`         | organization `Owner` or `Admin` (rename)                            |
-| `POST` | `/api/v1/workspaces/{workspaceId}/members` | organization `Owner` or `Admin` (create invite)                     |
+| Method   | Route                                                 | Authorized callers                                                  |
+| -------- | ----------------------------------------------------- | ------------------------------------------------------------------- |
+| `GET`    | `/api/v1/workspaces`                                  | any workspace member (results filtered to the caller's memberships) |
+| `POST`   | `/api/v1/workspaces`                                  | organization `Owner` or `Admin`                                     |
+| `GET`    | `/api/v1/workspaces/{workspaceId}`                    | members of that workspace                                           |
+| `PUT`    | `/api/v1/workspaces/{workspaceId}`                    | organization `Owner` or `Admin` (rename)                            |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/members`            | organization `Owner` or `Admin` (create invite)                     |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)         |
 
 ### Workspace member invites (scoped tokens)
 
@@ -504,6 +506,47 @@ bound to one organization, one workspace, one role and an expiry, and is
 single-use. It is a one-time join grant, not an authentication credential and
 not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Invite acceptance,
 delivery and revocation endpoints are follow-up stories.
+
+### Member removal (revoking access)
+
+An authorized admin can remove a member, revoking their access (CORE-LIFE-001):
+
+| Method   | Route                                                         | Authorized callers              |
+| -------- | ------------------------------------------------------------- | ------------------------------- |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}` | organization `Owner` or `Admin` |
+
+Both routes hard-delete the addressed membership and return `204 No Content`. The
+membership row **is** the access grant — every tenant- and workspace-scoped
+authorization check reads it — so deleting it **revokes the subject's access on
+their very next request**, fail-closed: a removed workspace member's by-id
+workspace read becomes `404`, and a removed organization member can no longer
+resolve the tenant at all (the `TenantContextResolver` requires a persisted
+membership). The workspace route resolves its tenant from a required
+`?organizationSlug=` query parameter (like the other workspace by-id routes); the
+organization route carries the tenant's slug in its path.
+
+Authorization mirrors the member-invite route: the **"Manage members"** matrix
+row, **organization `Owner` or `Admin`** (`docs/06_AUTHORIZATION_MATRIX.md`),
+matched exactly (`MembershipRole` is non-linear). Every step is fail-closed and
+hidden as `404` for a caller who cannot see the tenant, a workspace/organization
+not in the resolved tenant, or a `memberId` that belongs to another
+workspace/tenant — so a member outside the caller's scope can never be removed or
+probed for (threats T1/T5). A known tenant member who lacks `Owner`/`Admin` is
+`403`.
+
+The **last-Owner invariant** is guarded: removing the **sole** `Owner` of a
+workspace or organization is rejected with `409 Conflict` and changes nothing — a
+tenant must never be left ownerless (an ownerless organization would be
+permanently unreachable). Removing an `Owner` when another `Owner` remains
+succeeds.
+
+Every successful removal appends an append-only `MemberRemoved` audit record (see
+"Audit log" below) capturing the tenant, the workspace (for a workspace member),
+the authenticated **actor** (the admin who removed the member), the removed
+membership and the revoked role — never any token or content (threats T1/T6/T7).
+The audit record is a recorded fact, so it survives the now-deleted membership it
+references.
 
 ### Session create and list
 
@@ -671,9 +714,12 @@ state (a generic action such as a session start or a member invite is not a stat
 transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a thin
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
-(`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`) is
-extensible without a schema change because the action persists by its stable name;
-each producer command wires its own action in its own story.
+(`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
+`MemberRemoved`) is extensible without a schema change because the action persists
+by its stable name; each producer command wires its own action in its own story.
+The member-removal command (CORE-LIFE-001) is the first wired producer of
+`MemberRemoved`, appending an entry whenever an authorized admin removes a
+workspace or organization member (the threat-model control for access revocation).
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final

@@ -467,5 +467,50 @@ public sealed class TenantContextResolverTests
             Members.Add(member);
             return Task.FromResult(OrganizationMemberAddResult.Added);
         }
+
+        public Task<OrganizationMember?> FindByIdAsync(
+            Guid organizationId,
+            Guid memberId,
+            CancellationToken cancellationToken)
+        {
+            if (organizationId == Guid.Empty)
+            {
+                throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+            }
+
+            if (memberId == Guid.Empty)
+            {
+                throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+            }
+
+            return Task.FromResult(
+                Members.FirstOrDefault(member => member.Id == memberId && member.OrganizationId == organizationId));
+        }
+
+        public Task<int> CountByRoleAsync(
+            Guid organizationId,
+            MembershipRole role,
+            CancellationToken cancellationToken)
+        {
+            if (organizationId == Guid.Empty)
+            {
+                throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+            }
+
+            if (!OrganizationMember.IsValidRole(role))
+            {
+                throw new ArgumentOutOfRangeException(nameof(role), role, "Role is not a defined membership role.");
+            }
+
+            return Task.FromResult(
+                Members.Count(member => member.OrganizationId == organizationId && member.HasRole(role)));
+        }
+
+        public Task RemoveAsync(OrganizationMember member, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(member);
+            Members.RemoveAll(existing => existing.Id == member.Id);
+            return Task.CompletedTask;
+        }
     }
 }

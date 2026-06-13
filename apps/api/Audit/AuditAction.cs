@@ -61,4 +61,17 @@ public enum AuditAction
     /// the fact that an invite was created.
     /// </summary>
     MemberInvited = 4,
+
+    /// <summary>
+    /// A workspace or organization member was removed, revoking the subject's access — the member removal
+    /// command (CORE-LIFE-001). Auditing the removal is the threat model's stated control for access
+    /// revocation: it records that an authorized admin took a member's standing away (threats T1/T6 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). A generic audit fact whose actor is the admin who performed the
+    /// removal, whose resource is the removed membership (its generic kind name and surrogate id), and
+    /// whose previous state records the role that was revoked; it is workspace-scoped for a workspace
+    /// member removal and organization-level (no workspace) for an organization member removal. The
+    /// removal is a deletion, not a transition to a new state, so the new state is null
+    /// (<see cref="AuditLogEntry.ForMemberRemoval"/>).
+    /// </summary>
+    MemberRemoved = 5,
 }

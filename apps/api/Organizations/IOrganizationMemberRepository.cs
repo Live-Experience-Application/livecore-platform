@@ -63,4 +63,51 @@ public interface IOrganizationMemberRepository
     Task<OrganizationMemberAddResult> AddAsync(
         OrganizationMember member,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finds the membership with exactly the given surrogate id WITHIN the given organization, or
+    /// <see langword="null"/> when no such membership exists there (CORE-LIFE-001). The member removal route
+    /// addresses a member by its id, but a membership is only ever returned when it belongs to exactly the
+    /// resolved tenant: a membership id that exists in another organization is never returned, so a member
+    /// outside the caller's resolved tenant can never be addressed or probed for (threats T1/T5). This is the
+    /// tenant-scoped, by-id sibling of <see cref="FindAsync"/> (which addresses a member by its subject).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or member id is empty. An empty id can never address a stored membership, so the
+    /// lookup is rejected instead of silently returning nothing.
+    /// </exception>
+    Task<OrganizationMember?> FindByIdAsync(
+        Guid organizationId,
+        Guid memberId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Counts the memberships holding exactly the given generic role in the given organization
+    /// (CORE-LIFE-001). It backs the last-Owner invariant: a tenant must never be left without an Owner (an
+    /// ownerless organization is permanently unreachable, since the tenant resolver requires a membership),
+    /// so the removal command refuses to remove the sole Owner. The role is matched exactly; the
+    /// authorization matrix is non-linear, so this is never an ordering comparison, and the count is
+    /// tenant-scoped so a foreign tenant's members are never counted (threat T5).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The role is not a defined <see cref="MembershipRole"/>.
+    /// </exception>
+    Task<int> CountByRoleAsync(
+        Guid organizationId,
+        MembershipRole role,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes (hard-deletes) the given membership, revoking the subject's standing in the organization
+    /// (CORE-LIFE-001). The membership row IS the access grant — the tenant context resolver requires it
+    /// (<see cref="IsMemberAsync"/>/<see cref="FindAsync"/>) — so deleting it revokes the subject's tenant
+    /// access on their very next request, fail-closed. The append-only audit log records the removal as a
+    /// durable fact and is never cascade-erased with the row (the audit references are recorded facts, not
+    /// foreign keys). The caller is responsible for guarding the last-Owner invariant before calling this.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The member is null.</exception>
+    Task RemoveAsync(
+        OrganizationMember member,
+        CancellationToken cancellationToken);
 }

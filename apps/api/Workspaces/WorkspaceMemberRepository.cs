@@ -141,4 +141,85 @@ internal sealed class WorkspaceMemberRepository : IWorkspaceMemberRepository
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<WorkspaceMember?> FindByIdAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid memberId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (memberId == Guid.Empty)
+        {
+            throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+        }
+
+        // All three predicates translate to parameterized SQL equality. The id is the row's own key, but
+        // the organization_id and workspace_id predicates additionally pin the tenant and workspace
+        // boundaries (the organization boundary checked before the workspace boundary), so a membership with
+        // that id in another workspace, or in the same workspace id under a different organization, is never
+        // returned (threats T1/T5).
+        return await _dbContext.WorkspaceMembers
+            .FirstOrDefaultAsync(
+                member => member.Id == memberId
+                    && member.OrganizationId == organizationId
+                    && member.WorkspaceId == workspaceId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int> CountByRoleAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        MembershipRole role,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // Reject undefined enum values a cast could smuggle in before touching the database.
+        if (!WorkspaceMember.IsValidRole(role))
+        {
+            throw new ArgumentOutOfRangeException(nameof(role), role, "Role is not a defined membership role.");
+        }
+
+        // The role is persisted as its stable name (HasConversion<string>), so EF translates this equality
+        // to the stored name; the matrix is non-linear, so this is an EXACT match, never an ordering
+        // comparison. Scoped by organization and workspace so only this workspace's members are counted
+        // (threat T5).
+        return await _dbContext.WorkspaceMembers
+            .CountAsync(
+                member => member.OrganizationId == organizationId
+                    && member.WorkspaceId == workspaceId
+                    && member.Role == role,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(WorkspaceMember member, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        _dbContext.WorkspaceMembers.Remove(member);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

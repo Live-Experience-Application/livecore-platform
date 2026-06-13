@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.IdentityAccess;
 using Microsoft.AspNetCore.Mvc;
 
@@ -23,6 +24,14 @@ namespace LiveCore.Api.Organizations;
 ///   <item><c>POST /api/v1/organizations</c> — create a new tenant and make the
 ///   caller its founding <c>Owner</c> ("Creates organization and Owner
 ///   membership"), atomically.</item>
+///   <item><c>DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}</c>
+///   — remove an organization member (CORE-LIFE-001), "Manage members" (Owner or
+///   Admin). Hard-deletes the membership, revoking the subject's tenant access on
+///   their next request; the sole tenant Owner cannot be removed (the last-Owner
+///   invariant, 409 — an ownerless tenant would be permanently unreachable); the
+///   removal is appended to the append-only audit log
+///   (<see cref="AuditAction.MemberRemoved"/>). Fail-closed and hidden as 404 for a
+///   cross-tenant/unknown organization or member.</item>
 /// </list>
 ///
 /// Authorization model (server-side, fail-closed; docs/06_AUTHORIZATION_MATRIX.md;
@@ -48,13 +57,17 @@ namespace LiveCore.Api.Organizations;
 ///   of a pre-existing organization (threats T5/T1).</item>
 /// </list>
 ///
-/// The tenant context resolver itself is not invoked here: it resolves an
-/// EXISTING organization the caller is already a member of, which neither the
-/// create (the tenant does not exist yet) nor the cross-tenant list (many
-/// organizations, not one) is. Instead these routes reuse the resolver's
-/// building blocks — the same OIDC principal mapping, the same exact
+/// The tenant context resolver is not invoked by the create or list routes: it
+/// resolves an EXISTING organization the caller is already a member of, which
+/// neither the create (the tenant does not exist yet) nor the cross-tenant list
+/// (many organizations, not one) is. Instead those two routes reuse the
+/// resolver's building blocks — the same OIDC principal mapping, the same exact
 /// organization-claim check, the same repositories and membership model — so the
-/// per-organization decision is identical to what the resolver would grant.
+/// per-organization decision is identical to what the resolver would grant. The
+/// member removal route, by contrast, acts on one EXISTING organization the
+/// caller belongs to, so it DOES use <see cref="TenantContextResolver"/>
+/// directly (token claim AND persisted membership), exactly like the
+/// workspace-scoped routes.
 ///
 /// Persistence dependency: the endpoints use the organization repository and the
 /// user-profile reference service, which are registered only when a database
@@ -73,6 +86,7 @@ internal static class OrganizationEndpoints
 
         group.MapGet("/", ListOrganizationsAsync);
         group.MapPost("/", CreateOrganizationAsync);
+        group.MapDelete("/{organizationSlug}/members/{memberId}", RemoveOrganizationMemberAsync);
 
         return endpoints;
     }
@@ -216,6 +230,111 @@ internal static class OrganizationEndpoints
         return Results.Created($"/api/v1/organizations/{organization.Id}", response);
     }
 
+    // DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}
+    private static async Task<IResult> RemoveOrganizationMemberAsync(
+        HttpContext httpContext,
+        string organizationSlug,
+        string memberId,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The organization is identified by its slug in the path (the tenant's natural key, matched against
+        // the token's organization claim). A missing/blank slug or a malformed member id can never address a
+        // stored row; hide as 404, never echoing why.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return HiddenOrganization();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenOrganization();
+        }
+
+        // Resolve the trusted tenant context (token claim AND persisted membership). A denied resolution —
+        // a foreign/unknown tenant, a malformed slug, a non-member or a service-account principal — is
+        // hidden as 404, so a tenant the caller cannot see is indistinguishable from a missing one (threat
+        // T5). The resolver canonicalizes the slug and never throws on a malformed one.
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return HiddenOrganization();
+        }
+
+        var context = resolution.Context;
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md). The caller is a known
+        // member of the tenant (the resolution proved it), so an insufficient role is a 403. Exact,
+        // non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Find the target membership WITHIN this tenant; a member id that belongs to another organization
+        // (or no membership at all) is hidden as 404, never 403, so a member outside the caller's resolved
+        // tenant can never be probed for (threats T1/T5).
+        var target = await deps.OrganizationMembers
+            .FindByIdAsync(context.OrganizationId, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenOrganization();
+        }
+
+        // Last-Owner invariant: the sole Owner of the tenant cannot be removed — an ownerless organization
+        // would be permanently unreachable, since the tenant resolver requires a membership. Only relevant
+        // when the target itself is an Owner; the count is tenant-scoped. This is an invariant conflict
+        // (409), not an authorization failure.
+        if (target.HasRole(MembershipRole.Owner))
+        {
+            var ownerCount = await deps.OrganizationMembers
+                .CountByRoleAsync(context.OrganizationId, MembershipRole.Owner, cancellationToken)
+                .ConfigureAwait(false);
+            if (ownerCount <= 1)
+            {
+                return LastOwnerConflict();
+            }
+        }
+
+        // Capture the removed identity/role BEFORE deletion for the audit record.
+        var removedMemberId = target.Id;
+        var removedRole = target.Role;
+
+        await deps.OrganizationMembers.RemoveAsync(target, cancellationToken).ConfigureAwait(false);
+
+        // AUDIT: removal is security-relevant access revocation, so append an append-only audit record
+        // capturing the actor (the admin who removed the member), the removed membership and the revoked
+        // role (threats T1/T6). An organization member removal is organization-level, so it records no
+        // workspace. The audit row outlives the now-deleted membership (recorded fact, not FK).
+        var now = timeProvider.GetUtcNow();
+        var entry = AuditLogEntry.ForMemberRemoval(
+            context.OrganizationId,
+            workspaceId: null,
+            context.UserProfileId,
+            nameof(OrganizationMember),
+            removedMemberId,
+            removedRole.ToString(),
+            now);
+        await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+
+        // The membership row IS the access grant, so its deletion has already revoked the subject's tenant
+        // access; nothing is returned (204 No Content).
+        return Results.NoContent();
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They
     /// exist only when a database connection string is configured; when absent,
@@ -226,14 +345,22 @@ internal static class OrganizationEndpoints
         var services = httpContext.RequestServices;
         var organizations = services.GetService<IOrganizationRepository>();
         var userProfiles = services.GetService<UserProfileReferenceService>();
+        var resolver = services.GetService<TenantContextResolver>();
+        var organizationMembers = services.GetService<IOrganizationMemberRepository>();
+        var auditLog = services.GetService<IAuditLogRepository>();
 
-        if (organizations is null || userProfiles is null)
+        if (organizations is null
+            || userProfiles is null
+            || resolver is null
+            || organizationMembers is null
+            || auditLog is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new OrganizationEndpointDependencies(organizations, userProfiles);
+        dependencies = new OrganizationEndpointDependencies(
+            organizations, userProfiles, resolver, organizationMembers, auditLog);
         return true;
     }
 
@@ -279,6 +406,17 @@ internal static class OrganizationEndpoints
             title: "Bad Request",
             detail: detail);
 
+    // The last Owner of an organization cannot be removed: an ownerless tenant
+    // would be permanently unreachable (the tenant resolver requires a
+    // membership). The caller is authorized; the invariant, not the caller, is
+    // the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md). The
+    // detail names only the generic invariant and leaks no tenant data (threat T7).
+    private static IResult LastOwnerConflict()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The last Owner of the organization cannot be removed.");
+
     // Tenant existence is hidden: a foreign tenant (a slug the token does not
     // claim) is reported as 404, never echoing the reason (docs/08; threat T5).
     private static IResult HiddenOrganization()
@@ -289,5 +427,8 @@ internal static class OrganizationEndpoints
 
     private readonly record struct OrganizationEndpointDependencies(
         IOrganizationRepository Organizations,
-        UserProfileReferenceService UserProfiles);
+        UserProfileReferenceService UserProfiles,
+        TenantContextResolver Resolver,
+        IOrganizationMemberRepository OrganizationMembers,
+        IAuditLogRepository AuditLog);
 }

@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
@@ -30,6 +31,13 @@ namespace LiveCore.Api.Workspaces;
 ///   its hash is stored (threats T6/T7). This is the invite PLACEHOLDER: there
 ///   is no acceptance/redeem route, no email delivery and no UI in this
 ///   story.</item>
+///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
+///   remove a workspace member (CORE-LIFE-001), "Manage members" (Owner or
+///   Admin). Hard-deletes the membership, revoking the subject's access on their
+///   next request; the sole workspace Owner cannot be removed (the last-Owner
+///   invariant, 409); the removal is appended to the append-only audit log
+///   (<see cref="AuditAction.MemberRemoved"/>). Fail-closed and hidden as 404 for
+///   a cross-tenant/unknown workspace or member.</item>
 /// </list>
 ///
 /// Authorization model (object-level, server-side; docs/06_AUTHORIZATION_MATRIX.md;
@@ -79,6 +87,7 @@ internal static class WorkspaceEndpoints
         group.MapGet("/{workspaceId}", GetWorkspaceAsync);
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
+        group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
         return endpoints;
     }
@@ -507,6 +516,124 @@ internal static class WorkspaceEndpoints
         return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
     }
 
+    // DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
+    private static async Task<IResult> RemoveWorkspaceMemberAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string memberId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace or member id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is
+            // indistinguishable from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant
+        // or unknown workspace is never revealed; threats T1/T5).
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite sibling on
+        // this same path (POST .../members). The caller is a known member of the tenant and the workspace
+        // exists, so an insufficient role is a 403. Exact, non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Find the target membership WITHIN this tenant and workspace; a member id that belongs to another
+        // workspace or tenant (or no membership at all) is hidden as 404, never 403, so a member outside the
+        // caller's resolved workspace can never be probed for (threats T1/T5).
+        var target = await deps.WorkspaceMembers
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Last-Owner invariant: the sole Owner of the workspace cannot be removed (a workspace must not be
+        // left without an Owner). Only relevant when the target itself is an Owner; the count is
+        // tenant- and workspace-scoped. This is an invariant conflict (409), not an authorization failure.
+        if (target.HasRole(MembershipRole.Owner))
+        {
+            var ownerCount = await deps.WorkspaceMembers
+                .CountByRoleAsync(context.OrganizationId, workspaceGuid, MembershipRole.Owner, cancellationToken)
+                .ConfigureAwait(false);
+            if (ownerCount <= 1)
+            {
+                return LastOwnerConflict();
+            }
+        }
+
+        // Capture the removed identity/role BEFORE deletion for the audit record (the in-memory object
+        // survives the delete, but capturing first keeps the audit independent of the tracked entity state).
+        var removedMemberId = target.Id;
+        var removedRole = target.Role;
+
+        await deps.WorkspaceMembers.RemoveAsync(target, cancellationToken).ConfigureAwait(false);
+
+        // AUDIT: removal is security-relevant access revocation, so append an append-only audit record
+        // capturing the actor (the admin who removed the member), the removed membership and the revoked
+        // role (threats T1/T6). The audit row outlives the now-deleted membership (recorded fact, not FK).
+        var now = timeProvider.GetUtcNow();
+        var entry = AuditLogEntry.ForMemberRemoval(
+            context.OrganizationId,
+            workspaceGuid,
+            context.UserProfileId,
+            nameof(WorkspaceMember),
+            removedMemberId,
+            removedRole.ToString(),
+            now);
+        await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+
+        // The membership row IS the access grant, so its deletion has already revoked the subject's access;
+        // nothing is returned (204 No Content).
+        return Results.NoContent();
+    }
+
     /// <summary>
     /// Parses a generic membership role name (case-insensitive) and confirms it
     /// is a DEFINED role. The authorization matrix is non-linear, so this is a
@@ -548,19 +675,21 @@ internal static class WorkspaceEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var workspaceInvitations = services.GetService<IWorkspaceInvitationRepository>();
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
+        var auditLog = services.GetService<IAuditLogRepository>();
 
         if (resolver is null
             || workspaces is null
             || workspaceMembers is null
             || workspaceInvitations is null
-            || quotaEnforcement is null)
+            || quotaEnforcement is null
+            || auditLog is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new WorkspaceEndpointDependencies(
-            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement);
+            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog);
         return true;
     }
 
@@ -611,6 +740,17 @@ internal static class WorkspaceEndpoints
             title: "Conflict",
             detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
+    // The last Owner of a workspace cannot be removed: a workspace must not be
+    // left without an Owner. The caller is authorized; the invariant, not the
+    // caller, is the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md).
+    // The detail names only the generic invariant and leaks no tenant data
+    // (threat T7).
+    private static IResult LastOwnerConflict()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The last Owner of the workspace cannot be removed.");
+
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
@@ -638,5 +778,6 @@ internal static class WorkspaceEndpoints
         IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers,
         IWorkspaceInvitationRepository WorkspaceInvitations,
-        QuotaEnforcementService QuotaEnforcement);
+        QuotaEnforcementService QuotaEnforcement,
+        IAuditLogRepository AuditLog);
 }

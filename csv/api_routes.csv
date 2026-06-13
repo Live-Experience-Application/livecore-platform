@@ -2,10 +2,12 @@ method,route,module,roles,notes
 GET,/api/v1/me,IdentityAccess,authenticated,Returns principal context only
 GET,/api/v1/organizations,Organizations,authenticated,Only organizations user belongs to
 POST,/api/v1/organizations,Organizations,authenticated,Creates organization and Owner membership
+DELETE,/api/v1/organizations/{organizationSlug}/members/{memberId},Organizations,"Owner,Admin",Remove organization member; revokes access; last Owner cannot be removed; audited; hidden-404
 GET,/api/v1/workspaces,Workspaces,"Owner,Admin,Host,CoHost,Participant,Observer,Auditor",Filtered by membership
 POST,/api/v1/workspaces,Workspaces,"Owner,Admin",Creates generic workspace; enforces workspace.active.max quota
 GET,/api/v1/workspaces/{workspaceId},Workspaces,workspace members,Projection depends on role
 POST,/api/v1/workspaces/{workspaceId}/members,Workspaces,"Owner,Admin",Invite/add member
+DELETE,/api/v1/workspaces/{workspaceId}/members/{memberId},Workspaces,"Owner,Admin",Remove workspace member; revokes access; last Owner cannot be removed; audited; hidden-404
 GET,/api/v1/workspaces/{workspaceId}/sessions,Sessions,workspace members,Filtered
 POST,/api/v1/workspaces/{workspaceId}/sessions,Sessions,"Owner,Admin,Host,CoHost",Create session
 POST,/api/v1/sessions/{sessionId}/start,Sessions,"Host,CoHost,Owner,Admin",Emits SessionStarted; enforces session.active.max quota

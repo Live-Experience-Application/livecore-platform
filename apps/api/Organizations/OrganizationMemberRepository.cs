@@ -100,4 +100,66 @@ internal sealed class OrganizationMemberRepository : IOrganizationMemberReposito
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<OrganizationMember?> FindByIdAsync(
+        Guid organizationId,
+        Guid memberId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (memberId == Guid.Empty)
+        {
+            throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+        }
+
+        // Both predicates translate to parameterized SQL equality. The id is the row's own key, but the
+        // organization_id predicate additionally pins the tenant boundary, so a membership with that id in
+        // another organization is never returned (threats T1/T5).
+        return await _dbContext.OrganizationMembers
+            .FirstOrDefaultAsync(
+                member => member.Id == memberId && member.OrganizationId == organizationId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int> CountByRoleAsync(
+        Guid organizationId,
+        MembershipRole role,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        // Reject undefined enum values a cast could smuggle in before touching the database.
+        if (!OrganizationMember.IsValidRole(role))
+        {
+            throw new ArgumentOutOfRangeException(nameof(role), role, "Role is not a defined membership role.");
+        }
+
+        // The role is persisted as its stable name (HasConversion<string>), so EF translates this equality
+        // to the stored name; the matrix is non-linear, so this is an EXACT match, never an ordering
+        // comparison. Scoped by organization so only this tenant's members are counted (threat T5).
+        return await _dbContext.OrganizationMembers
+            .CountAsync(
+                member => member.OrganizationId == organizationId && member.Role == role,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(OrganizationMember member, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        _dbContext.OrganizationMembers.Remove(member);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }
