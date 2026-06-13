@@ -1152,6 +1152,46 @@ unchanged — a deployment that wants a free limit defines the quota definition 
 new HTTP route, table or migration is added; enforcement reads and writes the existing `quota_definitions` /
 `quota_usage` tables.
 
+### Ad eligibility
+
+CORE-ADS-001 (the `Ad Eligibility` epic) decides whether a subject is eligible to see ads — the two Core-owned ad
+types of `docs/22_ADS_AND_MOBILE_BILLING_BOUNDARIES.md`, `AdEligibilityPolicy` and `AdEligibilityResult`, plus the
+read that exposes them. It lives in the Entitlements module (ad eligibility is **entitlement-driven**) and reuses the
+CORE-ENTL-002 `SubjectEntitlementResolver`, so it adds **no table and no migration**. Core decides eligibility only;
+it never renders, requests, configures or places ads (`docs/22`).
+
+| Method | Route                       | Authorized callers                                 |
+| ------ | --------------------------- | -------------------------------------------------- |
+| `GET`  | `/api/v1/me/ad-eligibility` | any authenticated **user** (their own eligibility) |
+
+The response is the generic, entitlement-derived decision and nothing else — no ad placement, ad provider/unit id or
+SDK config (the epic acceptance criterion **"Core returns ad eligibility without knowing ad placements"**; threat
+T7):
+
+```json
+{
+    "adsRequired": true,
+    "reason": "NO_AD_FREE_ENTITLEMENT",
+    "sessionAdFreeUntil": null,
+    "hostedSessionAdFree": false
+}
+```
+
+`AdEligibilityPolicy.Evaluate` is a **pure, fail-closed** function of the user's resolved effective entitlements: ads
+are required by default and turned off only by an explicit, active server grant of `ads.disabled` (the personal
+ad-free state) — so a client can never assert ad-free state the server did not grant ("Never trust client-side
+premium flags"). Otherwise an explicit `ads.required` grant yields `reason: ADS_REQUIRED_ENTITLEMENT`, and a subject
+with no relevant grant yields `reason: NO_AD_FREE_ENTITLEMENT`. `hostedSessionAdFree` is reported **independently**
+from the `hosted.sessions.ads.disabled` capability (sessions the subject hosts are ad-free for participants) and does
+not change the subject's own `adsRequired`; `sessionAdFreeUntil` is part of the contract shape for a future,
+mobile-driven temporary (rewarded-ad) window and is currently always `null`.
+
+`/me/ad-eligibility` resolves the **current user's** profile (the canonical, idempotent "current user" resolution)
+and decides for the `User` subject keyed by the profile id, reading only that subject's entitlements (per-subject
+isolation, threat T5). A missing/invalid token is `401`; a non-user **service-account** principal is `403` (it has
+no personal premium state, the same rule as the `/me/quota-status` read); the route carries no tenant boundary, and
+fails closed with `503` when no database is configured.
+
 ### Purchase provider abstraction
 
 The Store module owns generic, server-side **store purchase verification** so that the client never becomes the

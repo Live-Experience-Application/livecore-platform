@@ -605,6 +605,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<SubjectEntitlementResolver>();
     builder.Services.AddScoped<SubjectEntitlementAssignmentService>();
 
+    // Ad eligibility decision (CORE-ADS-001, the Ad Eligibility epic): the entitlement-driven service behind
+    // GET /api/v1/me/ad-eligibility. Registered here, inside the persistence conditional, because it composes the
+    // CORE-ENTL-002 SubjectEntitlementResolver above; the AdEligibilityPolicy it applies is a pure static function
+    // (no DI). It decides whether a subject must see ads ENTIRELY from server entitlements and FAIL-CLOSED (no
+    // ad-free grant ⇒ ads required), so "Core returns ad eligibility without knowing ad placements" (the epic
+    // acceptance criterion; docs/22_ADS_AND_MOBILE_BILLING_BOUNDARIES.md) — Core never renders, requests, configures
+    // or places ads.
+    builder.Services.AddScoped<AdEligibilityService>();
+
     // Quota definition + usage persistence and the server-side quota-status calculation (CORE-ENTL-003, the quota
     // definition and quota status story of the "Entitlements and Quotas" epic): the Entitlements module owns the
     // global quota_definitions catalog (how a numeric quota entitlement is measured — for which subject kind and in
@@ -814,6 +823,16 @@ app.MapAssetEndpoints();
 // server-side and fail-closed (the epic acceptance criterion). Quota ENFORCEMENT on protected commands is
 // CORE-ENTL-004.
 app.MapQuotaStatusEndpoints();
+
+// Ad eligibility endpoint (CORE-ADS-001): the Ad Eligibility epic's single read, GET /api/v1/me/ad-eligibility. It
+// lives in an authenticated route group and fails closed (503) when persistence is not configured, exactly like the
+// quota-status endpoint. No new DI registration beyond the AdEligibilityService above is required: the user profile
+// service and the entitlement resolver it reuses are already registered. It resolves the current user (a service
+// account is 403) and decides the USER subject's ad eligibility ENTIRELY from server entitlements and fail-closed (no
+// ad-free grant ⇒ ads required), returning only the generic decision — never an ad placement, provider/unit id or SDK
+// config. So "Core returns ad eligibility without knowing ad placements" (the epic acceptance criterion;
+// docs/22_ADS_AND_MOBILE_BILLING_BOUNDARIES.md): Core decides eligibility, the vertical owns all ad rendering.
+app.MapAdEligibilityEndpoints();
 
 // Apple transaction verification endpoint (CORE-STORE-003): the Store module's first HTTP route,
 // POST /api/v1/purchases/apple/transactions. It lives in an authenticated route group and fails closed (503)

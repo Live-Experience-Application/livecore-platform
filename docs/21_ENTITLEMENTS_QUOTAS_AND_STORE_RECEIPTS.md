@@ -48,6 +48,7 @@ session.participant.max
 asset.storage.bytes.max
 ads.required
 ads.disabled
+hosted.sessions.ads.disabled
 mobile.native.access
 offline.cache.enabled
 export.enabled
@@ -100,7 +101,7 @@ session.active.max = fair_use_unlimited
 session.participant.max = fair_use_unlimited
 asset.storage.bytes.max = plan_defined
 ads.disabled = true for host
-hosted_sessions.ads.disabled = true if table pass included
+hosted.sessions.ads.disabled = true if table pass included
 export.enabled = true
 ```
 

@@ -353,6 +353,40 @@ internal static class TestData
     }
 
     /// <summary>
+    /// Creates and persists a generic boolean flag entitlement definition, driving the real
+    /// <see cref="EntitlementDefinition.Define"/> factory. Used to arrange the catalog a subject flag entitlement
+    /// grants (e.g. <c>ads.disabled</c>). The key is generic Core vocabulary (AGENTS.md).
+    /// </summary>
+    public static async Task<EntitlementDefinition> AddFlagEntitlementDefinitionAsync(
+        this LiveCoreDbContext context,
+        string key)
+    {
+        var definition = EntitlementDefinition.Define(
+            key, EntitlementValueKind.Flag, "Flag entitlement", null, SeedTime);
+        context.EntitlementDefinitions.Add(definition);
+        await context.SaveChangesAsync();
+        return definition;
+    }
+
+    /// <summary>
+    /// Creates and persists a flag entitlement assignment granting a subject a boolean capability at the given
+    /// value, driving the real <see cref="SubjectEntitlement.GrantFlag"/> factory.
+    /// </summary>
+    public static async Task<SubjectEntitlement> AddSubjectFlagEntitlementAsync(
+        this LiveCoreDbContext context,
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        EntitlementDefinition entitlement,
+        bool value)
+    {
+        var assignment = SubjectEntitlement.GrantFlag(
+            subjectType, subjectId, entitlement, value, sourcePlanDefinitionId: null, SeedTime);
+        context.SubjectEntitlements.Add(assignment);
+        await context.SaveChangesAsync();
+        return assignment;
+    }
+
+    /// <summary>
     /// Creates and persists a subject's recorded usage of a quota at the given amount, driving the real
     /// <see cref="QuotaUsage.Start"/> factory and <see cref="QuotaUsage.Record"/> transition so the seeded row
     /// has exactly the amount production would record.

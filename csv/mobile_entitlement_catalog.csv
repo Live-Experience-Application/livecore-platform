@@ -5,7 +5,7 @@ session.participant.max,quota,session,4,4,fair_use_unlimited,fair_use_unlimited,
 asset.storage.bytes.max,quota,user,262144000,524288000,5368709120,10737418240,Storage values are examples and must be finalized
 ads.required,flag,user,true,false,false,false,Server source of truth for ad eligibility
 ads.disabled,flag,user,false,true,true,true,Personal ad-free state
-hosted_sessions.ads.disabled,flag,host,false,false,false,true,Table Pro removes ads for participants in hosted sessions
+hosted.sessions.ads.disabled,flag,host,false,false,false,true,Table Pro removes ads for participants in hosted sessions; dotted key conforms to the Core entitlement key shape
 mobile.native.access,flag,user,true,true,true,true,Native app access remains available for free users
 offline.cache.enabled,flag,user,limited,true,true,true,Only visible data may be cached
 export.enabled,flag,user,false,false,true,true,Export can be a paid feature
