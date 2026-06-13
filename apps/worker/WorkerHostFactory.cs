@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using LiveCore.Api.Exports;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Recaps;
 
@@ -17,7 +18,11 @@ namespace LiveCore.Worker;
 ///   <item>the recap generation job (CORE-JOB-001), which produces a recap for every ENDED session that has
 ///   no recap yet, idempotently and tenant-scoped — the Recaps module owns the generation logic
 ///   (<see cref="RecapGenerationService"/>) and this host schedules it through
-///   <see cref="RecapGenerationBackgroundService"/>.</item>
+///   <see cref="RecapGenerationBackgroundService"/>;</item>
+///   <item>the export processing job (CORE-JOB-002), which processes every queued workspace export job into a
+///   workspace export manifest, idempotently and tenant-scoped — the Exports module owns the processing logic
+///   (<see cref="ExportProcessingService"/>) and this host schedules it through
+///   <see cref="ExportProcessingBackgroundService"/>.</item>
 /// </list>
 /// Each job's logic lives in its owning domain module in <c>apps/api</c>; this host only handles timing,
 /// scoping and resilience.
@@ -47,18 +52,20 @@ public static class WorkerHostFactory
         // metrics over a scrape/OTLP surface is a documented follow-up. The API host owns the /metrics surface.
         builder.Services.AddLiveCoreMetrics();
 
-        // Background jobs (CORE-AST-006 asset cleanup, CORE-JOB-001 recap generation). Each Add* extension
+        // Background jobs (CORE-AST-006 asset cleanup, CORE-JOB-001 recap generation, CORE-JOB-002 export
+        // processing). Each Add* extension
         // registers its owning module's dependencies (the EF Core DbContext, the module repositories, a
         // TimeProvider, the job policy and the job's application service) and returns whether persistence is
-        // configured. Like the API host, both jobs are GATED on a configured database connection string: with
+        // configured. Like the API host, each job is GATED on a configured database connection string: with
         // none, no DbContext and no loop are registered, so the worker still starts (it just has no job to run)
         // rather than failing closed. The shared infrastructure (the DbContext and the TimeProvider) is
-        // registered with TryAdd/AddDbContext semantics in each extension, so wiring both in the same container
-        // composes safely. Each scheduling background service is added only when its job is configured.
+        // registered with TryAdd/AddDbContext semantics in each extension, so wiring all of them in the same
+        // container composes safely. Each scheduling background service is added only when its job is configured.
         var assetCleanupConfigured = builder.Services.AddAssetCleanup(builder.Configuration);
         var recapGenerationConfigured = builder.Services.AddRecapGeneration(builder.Configuration);
+        var exportProcessingConfigured = builder.Services.AddExportProcessing(builder.Configuration);
 
-        if (assetCleanupConfigured || recapGenerationConfigured)
+        if (assetCleanupConfigured || recapGenerationConfigured || exportProcessingConfigured)
         {
             // Worker liveness heartbeat (CORE-OPS-005): each job loop writes a heartbeat each tick so a wedged
             // loop is detectable by orchestration (the shared file goes stale). Registered once, alongside the
@@ -78,6 +85,11 @@ public static class WorkerHostFactory
         if (recapGenerationConfigured)
         {
             builder.Services.AddHostedService<RecapGenerationBackgroundService>();
+        }
+
+        if (exportProcessingConfigured)
+        {
+            builder.Services.AddHostedService<ExportProcessingBackgroundService>();
         }
 
         return builder;

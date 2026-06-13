@@ -76,4 +76,31 @@ public class WorkerSmokeTests
 
         Assert.DoesNotContain(hostedServices, service => service is RecapGenerationBackgroundService);
     }
+
+    [Fact]
+    public void WorkerHost_registers_the_export_processing_job_when_a_database_is_configured()
+    {
+        // CORE-JOB-002: with a database configured the worker schedules the export processing job alongside the
+        // other jobs. The connection string is supplied through configuration only (no connection is opened by
+        // building the host), exactly as the API host reads it.
+        using var host = WorkerHostFactory.Create(
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
+            .Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.Contains(hostedServices, service => service is ExportProcessingBackgroundService);
+    }
+
+    [Fact]
+    public void WorkerHost_registers_no_export_processing_job_without_a_database()
+    {
+        // Persistence-gated, fail-safe: with no database configured the worker schedules no export processing
+        // loop (mirroring the other jobs' gating).
+        using var host = WorkerHostFactory.Create([]).Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.DoesNotContain(hostedServices, service => service is ExportProcessingBackgroundService);
+    }
 }

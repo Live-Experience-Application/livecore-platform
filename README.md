@@ -74,7 +74,7 @@ eslint.config.mjs        ESLint flat config for the TypeScript packages
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/api/Migrations.Dockerfile  one-shot migrations runner image (applies EF Core migrations before API rollout)
-apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup and recap generation jobs
+apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup, recap generation and export processing jobs
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
@@ -328,9 +328,9 @@ Start the API host (listens on `http://localhost:5062` by default, see
 dotnet run --project apps/api
 ```
 
-Start the background worker host (runs the asset cleanup and recap generation jobs
-when a database is configured; see "Asset cleanup job" and "Recap generation job"
-below):
+Start the background worker host (runs the asset cleanup, recap generation and
+export processing jobs when a database is configured; see "Asset cleanup job",
+"Recap generation job" and "Export processing job" below):
 
 ```bash
 dotnet run --project apps/worker
@@ -1851,6 +1851,45 @@ between the eligibility read and the append) is logged and counted, and that ses
 the next sweep, without aborting the run. The `RecapGenerated` realtime event and audit fact, and any
 recap HTTP route, remain follow-up stories — this job produces and persists the durable recap only.
 
+### Export processing job
+
+CORE-JOB-002 adds the Exports module's background processing — the worker's third periodic job
+(`apps/worker`; `docs/02_ARCHITECTURE.md`: the worker owns "background jobs, exports, cleanup, async
+processing"), behind no HTTP route. The export job and manifest aggregates already existed (CORE-AUD-002,
+CORE-AUD-003) but nothing processed them; this job picks up **queued export jobs** and produces their
+**workspace export manifests/entries**. For each queued job it inventories the workspace and records a
+per-kind `ExportManifest` (one `ExportManifestEntry` per generic `ExportResourceKind` — sessions, scenes,
+content blocks, entities, participants, assets), counting **rows only**, never any title, body, object key or
+other content (threats T7/T8).
+
+It drives each job through the `ExportJob` aggregate's own guarded **status transitions** (the acceptance
+criterion): `Pending -> Running -> Completed`, committed **atomically** with the produced manifest as a single
+unit of work (the repositories share one EF unit of work per sweep scope), so the job is never observed
+completed without its manifest, nor a manifest without a completed job, and a crash before the commit simply
+leaves the job queued for the next sweep to reprocess. The work reuses the existing Exports module
+(`IExportJobRepository`, `ExportManifest.ForWorkspaceExport`, `IExportManifestRepository`); no parallel export
+pipeline is built.
+
+It is **idempotent** and **tenant-scoped** (the acceptance criteria). Eligibility is read by
+`IQueuedExportJobReader` as the workspace-scoped jobs that are not yet terminal, so a completed export is never
+re-processed and any job left non-terminal by an interrupted run is reprocessed by the next sweep; the
+produce-exactly-one-manifest guarantee is the unique `export_manifests(export_job_id)` index, so a lost create
+race (or a concurrent worker) surfaces as a benign duplicate whose losing attempt rolls back atomically. The read spans all
+tenants (a system sweep), but each job is re-resolved, inventoried and manifested with its **own**
+organization and workspace (re-scoped through `IExportJobRepository.FindByIdAsync`, the surrogate id never
+trusted alone), so one workspace's export only ever counts its own resources and its manifest is attributed
+only to its own tenant (threat T5). Only `Workspace`-scoped jobs are processed; a `UserData` export's narrower
+manifest is a separate artifact that does not yet exist, so processing it is a follow-up and is never silently
+widened into a workspace inventory (threat T8).
+
+The processing logic lives in the Exports module (`ExportProcessingService`); the worker only schedules it
+(`ExportProcessingBackgroundService`, every `Exports:Processing:SweepInterval`, in bounded
+`Exports:Processing:BatchSize` batches), and like the other jobs it is **gated on a configured database
+connection string** (no database -> the worker starts but runs no processing loop). The sweep is per-job
+**resilient**: a job whose processing fails (for example because its workspace was deleted between the queued
+read and processing) is logged and counted, and that job is left non-terminal for the next sweep to retry,
+without aborting the run. An export-request HTTP route and a user-data export pipeline remain follow-up stories.
+
 ### Worker liveness heartbeat
 
 CORE-OPS-005 adds the worker's liveness signal so orchestration can detect a **wedged** job loop. A
@@ -2070,10 +2109,11 @@ full `ExportManifestView` (with the inventory) for host-capable / metadata roles
 (Owner/Admin/Host/CoHost/Auditor — the "View workspace metadata" = yes roles) versus the stripped,
 audience-safe `ExportManifestSummaryView` (`{id, scope}` only — no inventory) for audience roles,
 fail-closed to the summary shape for any undefined role. The projector decides the view **shape**,
-not access; the worker that drives the export and produces the manifest, and any export HTTP route
-with its server-side access authorization, are later Exports stories (exactly as CORE-AUD-002
-deferred the export endpoint). CORE-AUD-003 is the manifest model, its persistence, its EF
-migration and its role-based projection only; there is no export HTTP route yet.
+not access; CORE-AUD-003 is the manifest model, its persistence, its EF migration and its role-based
+projection only. The worker that actually **drives** the export and produces the manifest is now
+implemented — the export processing background job (CORE-JOB-002; see "Export processing job" above) —
+while any export HTTP route with its server-side access authorization remains a later Exports story
+(exactly as CORE-AUD-002 deferred the export endpoint); there is no export HTTP route yet.
 
 ### Recaps
 
@@ -2574,8 +2614,8 @@ curl http://localhost:8080/health/live
 docker stop livecore-api
 ```
 
-Run the worker container (no ports; runs the asset cleanup and recap generation jobs when a database
-is configured, otherwise idles):
+Run the worker container (no ports; runs the asset cleanup, recap generation and export processing jobs
+when a database is configured, otherwise idles):
 
 ```bash
 docker run --rm livecore-worker
