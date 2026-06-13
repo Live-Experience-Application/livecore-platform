@@ -419,6 +419,16 @@ a Railway pre-deploy command) and the standalone-bundle alternative are document
 in `docs/13_SELF_HOSTING_REQUIREMENTS.md`. CI's `migrations` job applies all
 migrations to an empty PostgreSQL database on every change.
 
+CI additionally hardens the migrations against model drift and SQLite-only test
+coverage (CORE-OPS-002): the `integration-postgres` job runs the full integration
+suite against a real PostgreSQL service container — where each test's schema is
+applied by the **real migrations** (`Database.Migrate()`), not the SQLite
+`EnsureCreated()` schema — and runs `dotnet ef migrations has-pending-model-changes`
+as a model-vs-migration drift gate. The integration suite is provider-switchable
+through the `LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment
+variables; with them unset it stays on in-memory SQLite, so local runs need no
+database server.
+
 ### Tenant model and HTTP API
 
 The Identity and Tenant Boundaries epic builds the tenant model in the

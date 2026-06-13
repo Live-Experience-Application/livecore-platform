@@ -1,12 +1,13 @@
 # CI pipeline for livecore-platform (CORE-FND-003, docker job: CORE-FND-005).
 #
-# Runs the commands documented in README.md verbatim. Six independent jobs:
-#   dotnet          - build, smoke tests, format/code-style verification
-#   typescript      - pnpm install, lint, format check, package builds/tests
-#   boundary-scan   - forbidden vertical term scan (pwsh on Linux)
-#   powershell-lint - PSScriptAnalyzer over scripts/*.ps1
-#   docker          - image builds and container smoke tests (no push)
-#   migrations      - apply all migrations to an empty Postgres (CORE-OPS-001)
+# Runs the commands documented in README.md verbatim. Independent jobs:
+#   dotnet               - build, smoke tests, format/code-style verification
+#   typescript           - pnpm install, lint, format check, package builds/tests
+#   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
+#   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
+#   docker               - image builds and container smoke tests (no push)
+#   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
+#   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002)
 #
 # No deployment, no registry push, no product features: foundation quality
 # gates only.
@@ -198,3 +199,57 @@ jobs:
           docker run --rm --network host \
             --env ConnectionStrings__Database="$MIGRATIONS_CONNECTION_STRING" \
             livecore-migrations:ci
+
+  integration-postgres:
+    name: Integration tests against PostgreSQL
+    runs-on: ubuntu-latest
+    # CORE-OPS-002: the integration suite defaults to in-memory SQLite with
+    # EnsureCreated(), which builds the schema from the model and never touches the
+    # checked-in migration files, so a broken or drifted PostgreSQL migration would
+    # stay invisible. This job closes both gaps:
+    #   1. a model-vs-migration drift gate (dotnet ef migrations
+    #      has-pending-model-changes), and
+    #   2. running the full integration suite against a real PostgreSQL, where each
+    #      test's database schema is applied by the REAL migrations
+    #      (Database.Migrate(), via a once-migrated template the per-test databases
+    #      are copied from).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Select the PostgreSQL provider for the integration suite and point it at the
+      # ephemeral service container. No credential is committed: this is a throwaway
+      # CI database whose password exists only for this service container, and the
+      # suite creates and drops its own per-test databases against it.
+      LIVECORE_TEST_DB_PROVIDER: Postgres
+      LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore .NET local tools (dotnet-ef)
+        run: dotnet tool restore
+
+      - name: Fail on model-vs-migration drift
+        # Returns non-zero when the EF Core model has changes not captured in a
+        # migration, so model and migrations can never silently diverge.
+        run: dotnet ef migrations has-pending-model-changes --project apps/api
+
+      - name: Run integration suite against PostgreSQL
+        run: dotnet test tests/LiveCore.Api.IntegrationTests/LiveCore.Api.IntegrationTests.csproj

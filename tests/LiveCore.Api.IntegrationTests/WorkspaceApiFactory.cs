@@ -19,10 +19,18 @@ namespace LiveCore.Api.IntegrationTests;
 ///   (<c>ConnectionStrings:Database</c>) so the production persistence
 ///   conditional in <c>Program.cs</c> registers the repositories, the tenant
 ///   context resolver, the DbContext and the database readiness check — exactly
-///   the production wiring. The Npgsql provider is then replaced with EF Core
-///   SQLite (a private in-memory database kept alive by one open connection,
-///   foreign keys ON) so no PostgreSQL server is needed, mirroring the existing
-///   repository tests' SQLite setup.</item>
+///   the production wiring.
+///   <para>
+///   By default the Npgsql provider is then replaced with EF Core SQLite (a
+///   private in-memory database kept alive by one open connection, foreign keys
+///   ON) so no PostgreSQL server is needed, mirroring the existing repository
+///   tests' SQLite setup. When the environment selects PostgreSQL
+///   (<see cref="PostgresTestDatabase.IsConfigured"/>, the CI
+///   <c>integration-postgres</c> job, CORE-OPS-002) the factory instead points the
+///   <b>unchanged</b> production Npgsql registration at a throwaway per-test
+///   database whose schema was applied by the real, checked-in migrations — so the
+///   suite covers the migration files, not only the SQLite EnsureCreated() schema.
+///   </para></item>
 ///   <item>A test authentication scheme
 ///   (<see cref="TestAuthenticationHandler"/>) registered as the default scheme,
 ///   so <c>RequireAuthorization()</c> on the workspace route group authenticates
@@ -30,9 +38,9 @@ namespace LiveCore.Api.IntegrationTests;
 ///   wiring is untouched.</item>
 /// </list>
 ///
-/// The shared SQLite connection means every request in a test sees the same
-/// seeded database. Use <see cref="SeedAsync"/> to arrange data and the
-/// <c>Create*Client</c> helpers to act as a chosen caller.
+/// The shared SQLite connection (or the dedicated PostgreSQL database) means every
+/// request in a test sees the same seeded database. Use <see cref="SeedAsync"/> to
+/// arrange data and the <c>Create*Client</c> helpers to act as a chosen caller.
 ///
 /// It is unsealed so a test that needs to observe an extra production seam can
 /// derive from it and override <see cref="ConfigureWebHost"/> (calling base
@@ -43,49 +51,76 @@ namespace LiveCore.Api.IntegrationTests;
 internal class WorkspaceApiFactory : WebApplicationFactory<Program>
 {
     // A placeholder connection string only switches the production persistence
-    // conditional on; the actual provider is replaced with SQLite below. No real
-    // PostgreSQL connection is ever opened.
+    // conditional on; under SQLite the actual provider is replaced below, so no
+    // real PostgreSQL connection is ever opened.
     private const string _placeholderConnectionString =
         "Host=localhost;Port=5432;Database=livecore-integration-test";
 
-    private readonly SqliteConnection _connection;
+    private readonly bool _usePostgres = PostgresTestDatabase.IsConfigured;
+
+    // SQLite path only: one open connection keeps the private in-memory database
+    // alive for the whole factory lifetime while every request still uses its own
+    // scoped DbContext, so reads genuinely round-trip through the database.
+    private readonly SqliteConnection? _connection;
+
+    // PostgreSQL path only: the connection string of this factory's throwaway
+    // database, dropped on dispose. Assigned in ConfigureWebHost (not the
+    // constructor) because the database to create is chosen by an overridable
+    // member (CreatePostgresDatabase).
+    private string? _postgresConnectionString;
 
     public WorkspaceApiFactory()
     {
-        // One open connection keeps the private in-memory database alive for the
-        // whole factory lifetime while every request still uses its own scoped
-        // DbContext, so reads genuinely round-trip through the database.
-        _connection = new SqliteConnection("Filename=:memory:");
-        _connection.Open();
+        if (!_usePostgres)
+        {
+            _connection = new SqliteConnection("Filename=:memory:");
+            _connection.Open();
+        }
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        // Switch the production persistence conditional on (repositories, the
-        // tenant context resolver, TimeProvider, the DbContext, the readiness
-        // check are all registered exactly as in production).
-        builder.UseSetting("ConnectionStrings:Database", _placeholderConnectionString);
+        ArgumentNullException.ThrowIfNull(builder);
+
+        if (_usePostgres)
+        {
+            // Provision this factory's own throwaway database and point the
+            // production persistence conditional (and so the production Npgsql
+            // registration) at it.
+            _postgresConnectionString = CreatePostgresDatabase();
+            builder.UseSetting("ConnectionStrings:Database", _postgresConnectionString);
+        }
+        else
+        {
+            // Switch the production persistence conditional on (repositories, the
+            // tenant context resolver, TimeProvider, the DbContext, the readiness
+            // check are all registered exactly as in production).
+            builder.UseSetting("ConnectionStrings:Database", _placeholderConnectionString);
+        }
 
         builder.ConfigureServices(services =>
         {
-            // Replace the Npgsql DbContext options with SQLite over the shared
-            // open connection. Production registers DbContextOptions via
-            // AddDbContext<LiveCoreDbContext>(UseNpgsql(...)); remove every EF
-            // options/configuration descriptor it added so only the SQLite
-            // provider remains (otherwise EF reports two providers registered in
-            // one service provider).
-            RemoveDbContextRegistrations(services);
+            if (!_usePostgres)
+            {
+                // Replace the Npgsql DbContext options with SQLite over the shared
+                // open connection. Production registers DbContextOptions via
+                // AddDbContext<LiveCoreDbContext>(UseNpgsql(...)); remove every EF
+                // options/configuration descriptor it added so only the SQLite
+                // provider remains (otherwise EF reports two providers registered
+                // in one service provider).
+                RemoveDbContextRegistrations(services);
 
-            // Give SQLite its own EF internal service provider so leftover
-            // provider singletons can never collide with another provider in the
-            // shared application container.
-            var sqliteInternalServices = new ServiceCollection()
-                .AddEntityFrameworkSqlite()
-                .BuildServiceProvider();
+                // Give SQLite its own EF internal service provider so leftover
+                // provider singletons can never collide with another provider in
+                // the shared application container.
+                var sqliteInternalServices = new ServiceCollection()
+                    .AddEntityFrameworkSqlite()
+                    .BuildServiceProvider();
 
-            services.AddDbContext<LiveCoreDbContext>(options => options
-                .UseSqlite(_connection)
-                .UseInternalServiceProvider(sqliteInternalServices));
+                services.AddDbContext<LiveCoreDbContext>(options => options
+                    .UseSqlite(_connection!)
+                    .UseInternalServiceProvider(sqliteInternalServices));
+            }
 
             // Default the authentication AND authorization to the test scheme so
             // RequireAuthorization() on the workspace group challenges via the
@@ -100,21 +135,37 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
                     .RequireAuthenticatedUser()
                     .Build());
 
-            // Initialize the test database (by default: create the schema and
-            // enforce foreign keys, mirroring the repository tests' SQLite setup).
-            using var provider = services.BuildServiceProvider();
-            using var scope = provider.CreateScope();
-            var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
-            InitializeDatabase(context);
+            if (!_usePostgres)
+            {
+                // Initialize the swapped-in SQLite database (by default: create the
+                // schema and enforce foreign keys, mirroring the repository tests'
+                // SQLite setup). Under PostgreSQL the per-test database already
+                // carries the migrated schema (or is intentionally left empty by the
+                // startup-migration guard), so there is nothing to initialize.
+                using var provider = services.BuildServiceProvider();
+                using var scope = provider.CreateScope();
+                var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+                InitializeDatabase(context);
+            }
         });
     }
+
+    /// <summary>
+    /// Provisions this factory's PostgreSQL database when the suite runs against
+    /// PostgreSQL. The default returns a fresh database carrying the schema the real
+    /// migrations produce (a copy of the migrated template). A derived factory can
+    /// override this seam to provision an empty database instead (for example, the
+    /// startup-migration guard asserts the host never creates the schema itself).
+    /// </summary>
+    protected virtual string CreatePostgresDatabase() => PostgresTestDatabase.CreateMigratedDatabase();
 
     /// <summary>
     /// Prepares the swapped-in SQLite database for the test host. The default
     /// creates the schema with <c>EnsureCreated</c> and turns foreign keys on, so
     /// every test sees the full schema. A derived factory can override this seam
     /// (for example, to leave the schema absent and assert that the application's
-    /// own startup never implicitly creates or migrates it).
+    /// own startup never implicitly creates or migrates it). It is not called when
+    /// the suite runs against PostgreSQL.
     /// </summary>
     protected virtual void InitializeDatabase(LiveCoreDbContext context)
     {
@@ -159,7 +210,13 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
 
         using var scope = Services.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
-        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
+        if (!_usePostgres)
+        {
+            // SQLite enforces foreign keys per-connection; PostgreSQL enforces them
+            // by default and rejects this PRAGMA.
+            context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
+        }
+
         await seed(context);
     }
 
@@ -186,13 +243,49 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
     /// <summary>Creates an HttpClient with no token (no auth headers).</summary>
     public HttpClient CreateAnonymousClient() => CreateClient();
 
+    // Guards the one-time cleanup so it runs exactly once and — for the per-test
+    // PostgreSQL database — only AFTER the host has been fully torn down, never
+    // while a live application connection is still holding the database open.
+    private int _cleanedUp;
+    private volatile bool _asyncDisposing;
+
+    public override async ValueTask DisposeAsync()
+    {
+        _asyncDisposing = true;
+
+        // Stop and dispose the host first (closing every application connection to
+        // the per-test database), THEN drop it — otherwise DROP DATABASE would race
+        // a live connection. base.DisposeAsync may invoke Dispose(true) internally,
+        // which is why that path defers cleanup to here (see Dispose below).
+        await base.DisposeAsync().ConfigureAwait(false);
+
+        Cleanup();
+    }
+
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        base.Dispose(disposing);
+
+        // The async path drops after base.DisposeAsync completes; only the
+        // synchronous path cleans up here (after the host has been disposed above).
+        if (disposing && !_asyncDisposing)
         {
-            _connection.Dispose();
+            Cleanup();
+        }
+    }
+
+    private void Cleanup()
+    {
+        if (Interlocked.Exchange(ref _cleanedUp, 1) == 1)
+        {
+            return;
         }
 
-        base.Dispose(disposing);
+        _connection?.Dispose();
+
+        if (_postgresConnectionString is not null)
+        {
+            PostgresTestDatabase.DropDatabase(_postgresConnectionString);
+        }
     }
 }

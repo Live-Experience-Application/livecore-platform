@@ -47,8 +47,12 @@ public class StartupMigrationApplicationTests
         await connection.OpenAsync();
 
         await using DbCommand command = connection.CreateCommand();
-        command.CommandText =
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';";
+        command.CommandText = PostgresTestDatabase.IsConfigured
+            // PostgreSQL: count the user tables in the default schema (the EF
+            // migrations history table would also surface here if startup migrated).
+            ? "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
+            // SQLite: count the application tables (EF's history table included).
+            : "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';";
         var result = await command.ExecuteScalarAsync();
 
         return Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
@@ -58,10 +62,14 @@ public class StartupMigrationApplicationTests
     /// A <see cref="WorkspaceApiFactory"/> that swaps in the same production
     /// persistence wiring but leaves the schema absent, so the only thing that
     /// could populate the database is the application's own startup — which must
-    /// not.
+    /// not. The empty database is provided per provider: SQLite skips
+    /// <c>EnsureCreated()</c>, PostgreSQL provisions a fresh database the migrations
+    /// were never applied to.
     /// </summary>
     private sealed class StartupMigrationGuardApiFactory : WorkspaceApiFactory
     {
+        protected override string CreatePostgresDatabase() => PostgresTestDatabase.CreateEmptyDatabase();
+
         protected override void InitializeDatabase(LiveCoreDbContext context)
         {
             // Intentionally do nothing: no EnsureCreated(), no Migrate(). The

@@ -119,5 +119,28 @@ ConnectionStrings__Database="Host=...;Password=..." ./efbundle
 CI proves this path on every change: the `migrations` job
 (`.github/workflows/ci.yml`) builds the runner image and applies all migrations
 to an empty PostgreSQL database, failing the build if any migration cannot be
-applied. (A real-Postgres integration suite and a model-vs-migration drift gate
-are a separate hardening story, CORE-OPS-002.)
+applied.
+
+### Migration coverage and model-drift gate (CORE-OPS-002)
+
+The integration test suite defaults to in-memory SQLite with `EnsureCreated()`,
+which builds the schema straight from the model and never touches the checked-in
+migration files. So that a broken or drifted PostgreSQL migration cannot stay
+invisible, the `integration-postgres` CI job (`.github/workflows/ci.yml`) adds two
+gates on every change:
+
+- **Real-PostgreSQL migration coverage.** The job spins up a PostgreSQL service
+  container and runs the whole integration suite against it. The suite is
+  provider-switchable: the `LIVECORE_TEST_DB_PROVIDER=Postgres` and
+  `LIVECORE_TEST_POSTGRES` environment variables make each test use a throwaway
+  PostgreSQL database whose schema is applied by the **real, checked-in
+  migrations** (`Database.Migrate()`), rather than the SQLite `EnsureCreated()`
+  schema. The migrations are applied once to a template database and each per-test
+  database is a fast copy of it, preserving the suite's per-test isolation. Without
+  those environment variables the suite stays on in-memory SQLite, so local runs
+  and the default `dotnet test` need no database server.
+- **Model-vs-migration drift gate.** The job runs
+  `dotnet ef migrations has-pending-model-changes --project apps/api`, which fails
+  when the EF Core model has changes not captured in a migration. A change to an
+  entity mapping without a matching migration fails CI instead of shipping a schema
+  that the model and the migrations disagree on.
