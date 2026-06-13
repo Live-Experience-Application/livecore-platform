@@ -1,3 +1,5 @@
+using LiveCore.Api.Hosting;
+
 namespace LiveCore.Api.Realtime;
 
 /// <summary>
@@ -7,6 +9,11 @@ namespace LiveCore.Api.Realtime;
 /// connection endpoints challenge an unauthenticated client with 401. The hub's <c>[Authorize]</c>
 /// attribute already enforces this; the explicit <c>RequireAuthorization()</c> here makes the
 /// endpoint-level requirement unmistakable and independent of the attribute.
+///
+/// The hub also pins the shared CORS allow-list policy (<see cref="CorsConfiguration.PolicyName"/>) with
+/// <c>RequireCors</c> so a browser/PWA client may open the <c>/hubs</c> connection only from a configured
+/// origin — the SAME allow-list the REST API applies through the pipeline-level <c>UseCors</c>
+/// (CORE-OPS-003). It is layered on the authorization above, not a replacement for it.
 /// </summary>
 internal static class RealtimeEndpoints
 {
@@ -14,7 +21,8 @@ internal static class RealtimeEndpoints
     {
         endpoints
             .MapHub<SessionHub>(RealtimeHubRoutes.SessionHub)
-            .RequireAuthorization();
+            .RequireAuthorization()
+            .RequireCors(CorsConfiguration.PolicyName);
 
         return endpoints;
     }

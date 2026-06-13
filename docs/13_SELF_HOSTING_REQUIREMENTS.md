@@ -144,3 +144,84 @@ gates on every change:
   when the EF Core model has changes not captured in a migration. A change to an
   entity mapping without a matching migration fails CI instead of shipping a schema
   that the model and the migrations disagree on.
+
+## Edge posture: CORS, forwarded headers and HTTPS (CORE-OPS-003)
+
+The Core API is meant to sit **behind a reverse proxy / load balancer that
+terminates TLS** (docs/02_ARCHITECTURE.md deployment options: a single VPS with a
+proxy, Railway, or Kubernetes ingress). Three settings make that posture correct
+and safe; all are runtime configuration with **fail-closed defaults**, so nothing
+about which sites may call the API or which proxy hop to trust is hardcoded.
+
+### TLS termination
+
+Core does **not** terminate TLS itself; the proxy presents the certificate and
+forwards the request to the API over the internal network. The deployment is
+responsible for:
+
+- redirecting `http` to `https` **at the proxy** (the edge), and serving the API
+  only over `https` publicly;
+- forwarding the original scheme/host/client-IP through the standard
+  `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-For` headers (see
+  "Forwarded headers" below);
+- keeping the OIDC discovery over HTTPS — `Authentication:Oidc:RequireHttpsMetadata`
+  stays `true` in production (docs/07_SECURITY_THREAT_MODEL.md).
+
+The API host does not add an HTTPS redirect or HSTS middleware, because the public
+HTTPS boundary lives at the proxy; doing it in the app as well would either
+double-redirect or fight the proxy. If a deployment ever runs the API with **no**
+proxy in front, it must terminate TLS in Kestrel directly — that is a deployment
+choice, not a Core default.
+
+### CORS allowed origins (`Cors:AllowedOrigins`)
+
+A browser/PWA front-end served from a different origin than the API (the Next.js
+PWA, docs/02_ARCHITECTURE.md) may call the REST API **and** the `/hubs` SignalR
+endpoint only from an origin on a configured allow-list. One named policy is
+applied to both surfaces.
+
+- Configure it as a list, e.g. the environment variables
+  `Cors__AllowedOrigins__0=https://app.example.com`,
+  `Cors__AllowedOrigins__1=https://admin.example.com` (or the `Cors:AllowedOrigins`
+  array in a settings file). Each entry is a scheme+host[+port] origin with no
+  trailing path.
+- **Fail-closed default:** with no configured origins **no** cross-origin browser
+  client is allowed — a disallowed origin's preflight receives no
+  `Access-Control-Allow-Origin` header and the browser blocks the call. For local
+  PWA development, set the dev origin (for example `http://localhost:3000`) through
+  an environment variable or your own `appsettings.Development.json` / user-secrets;
+  the repository ships **no** default origin.
+- CORS is a **browser-enforced** boundary layered on top of the OIDC/tenant
+  authorization every endpoint already applies — it never widens server-side
+  authorization (a non-browser client ignores CORS, and still needs a valid token
+  and membership). Because the allow-list is always an explicit set of origins
+  (never a wildcard), credentialed requests are permitted, which a browser SignalR
+  client needs.
+
+### Forwarded headers (`ForwardedHeaders:KnownProxies` / `:KnownNetworks`)
+
+`UseForwardedHeaders` restores the real client scheme/host/IP from the proxy's
+`X-Forwarded-*` headers, but only when the **immediate peer is a trusted proxy** —
+otherwise a client could spoof `X-Forwarded-Proto: https` and make the app believe
+an insecure request was secure (threat T7).
+
+- **Loopback** is trusted by the framework default (a proxy on the same host works
+  with no extra configuration).
+- A proxy on another address — a container-network ingress, a managed load
+  balancer — must be named explicitly:
+  - `ForwardedHeaders__KnownProxies__0=10.0.0.7` for a specific proxy IP, and/or
+  - `ForwardedHeaders__KnownNetworks__0=10.0.0.0/8` for a proxy network (CIDR),
+    which is the usual case in Kubernetes / Docker where the proxy's pod IP is not
+    fixed.
+  - `ForwardedHeaders__ForwardLimit=2` raises the trusted-hop count when there is
+    more than one proxy in the chain (the default is one).
+- With nothing configured, only loopback is trusted, so an arbitrary internet
+  client can never spoof the scheme or host.
+
+### Constrained host header (`AllowedHosts`)
+
+`AllowedHosts` is constrained (no longer `*`): the repository default permits only
+`localhost;127.0.0.1`. A deployment **must** set it to its real public host(s),
+for example `AllowedHosts=app.example.com` (semicolon-separated for several), so
+the host-filtering middleware rejects requests carrying an unexpected `Host`
+header.

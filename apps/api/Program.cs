@@ -4,6 +4,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
+using LiveCore.Api.Hosting;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -39,6 +40,25 @@ builder.Logging.AddJsonConsole(options =>
 builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
 builder.Services.AddHealthChecks();
+
+// CORS allow-list for browser/PWA clients (CORE-OPS-003). One named policy
+// (CorsConfiguration.PolicyName) is applied to BOTH the REST API and the SignalR
+// hub, read from configuration only (Cors:AllowedOrigins) and FAIL-CLOSED by
+// default: with no configured origins no cross-origin browser client is allowed.
+// CORS is a browser-enforced boundary layered on top of the OIDC/tenant checks
+// every endpoint already applies; it never widens server-side authorization
+// (docs/07_SECURITY_THREAT_MODEL.md; docs/13_SELF_HOSTING_REQUIREMENTS.md lists
+// "CORS allowed origins" as runtime configuration).
+builder.Services.AddLiveCoreCors(builder.Configuration);
+
+// Forwarded-headers posture for running behind a TLS-terminating reverse proxy
+// (CORE-OPS-003). UseForwardedHeaders (added to the pipeline below) restores the
+// real client scheme/host/IP from the proxy's X-Forwarded-* headers, but only
+// when the immediate peer is a trusted proxy: loopback by the framework default,
+// plus any proxy/network named in configuration (ForwardedHeaders:KnownProxies /
+// :KnownNetworks). Nothing is hardcoded, so an untrusted client can never spoof
+// the scheme (threat T7).
+builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 
 // Realtime SignalR services (CORE-RT-001, the Realtime Event Stream epic's first story). SignalR is
 // part of the ASP.NET Core shared framework (Microsoft.AspNetCore.App) — no new package dependency.
@@ -769,6 +789,25 @@ if (!oidcConfigured)
     app.Logger.LogWarning(
         "No OIDC Authority configured (Authentication:Oidc:Authority); authentication is disabled and authenticated endpoints fail closed.");
 }
+
+// Forwarded headers run FIRST, before any middleware that reads the request
+// scheme/host/IP (CORS, authentication, URL generation), so the rest of the
+// pipeline sees the real client's scheme/host as restored from a TRUSTED proxy's
+// X-Forwarded-* headers rather than the internal proxy hop (CORE-OPS-003;
+// docs/13_SELF_HOSTING_REQUIREMENTS.md TLS-termination posture). Only loopback
+// (framework default) and the configured known proxies/networks are trusted, so
+// an untrusted client cannot spoof the scheme (threat T7).
+app.UseForwardedHeaders();
+
+// CORS runs before authentication so a browser preflight (an OPTIONS request that
+// carries no credentials) is answered by the CORS middleware itself rather than
+// being challenged with 401. The single named policy (CorsConfiguration.PolicyName)
+// is applied here as the middleware default, covering the REST API; the SignalR
+// hub additionally pins it with RequireCors so its cross-origin access is
+// unmistakable (CORE-OPS-003). It is fail-closed: an origin not on the configured
+// allow-list receives no Access-Control-Allow-Origin header and the browser blocks
+// the call.
+app.UseCors(CorsConfiguration.PolicyName);
 
 // Authentication runs before authorization, which runs before the endpoints, per
 // the documented request flow (docs/02_ARCHITECTURE.md). The health endpoints

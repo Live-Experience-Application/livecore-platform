@@ -429,6 +429,35 @@ through the `LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment
 variables; with them unset it stays on in-memory SQLite, so local runs need no
 database server.
 
+### Reverse-proxy edge: CORS, forwarded headers and HTTPS posture
+
+The API is meant to run **behind a TLS-terminating reverse proxy** (CORE-OPS-003).
+Three runtime settings make that posture correct and safe, all **fail-closed by
+default** (the full deployment guide is in `docs/13_SELF_HOSTING_REQUIREMENTS.md`):
+
+- **CORS allow-list (`Cors:AllowedOrigins`).** A browser/PWA front-end on a
+  different origin may call the REST API **and** the `/hubs` SignalR endpoint only
+  from an origin on this configured allow-list (one named policy applied to both,
+  with credentials, because the list is always explicit origins — never a
+  wildcard). The default is fail-closed: with no configured origins **no**
+  cross-origin browser client is allowed (a disallowed origin's preflight gets no
+  `Access-Control-Allow-Origin` header). Configure it as a list, e.g.
+  `Cors__AllowedOrigins__0=https://app.example.com`. CORS is a browser-enforced
+  boundary layered on the OIDC/tenant checks every endpoint already applies — it
+  never widens server-side authorization (`docs/07_SECURITY_THREAT_MODEL.md`).
+- **Forwarded headers (`ForwardedHeaders:KnownProxies` / `:KnownNetworks`).**
+  `UseForwardedHeaders` restores the real client scheme/host/IP from the proxy's
+  `X-Forwarded-Proto`/`-Host`/`-For` headers, but only when the immediate peer is a
+  **trusted** proxy: loopback by default, plus any proxy IP / CIDR network named in
+  configuration (e.g. `ForwardedHeaders__KnownNetworks__0=10.0.0.0/8`). With
+  nothing configured only loopback is trusted, so an untrusted client cannot spoof
+  `X-Forwarded-Proto: https` (threat T7). TLS is terminated at the proxy; the app
+  adds no HTTPS redirect/HSTS of its own (that boundary lives at the edge).
+- **Constrained host header (`AllowedHosts`).** No longer `*` — the default permits
+  only `localhost;127.0.0.1`, and a deployment sets its real public host(s) (e.g.
+  `AllowedHosts=app.example.com`) so requests with an unexpected `Host` are
+  rejected.
+
 ### Tenant model and HTTP API
 
 The Identity and Tenant Boundaries epic builds the tenant model in the
