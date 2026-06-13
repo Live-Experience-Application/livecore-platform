@@ -75,7 +75,7 @@ apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
-packages/design-tokens   @livecore/design-tokens - design tokens/theme contracts (skeleton)
+packages/design-tokens   @livecore/design-tokens - generic design tokens and theme contracts
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
@@ -215,6 +215,29 @@ Details — never the access token or request body, so a `404` hidden resource o
 the package, type-checks the compile-time type assertions (`tsconfig.test.json`)
 and runs package-build tests against an injected transport with the Node built-in
 test runner.
+
+### TypeScript design tokens package
+
+`@livecore/design-tokens` (`packages/design-tokens`) is the generic,
+product-neutral design-token contract a vertical app themes the Core UI with
+(CORE-SDK-003). Core owns the **contract** — the token categories (`color`,
+`spacing`, `typography`, `radius`, `shadow`, `breakpoint`, `motion`) and the
+stable generic keys within each (the semantic color roles, the t-shirt scales,
+the motion steps), exported as `as const` tuples alongside their string-literal
+unions exactly like the `@livecore/contracts` enums — plus a neutral `baseTheme`
+default that satisfies the contract. A vertical owns the **values**: it re-skins
+the Core UI by defining its own `Theme` (typically by spreading `baseTheme.tokens`
+and overriding only what it wants), and the `defineTheme` helper makes the
+compiler check that no required token is dropped. Themes are a vertical extension
+mechanism (`docs/04_PRODUCT_BOUNDARIES.md`), so the package carries only generic
+UI vocabulary and no vertical visual identity (`AGENTS.md`).
+
+The package is types-first and adds no runtime dependencies; its stable runtime
+surface is the scale-key tuples (for enumeration/validation), the `baseTheme`
+value and the `defineTheme` authoring helper. Its `test` script builds the
+package, type-checks the compile-time type assertions (`tsconfig.test.json`) and
+runs package-build tests against the compiled output with the Node built-in test
+runner.
 
 ### Boundary scan
 

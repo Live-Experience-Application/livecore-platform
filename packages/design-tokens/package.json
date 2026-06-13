@@ -2,7 +2,7 @@
   "name": "@livecore/design-tokens",
   "version": "0.0.0",
   "private": true,
-  "description": "Generic design tokens and theme contracts for LiveCore vertical apps. Skeleton only; token content arrives with CORE-SDK-003.",
+  "description": "Generic, product-neutral design tokens and theme contracts for LiveCore vertical apps: the token contract (color, spacing, typography, radius, shadow, breakpoint, motion), the stable scale keys, a neutral base theme and a type-safe theme authoring helper.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
