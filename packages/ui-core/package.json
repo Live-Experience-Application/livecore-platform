@@ -2,7 +2,7 @@
   "name": "@livecore/ui-core",
   "version": "0.0.0",
   "private": true,
-  "description": "Generic React components and design primitives for LiveCore vertical apps. Skeleton only; component content arrives with CORE-SDK-004.",
+  "description": "Generic, product-neutral UI primitive contracts for LiveCore vertical apps: the variant vocabularies (tone, size, emphasis, surface level, layout), the typed prop shape of each generic primitive and the pure variant-resolution defaults. Framework-agnostic and types-first; verticals render the actual components.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

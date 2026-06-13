@@ -74,7 +74,7 @@ apps/worker              Background worker host (LiveCore.Worker) - runs the ass
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
-packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
+packages/ui-core         @livecore/ui-core    - generic, framework-agnostic UI primitive contracts (variant vocabularies, prop shapes, variant defaults)
 packages/design-tokens   @livecore/design-tokens - generic design tokens and theme contracts
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
@@ -163,9 +163,9 @@ Apply formatting:
 pnpm run format
 ```
 
-Run package test scripts (the `@livecore/contracts` and `@livecore/sdk-ts`
-packages define type and package-build tests; packages without a `test` script
-are skipped):
+Run package test scripts (the `@livecore/contracts`, `@livecore/sdk-ts`,
+`@livecore/design-tokens` and `@livecore/ui-core` packages define type and
+package-build tests; packages without a `test` script are skipped):
 
 ```bash
 pnpm --recursive run test
@@ -238,6 +238,33 @@ value and the `defineTheme` authoring helper. Its `test` script builds the
 package, type-checks the compile-time type assertions (`tsconfig.test.json`) and
 runs package-build tests against the compiled output with the Node built-in test
 runner.
+
+### TypeScript UI core package
+
+`@livecore/ui-core` (`packages/ui-core`) is the generic, product-neutral UI
+primitive **contract** a vertical app builds its components on (CORE-SDK-004).
+Core owns the **contract**: the variant vocabularies a primitive's props are
+drawn from (the semantic `tone`, the `size` and `emphasis` scales, the surface
+level and the layout options), exported as `as const` tuples alongside their
+string-literal unions exactly like the `@livecore/contracts` enums and the
+`@livecore/design-tokens` scales; the typed prop shape of each generic primitive
+(`Surface`, `Stack`, `Text`, `Heading`, `Button`, `Badge`, `Field`, `Spinner`,
+`Divider`, `Avatar`); and the pure `resolveVariant` helper plus its
+`DEFAULT_VARIANT`, which fill a partially-specified variant with Core's stable
+defaults so every vertical resolves a primitive's tone, size and emphasis
+identically. A vertical owns the **rendering**: it implements the actual
+components (typically React, but the contract is framework-agnostic) that accept
+these props and apply their theme (`@livecore/design-tokens`). Vertical-specific
+screens and UI wrappers are a vertical extension mechanism
+(`docs/04_PRODUCT_BOUNDARIES.md`); Core defines no screen and carries only
+generic UI vocabulary and no vertical domain language (`AGENTS.md`).
+
+The package is types-first and adds no runtime dependencies; its stable runtime
+surface is the variant tuples (for enumeration/validation), the default
+constants and the `resolveVariant` helper, with the prop contracts being
+compile-time types. Its `test` script builds the package, type-checks the
+compile-time type assertions (`tsconfig.test.json`) and runs package-build tests
+against the compiled output with the Node built-in test runner.
 
 ### Boundary scan
 
