@@ -92,4 +92,31 @@ public interface IAssetLinkRepository
         AssetLinkTargetType targetType,
         Guid targetId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES every link attaching the given asset to ANY target WITHIN the given organization and
+    /// workspace, and returns the number removed (CORE-LIFE-006, the "Resource Lifecycle and Deletion"
+    /// epic). This is the cleanup the asset's OWN deletion requires — the inverse of
+    /// <see cref="RemoveByTargetAsync"/> (which removes a target's links when the target is deleted). Unlike
+    /// the polymorphic <c>target_id</c>, <c>asset_links.asset_id</c> IS a real foreign key into
+    /// <c>assets(id)</c> configured <c>ON DELETE CASCADE</c>, so the database would itself remove these links
+    /// when the asset row is deleted; the <see cref="AssetDeletionService"/> removes them EXPLICITLY first
+    /// anyway so the cascade is deterministic, observable and identical across providers (and the story's
+    /// "its links are removed" is a directly testable effect, not an implicit side effect), exactly as the
+    /// scene deletion removes its FK-backed child content blocks explicitly
+    /// (docs/adr/0012-resource-deletion-cascades-dependents.md step 2). The database cascade then remains as
+    /// defence in depth. This removes only the LINK rows, never the linked target content blocks / entities
+    /// (a target can outlive an asset it was linked to). The deletion is tenant-, workspace- AND asset-scoped
+    /// (the predicate leads with <c>organization_id</c> then <c>workspace_id</c>), so a foreign tenant's or
+    /// workspace's links are NEVER removed even when the asset id would otherwise be addressable (threat
+    /// T5/T1). Removing the links of an asset that has none is a no-op that returns 0.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or asset id is empty.
+    /// </exception>
+    Task<int> RemoveByAssetAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid assetId,
+        CancellationToken cancellationToken);
 }

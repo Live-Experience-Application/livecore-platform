@@ -575,6 +575,21 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // before minting a URL.
     builder.Services.AddScoped<AssetDownloadPolicy>();
 
+    // Asset deletion command (CORE-LIFE-006, the "Resource Lifecycle and Deletion" epic): the Assets module's
+    // "a host can delete an asset" command. Registered here, inside the persistence conditional, because it
+    // composes the asset and asset-link repositories, the IAssetStorage adapter and the audit repository (all
+    // registered above) plus the shared DbContext for a single transaction. It loads the asset through the
+    // tenant- AND workspace-scoped IAssetRepository.FindByIdAsync FIRST (an asset in another workspace/tenant
+    // is never reachable; threats T1/T5), then REMOVES its asset_links (the FK-backed link rows, removed
+    // explicitly so the cascade is deterministic — ADR 0012 step 2), DELETES the underlying storage object via
+    // IAssetStorage BEFORE the metadata row (so a storage failure leaves no dangling row — mirrors the
+    // upload-intent ordering), deletes the row and appends an AssetDeleted audit record, all atomically
+    // (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md). With no storage configured
+    // the fail-closed UnconfiguredAssetStorage makes the whole transaction roll back having changed nothing and
+    // the endpoint returns 503 (private-by-default holds even unconfigured; threat T4). Consumed by
+    // DELETE /api/v1/assets/{assetId} (wired by MapAssetEndpoints).
+    builder.Services.AddScoped<AssetDeletionService>();
+
     // Entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic): the Entities
     // module's "a host can delete an entity" command. Registered here, inside the persistence conditional,
     // because it composes the entity, entity-relationship, visibility-rule, asset-link and audit
@@ -915,15 +930,16 @@ app.MapEntityRelationshipEndpoints();
 app.MapEntityEndpoints();
 
 // Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005
-// linking): the Assets module's HTTP routes, POST /api/v1/assets/upload-intent,
-// GET /api/v1/assets/{assetId}/download-url and POST /api/v1/assets/{assetId}/links. They live
+// linking, CORE-LIFE-006 deletion): the Assets module's HTTP routes,
+// POST /api/v1/assets/upload-intent, GET /api/v1/assets/{assetId}/download-url,
+// POST /api/v1/assets/{assetId}/links and DELETE /api/v1/assets/{assetId}. They live
 // in an authenticated route group and fail closed (503) when persistence is not configured,
 // exactly like the reveal/scene endpoints. No new DI registration beyond the upload-intent
-// service, the asset link service, the download policy and the storage location above is
-// required: the tenant context resolver, the asset/asset-link repositories, the workspace member
-// repository and the IAssetStorage adapter they reuse are already registered. Upload-intent
-// authorizes the caller by their role in the target workspace (Owner/Admin/Host/CoHost), mints
-// server-side storage coordinates, registers a PENDING asset and returns a short-lived signed
+// service, the asset link service, the download policy, the deletion service and the storage
+// location above is required: the tenant context resolver, the asset/asset-link repositories, the
+// workspace member repository and the IAssetStorage adapter they reuse are already registered.
+// Upload-intent authorizes the caller by their role in the target workspace (Owner/Admin/Host/CoHost),
+// mints server-side storage coordinates, registers a PENDING asset and returns a short-lived signed
 // upload URL. The signed download flow resolves the asset within the query-supplied organization,
 // discovers its workspace from the loaded row, authorizes the caller through the central Assets
 // download policy (host-content roles always; an audience role only when the asset is linked to a
@@ -932,9 +948,14 @@ app.MapEntityEndpoints();
 // flow resolves the asset within the body-supplied organization, authorizes a host-content role,
 // verifies the target content block/entity is in the asset's own workspace (the same-workspace
 // coupling for the polymorphic target; threats T5/T1) and records the link (201; a repeat is 409, a
-// missing target hidden as 404). The asset is private by default and an unconfigured storage
-// backend fails closed with 503 in both signed-URL flows (threat T4 "Asset leak"). The cleanup job
-// (CORE-AST-006) is a later story.
+// missing target hidden as 404). The DELETE flow resolves the asset within the query-supplied
+// organization, discovers its workspace from the loaded row, authorizes a host-content role
+// (every denial hidden as 404, an insufficient role as 403), then removes the asset's links, deletes
+// the storage object BEFORE the row and audits the deletion atomically (cascade, not block;
+// docs/adr/0012-resource-deletion-cascades-dependents.md); 204 on success, a non-existent asset a safe
+// 404. The asset is private by default and an unconfigured storage backend fails closed with 503 in
+// the signed-URL flows AND the deletion flow (threat T4 "Asset leak"). The cleanup job (CORE-AST-006)
+// reclaims abandoned pending intents in the worker.
 app.MapAssetEndpoints();
 
 // Quota-status endpoints (CORE-ENTL-003): the Entitlements module's quota-status reads,

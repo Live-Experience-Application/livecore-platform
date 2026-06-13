@@ -111,6 +111,36 @@ download, and the audit role and any other role are denied fail-closed. The asse
 reached only through the single short-lived signed URL minted after the permission check (the epic
 acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak).
 
+### Host-initiated deletion flow (CORE-LIFE-006)
+
+The asset delete route, `DELETE /api/v1/assets/{assetId}` (`csv/api_routes.csv`, roles
+Host/CoHost/Owner/Admin), lets a host remove an asset directly — until this story an `Available` asset
+could be created, linked and downloaded but never deleted (only the background cleanup job could reclaim
+abandoned `Pending` intents). The route path carries only the asset id, so the target organization is a
+required `?organizationSlug=` query parameter; the asset is loaded **within** that resolved tenant
+(`IAssetRepository.FindByIdInOrganizationAsync`, the predicate leads with `organization_id`), its own
+workspace is **discovered from the loaded row** after the tenant boundary is enforced, and the caller is
+authorized **server-side** by their role in the asset's own workspace — exactly the load-then-authorize
+shape of the signed download route. A caller who cannot see the tenant, an unknown or cross-tenant asset,
+and a non-member of the asset's workspace are all hidden as `404` (never `403`); a known member who lacks
+the delete role is `403`. The delete roles are the host-content `Owner`/`Admin`/`Host`/`CoHost`, the same
+host-capable set that creates upload intents and links assets and that deletes scenes/entities/content
+blocks (`docs/06_AUTHORIZATION_MATRIX.md`; `docs/adr/0012-resource-deletion-cascades-dependents.md`).
+
+The deletion **cascades**, not blocks (ADR 0012). In one transaction it removes the asset's `asset_links`
+(`asset_links.asset_id` is a real `ON DELETE CASCADE` foreign key, so the database would also cascade them;
+the application removes them explicitly first so the cascade is deterministic and the "its links are removed"
+effect is directly testable — ADR 0012 step 2), **then deletes the underlying storage object** via the
+`IAssetStorage` adapter, **then deletes the metadata row**, and appends an `AssetDeleted` audit record. The
+storage object is deleted **before** the metadata row — the same ordering the upload-intent flow uses (mint
+the signed URL before persisting the row) — so a row is never removed while its object remains: a deletion
+never leaves an orphaned object behind, and a storage failure leaves no dangling row. An asset is not a
+visibility resource and is never an asset-link **target**, so there are no `visibility_rules` or target-side
+links to clean up (only the asset's own links). An unconfigured storage backend fails closed (`503`): the
+`UnconfiguredAssetStorage` throws when the object delete is attempted, the whole transaction rolls back having
+removed nothing, and the asset stays private by default even when storage is not configured (threat T4 "Asset
+leak"). On success the route returns `204 No Content`; deleting a non-existent asset is a safe hidden-`404`.
+
 ### Cleanup job (CORE-AST-006)
 
 The asset cleanup job is the lifecycle's final step. It is a periodic background sweep that runs in the
@@ -139,9 +169,11 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - no public object listing
 - upload intent requires authorization
 - download URL requires authorization
+- deletion requires authorization
 - signed URLs are short-lived
 - asset metadata is filtered by visibility rules
 - an asset is audience-accessible only when linked to a visible content block or entity
+- deleting an asset removes its storage object before its metadata row (no orphaned object)
 
 ## Asset lifecycle
 
@@ -152,9 +184,13 @@ Create upload intent
   -> Core stores asset metadata
   -> asset can be linked to ContentBlock or Entity
   -> visibility controls whether it can be accessed
+  -> a host can delete the asset (its links and storage object are removed)
 
 (an upload intent that is never confirmed within the grace window is reclaimed
  by the background cleanup job: its object and metadata row are deleted)
+
+(a host-initiated delete removes the asset's links, then its storage object,
+ then its metadata row — object before row, so no orphaned object is left behind)
 ```
 
 ## Metadata

@@ -12,12 +12,21 @@ namespace LiveCore.Api.Assets;
 /// command, docs/02_ARCHITECTURE.md), mirroring <see cref="LiveCore.Api.Visibility.RevealEndpoints"/>,
 /// <see cref="LiveCore.Api.Scenes.SceneEndpoints"/> and <see cref="LiveCore.Api.Content.ContentBlockEndpoints"/>.
 ///
-/// Routes owned by these stories (csv/api_routes.csv lines 19-20):
+/// Routes owned by these stories (csv/api_routes.csv):
 /// <list type="bullet">
 ///   <item><c>POST /api/v1/assets/upload-intent</c> — module <b>Assets</b>, roles
 ///   "Host,CoHost,Owner,Admin", "Creates upload intent" (CORE-AST-003).</item>
 ///   <item><c>GET /api/v1/assets/{assetId}/download-url</c> — module <b>Assets</b>, "authorized viewers",
 ///   "Signed URL after permission check" (CORE-AST-004).</item>
+///   <item><c>POST /api/v1/assets/{assetId}/links</c> — module <b>Assets</b>, roles
+///   "Host,CoHost,Owner,Admin", "Link asset to content block or entity" (CORE-AST-005).</item>
+///   <item><c>DELETE /api/v1/assets/{assetId}</c> — module <b>Assets</b>, roles "Host,CoHost,Owner,Admin",
+///   host-initiated asset deletion (CORE-LIFE-006): removes the asset together with its links and its
+///   underlying storage object, atomically and audited, through <see cref="AssetDeletionService"/>. The
+///   tenant resolution and object-level authorization mirror the signed download route; on success it returns
+///   <c>204 No Content</c>, and deleting a non-existent asset is a safe hidden-404. The storage object is
+///   deleted BEFORE the row, so an unconfigured storage backend fails closed with 503 and leaves no dangling
+///   row (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md; threat T4).</item>
 /// </list>
 ///
 /// UPLOAD-INTENT (CORE-AST-003) — the command registers a new <see cref="AssetStatus.Pending"/>
@@ -108,6 +117,7 @@ internal static class AssetEndpoints
         group.MapPost("/upload-intent", CreateUploadIntentAsync);
         group.MapGet("/{assetId}/download-url", CreateDownloadUrlAsync);
         group.MapPost("/{assetId}/links", CreateAssetLinkAsync);
+        group.MapDelete("/{assetId}", DeleteAssetAsync);
 
         return endpoints;
     }
@@ -443,6 +453,135 @@ internal static class AssetEndpoints
         };
     }
 
+    // DELETE /api/v1/assets/{assetId}?organizationSlug={slug}
+    //
+    // Deletes ONE asset (CORE-LIFE-006, the "Resource Lifecycle and Deletion" epic): a host removes an asset
+    // together with its asset links and its underlying storage object. The tenant resolution and object-level
+    // authorization mirror the signed download route exactly — the route path carries only {assetId}, so the
+    // target organization is a required ?organizationSlug= QUERY parameter resolved by the TenantContextResolver;
+    // the asset is loaded WITHIN that resolved tenant via FindByIdInOrganizationAsync (the predicate leads with
+    // the organization id, so a foreign-tenant asset is never found), the asset's own workspace id is discovered
+    // from the loaded row AFTER the tenant boundary has been enforced, and the caller is authorized by their
+    // WORKSPACE role in the ASSET'S own workspace. Load-then-authorize, fail-closed at every step and never
+    // leaking why:
+    //   * 503 when persistence is off; 401 when the principal cannot be mapped.
+    //   * A missing organizationSlug is 400; a malformed/empty asset id, a denied tenant resolution, an asset
+    //     not present in the resolved tenant, and a caller who is not a member of the asset's workspace are ALL
+    //     hidden as 404 (never distinguishable, never 403 for a non-member; threats T1/T5).
+    //   * A known member of the asset's workspace who lacks the delete role is 403. Assets are host-prepared
+    //     content, so the delete role set is the host-capable Owner/Admin/Host/CoHost (the same set that creates
+    //     upload intents and links assets, and that deletes scenes/entities/content blocks;
+    //     docs/06_AUTHORIZATION_MATRIX.md). MembershipRole is non-linear, so the role check is EXACT, never an
+    //     ordering comparison.
+    //   * 503 when no object storage is configured: the deletion service deletes the storage object BEFORE the
+    //     metadata row, so the fail-closed UnconfiguredAssetStorage throws and the transaction rolls back having
+    //     deleted NOTHING (no dangling row, private-by-default holds even unconfigured; threat T4), exactly as
+    //     the upload-intent flow fails closed.
+    // On success the deletion (its link cascade, storage object delete and audit append) runs atomically through
+    // the tenant- and workspace-scoped deletion service and returns 204 No Content; deleting a non-existent
+    // asset is a safe hidden-404.
+    private static async Task<IResult> DeleteAssetAsync(
+        HttpContext httpContext,
+        string assetId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required to resolve the tenant; the route path carries only the asset
+        // id, so it is a query parameter exactly like the signed download route.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty asset id can never address a stored asset; hidden as 404, never echoing why.
+        if (!Guid.TryParse(assetId, out var assetGuid) || assetGuid == Guid.Empty)
+        {
+            return HiddenAsset();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the asset as 404 (threat T5).
+            return HiddenAsset();
+        }
+
+        var context = resolution.Context;
+
+        // Load the asset WITHIN the resolved tenant (org boundary leads); a cross-tenant or unknown asset is
+        // hidden as 404. The asset's own workspace is then discovered from the loaded row, AFTER the tenant
+        // boundary has been enforced (mirrors the signed download and link routes).
+        var asset = await deps.Assets
+            .FindByIdInOrganizationAsync(context.OrganizationId, assetGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (asset is null)
+        {
+            return HiddenAsset();
+        }
+
+        // Object-level authorization: the caller must be a member of the ASSET'S workspace. A caller who is a
+        // member of the tenant but NOT of the asset's workspace must not learn the asset exists, so a missing
+        // membership is hidden as 404 (not 403) — the same rule as the download route (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, asset.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenAsset();
+        }
+
+        // The caller is a known member of the asset's workspace, so an insufficient role is 403. The delete
+        // (host-preparation) roles are Owner/Admin/Host/CoHost (the same host-capable set that creates upload
+        // intents and links, and that deletes scenes/entities/content blocks;
+        // docs/06_AUTHORIZATION_MATRIX.md; docs/adr/0012-resource-deletion-cascades-dependents.md).
+        // MembershipRole is non-linear, so this is an EXACT set membership check, never an ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized: delete the asset (cascade its links, delete the storage object, then the row, append the
+        // audit record) atomically. The service re-loads the asset through the tenant- AND workspace-scoped
+        // FindByIdAsync, so an asset in another workspace or tenant is never deleted even when its id is known;
+        // an unknown id is a SAFE 404 that changes nothing (threats T1/T5).
+        var now = timeProvider.GetUtcNow();
+        AssetDeletionResult result;
+        try
+        {
+            result = await deps.AssetDeletion
+                .DeleteAsync(context.OrganizationId, asset.WorkspaceId, assetGuid, context.UserProfileId, now, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (AssetStorageNotConfiguredException)
+        {
+            // No object storage is configured for this deployment: the deletion service deletes the storage
+            // object before the row, so the whole transaction rolled back having removed NOTHING (no dangling
+            // row, private-by-default holds; threat T4). The response never leaks any storage coordinate (the
+            // exception message carries only the operation name).
+            return StorageUnavailable();
+        }
+
+        return result == AssetDeletionResult.Deleted
+            ? Results.NoContent()
+            : HiddenAsset();
+    }
+
     /// <summary>
     /// Parses an <see cref="AssetLinkTargetType"/> from its NAME only (case-insensitive), rejecting
     /// null/blank, numeric values and unknown names — so a client cannot smuggle in an undefined enum value
@@ -481,6 +620,7 @@ internal static class AssetEndpoints
         var storage = services.GetService<IAssetStorage>();
         var assetLinks = services.GetService<AssetLinkService>();
         var downloadPolicy = services.GetService<AssetDownloadPolicy>();
+        var assetDeletion = services.GetService<AssetDeletionService>();
 
         if (resolver is null
             || workspaceMembers is null
@@ -488,14 +628,15 @@ internal static class AssetEndpoints
             || assets is null
             || storage is null
             || assetLinks is null
-            || downloadPolicy is null)
+            || downloadPolicy is null
+            || assetDeletion is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new AssetEndpointDependencies(
-            resolver, workspaceMembers, uploadIntents, assets, storage, assetLinks, downloadPolicy);
+            resolver, workspaceMembers, uploadIntents, assets, storage, assetLinks, downloadPolicy, assetDeletion);
         return true;
     }
 
@@ -585,5 +726,6 @@ internal static class AssetEndpoints
         IAssetRepository Assets,
         IAssetStorage Storage,
         AssetLinkService AssetLinks,
-        AssetDownloadPolicy DownloadPolicy);
+        AssetDownloadPolicy DownloadPolicy,
+        AssetDeletionService AssetDeletion);
 }

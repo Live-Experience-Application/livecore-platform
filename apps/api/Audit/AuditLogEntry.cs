@@ -649,6 +649,72 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records an asset deletion (<see cref="AuditAction.AssetDeleted"/>) — the audit fact written when an
+    /// authorized host deletes an asset, removing its links and the underlying storage object (CORE-LIFE-006).
+    /// It is the asset counterpart of <see cref="ForEntityDeletion"/>, <see cref="ForContentBlockDeletion"/>
+    /// and <see cref="ForSceneDeletion"/> and, like them, a thin specialization of <see cref="Create"/> that
+    /// pins the action and applies the deletion producer's stricter contract: the tenant, the workspace the
+    /// asset belonged to, the authenticated actor (the host who deleted the asset) and the deleted asset
+    /// resource (its generic kind name and surrogate id) are all REQUIRED, where the generic factory leaves
+    /// them optional. A deletion is a removal rather than a transition, so there is NO before/after state pair
+    /// (both null) — the asset's lifecycle status is irrelevant once it is gone. The resource kind is passed as
+    /// a generic NAME string (e.g. <c>Asset</c>) so the Audit module does not depend on the Assets module's
+    /// types, exactly like <see cref="ForVisibilityRuleChange"/> takes visibility state names as strings. Every
+    /// value is an identifier or a generic name — never a storage coordinate or any free-form content (threats
+    /// T4/T7) — and the audit row outlives the now-deleted asset it references because the reference is a
+    /// recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the deletion happened in (required).</param>
+    /// <param name="workspaceId">The workspace the deleted asset belonged to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the deletion (required; the audited actor).</param>
+    /// <param name="assetResourceType">The deleted asset's generic kind name (e.g. Asset).</param>
+    /// <param name="assetId">The deleted asset's surrogate id.</param>
+    /// <param name="createdAt">When the deletion happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the asset resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForAssetDeletion(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string assetResourceType,
+        Guid assetId,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(assetResourceType))
+        {
+            throw new ArgumentException("Asset resource type must not be empty.", nameof(assetResourceType));
+        }
+
+        if (assetId == Guid.Empty)
+        {
+            throw new ArgumentException("Asset id must not be empty.", nameof(assetId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.AssetDeleted,
+            actorUserProfileId,
+            assetResourceType,
+            assetId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

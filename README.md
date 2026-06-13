@@ -715,9 +715,9 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`) is extensible without a schema
-change because the action persists by its stable name; each producer command wires its own action in its own
-story. The member-removal command (CORE-LIFE-001) is the first wired producer of
+`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`) is extensible without
+a schema change because the action persists by its stable name; each producer command wires its own action in
+its own story. The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
 workspace or organization member (the threat-model control for access revocation).
 The entity-deletion command (CORE-LIFE-003) wires `EntityDeleted`, appending an entry
@@ -729,7 +729,10 @@ visibility rules and asset links being consequences of the one action — the co
 `docs/adr/0012-resource-deletion-cascades-dependents.md` ("audit the deletion"). The scene-deletion command
 (CORE-LIFE-005) wires `SceneDeleted` identically — one append-only fact per scene deletion, its cascaded
 child content blocks, visibility rules and asset links and the remaining scenes' order re-pack being
-consequences of the one action.
+consequences of the one action. The host-initiated asset-deletion command (CORE-LIFE-006) wires `AssetDeleted`
+the same way — one append-only fact per asset deletion, its cascaded asset links and the removed storage object
+being consequences of the one action; the storage object key is never recorded (only the asset id; threats
+T4/T7).
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
@@ -1374,6 +1377,61 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Because the worker now
 reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
 `apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
+
+### Asset deletion
+
+A host can delete an asset; its links are removed and the underlying storage object is deleted
+(CORE-LIFE-006, the "Resource Lifecycle and Deletion" epic):
+
+| Method   | Route                      | Authorized callers                        |
+| -------- | -------------------------- | ----------------------------------------- |
+| `DELETE` | `/api/v1/assets/{assetId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+Until now an asset could be created (CORE-AST-003), linked (CORE-AST-005) and downloaded (CORE-AST-004)
+but never removed by a host — only the background cleanup job (CORE-AST-006) could reclaim still-`Pending`,
+never-confirmed upload intents, so an `Available` asset could not be deleted at all. This adds the
+host-initiated path. The route path carries only the `{assetId}`, so the target organization is a required
+`?organizationSlug=` query parameter (the same token-claim-and-membership tenant check as the signed download
+route). The asset is loaded **within** the resolved tenant (`FindByIdInOrganizationAsync`, the predicate leads
+with `organization_id`), its own workspace is **discovered from the loaded row** after the tenant boundary is
+enforced, and the caller is authorized by their role in the asset's own workspace — so an asset in another
+workspace or tenant is never reachable to delete even when its id is known (threats T1/T5).
+
+**Cascade, not block** (`docs/adr/0012-resource-deletion-cascades-dependents.md`), handled consistently with
+the entity (CORE-LIFE-003), content-block (CORE-LIFE-004) and scene (CORE-LIFE-005) deletions. In **one
+transaction** the deletion:
+
+- removes the asset's **`asset_links`** — `asset_links.asset_id` is a real `ON DELETE CASCADE` foreign key, so
+  the database would itself cascade them when the row is removed; the application removes them **explicitly
+  first** so the cascade is deterministic, observable and provider-independent, and the story's "its links are
+  removed" is a directly testable effect (the database cascade then remains as defence in depth). Only the link
+  rows are removed — the linked content blocks/entities are untouched. An asset is **not** a visibility resource
+  and is never an asset-link **target**, so there are no `visibility_rules` or target-side links to clean up;
+- then **deletes the underlying storage object** via the `IAssetStorage` adapter
+  (`IAssetStorage.DeleteObjectAsync`, the same server-side delete the cleanup job uses — no signed URL, no bytes
+  served, so it only ever **removes** access; threat T4 "Asset leak");
+- then **deletes the metadata row** and appends an append-only `AssetDeleted` audit record.
+
+The storage object is deleted **before** the metadata row — the same ordering the upload intent uses (mint the
+signed URL before persisting the row) — so a row is never removed while its object remains: a deletion never
+leaves an orphaned object behind, and **a storage failure leaves no dangling row**. When no object storage is
+configured the fail-closed `UnconfiguredAssetStorage` throws when the object delete is attempted, the whole
+transaction rolls back having removed nothing, and the request is **`503`** (the private-by-default posture
+holds even unconfigured, exactly as the upload-intent flow fails closed).
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, is not a member of
+the asset's workspace, or names an asset that belongs to another workspace/tenant — and **deleting a
+non-existent asset is a safe `404`** (it reveals nothing and changes nothing). A known workspace member who
+lacks the delete role is `403`; assets are host-prepared content, so the delete role set is the host-capable
+`Owner`/`Admin`/`Host`/`CoHost` (the same set that creates upload intents and links assets and deletes
+scenes/entities/content blocks), matched exactly (`MembershipRole` is non-linear). On success the route returns
+`204 No Content`.
+
+Every successful deletion appends an append-only `AssetDeleted` audit record (see "Audit log" above) capturing
+the tenant, the workspace, the authenticated **actor** (the host who deleted) and the deleted asset — never any
+storage coordinate (only the asset id; threats T4/T7). The audit record is a recorded fact, so it survives the
+now-deleted asset it references. Faithful to the entity-, content-block- and scene-deletion precedents, the
+deletion emits no realtime session event (the event catalog defines none for asset deletion).
 
 ### Export jobs
 

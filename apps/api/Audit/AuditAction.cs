@@ -123,4 +123,22 @@ public enum AuditAction
     /// (<see cref="AuditLogEntry.ForSceneDeletion"/>).
     /// </summary>
     SceneDeleted = 8,
+
+    /// <summary>
+    /// A host deleted an asset, removing its links and the underlying storage object — the host-initiated
+    /// asset deletion command (CORE-LIFE-006, the "Resource Lifecycle and Deletion" epic). Until now an
+    /// available asset could be created and linked but never removed; this adds the inverse. Recording the
+    /// deletion keeps an asset removal auditable exactly as an entity, content-block or scene removal is, the
+    /// consistent application of docs/adr/0012-resource-deletion-cascades-dependents.md ("All resource-deletion
+    /// implementations follow this decision: cascade the dependents, in the application, inside one transaction,
+    /// and audit the deletion"). A generic, workspace-scoped audit fact whose actor is the host who deleted the
+    /// asset and whose resource is the deleted asset (its generic kind name and surrogate id). The deletion is a
+    /// removal, not a transition to a new state, so there is no before/after state pair (the asset's lifecycle
+    /// status is irrelevant once it is gone); the asset's links the deletion cascades and the storage object the
+    /// deletion removes are consequences of the same action and are not separately audited, exactly as
+    /// <see cref="EntityDeleted"/>, <see cref="ContentBlockDeleted"/> and <see cref="SceneDeleted"/> record one
+    /// fact for the deletion they perform (<see cref="AuditLogEntry.ForAssetDeletion"/>). The storage object key
+    /// is never recorded — only identifiers, never a means to reach private content (threats T4/T7).
+    /// </summary>
+    AssetDeleted = 9,
 }

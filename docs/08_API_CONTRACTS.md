@@ -56,6 +56,7 @@ GET    /api/v1/participants/{participantId}/visible-feed
 POST   /api/v1/assets/upload-intent
 GET    /api/v1/assets/{assetId}/download-url
 POST   /api/v1/assets/{assetId}/links
+DELETE /api/v1/assets/{assetId}
 ```
 
 ## DTO design rules

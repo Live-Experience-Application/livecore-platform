@@ -336,6 +336,75 @@ public sealed class AssetLinkRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveByAsset_removes_only_the_assets_links_and_returns_the_count()
+    {
+        // CORE-LIFE-006: the asset deletion removes its own links by asset id. Only the named asset's links
+        // go; another asset's links in the same workspace survive.
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_subject);
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id, "org/ws/a.bin");
+        var other = await SeedAssetAsync(org.Id, ws.Id, user.Id, "org/ws/b.bin");
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, Guid.CreateVersion7(), user.Id);
+        var survivor = await SeedLinkAsync(org.Id, ws.Id, other.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+
+        await using (var context = CreateContext())
+        {
+            var removed = await new AssetLinkRepository(context)
+                .RemoveByAssetAsync(org.Id, ws.Id, asset.Id, CancellationToken.None);
+            Assert.Equal(2, removed);
+        }
+
+        await using var verify = CreateContext();
+        var repository = new AssetLinkRepository(verify);
+        Assert.Empty(await repository.ListByAssetAsync(org.Id, ws.Id, asset.Id, CancellationToken.None));
+        // The other asset's link survives — the removal is asset-scoped, never over-reaching.
+        Assert.NotNull(await repository.FindByIdAsync(org.Id, ws.Id, survivor.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RemoveByAsset_is_a_no_op_returning_zero_for_an_asset_with_no_links()
+    {
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_subject);
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id, "org/ws/a.bin");
+
+        await using var context = CreateContext();
+        var removed = await new AssetLinkRepository(context)
+            .RemoveByAssetAsync(org.Id, ws.Id, asset.Id, CancellationToken.None);
+
+        Assert.Equal(0, removed);
+    }
+
+    [Fact]
+    public async Task RemoveByAsset_never_removes_links_through_a_foreign_tenant_or_workspace()
+    {
+        // Mandatory negative isolation test (threat T5/T1): the removal is tenant- and workspace-scoped, so an
+        // asset's links are never removed through another tenant's or workspace's id even when the asset id is
+        // known.
+        var orgA = await SeedOrganizationAsync(_organizationSlugA);
+        var orgB = await SeedOrganizationAsync(_organizationSlugB);
+        var wsInA = await SeedWorkspaceAsync(orgA.Id, _workspaceSlugA);
+        var siblingInA = await SeedWorkspaceAsync(orgA.Id, _workspaceSlugB);
+        var user = await SeedUserAsync(_subject);
+        var asset = await SeedAssetAsync(orgA.Id, wsInA.Id, user.Id, "org/ws/a.bin");
+        var link = await SeedLinkAsync(orgA.Id, wsInA.Id, asset.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AssetLinkRepository(context);
+            // Foreign tenant (org B) and sibling workspace both remove nothing.
+            Assert.Equal(0, await repository.RemoveByAssetAsync(orgB.Id, wsInA.Id, asset.Id, CancellationToken.None));
+            Assert.Equal(0, await repository.RemoveByAssetAsync(orgA.Id, siblingInA.Id, asset.Id, CancellationToken.None));
+        }
+
+        await using var verify = CreateContext();
+        Assert.NotNull(await new AssetLinkRepository(verify).FindByIdAsync(orgA.Id, wsInA.Id, link.Id, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Lookups_reject_empty_ids()
     {
         await using var context = CreateContext();
@@ -348,5 +417,8 @@ public sealed class AssetLinkRepositoryTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByAssetAsync(Guid.Empty, id, id, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByAssetAsync(id, Guid.Empty, id, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByAssetAsync(id, id, Guid.Empty, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.RemoveByAssetAsync(Guid.Empty, id, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.RemoveByAssetAsync(id, Guid.Empty, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.RemoveByAssetAsync(id, id, Guid.Empty, CancellationToken.None));
     }
 }
