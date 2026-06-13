@@ -224,7 +224,9 @@ public sealed class Participant
         string displayName,
         DateTimeOffset createdAt)
         => new(
-            Guid.CreateVersion7(),
+            // UUIDv7 id derived from the creation time so ordering by id (ListActiveByWorkspace, the
+            // session audience fan-out) is chronological even for participants created in the same ms.
+            Guid.CreateVersion7(createdAt),
             organizationId,
             workspaceId,
             userProfileId,

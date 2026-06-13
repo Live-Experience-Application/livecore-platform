@@ -122,9 +122,9 @@ public sealed class RecapRepositoryTests : IDisposable
         return profile;
     }
 
-    private async Task<Recap> SeedHostRecapAsync(Guid organizationId, Guid workspaceId, Guid sessionId, Guid generatedBy)
+    private async Task<Recap> SeedHostRecapAsync(Guid organizationId, Guid workspaceId, Guid sessionId, Guid generatedBy, DateTimeOffset? generatedAt = null)
     {
-        var recap = Recap.GenerateByHost(organizationId, workspaceId, sessionId, generatedBy, _summary, _generatedAt);
+        var recap = Recap.GenerateByHost(organizationId, workspaceId, sessionId, generatedBy, _summary, generatedAt ?? _generatedAt);
         await using var context = CreateContext();
         var repository = new RecapRepository(context);
         await repository.AppendAsync(recap, CancellationToken.None);
@@ -184,8 +184,10 @@ public sealed class RecapRepositoryTests : IDisposable
         var session = await SeedSessionAsync(organization.Id, workspace.Id, "Opening night");
         var user = await SeedUserAsync(_issuer, _subject);
 
-        var first = await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id);
-        var second = await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id);
+        // Distinct produced times so the order assertion is deterministic (the surrogate id is a UUIDv7
+        // derived from the produced time, not the wall-clock instant the rows were constructed).
+        var first = await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id, _generatedAt);
+        var second = await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id, _generatedAt.AddSeconds(1));
 
         await using var context = CreateContext();
         var repository = new RecapRepository(context);

@@ -123,9 +123,10 @@ public sealed class ParticipantRepositoryTests : IDisposable
         Guid organizationId,
         Guid workspaceId,
         Guid? userProfileId,
-        string displayName)
+        string displayName,
+        DateTimeOffset? createdAt = null)
     {
-        var participant = Participant.Create(organizationId, workspaceId, userProfileId, displayName, _createdAt);
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId, displayName, createdAt ?? _createdAt);
         await using var context = CreateContext();
         var repository = new ParticipantRepository(context);
         Assert.Equal(
@@ -259,9 +260,12 @@ public sealed class ParticipantRepositoryTests : IDisposable
         // deterministic (by the time-ordered surrogate id).
         var organization = await SeedOrganizationAsync(_organizationSlugA);
         var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
-        var first = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 1");
-        var second = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 2");
-        var removed = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Gone");
+        // Distinct creation times so the order assertion is deterministic: the surrogate id is a UUIDv7
+        // derived from createdAt, so a later participant sorts after an earlier one regardless of the
+        // wall-clock instant the rows were constructed.
+        var first = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 1", _createdAt);
+        var second = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Guest 2", _createdAt.AddSeconds(1));
+        var removed = await SeedParticipantAsync(organization.Id, workspace.Id, userProfileId: null, "Gone", _createdAt.AddSeconds(2));
 
         await using (var context = CreateContext())
         {

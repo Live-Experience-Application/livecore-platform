@@ -330,7 +330,9 @@ public sealed class Asset
         }
 
         return new Asset(
-            Guid.CreateVersion7(),
+            // UUIDv7 id derived from the creation time so ordering by id (ListByWorkspace,
+            // ListExpiredPending) is chronological even for rows created in the same wall-clock ms.
+            Guid.CreateVersion7(createdAt),
             organizationId,
             workspaceId,
             createdByUserProfileId,

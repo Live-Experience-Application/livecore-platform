@@ -227,7 +227,9 @@ public sealed class Recap
         }
 
         return new Recap(
-            Guid.CreateVersion7(),
+            // UUIDv7 id derived from the produced time so ordering by id (ListBySession) is in
+            // produced order even for recaps created in the same wall-clock millisecond.
+            Guid.CreateVersion7(generatedAt),
             organizationId,
             workspaceId,
             sessionId,
@@ -256,7 +258,9 @@ public sealed class Recap
         string summary,
         DateTimeOffset generatedAt)
         => new(
-            Guid.CreateVersion7(),
+            // UUIDv7 id derived from the produced time (see GenerateByHost) so ListBySession reads
+            // recaps in produced order regardless of same-millisecond construction.
+            Guid.CreateVersion7(generatedAt),
             organizationId,
             workspaceId,
             sessionId,
