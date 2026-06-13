@@ -356,6 +356,11 @@ public sealed class TenantContextResolverTests
             return Task.FromResult(Organizations.FirstOrDefault(organization => organization.HasSlug(canonicalSlug)));
         }
 
+        public Task<IReadOnlyList<Organization>> ListByMemberAsync(
+            Guid userProfileId,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("The tenant context resolver does not list organizations.");
+
         public Task<OrganizationAddResult> AddAsync(Organization organization, CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(organization);
@@ -367,6 +372,12 @@ public sealed class TenantContextResolverTests
             Organizations.Add(organization);
             return Task.FromResult(OrganizationAddResult.Added);
         }
+
+        public Task<OrganizationAddResult> AddWithOwnerAsync(
+            Organization organization,
+            OrganizationMember owner,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("The tenant context resolver does not create organizations.");
     }
 
     private sealed class FakeUserProfileRepository : IUserProfileRepository

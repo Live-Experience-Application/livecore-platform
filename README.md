@@ -423,6 +423,33 @@ request: the target organization is resolved from the request and verified
 against the caller's membership, and cross-tenant or non-member access is hidden
 as `404` rather than `403`.
 
+### Organization create and read
+
+The Organizations module exposes the tenant create/read API (CORE-API-001):
+
+| Method | Route                   | Authorized callers                                             |
+| ------ | ----------------------- | -------------------------------------------------------------- |
+| `GET`  | `/api/v1/organizations` | any authenticated user (only the organizations they belong to) |
+| `POST` | `/api/v1/organizations` | any authenticated user (becomes the new tenant's `Owner`)      |
+
+Both routes are user-tenant operations, so a service-account principal is denied
+`403` (only a human user holds an organization membership). The tenant boundary
+is the token's organization claim, matched exactly — the same token-asserted
+boundary the `TenantContextResolver` enforces:
+
+- `GET` lists the organizations the caller is a member of, intersected with the
+  organizations the token claims, so a persisted membership the token does not
+  assert (a foreign tenant from the token's point of view) is never listed.
+- `POST` creates a new tenant **only** for a slug the token claims; a slug the
+  token does not claim is a foreign tenant, hidden as `404` (the create never
+  reveals whether it exists). On success it makes the caller the founding
+  `Owner` — the `Organization` row and its `OrganizationMember` are written
+  **atomically**, so a tenant is never left ownerless. A slug that is already
+  taken is `409 Conflict` and grants **no** membership, so a create can never
+  escalate into ownership of a pre-existing organization (threats T5/T1). The
+  organization is the tenant root, so the create body names the new tenant
+  directly (slug + display name) and carries no parent organization.
+
 The workspace routes implemented so far:
 
 | Method | Route                                      | Authorized callers                                                  |

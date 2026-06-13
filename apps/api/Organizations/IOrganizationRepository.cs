@@ -38,6 +38,30 @@ public interface IOrganizationRepository
     Task<Organization?> FindBySlugAsync(string slug, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the organizations the given subject is a member of (in any role),
+    /// ordered by the organizations' time-ordered surrogate id. This is the
+    /// subject's own "my tenants" read backing
+    /// <c>GET /api/v1/organizations</c> (csv/api_routes.csv: "Only
+    /// organizations user belongs to"). It is deliberately distinct from the
+    /// tenant-scoped membership lookups on
+    /// <see cref="IOrganizationMemberRepository"/>: those forbid resolving a
+    /// subject's memberships without an organization (so one tenant's data is
+    /// never reached through another's id), whereas this returns only the
+    /// organizations the subject is genuinely a member of — never any tenant
+    /// the subject does not belong to (deny-by-default; threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). It does not interpret the membership
+    /// role and applies no token-claim filter; the caller intersects the result
+    /// with the principal's organization claims so the listing matches what the
+    /// tenant resolver would grant per organization.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The subject id is empty. An empty id can never address a stored
+    /// membership, so the lookup is rejected instead of silently returning an
+    /// empty list.
+    /// </exception>
+    Task<IReadOnlyList<Organization>> ListByMemberAsync(Guid userProfileId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new organization. Returns
     /// <see cref="OrganizationAddResult.DuplicateSlug"/> when an organization
     /// with the same slug already exists (enforced by the unique database
@@ -45,4 +69,28 @@ public interface IOrganizationRepository
     /// for one slug).
     /// </summary>
     Task<OrganizationAddResult> AddAsync(Organization organization, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Persists a new organization together with its founding owner membership
+    /// ATOMICALLY, in a single transaction (the create-tenant operation behind
+    /// <c>POST /api/v1/organizations</c>: "Creates organization and Owner
+    /// membership", csv/api_routes.csv). The Organizations module owns both the
+    /// <c>organizations</c> and <c>organization_members</c> tables
+    /// (docs/05_MODULE_CONTRACTS.md), so the tenant and its founding owner are
+    /// committed together: a tenant is never left without an owner (which would
+    /// be permanently unreachable, since the tenant resolver requires a
+    /// membership), and a duplicate slug rolls the membership back with it.
+    /// Returns <see cref="OrganizationAddResult.DuplicateSlug"/> when an
+    /// organization with the same slug already exists; in that case NOTHING is
+    /// persisted — the caller is never added to a pre-existing tenant, so a
+    /// create can never escalate into membership of someone else's organization
+    /// (threats T5/T1).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The owner membership does not belong to the organization being created.
+    /// </exception>
+    Task<OrganizationAddResult> AddWithOwnerAsync(
+        Organization organization,
+        OrganizationMember owner,
+        CancellationToken cancellationToken);
 }

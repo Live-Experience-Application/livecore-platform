@@ -712,6 +712,18 @@ app.UseAuthorization();
 // Health endpoints (CORE-FND-004): unauthenticated by convention.
 app.MapLiveCoreHealthEndpoints();
 
+// Organization endpoints (CORE-API-001): the tenant create/read API,
+// GET/POST /api/v1/organizations. They live in an authenticated route group and
+// fail closed (503) when persistence is not configured, exactly like the
+// workspace endpoints. No new DI registration is required: the organization
+// repository and the user-profile reference service they consume are already
+// registered above inside the persistence conditional. The list returns only the
+// organizations the caller is a member of AND the token claims; the create makes
+// the caller the founding Owner atomically, hides a foreign tenant (an unclaimed
+// slug) as 404 and rejects a taken slug as 409 without granting any membership
+// (threats T1/T5).
+app.MapOrganizationEndpoints();
+
 // Workspace endpoints (CORE-WS-003): the first domain HTTP endpoints. They live
 // in an authenticated route group and fail closed (503) when persistence is not
 // configured, so mapping them never crashes startup.

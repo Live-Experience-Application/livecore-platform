@@ -1,3 +1,4 @@
+using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using Microsoft.Data.Sqlite;
@@ -48,11 +49,31 @@ public sealed class OrganizationRepositoryTests : IDisposable
 
         using var context = new LiveCoreDbContext(_contextOptions);
         context.Database.EnsureCreated();
+        // SQLite does not enforce foreign keys unless asked; turn enforcement on
+        // so the organization_members foreign keys into organizations/users are
+        // genuinely exercised by the AddWithOwner tests.
+        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
     }
 
     public void Dispose() => _connection.Dispose();
 
-    private LiveCoreDbContext CreateContext() => new(_contextOptions);
+    private LiveCoreDbContext CreateContext()
+    {
+        var context = new LiveCoreDbContext(_contextOptions);
+        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
+        return context;
+    }
+
+    private async Task<UserProfile> SeedUserAsync(string subjectId)
+    {
+        var profile = UserProfile.CreateFromPrincipal(
+            new OidcPrincipal(PrincipalType.User, "https://issuer.test", subjectId),
+            _createdAt);
+        await using var context = CreateContext();
+        var repository = new UserProfileRepository(context);
+        Assert.Equal(UserProfileAddResult.Added, await repository.AddAsync(profile, CancellationToken.None));
+        return profile;
+    }
 
     private async Task<Organization> SeedOrganizationAsync(string slug, string name)
     {
@@ -258,5 +279,156 @@ public sealed class OrganizationRepositoryTests : IDisposable
         var loaded = await repository.FindBySlugAsync(_slug, CancellationToken.None);
 
         Assert.Null(loaded);
+    }
+
+    // ---- AddWithOwnerAsync (atomic tenant + founding owner, CORE-API-001) -----
+
+    [Fact]
+    public async Task AddWithOwner_persists_the_organization_and_its_owner_membership()
+    {
+        var user = await SeedUserAsync("founder");
+        var organization = Organization.Create(_slug, _name, _createdAt);
+        var owner = OrganizationMember.Create(organization.Id, user.Id, MembershipRole.Owner, _createdAt);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new OrganizationRepository(context);
+            var result = await repository.AddWithOwnerAsync(organization, owner, CancellationToken.None);
+            Assert.Equal(OrganizationAddResult.Added, result);
+        }
+
+        await using (var context = CreateContext())
+        {
+            // Both rows are committed: the tenant root and exactly one Owner
+            // membership for the founder, in the new organization.
+            var loadedOrg = await new OrganizationRepository(context)
+                .FindBySlugAsync(_slug, CancellationToken.None);
+            var loadedMember = await new OrganizationMemberRepository(context)
+                .FindAsync(organization.Id, user.Id, CancellationToken.None);
+
+            Assert.NotNull(loadedOrg);
+            Assert.Equal(organization.Id, loadedOrg.Id);
+            Assert.NotNull(loadedMember);
+            Assert.Equal(organization.Id, loadedMember.OrganizationId);
+            Assert.Equal(user.Id, loadedMember.UserProfileId);
+            Assert.Equal(MembershipRole.Owner, loadedMember.Role);
+        }
+    }
+
+    [Fact]
+    public async Task AddWithOwner_is_atomic_on_a_duplicate_slug_and_creates_no_membership()
+    {
+        // A pre-existing tenant owns the slug. A second caller creating the same
+        // slug is rejected, and — because the create is one transaction — their
+        // would-be owner membership is rolled back too, so a create can never add
+        // a caller to a pre-existing tenant (no privilege escalation; threat T5).
+        var existing = await SeedOrganizationAsync(_slug, "First Tenant");
+        var intruder = await SeedUserAsync("intruder");
+        var duplicate = Organization.Create(_slug, "Second Tenant", _createdAt);
+        var intruderOwner = OrganizationMember.Create(
+            duplicate.Id, intruder.Id, MembershipRole.Owner, _createdAt);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new OrganizationRepository(context);
+            var result = await repository.AddWithOwnerAsync(duplicate, intruderOwner, CancellationToken.None);
+            Assert.Equal(OrganizationAddResult.DuplicateSlug, result);
+        }
+
+        await using (var context = CreateContext())
+        {
+            // The original tenant is untouched, and the intruder has NO membership
+            // in it: the rolled-back transaction created nothing.
+            var loadedOrg = await new OrganizationRepository(context)
+                .FindBySlugAsync(_slug, CancellationToken.None);
+            Assert.NotNull(loadedOrg);
+            Assert.Equal(existing.Id, loadedOrg.Id);
+            Assert.Equal("First Tenant", loadedOrg.Name);
+
+            var members = new OrganizationMemberRepository(context);
+            Assert.False(await members.IsMemberAsync(existing.Id, intruder.Id, CancellationToken.None));
+            Assert.False(await members.IsMemberAsync(duplicate.Id, intruder.Id, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task AddWithOwner_rejects_an_owner_for_a_different_organization()
+    {
+        var user = await SeedUserAsync("founder");
+        var organization = Organization.Create(_slug, _name, _createdAt);
+        // The membership names a DIFFERENT organization id than the one being
+        // created; this is a programming error and must fail closed.
+        var mismatchedOwner = OrganizationMember.Create(
+            Guid.CreateVersion7(), user.Id, MembershipRole.Owner, _createdAt);
+
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.AddWithOwnerAsync(organization, mismatchedOwner, CancellationToken.None));
+    }
+
+    // ---- ListByMemberAsync (the subject's own organizations, CORE-API-001) ----
+
+    [Fact]
+    public async Task ListByMember_returns_only_the_subjects_organizations()
+    {
+        // The subject is a member of A and B; another subject is the sole member
+        // of C. Listing the subject's organizations returns exactly A and B and
+        // never C (deny-by-default; threat T5). The result is ordered by the
+        // organizations' time-ordered id; the assertion is order-independent so it
+        // never depends on the sub-millisecond ordering of two UUIDv7 ids.
+        var subject = await SeedUserAsync("subject");
+        var other = await SeedUserAsync("other");
+        var orgA = await SeedOrganizationAsync(_slug, _name);
+        var orgB = await SeedOrganizationAsync(_foreignSlug, _foreignName);
+        var orgC = await SeedOrganizationAsync("third-tenant", "Third Tenant");
+
+        await using (var context = CreateContext())
+        {
+            var members = new OrganizationMemberRepository(context);
+            await members.AddAsync(
+                OrganizationMember.Create(orgA.Id, subject.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgB.Id, subject.Id, MembershipRole.Participant, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgC.Id, other.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+        }
+
+        await using var context2 = CreateContext();
+        var repository = new OrganizationRepository(context2);
+        var listed = await repository.ListByMemberAsync(subject.Id, CancellationToken.None);
+
+        var listedIds = listed.Select(o => o.Id).ToHashSet();
+        Assert.Equal(2, listed.Count);
+        Assert.Contains(orgA.Id, listedIds);
+        Assert.Contains(orgB.Id, listedIds);
+        Assert.DoesNotContain(orgC.Id, listedIds);
+    }
+
+    [Fact]
+    public async Task ListByMember_returns_empty_for_a_subject_with_no_memberships()
+    {
+        var subject = await SeedUserAsync("loner");
+        await SeedOrganizationAsync(_slug, _name);
+
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+        var listed = await repository.ListByMemberAsync(subject.Id, CancellationToken.None);
+
+        Assert.Empty(listed);
+    }
+
+    [Fact]
+    public async Task ListByMember_rejects_an_empty_subject_id()
+    {
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByMemberAsync(Guid.Empty, CancellationToken.None));
     }
 }
