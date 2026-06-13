@@ -248,4 +248,24 @@ internal static class SceneProjection
             ? scenes.Select(SceneResponse.From).ToArray()
             : scenes.Select(ParticipantSceneResponse.From).ToArray();
     }
+
+    /// <summary>
+    /// Projects a SINGLE scene into the role-appropriate response, boxed as
+    /// <see cref="object"/> so the by-scene-id read (<c>GET /api/v1/scenes/{sceneId}</c>,
+    /// CORE-API-007) can return either the full host shape (<see cref="SceneResponse"/>) or
+    /// the host-only-field-stripped participant shape
+    /// (<see cref="ParticipantSceneResponse"/>) — the SAME host-vs-participant DTO split the
+    /// scene LIST uses (<see cref="Project"/>), so the by-id read can never diverge from the
+    /// list's projection. The role classification is the identical, fail-closed
+    /// <see cref="ReceivesHostShape"/> set membership; an undefined role falls closed to the
+    /// stripped participant shape.
+    /// </summary>
+    public static object ProjectOne(Scene scene, MembershipRole role)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+
+        return ReceivesHostShape(role)
+            ? SceneResponse.From(scene)
+            : ParticipantSceneResponse.From(scene);
+    }
 }

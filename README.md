@@ -701,29 +701,32 @@ workspace's scenes and the content blocks shown within them:
 | ------ | ----------------------------------------- | ---------------------------------------------- |
 | `GET`  | `/api/v1/workspaces/{workspaceId}/scenes` | any member of that workspace                   |
 | `POST` | `/api/v1/workspaces/{workspaceId}/scenes` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/scenes/{sceneId}`                | any member of the scene's workspace            |
 | `POST` | `/api/v1/scenes/{sceneId}/content-blocks` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
 
 The two workspace-scoped scene routes resolve the target organization from a
 required `organizationSlug` (a query parameter on the `GET`, a body field on the
-`POST`), exactly like the workspace by-id routes; the content-block route carries
-only the scene id in its path, so it takes a required `?organizationSlug=` query
-parameter like the session commands. Every route runs the same
-token-claim-and-membership tenant check and then authorizes the caller by their
-role in the relevant workspace (the scene's own workspace for the content-block
-route). A caller who cannot see the tenant, or who is not a member of the
-workspace, is hidden as `404` (never `403`); a known member who lacks the write
-role is `403`.
+`POST`), exactly like the workspace by-id routes; the by-scene-id read and the
+content-block route carry only the scene id in their path, so they take a required
+`?organizationSlug=` query parameter like the session commands. Every route runs
+the same token-claim-and-membership tenant check and then authorizes the caller by
+their role in the relevant workspace (the scene's own workspace for the
+by-scene-id and content-block routes — discovered from the loaded scene row after
+the tenant boundary is enforced). A caller who cannot see the tenant, or who is
+not a member of the workspace, is hidden as `404` (never `403`); a known member
+who lacks the write role is `403`.
 
 Creating a scene assigns its ordering position server-side (appended after the
 current last scene in the workspace); clients never supply or reorder positions.
 Creating a content block stores it at its initial revision. Both creates return
 `201 Created`.
 
-The scene list projects by the caller's workspace role: host-capable and
-metadata roles (`Owner`, `Admin`, `Host`, `CoHost`, `Auditor`) receive the full
-scene metadata, while audience roles (`Participant`, `Observer`) receive a
-stripped, audience-safe projection (scene id, title and order only — no internal
-tenant/workspace ids, no host preparation timestamps, no authorization
+The scene list **and the by-scene-id read** (`GET /api/v1/scenes/{sceneId}`,
+CORE-API-007) project by the caller's workspace role through the same projector:
+host-capable and metadata roles (`Owner`, `Admin`, `Host`, `CoHost`, `Auditor`)
+receive the full scene metadata, while audience roles (`Participant`, `Observer`)
+receive a stripped, audience-safe projection (scene id, title and order only — no
+internal tenant/workspace ids, no host preparation timestamps, no authorization
 rationale). Only the response shape differs by role; every member still receives
 all of the workspace's scenes, since deciding which scenes an audience may
 actually see is the later Visibility epic.
@@ -1300,11 +1303,11 @@ entitlement of a plan at the plan's server-decided values (**reusing** the CORE-
 client never supplies a premium value), idempotently (a re-run updates existing assignments in place and
 reinstates revoked ones rather than duplicating; a retired plan or a retired entitlement is never newly
 assigned, fail-closed), and `RevokeAsync` revokes a single entitlement for the downgrade/refund path. The
-service performs the assignment mechanism only; the purchase-verification flow that _triggers_ an assignment,
-the store-notification downgrade flow that _triggers_ a revocation, and the `GET /v1/me/entitlements` HTTP route
-that _exposes_ the resolved state (with its authenticated, own-subject-only authorization) are later stories —
-this story supplies the generic, reusable assignment, revocation and lookup primitives they build on. There is
-still no entitlement HTTP route.
+service performs the assignment mechanism only; the purchase-verification flow that _triggers_ an assignment and
+the store-notification downgrade flow that _triggers_ a revocation are later stories — this story supplies the
+generic, reusable assignment, revocation and lookup primitives they build on. The `GET /api/v1/me/entitlements`
+HTTP route that _exposes_ the resolved state (with its authenticated, own-subject-only authorization) is now
+implemented (CORE-API-007; see "Current-user entitlements" below).
 
 ### Quota definitions and quota status
 
@@ -1425,6 +1428,51 @@ and decides for the `User` subject keyed by the profile id, reading only that su
 isolation, threat T5). A missing/invalid token is `401`; a non-user **service-account** principal is `403` (it has
 no personal premium state, the same rule as the `/me/quota-status` read); the route carries no tenant boundary, and
 fails closed with `503` when no database is configured.
+
+### Current-user entitlements
+
+CORE-API-007 (the `API Completeness` epic) exposes the documented-not-built
+`GET /v1/me/entitlements` read (`csv/mobile_store_api_routes.csv`) under the Core `/api/v1` prefix. It is the
+read half of the entitlements story (CORE-ENTL-002) made reachable over HTTP: it reuses the
+`SubjectEntitlementResolver` unchanged, so it adds **no table and no migration** and can never diverge from an
+internal feature guard that consults the same resolver.
+
+| Method | Route                     | Authorized callers                                  |
+| ------ | ------------------------- | --------------------------------------------------- |
+| `GET`  | `/api/v1/me/entitlements` | any authenticated **user** (their own entitlements) |
+
+The response is the current user's resolved, server-authoritative effective entitlements — the generic key and
+value only, ordered by key, with no subject id, internal surrogate id, source-plan provenance or authorization
+rationale (the epic acceptance criterion **"User-visible premium state comes only from server entitlements"**;
+threat T7). Each item carries the generic `key`, the `valueKind` (`Flag` or `Quota`), the granted `flagValue`
+(for a flag) and the granted `quotaLimit` (for a quota — `null` meaning an unlimited/fair-use grant):
+
+```json
+{
+    "entitlements": [
+        {
+            "key": "ads.disabled",
+            "valueKind": "Flag",
+            "flagValue": true,
+            "quotaLimit": null
+        },
+        {
+            "key": "workspace.active.max",
+            "valueKind": "Quota",
+            "flagValue": null,
+            "quotaLimit": 5
+        }
+    ]
+}
+```
+
+It resolves the **current user's** profile (the canonical, idempotent "current user" resolution) and resolves the
+`User` subject keyed by the profile id, reading only that subject's active assignments (per-subject isolation,
+threat T5) — so a revoked or never-granted entitlement is simply absent (the fail-closed default) and one user's
+premium state is never returned through another's id. A missing/invalid token is `401`; a non-user
+**service-account** principal is `403` (it has no personal premium state, the same rule as the `/me/ad-eligibility`
+and `/me/quota-status` reads); the route carries no tenant boundary, and fails closed with `503` when no database
+is configured.
 
 ### Purchase provider abstraction
 

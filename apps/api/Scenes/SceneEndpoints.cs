@@ -35,6 +35,17 @@ namespace LiveCore.Api.Scenes;
 ///   append-to-end (the next order after the current maximum in the workspace; an empty
 ///   workspace gets order 0), so a client can never choose, skip or collide a position.
 ///   No reorder route exists in csv/api_routes.csv, so reorder is out of scope.</item>
+///   <item><c>GET  /api/v1/scenes/{sceneId}</c> — module Scenes, roles "workspace members"
+///   (CORE-API-007, the documented-not-built by-scene-id read of docs/08_API_CONTRACTS.md).
+///   Reads ONE scene by id within the query-supplied organization via
+///   <see cref="ISceneRepository.FindByIdInOrganizationAsync"/> (the same org-scoped lookup
+///   the content-block route uses), discovers the scene's own workspace from the loaded row
+///   AFTER the tenant boundary has been enforced, authorizes the caller's membership in that
+///   workspace, then PROJECTS the scene BY ROLE through the SAME
+///   <see cref="SceneProjection"/> the list uses — the host shape
+///   (<see cref="SceneResponse"/>) to the host-capable/metadata roles and the stripped
+///   participant shape (<see cref="ParticipantSceneResponse"/>) to the audience roles — so
+///   the by-id read can never diverge from the list's host-vs-participant DTO split.</item>
 /// </list>
 ///
 /// Tenant resolution (mirrors the workspace by-id routes): the route path carries the
@@ -77,12 +88,21 @@ internal static class SceneEndpoints
     {
         // Authenticated group: the bearer middleware authenticates the caller, so a
         // missing/invalid token is challenged as 401 before any handler runs.
-        var group = endpoints
+        var workspaceScopedGroup = endpoints
             .MapGroup("/api/v1/workspaces")
             .RequireAuthorization();
 
-        group.MapGet("/{workspaceId}/scenes", ListScenesAsync);
-        group.MapPost("/{workspaceId}/scenes", CreateSceneAsync);
+        workspaceScopedGroup.MapGet("/{workspaceId}/scenes", ListScenesAsync);
+        workspaceScopedGroup.MapPost("/{workspaceId}/scenes", CreateSceneAsync);
+
+        // The by-scene-id read group (CORE-API-007): the route path carries only the
+        // {sceneId}, so the target organization is a required ?organizationSlug= query
+        // parameter exactly like the by-session-id and content-block routes.
+        var sceneScopedGroup = endpoints
+            .MapGroup("/api/v1/scenes")
+            .RequireAuthorization();
+
+        sceneScopedGroup.MapGet("/{sceneId}", GetSceneByIdAsync);
 
         return endpoints;
     }
@@ -165,6 +185,92 @@ internal static class SceneEndpoints
             .ConfigureAwait(false);
 
         var response = SceneProjection.Project(scenes, member.Role);
+        return Results.Ok(response);
+    }
+
+    // GET /api/v1/scenes/{sceneId}?organizationSlug={slug}
+    private static async Task<IResult> GetSceneByIdAsync(
+        HttpContext httpContext,
+        string sceneId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route
+        // path carries no organization, so it is a query parameter exactly like the
+        // by-session-id and content-block routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed scene id can never address a stored scene; treat it as hidden
+        // (404), never echoing back why.
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the scene as 404 so a foreign or
+            // non-existent tenant is indistinguishable from a missing scene (docs/08;
+            // threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Load the scene WITHIN the resolved tenant. The lookup leads with the
+        // organization id, so a scene in another tenant is never returned even when the
+        // surrogate id matches; a cross-tenant or unknown scene is hidden as 404 (threats
+        // T1/T5). The scene's own workspace id is then discovered from the loaded row,
+        // AFTER the tenant boundary has been enforced — the same shape as the
+        // content-block route (ISceneRepository.FindByIdInOrganizationAsync).
+        var scene = await deps.Scenes
+            .FindByIdInOrganizationAsync(context.OrganizationId, sceneGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (scene is null)
+        {
+            return HiddenScene();
+        }
+
+        // Object-level authorization: the caller must be a member of the SCENE'S own
+        // workspace. The read is allowed to ANY membership role (the same "workspace
+        // members" rule as the scene list), so any membership suffices; a non-member is
+        // hidden as 404 (not 403) so resource existence is not leaked (threats T1/T5). The
+        // member's actual workspace ROLE then drives the host-vs-participant projection
+        // below, so this loads the membership row (FindAsync) scoped by organization id
+        // then the scene's own workspace id — a control role held in a DIFFERENT workspace
+        // never confers standing here.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, scene.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // The scene is PROJECTED BY ROLE through the SAME projector the list uses
+        // (CORE-SCENE-004 / CORE-API-007): host-capable and metadata-entitled roles
+        // (Owner/Admin/Host/CoHost/Auditor) receive the full host shape (SceneResponse);
+        // the audience roles (Participant/Observer) receive the host-only-field-stripped
+        // participant shape (ParticipantSceneResponse). MembershipRole is non-linear, so
+        // the classification is EXACT set membership, never a >/< comparison, and an
+        // undefined role falls closed to the stripped shape (SceneProjection.ProjectOne).
+        var response = SceneProjection.ProjectOne(scene, member.Role);
         return Results.Ok(response);
     }
 
@@ -348,6 +454,13 @@ internal static class SceneEndpoints
     // belong to are ALL reported as 404, never distinguishable from each other and never
     // echoing the reason (docs/08; threats T1/T5).
     private static IResult HiddenWorkspace() => NotFound();
+
+    // Scene existence is hidden (the by-scene-id read, CORE-API-007): a malformed id, a
+    // scene in a foreign or non-entitled tenant, an unknown scene, and a scene in a
+    // workspace the caller does not belong to are ALL reported as 404, never
+    // distinguishable from each other and never echoing the reason (docs/08; threats
+    // T1/T5).
+    private static IResult HiddenScene() => NotFound();
 
     private static IResult NotFound()
         => Results.Problem(

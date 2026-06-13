@@ -14,6 +14,7 @@ GET,/api/v1/sessions/{sessionId}/events,Realtime,session audience,Filtered repla
 POST,/api/v1/sessions/{sessionId}/reveal,Visibility,"Host,CoHost,Owner,Admin",Idempotent reveal
 GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection by role
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
+GET,/api/v1/scenes/{sceneId},Scenes,workspace members,Projection by role
 POST,/api/v1/scenes/{sceneId}/content-blocks,Content,"Host,CoHost,Owner,Admin",Create content block
 GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant owner or Host,Participant-safe feed
 POST,/api/v1/assets/upload-intent,Assets,"Host,CoHost,Owner,Admin",Creates upload intent
@@ -22,6 +23,7 @@ POST,/api/v1/assets/{assetId}/links,Assets,"Host,CoHost,Owner,Admin",Link asset 
 GET,/api/v1/me/quota-status,Entitlements,authenticated user,Server-calculated quota status for the current user
 GET,/api/v1/workspaces/{workspaceId}/quota-status,Entitlements,"Host,CoHost,Owner,Admin",Server-calculated workspace quota status; membership authorized
 GET,/api/v1/me/ad-eligibility,Entitlements,authenticated user,Entitlement-driven ad eligibility for the current user; no ad placements/provider config; service account denied
+GET,/api/v1/me/entitlements,Entitlements,authenticated user,Effective server entitlements for the current user; generic key+value only; service account denied
 POST,/api/v1/purchases/apple/transactions,Store,authenticated user,Verify Apple transaction server-side before granting entitlements; service account denied
 POST,/api/v1/purchases/google/tokens,Store,authenticated user,Verify Google purchase token server-side before granting entitlements; service account denied
 POST,/api/v1/store-notifications/apple,Store,none (provider callback),Receive Apple App Store Server Notifications; signature validated by deployment adapter; idempotent

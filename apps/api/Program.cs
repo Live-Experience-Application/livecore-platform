@@ -795,16 +795,19 @@ app.MapRevealEndpoints();
 // reconnect replay never leaks a hidden event (threat T3; docs/09_EVENT_CATALOG.md "Reconnect replay").
 app.MapSessionEventReplayEndpoints();
 
-// Scene content endpoints (CORE-SCENE-003): the Scenes module's first HTTP routes,
-// GET/POST /api/v1/workspaces/{workspaceId}/scenes. They live in an authenticated
-// route group and fail closed (503) when persistence is not configured, exactly like
-// the workspace endpoints. No new DI registration is required: the tenant context
-// resolver, the scene repository and the workspace member repository they consume are
-// already registered above inside the persistence conditional. The GET list returns the
-// SAME generic scene DTO to all workspace members; the per-role / host-vs-participant
-// projection (the "Projection by role" route note) is the later CORE-SCENE-004 story.
-// The POST assigns the scene order server-side as append-to-end (no client-supplied
-// order, no reorder route).
+// Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read):
+// the Scenes module's HTTP routes, GET/POST /api/v1/workspaces/{workspaceId}/scenes and
+// GET /api/v1/scenes/{sceneId}. They live in authenticated route groups and fail closed
+// (503) when persistence is not configured, exactly like the workspace endpoints. No new
+// DI registration is required: the tenant context resolver, the scene repository and the
+// workspace member repository they consume are already registered above inside the
+// persistence conditional. The GET list and the GET by-id both PROJECT BY ROLE through the
+// same SceneProjection (the host shape to host-capable/metadata roles, the stripped
+// participant shape to audience roles — the "Projection by role" route note, CORE-SCENE-004).
+// The by-id read resolves the scene within the query-supplied organization, discovers its
+// workspace from the loaded row and authorizes the caller's membership there (every denial
+// hidden as 404). The POST assigns the scene order server-side as append-to-end (no
+// client-supplied order, no reorder route).
 app.MapSceneEndpoints();
 
 // Scene content-block endpoint (CORE-SCENE-003): the Content module's first HTTP route,
@@ -866,6 +869,17 @@ app.MapQuotaStatusEndpoints();
 // config. So "Core returns ad eligibility without knowing ad placements" (the epic acceptance criterion;
 // docs/22_ADS_AND_MOBILE_BILLING_BOUNDARIES.md): Core decides eligibility, the vertical owns all ad rendering.
 app.MapAdEligibilityEndpoints();
+
+// Current-user effective-entitlements endpoint (CORE-API-007): the Entitlements module's documented-not-built
+// read, GET /api/v1/me/entitlements (csv/mobile_store_api_routes.csv). It lives in an authenticated route group
+// and fails closed (503) when persistence is not configured, exactly like the ad-eligibility/quota-status
+// endpoints. No new DI registration is required: the CORE-ENTL-002 SubjectEntitlementResolver and the user
+// profile service it reuses are already registered above. It resolves the current user (a service account is 403)
+// and returns the USER subject's effective entitlements resolved ENTIRELY from server entitlements — the generic
+// key + value only, never a subject id, source plan or authorization rationale (threat T7). So "User-visible
+// premium state comes only from server entitlements" (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md), reusing
+// the same resolver an internal feature guard would so the REST read can never diverge.
+app.MapMeEntitlementsEndpoints();
 
 // Apple transaction verification endpoint (CORE-STORE-003): the Store module's first HTTP route,
 // POST /api/v1/purchases/apple/transactions. It lives in an authenticated route group and fails closed (503)
