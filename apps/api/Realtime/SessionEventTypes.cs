@@ -28,6 +28,34 @@ public static class SessionEventTypes
     public const string SessionEnded = "SessionEnded";
 
     /// <summary>
+    /// A participant joined a session — the Sessions module's join flow
+    /// (docs/09_EVENT_CATALOG.md: "ParticipantJoined | Participant/System | Host/CoHost, maybe audience |
+    /// yes | join visibility configurable"; csv/event_catalog.csv: "Host/CoHost and configured audience").
+    /// Emitted by the join flow (CORE-EVT-002, <see cref="LiveCore.Api.Sessions.SessionParticipantJoinService"/>)
+    /// when a participant is actually admitted to a session. Like <see cref="SessionStarted"/> it is a
+    /// SUBJECTLESS audience event (no visibility subject, no selected participant), so the recipient resolver
+    /// delivers it to the session hosts (always — host-visible), the observers and every active participant
+    /// (the configurable audience). The payload carries the participant IDENTIFIER only — never a display
+    /// name or any other participant PII (threat T7); the actor is the joining participant's user (or the
+    /// system, for an anonymous participant).
+    /// </summary>
+    public const string ParticipantJoined = "ParticipantJoined";
+
+    /// <summary>
+    /// A participant left a session — the Sessions module's leave flow over <c>Participant.Remove</c>
+    /// (docs/09_EVENT_CATALOG.md: "ParticipantLeft | System | Host/CoHost | yes | participant feed
+    /// optional"). Emitted by the leave flow (CORE-EVT-002,
+    /// <see cref="LiveCore.Api.Sessions.SessionParticipantLeaveService"/>) when a participant is actually
+    /// removed (soft-deleted) from a session's audience. Like <see cref="ParticipantJoined"/> it is a
+    /// subjectless audience event delivered to the hosts (always — host-visible) and the remaining audience;
+    /// because the participant is removed BEFORE the event is published, the just-departed participant is no
+    /// longer in the active-participant fan-out, so a leaver never receives their own removal (the optional
+    /// participant feed). The payload carries the participant IDENTIFIER only — never a display name or any
+    /// other PII (threat T7) — and the actor is the system (a System-emitted event).
+    /// </summary>
+    public const string ParticipantLeft = "ParticipantLeft";
+
+    /// <summary>
     /// A host revealed a resource to the audience or to a selected participant — the central
     /// participant-facing event (docs/09_EVENT_CATALOG.md: "ContentRevealed | Host/CoHost | selected
     /// recipients | yes | central event"). Emitted by the reveal command (CORE-VIS-004/005) when a

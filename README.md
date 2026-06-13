@@ -707,6 +707,46 @@ host who cancelled it), the cancelled session and the `Prepared → Cancelled` s
 transition — never any content (threats T1/T5/T7). Like the workspace archive, the
 cancel records the before/after status because the session survives the transition.
 
+### Participant presence events (join / leave)
+
+A participant joining or leaving a session now appends and delivers the documented
+`ParticipantJoined` / `ParticipantLeft` session events (CORE-EVT-002). These catalog
+events (`docs/09_EVENT_CATALOG.md`) existed but were never emitted — the join flow
+(`SessionParticipantJoinService`) returned an admission only. This story wires the
+emission on the two participant-presence transitions:
+
+- **Join** — `SessionParticipantJoinService.JoinAsync` emits a `ParticipantJoined` event
+  on (and only on) an **admission**. The pure decision is unchanged (a session/participant
+  outside the caller's tenant/workspace, a removed participant or a non-joinable session is
+  a fail-closed denial); a denial emits nothing.
+- **Leave** — the symmetric `SessionParticipantLeaveService.LeaveAsync` removes a
+  participant from a session's audience over the participant aggregate's soft-delete
+  (`Participant.Remove`) and emits a `ParticipantLeft` event on (and only on) an **actual
+  departure**. Removing an already-removed participant is an idempotent no-op that emits
+  nothing, so each real departure appends **exactly one** event and a repeat appends none.
+
+Both events are emitted through the **reused** `ISessionEventPublisher` + recipient
+resolver (the Realtime module stays the sole owner of delivery — these flows do not
+duplicate the anti-leak routing). Like the CORE-EVT-001 `SessionStarted`/`SessionEnded`
+events they are **subjectless audience events** (no visibility subject, no selected
+participant), so the resolver delivers each to the whole session audience: the hosts
+(**always — host-visible**, `docs/06_AUTHORIZATION_MATRIX.md`), the observers and every
+active participant (the configurable audience of `docs/09_EVENT_CATALOG.md`). Because the
+leave performs `Participant.Remove` **before** publishing, the just-departed participant is
+no longer in the active-participant fan-out, so a leaver never receives their own removal
+(the optional participant feed).
+
+The payloads are **identifier-only**: each carries the participant's surrogate **id** and
+nothing else — never the display name or any other participant PII (threat T7). The
+participant id is an opaque surrogate (not a name, not a user identity), so the audience
+learns only **which** participant (by id) joined or left. `ParticipantJoined` records the
+joining participant's linked **user** as its actor (or none, for an anonymous participant);
+`ParticipantLeft` is **System**-emitted (no actor). No audit record is written (these are
+realtime presence events, not security-audited state transitions), and no schema migration
+is needed — the `session_events` table persists the new event-type names in its existing
+`event_type` string column. The join/leave HTTP endpoints and the persisted participant
+connection metadata remain later stories.
+
 ### Reveal command
 
 The Visibility module's reveal command makes a resource visible to the audience,

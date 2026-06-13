@@ -455,12 +455,23 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // resolver. It mirrors that resolver's shape: repositories in, a trusted
     // admission or a typed fail-closed denial out, with every lookup scoped by
     // organization id then workspace id so a session or participant outside the
-    // caller's tenant/workspace is hidden as not-found (threats T1/T5). The join
-    // HTTP endpoint, the durable ParticipantJoined session event and its SignalR
-    // delivery (docs/09_EVENT_CATALOG.md; docs/11_REALTIME_SYNC.md) and the
-    // persisted participant connection metadata are later stories (the Realtime
+    // caller's tenant/workspace is hidden as not-found (threats T1/T5). CORE-EVT-002
+    // additionally has it emit the durable ParticipantJoined session event on (and
+    // only on) an admission, through the reused ISessionEventPublisher + TimeProvider
+    // (registered in this same persistence conditional / unconditionally above), so
+    // the Realtime module stays the sole owner of delivery. The join HTTP endpoint and
+    // the persisted participant connection metadata remain later stories (the Realtime
     // epic / Participants-owned work) and are deliberately not wired here.
     builder.Services.AddScoped<SessionParticipantJoinService>();
+
+    // Session participant leave service (CORE-EVT-002): the symmetric counterpart of the join service. It
+    // removes a participant from a session's audience over the participant aggregate's soft-delete
+    // (Participant.Remove) and, on (and only on) an actual departure, emits the durable ParticipantLeft session
+    // event through the same reused ISessionEventPublisher + TimeProvider. Like the join service it is
+    // fail-closed and tenant-isolated (a session or participant outside the caller's tenant/workspace is hidden
+    // as not-found and emits nothing, threats T1/T5) and idempotent (removing an already-removed participant is
+    // a no-op that emits no second event). The leave HTTP endpoint is a later story.
+    builder.Services.AddScoped<SessionParticipantLeaveService>();
 
     // Realtime connection resolver (CORE-RT-002): resolves which SERVER-MANAGED groups a SignalR hub
     // connection joins (or a fail-closed denial). Registered here because it composes the tenant context

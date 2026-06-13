@@ -1,4 +1,5 @@
 using LiveCore.Api.Participants;
+using LiveCore.Api.Realtime;
 
 namespace LiveCore.Api.Sessions;
 
@@ -45,28 +46,45 @@ namespace LiveCore.Api.Sessions;
 ///   <see cref="SessionJoinDenialReason.SessionNotJoinable"/> (CORE-SES-002).</item>
 /// </list>
 ///
-/// This service persists nothing and emits nothing. It computes only the security
-/// decision. The durable <c>ParticipantJoined</c> session event and its delivery
-/// over SignalR (docs/09_EVENT_CATALOG.md; docs/11_REALTIME_SYNC.md) are the later
-/// Realtime epic, and the persisted participant connection metadata is
-/// Participants-owned later work; the join HTTP endpoint is a later story. Mapping a
-/// denial to a 404/403 response and assigning the participant to a realtime group
-/// are deliberately not done here.
+/// This service computes the security decision AND, when (and only when) it admits a
+/// join, emits the durable <c>ParticipantJoined</c> session event (CORE-EVT-002). The
+/// event is published through the reused <see cref="ISessionEventPublisher"/> (the
+/// same seam the reveal and start/end commands use), so the Realtime module stays the
+/// sole owner of delivery and the anti-leak recipient resolver is not duplicated. The
+/// event is a SUBJECTLESS audience event carrying the participant IDENTIFIER only (never
+/// a display name or any other PII, threat T7; see <see cref="ParticipantPresenceEvent"/>),
+/// so it is delivered to the session hosts (always — host-visible), the observers and
+/// every active participant. A DENIAL emits nothing: a participant outside the caller's
+/// tenant/workspace, a removed participant or a non-joinable session is hidden as a
+/// fail-closed denial with no event appended and no delivery. The matching leave event
+/// (<c>ParticipantLeft</c>) is the symmetric <see cref="SessionParticipantLeaveService"/>.
+///
+/// The persisted participant connection metadata is Participants-owned later work, and
+/// the join HTTP endpoint is a later story; mapping a denial to a 404/403 response and
+/// assigning the participant to a realtime group are deliberately not done here.
 /// </summary>
 public sealed class SessionParticipantJoinService
 {
     private readonly ISessionRepository _sessions;
     private readonly IParticipantRepository _participants;
+    private readonly ISessionEventPublisher _eventPublisher;
+    private readonly TimeProvider _timeProvider;
 
     public SessionParticipantJoinService(
         ISessionRepository sessions,
-        IParticipantRepository participants)
+        IParticipantRepository participants,
+        ISessionEventPublisher eventPublisher,
+        TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(participants);
+        ArgumentNullException.ThrowIfNull(eventPublisher);
+        ArgumentNullException.ThrowIfNull(timeProvider);
 
         _sessions = sessions;
         _participants = participants;
+        _eventPublisher = eventPublisher;
+        _timeProvider = timeProvider;
     }
 
     /// <summary>
@@ -76,7 +94,10 @@ public sealed class SessionParticipantJoinService
     /// workspace, and returns an admission carrying the validated ids or a typed
     /// fail-closed denial. The decision never crosses the tenant or workspace
     /// boundary: a session or participant outside the requested (organization,
-    /// workspace) is hidden as not-found (threat T1/T5).
+    /// workspace) is hidden as not-found (threat T1/T5). On (and only on) an
+    /// admission it appends and delivers the durable <c>ParticipantJoined</c> session
+    /// event (CORE-EVT-002) to the session audience before returning; every denial
+    /// emits nothing.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// Any of the organization, workspace, session or participant id is empty. An
@@ -174,10 +195,26 @@ public sealed class SessionParticipantJoinService
             return SessionJoinResult.Denied(SessionJoinDenialReason.SessionNotJoinable);
         }
 
-        // Every check passed: admit the join. The result carries the validated,
-        // boundary-checked ids only; nothing is persisted and no event is emitted
-        // (the durable ParticipantJoined event and realtime group assignment are
-        // later stories).
+        // Every check passed: the participant joins. Emit the durable ParticipantJoined session event
+        // (CORE-EVT-002) BEFORE returning the admission, so a join that is admitted is a join that is
+        // recorded and delivered. The event is published through the reused publisher + recipient resolver
+        // (the Realtime module owns delivery); it is a subjectless audience event carrying the participant
+        // IDENTIFIER only — never a display name or any PII (threat T7) — so it reaches the hosts (always —
+        // host-visible), the observers and every active participant. The actor is the joining participant's
+        // linked user, or null (system) for an anonymous participant (docs/09_EVENT_CATALOG.md:
+        // "ParticipantJoined | Participant/System").
+        var sessionEvent = ParticipantPresenceEvent.Create(
+            SessionEventTypes.ParticipantJoined,
+            organizationId,
+            workspaceId,
+            sessionId,
+            participantId,
+            createdBy: participant.UserProfileId,
+            _timeProvider.GetUtcNow());
+        await _eventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+
+        // The result carries the validated, boundary-checked ids only (the realtime group assignment and the
+        // persisted connection metadata remain later stories).
         return SessionJoinResult.Admit(organizationId, workspaceId, sessionId, participantId);
     }
 

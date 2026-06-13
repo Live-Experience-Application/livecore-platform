@@ -1,6 +1,8 @@
+using System.Text.Json;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -52,9 +54,11 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
     private static readonly DateTimeOffset _startedAt = new(2026, 6, 11, 9, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _endedAt = new(2026, 6, 11, 10, 30, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _removedAt = new(2026, 6, 11, 9, 30, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _joinedAt = new(2026, 6, 11, 9, 15, 0, TimeSpan.Zero);
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly TimeProvider _timeProvider = new FixedTimeProvider(_joinedAt);
 
     public SessionParticipantJoinServiceTests()
     {
@@ -85,10 +89,19 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
 
     /// <summary>
     /// Builds a service over fresh repositories on their own context, so each call
-    /// reads genuinely persisted state (the same pattern the repository tests use).
+    /// reads genuinely persisted state (the same pattern the repository tests use). A
+    /// recording publisher captures the ParticipantJoined event emitted on admission
+    /// (CORE-EVT-002); pass one in to inspect it, or let the default absorb it for the
+    /// tests that only assert the decision.
     /// </summary>
-    private SessionParticipantJoinService CreateService(LiveCoreDbContext context)
-        => new(new SessionRepository(context), new ParticipantRepository(context));
+    private SessionParticipantJoinService CreateService(
+        LiveCoreDbContext context,
+        ISessionEventPublisher? eventPublisher = null)
+        => new(
+            new SessionRepository(context),
+            new ParticipantRepository(context),
+            eventPublisher ?? new RecordingSessionEventPublisher(),
+            _timeProvider);
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
     {
@@ -202,12 +215,16 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
         var session = await SeedSessionAsync(organization.Id, workspace.Id, "Opening Run");
         var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Stage Left");
 
+        var publisher = new RecordingSessionEventPublisher();
         await using var context = CreateContext();
-        var service = CreateService(context);
+        var service = CreateService(context, publisher);
         var result = await service.JoinAsync(
             organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
 
         AssertAdmitted(result, organization.Id, workspace.Id, session.Id, participant.Id);
+        // An admission emits exactly one ParticipantJoined event carrying the participant IDENTIFIER only
+        // (no display name / PII, threat T7).
+        AssertParticipantJoinedEmitted(publisher, organization.Id, workspace.Id, session.Id, participant);
     }
 
     [Fact]
@@ -264,12 +281,15 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
         await StartSessionAsync(organization.Id, workspace.Id, session.Id);
         await RemoveParticipantAsync(organization.Id, workspace.Id, participant.Id);
 
+        var publisher = new RecordingSessionEventPublisher();
         await using var context = CreateContext();
-        var service = CreateService(context);
+        var service = CreateService(context, publisher);
         var result = await service.JoinAsync(
             organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
 
         AssertDenied(result, SessionJoinDenialReason.ParticipantNotActive);
+        // A denial emits NO event: a join that is not admitted is never recorded or delivered (fail-closed).
+        Assert.Empty(publisher.Published);
     }
 
     [Fact]
@@ -341,18 +361,22 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
         var session = await SeedSessionAsync(organizationB.Id, workspaceInB.Id, "Run");
         var participant = await SeedParticipantAsync(organizationB.Id, workspaceInB.Id, "Name");
 
+        var publisher = new RecordingSessionEventPublisher();
         await using var context = CreateContext();
-        var service = CreateService(context);
+        var service = CreateService(context, publisher);
 
-        // Sanity: under B's own tenant the join is admitted.
+        // Sanity: under B's own tenant the join is admitted and emits exactly one ParticipantJoined.
         var underB = await service.JoinAsync(
             organizationB.Id, workspaceInB.Id, session.Id, participant.Id, CancellationToken.None);
         AssertAdmitted(underB, organizationB.Id, workspaceInB.Id, session.Id, participant.Id);
+        Assert.Single(publisher.Published);
 
-        // Under A's tenant it is hidden as not-found.
+        // Under A's tenant it is hidden as not-found — and emits NOTHING: a cross-tenant join can never be
+        // recorded or delivered (fail-closed; threat T5). The published count stays at the one B emitted.
         var underA = await service.JoinAsync(
             organizationA.Id, workspaceInB.Id, session.Id, participant.Id, CancellationToken.None);
         AssertDenied(underA, SessionJoinDenialReason.SessionNotFound);
+        Assert.Single(publisher.Published);
     }
 
     [Fact]
@@ -502,11 +526,73 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
     }
 
     [Fact]
-    public void Constructor_rejects_null_repositories()
+    public void Constructor_rejects_null_dependencies()
     {
+        var sessions = new SessionRepository(CreateContext());
+        var participants = new ParticipantRepository(CreateContext());
+        var publisher = new RecordingSessionEventPublisher();
+
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(null!, new ParticipantRepository(CreateContext())));
+            () => new SessionParticipantJoinService(null!, participants, publisher, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(new SessionRepository(CreateContext()), null!));
+            () => new SessionParticipantJoinService(sessions, null!, publisher, _timeProvider));
+        Assert.Throws<ArgumentNullException>(
+            () => new SessionParticipantJoinService(sessions, participants, null!, _timeProvider));
+        Assert.Throws<ArgumentNullException>(
+            () => new SessionParticipantJoinService(sessions, participants, publisher, null!));
+    }
+
+    // ---- EMISSION HELPERS + TEST DOUBLES ----------------------------------------
+
+    /// <summary>
+    /// Asserts exactly one ParticipantJoined session event was emitted for the admitted join, carrying the
+    /// participant IDENTIFIER only (audience-wide, subjectless, no display name / PII — threat T7).
+    /// </summary>
+    private static void AssertParticipantJoinedEmitted(
+        RecordingSessionEventPublisher publisher,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Participant participant)
+    {
+        var sessionEvent = Assert.Single(publisher.Published);
+        Assert.Equal(SessionEventTypes.ParticipantJoined, sessionEvent.EventType);
+        Assert.Equal(organizationId, sessionEvent.OrganizationId);
+        Assert.Equal(workspaceId, sessionEvent.WorkspaceId);
+        Assert.Equal(sessionId, sessionEvent.SessionId);
+        // Audience-wide (no selected participant) and subjectless (no visibility subject): delivered to the
+        // whole session audience unconditionally, like SessionStarted/Ended.
+        Assert.Null(sessionEvent.TargetParticipantId);
+        Assert.False(sessionEvent.HasVisibilitySubject);
+        // The actor is the joining participant's linked user (null/system for an anonymous participant).
+        Assert.Equal(participant.UserProfileId, sessionEvent.CreatedBy);
+        // Identifier-only payload: the participant id is present; the display name is NOT (threat T7).
+        using var document = JsonDocument.Parse(sessionEvent.Payload);
+        Assert.Equal(participant.Id, document.RootElement.GetProperty("ParticipantId").GetGuid());
+        Assert.DoesNotContain(participant.DisplayName, sessionEvent.Payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A recording <see cref="ISessionEventPublisher"/> that captures the events a flow publishes without
+    /// touching the database, so a unit test can assert exactly what was (or was not) emitted.
+    /// </summary>
+    private sealed class RecordingSessionEventPublisher : ISessionEventPublisher
+    {
+        private readonly List<SessionEvent> _published = [];
+
+        public IReadOnlyList<SessionEvent> Published => _published;
+
+        public Task PublishAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(sessionEvent);
+            _published.Add(sessionEvent);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>A <see cref="TimeProvider"/> that always returns a fixed instant, so emitted timestamps are deterministic.</summary>
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }
