@@ -8,6 +8,7 @@ using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Templates;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 
@@ -349,6 +350,56 @@ internal static class TestData
         context.AssetLinks.Add(link);
         await context.SaveChangesAsync();
         return link;
+    }
+
+    /// <summary>
+    /// A generic, well-formed, NEUTRAL template definition document (the template boundary, docs/04): a
+    /// top-level <c>templateKey</c> plus a non-empty <c>entityTypes</c> array of valid entries, exactly
+    /// the minimal structure <c>TemplateDefinitionValidator</c> requires. Used to seed templates for the
+    /// deletion tests.
+    /// </summary>
+    private const string _templateDefinition = """
+        {
+          "templateKey": "sample.template",
+          "entityTypes": [
+            { "key": "type-alpha", "displayName": "Type Alpha", "attributeSchema": { "fields": [] } }
+          ]
+        }
+        """;
+
+    /// <summary>
+    /// Creates and persists an ORGANIZATION-scoped template owned by the given organization, driving the
+    /// real <see cref="Template.CreateForOrganization"/> aggregate factory so the seeded row has exactly
+    /// the invariants production would produce. Used to arrange a deletable org template. The key and
+    /// definition are generic, neutral data (AGENTS.md; the template boundary, docs/04).
+    /// </summary>
+    public static async Task<Template> AddOrganizationTemplateAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        string templateKey = "sample.template",
+        int version = 1)
+    {
+        var template = Template.CreateForOrganization(organizationId, templateKey, version, _templateDefinition, SeedTime);
+        context.Templates.Add(template);
+        await context.SaveChangesAsync();
+        return template;
+    }
+
+    /// <summary>
+    /// Creates and persists a GLOBAL template (available to every organization, <c>organization_id IS
+    /// NULL</c>), driving the real <see cref="Template.CreateGlobal"/> aggregate factory. Used to arrange
+    /// the "global templates cannot be deleted by an org" negative: a global template addressed through an
+    /// org path is a hidden 404 and is left intact.
+    /// </summary>
+    public static async Task<Template> AddGlobalTemplateAsync(
+        this LiveCoreDbContext context,
+        string templateKey = "sample.template",
+        int version = 1)
+    {
+        var template = Template.CreateGlobal(templateKey, version, _templateDefinition, SeedTime);
+        context.Templates.Add(template);
+        await context.SaveChangesAsync();
+        return template;
     }
 
     /// <summary>

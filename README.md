@@ -1469,6 +1469,43 @@ assets/scenes/entities/content blocks), matched exactly (`MembershipRole` is non
 add-link precedent (CORE-AST-005) and the entity-relationship removal (CORE-LIFE-002), the removal emits no event
 and writes no audit record, and the schema is unchanged so no migration is needed.
 
+### Template deletion
+
+An authorized admin can delete an organization-scoped template (CORE-LIFE-008, the "Resource Lifecycle and
+Deletion" epic):
+
+| Method   | Route                                                             | Authorized callers              |
+| -------- | ----------------------------------------------------------------- | ------------------------------- |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/templates/{templateId}` | organization `Owner` or `Admin` |
+
+The Templates module had a template **create + load** (CORE-ENT-004) but no delete — a template could be
+registered and materialized into a workspace's entity types, never removed. This adds the **inverse**, reusing the
+existing `ITemplateRepository`. A template is an **organization-level** registry resource (not workspace content),
+so the route is org-scoped exactly like the organization member-removal route: the tenant's slug is in the path
+(resolved by the same token-claim-and-membership tenant check), and the template is addressed by id within that
+tenant. Deleting an org template is the **"authorized admin" action**, so the role set is **organization `Owner`
+or `Admin`** (the same admin set the member-removal route uses), matched exactly (`MembershipRole` is non-linear).
+
+**The global vs organization template boundary** (the headline requirement): a **global** template
+(`organization_id IS NULL`) is available to every tenant and **cannot be deleted by an organization**, while an
+**organization-scoped** template is owned by, and deletable only within, its one tenant. This is enforced
+**structurally**, not by a branch: the template is loaded through `FindByOrganizationAndIdAsync`, which matches
+only a row whose `organization_id` equals the resolved tenant — a global template is **never** returned through
+the org path, so an organization's attempt to delete a global template (even with its exact id) is an
+indistinguishable hidden `404` and the global template is left intact. A template owned by another organization is
+equally unreachable. The route is org-scoped, so there is no global delete path from this surface at all.
+
+On success the addressed template row is hard-deleted and the route returns `204 No Content`; **only the
+`templates` row is removed**. **Already-instantiated entity types are unaffected** (the acceptance criterion): the
+loader materializes **normal** workspace `EntityType` rows that carry **no foreign key back to the template**, so
+deleting the registry entry leaves every previously loaded type in place — there is nothing to cascade. It is
+fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, names a template owned by
+another organization or a global template, or names a template that does not exist — and **deleting a
+non-existent template is a safe `404`** (it reveals nothing and changes nothing). A known tenant member who lacks
+`Owner`/`Admin` is `403`. Faithful to the template-create precedent (CORE-ENT-004) and the entity-relationship
+removal (CORE-LIFE-002), the deletion emits no event and writes no audit record, and the schema is unchanged so
+no migration is needed.
+
 ### Export jobs
 
 The Exports module owns generic, **asynchronous** data exports (`docs/05_MODULE_CONTRACTS.md`:

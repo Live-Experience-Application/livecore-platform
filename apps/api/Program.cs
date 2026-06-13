@@ -795,6 +795,25 @@ app.MapMeEndpoints();
 // (threats T1/T5).
 app.MapOrganizationEndpoints();
 
+// Template deletion endpoint (CORE-LIFE-008, the "Resource Lifecycle and Deletion" epic):
+// DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}. The Templates module had a
+// template create + load (CORE-ENT-004) but no delete; this adds the inverse. It lives in an
+// authenticated route group and fails closed (503) when persistence is not configured, exactly like the
+// organization endpoints. No new DI registration is required: the tenant context resolver and the
+// template repository (extended with RemoveAsync) it consumes are already registered above inside the
+// persistence conditional. The template is org-scoped, so the tenant's slug is in the path (resolved by
+// the same token-claim-and-membership tenant check the organization member-removal route uses), and the
+// caller is authorized as an admin of that tenant (Owner/Admin). The template is then loaded through the
+// tenant-scoped FindByOrganizationAndIdAsync, which never returns a GLOBAL template — so "global
+// templates cannot be deleted by an org" is enforced structurally as a hidden 404 (threats T1/T5), and a
+// template owned by another organization is equally unreachable. Every denial is hidden as 404 (an
+// insufficient role as 403), and deleting a non-existent template is a safe 404. The workspace
+// EntityType rows a previous load materialized carry no foreign key back to the template, so
+// already-instantiated entity types are unaffected (the story acceptance criterion); there is nothing to
+// cascade, and (faithful to the template-create and entity-relationship-removal precedents) the deletion
+// emits no event and writes no audit record.
+app.MapTemplateEndpoints();
+
 // Workspace endpoints (CORE-WS-003): the first domain HTTP endpoints. They live
 // in an authenticated route group and fail closed (503) when persistence is not
 // configured, so mapping them never crashes startup.

@@ -98,4 +98,16 @@ public interface ITemplateRepository
     /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
     /// </summary>
     Task<TemplateAddResult> AddAsync(Template template, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Hard-deletes exactly the given template row (CORE-LIFE-008, "Implement template deletion",
+    /// the "Resource Lifecycle and Deletion" epic). The caller resolves the row first through a
+    /// scope-aware lookup — <see cref="FindByOrganizationAndIdAsync"/> for an org-scoped template —
+    /// so the boundary is already enforced before this call (a GLOBAL template is never reachable
+    /// through the org path, so an organization can never delete one; threat T5/T1). Only the
+    /// <c>templates</c> row is removed: the workspace <c>EntityType</c> rows a previous load
+    /// materialized carry NO foreign key back to the template (the loader creates normal workspace
+    /// rows), so already-instantiated entity types are unaffected (the story acceptance criterion).
+    /// </summary>
+    Task RemoveAsync(Template template, CancellationToken cancellationToken);
 }

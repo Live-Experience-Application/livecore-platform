@@ -188,4 +188,18 @@ internal sealed class TemplateRepository : ITemplateRepository
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(Template template, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(template);
+
+        // The caller resolved this exact row through the scope-aware lookup (the org endpoint uses
+        // FindByOrganizationAndIdAsync, which never returns a global template), so removing the loaded
+        // template deletes precisely that one row. No dependent rows are touched: the workspace
+        // EntityType rows a previous load materialized hold no foreign key back to the template, so
+        // already-instantiated entity types survive the deletion (CORE-LIFE-008 acceptance criterion).
+        _dbContext.Templates.Remove(template);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

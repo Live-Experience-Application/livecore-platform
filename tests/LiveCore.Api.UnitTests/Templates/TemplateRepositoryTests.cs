@@ -305,6 +305,78 @@ public sealed class TemplateRepositoryTests : IDisposable
         Assert.Equal(global.Id, Assert.Single(globals).Id);
     }
 
+    // --- Removal (CORE-LIFE-008) -----------------------------------------------
+
+    [Fact]
+    public async Task RemoveAsync_deletes_only_the_addressed_org_template()
+    {
+        // Two org templates and a global template; removing one org template leaves the others intact.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var toDelete = await SeedForOrganizationAsync(organization.Id, "template-alpha");
+        var sibling = await SeedForOrganizationAsync(organization.Id, "template-beta");
+        var global = await SeedGlobalAsync("template-gamma");
+
+        await using (var context = CreateContext())
+        {
+            var repository = new TemplateRepository(context);
+            var loaded = await repository.FindByOrganizationAndIdAsync(
+                organization.Id, toDelete.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.RemoveAsync(loaded, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new TemplateRepository(context);
+            Assert.Null(await repository.FindByOrganizationAndIdAsync(
+                organization.Id, toDelete.Id, CancellationToken.None));
+            // The sibling org template and the global template are untouched.
+            Assert.NotNull(await repository.FindByOrganizationAndIdAsync(
+                organization.Id, sibling.Id, CancellationToken.None));
+            Assert.NotNull(await repository.FindGlobalByIdAsync(global.Id, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task RemoveAsync_of_an_org_template_leaves_a_global_template_with_the_same_key_and_version()
+    {
+        // The global/organization boundary: an org template and a global template may share a
+        // key+version (different scopes). Deleting the org one must never touch the global one.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var global = await SeedGlobalAsync("template-alpha", 1);
+        var orgScoped = await SeedForOrganizationAsync(organization.Id, "template-alpha", 1);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new TemplateRepository(context);
+            var loaded = await repository.FindByOrganizationAndIdAsync(
+                organization.Id, orgScoped.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.RemoveAsync(loaded, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new TemplateRepository(context);
+            Assert.Null(await repository.FindByOrganizationAndIdAsync(
+                organization.Id, orgScoped.Id, CancellationToken.None));
+            // The global template with the same key+version still resolves via the global path.
+            var remainingGlobal = await repository.FindGlobalByKeyAsync("template-alpha", 1, CancellationToken.None);
+            Assert.NotNull(remainingGlobal);
+            Assert.Equal(global.Id, remainingGlobal.Id);
+        }
+    }
+
+    [Fact]
+    public async Task RemoveAsync_rejects_a_null_template()
+    {
+        await using var context = CreateContext();
+        var repository = new TemplateRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => repository.RemoveAsync(null!, CancellationToken.None));
+    }
+
     // --- Foreign-key enforcement -----------------------------------------------
 
     [Fact]
