@@ -91,6 +91,41 @@ internal sealed class SessionRepository : ISessionRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Session>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's sessions, so the lookup
+        // fails fast instead of returning an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // The predicate leads with the tenant column and then matches the workspace,
+        // so the list is exactly tenant- and workspace-scoped: another tenant's or
+        // another workspace's sessions are never returned even when their ids would
+        // otherwise be addressable (threat T5/T1; the organization boundary is checked
+        // before the workspace boundary, backed by the
+        // ix_sessions_organization_id_workspace_id index).
+        // The order is by the time-ordered surrogate id (UUIDv7), which is chronological
+        // and provider-independent — SQLite cannot ORDER BY a DateTimeOffset — matching
+        // the other repositories' ordering convention.
+        return await _dbContext.Sessions
+            .Where(session => session.OrganizationId == organizationId
+                && session.WorkspaceId == workspaceId)
+            .OrderBy(session => session.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<SessionAddResult> AddAsync(Session session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);

@@ -1,6 +1,33 @@
 namespace LiveCore.Api.Sessions;
 
 /// <summary>
+/// Request body for creating a session (CORE-API-003,
+/// <c>POST /api/v1/workspaces/{workspaceId}/sessions</c>, csv/api_routes.csv "Create
+/// session", roles Owner,Admin,Host,CoHost).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> and the
+/// target workspace is taken from the route path, mirroring how the scene create
+/// (<c>POST /api/v1/workspaces/{workspaceId}/scenes</c>) resolves its tenant: the
+/// slug is matched against the caller's token organization claim AND a persisted
+/// organization membership by the tenant context resolver, and the create is then
+/// authorized by the caller's role in the route's workspace (threat T5).
+///
+/// The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): a session
+/// carries only a human-readable <see cref="Title"/>. It deliberately carries NO
+/// lifecycle status: a session is always created <see cref="SessionStatus.Prepared"/>
+/// server-side (the state behind <c>SessionCreated</c>, docs/09_EVENT_CATALOG.md), so
+/// a client can never create a session that is already live or ended — the only way
+/// into the live timeline is the guarded start command. It also carries no id, tenant
+/// id or timestamps: those are server-assigned.
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to resolve
+/// the tenant context (the route carries no organization in its path).
+/// </param>
+/// <param name="Title">Human-readable display title of the new session.</param>
+public sealed record CreateSessionRequest(string? OrganizationSlug, string? Title);
+
+/// <summary>
 /// Response projection of a session (CORE-SES-004,
 /// <c>POST /api/v1/sessions/{sessionId}/start</c> and
 /// <c>POST /api/v1/sessions/{sessionId}/end</c>). It is the body returned by the

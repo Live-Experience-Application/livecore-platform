@@ -743,16 +743,19 @@ app.MapOrganizationEndpoints();
 // configured, so mapping them never crashes startup.
 app.MapWorkspaceEndpoints();
 
-// Session lifecycle endpoints (CORE-SES-004): the session start/end commands.
-// They live in an authenticated route group and fail closed (503) when
-// persistence is not configured, exactly like the workspace endpoints. No new DI
-// registration is required: the tenant context resolver, the session repository
-// and the workspace member repository they consume are already registered above
-// inside the persistence conditional. The durable SessionStarted/SessionEnded
-// events these commands will eventually emit are deferred to the Realtime epic
-// (no event store/SignalR transport exists yet); the persisted status transition
-// is the behavior delivered here (docs/09_EVENT_CATALOG.md; csv/database_tables.csv
-// assigns session_events to the Realtime module).
+// Session endpoints: the workspace-scoped create/list routes
+// (GET/POST /api/v1/workspaces/{workspaceId}/sessions, CORE-API-003) and the
+// by-session-id start/end lifecycle commands (CORE-SES-004). They live in
+// authenticated route groups and fail closed (503) when persistence is not
+// configured, exactly like the workspace endpoints. No new DI registration is
+// required: the tenant context resolver, the session repository, the workspace
+// member repository and the quota enforcement service they consume are already
+// registered above inside the persistence conditional. Create enforces (but does
+// not consume) the workspace's session.active.max quota; start consumes it and end
+// releases it. The durable SessionCreated/SessionStarted/SessionEnded events are
+// deferred to the Session Event Stream epic (CORE-EVT-001; no emission here); the
+// persisted status transition is the behavior delivered (docs/09_EVENT_CATALOG.md;
+// csv/database_tables.csv assigns session_events to the Realtime module).
 app.MapSessionEndpoints();
 
 // Participant-visible feed endpoint (CORE-SES-005): the Visibility module's first

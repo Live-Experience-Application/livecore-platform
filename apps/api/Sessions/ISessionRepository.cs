@@ -20,14 +20,12 @@ namespace LiveCore.Api.Sessions;
 /// workspace's session can never be read through another workspace's id and a
 /// session in one tenant can never be read through another tenant's id (threat T5
 /// in docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level
-/// authorization). There is also no <c>ListBy*</c> method: the workspace session
-/// list endpoint (GET /api/v1/workspaces/{workspaceId}/sessions) is a later story.
-/// Resolving the "current" organization or workspace from a request is not done
-/// here; that is the tenant context resolver (CORE-ID-005) and later endpoint
-/// stories. This is the aggregate + persistence story; the create/start/end HTTP
-/// endpoints and the <c>SessionCreated</c>/<c>Started</c>/<c>Ended</c> events
-/// (CORE-SES-004) are later stories and are deliberately not built here. This
-/// contract takes explicit ids.
+/// authorization). The workspace-scoped <see cref="ListByWorkspaceAsync"/> (added
+/// for the session create/list API, CORE-API-003) is the one list method; it is
+/// also tenant- AND workspace-scoped and never crosses either boundary. Resolving
+/// the "current" organization or workspace from a request is not done here; that is
+/// the tenant context resolver (CORE-ID-005) and the endpoint layer. This contract
+/// takes explicit ids.
 /// </summary>
 public interface ISessionRepository
 {
@@ -86,6 +84,32 @@ public interface ISessionRepository
     Task<Session?> FindByIdInOrganizationAsync(
         Guid organizationId,
         Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every session of the given workspace (owned by the given organization)
+    /// in a deterministic order — by the time-ordered surrogate id (UUIDv7), which is
+    /// chronological and provider-independent — backing the workspace session list
+    /// route (<c>GET /api/v1/workspaces/{workspaceId}/sessions</c>, CORE-API-003).
+    ///
+    /// The list is tenant- AND workspace-scoped: the predicate leads with
+    /// <c>organization_id</c> and then matches <c>workspace_id</c>, so a foreign
+    /// tenant's or a foreign workspace's sessions are NEVER returned even when their
+    /// ids would otherwise be addressable (threat T5/T1; docs/06_AUTHORIZATION_MATRIX.md:
+    /// the organization boundary is checked before the workspace boundary). An empty
+    /// list is returned for a workspace that has no sessions; the lookup never crosses
+    /// the tenant or workspace boundary to borrow another workspace's sessions. Every
+    /// lifecycle status is returned (the list is not filtered by status); deciding what
+    /// each role sees is the endpoint's concern, not the repository's.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or workspace id is empty. An empty id can never address a
+    /// stored workspace's sessions, so the lookup is rejected instead of silently
+    /// returning nothing.
+    /// </exception>
+    Task<IReadOnlyList<Session>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
         CancellationToken cancellationToken);
 
     /// <summary>

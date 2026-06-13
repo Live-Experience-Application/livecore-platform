@@ -505,6 +505,42 @@ single-use. It is a one-time join grant, not an authentication credential and
 not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Invite acceptance,
 delivery and revocation endpoints are follow-up stories.
 
+### Session create and list
+
+The Sessions module exposes the workspace-scoped create and list API
+(CORE-API-003), so a session is reachable over HTTP before its start/end
+lifecycle commands operate on it:
+
+| Method | Route                                       | Authorized callers                             |
+| ------ | ------------------------------------------- | ---------------------------------------------- |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/sessions` | any member of that workspace                   |
+| `POST` | `/api/v1/workspaces/{workspaceId}/sessions` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+Both routes carry the `{workspaceId}` in the path and resolve the target
+organization from a required `organizationSlug` (a query parameter on the `GET`,
+a body field on the `POST`), run the same token-claim-and-membership tenant check
+as the other workspace-scoped routes, and then authorize the caller by their role
+in that workspace. A caller who cannot see the tenant, or who is not a member of
+the workspace, is hidden as `404` (never `403`); a known member who lacks the
+create role is `403`.
+
+`POST` creates a new `Prepared` session (the lifecycle status is assigned
+server-side; a client can never create a session that is already live or ended)
+and returns `201 Created` with the generic session DTO. The workspace's
+`session.active.max` quota is enforced on create through the existing quota
+services: the create **checks** the quota (a workspace already running its
+maximum number of concurrent live sessions cannot create another and is rejected
+with `409 Conflict`) but does **not** consume it — the active-session count stays
+owned by `start` (which consumes a slot) and `end` (which releases it), so a
+created `Prepared` session never double-counts against the live ceiling. When no
+quota governs the deployment the create proceeds unchanged.
+
+`GET` lists the workspace's sessions (filtered to that tenant and workspace, so a
+member only ever sees their own workspace's sessions). Unlike the scene list there
+is no host-vs-participant projection split: a session is a single generic resource
+with no hidden content, so every workspace member receives the same safe DTO
+(identifiers, the display title, the lifecycle status and the server timestamps).
+
 ### Session lifecycle commands
 
 Two by-session-id commands drive the session lifecycle state machine

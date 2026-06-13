@@ -319,6 +319,86 @@ public sealed class SessionRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ListByWorkspace_returns_only_that_workspaces_sessions_ordered_by_id()
+    {
+        // The list backing GET /api/v1/workspaces/{workspaceId}/sessions (CORE-API-003)
+        // is tenant- and workspace-scoped and ordered by the time-ordered surrogate id
+        // (UUIDv7), so it is chronological and deterministic. A sibling workspace's
+        // session is never borrowed into the list (threat T5/T1).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace1 = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var workspace2 = await SeedWorkspaceAsync(organization.Id, _workspaceSlugB);
+        var first = await SeedSessionAsync(organization.Id, workspace1.Id, "First");
+        var second = await SeedSessionAsync(organization.Id, workspace1.Id, "Second");
+        var third = await SeedSessionAsync(organization.Id, workspace1.Id, "Third");
+        // A session in a sibling workspace that must NOT appear in workspace1's list.
+        await SeedSessionAsync(organization.Id, workspace2.Id, "Other");
+
+        await using var context = CreateContext();
+        var repository = new SessionRepository(context);
+        var listed = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace1.Id, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { first.Id, second.Id, third.Id },
+            listed.Select(session => session.Id).ToArray());
+        Assert.All(listed, session => Assert.Equal(workspace1.Id, session.WorkspaceId));
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_for_a_workspace_with_no_sessions_is_empty()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+
+        await using var context = CreateContext();
+        var repository = new SessionRepository(context);
+        var listed = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, CancellationToken.None);
+
+        Assert.Empty(listed);
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_does_not_return_a_workspaces_sessions_under_another_tenant()
+    {
+        // Mandatory negative foreign-tenant test (threat T5;
+        // docs/06_AUTHORIZATION_MATRIX.md: organization boundary checked before
+        // workspace boundary): listing the SAME workspace id under organization B's id
+        // returns nothing, even though the workspace and its sessions exist under
+        // organization A.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceInA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        await SeedSessionAsync(organizationA.Id, workspaceInA.Id, "Run");
+
+        await using var context = CreateContext();
+        var repository = new SessionRepository(context);
+
+        var underA = await repository.ListByWorkspaceAsync(
+            organizationA.Id, workspaceInA.Id, CancellationToken.None);
+        var underB = await repository.ListByWorkspaceAsync(
+            organizationB.Id, workspaceInA.Id, CancellationToken.None);
+
+        Assert.Single(underA);
+        Assert.Empty(underB);
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new SessionRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task A_session_cannot_reference_a_workspace_that_does_not_exist()
     {
         // The workspace_id foreign key is enforced (PRAGMA foreign_keys = ON): a

@@ -8,20 +8,34 @@ using Microsoft.AspNetCore.Mvc;
 namespace LiveCore.Api.Sessions;
 
 /// <summary>
-/// HTTP endpoints of the Sessions module's lifecycle commands (CORE-SES-004:
-/// "Implement session start/end commands"). They realize the documented request
-/// flow end-to-end for the two by-session-id routes: "authentication middleware
-/// -> tenant/workspace context resolver -> endpoint -> authorization policy"
-/// (docs/02_ARCHITECTURE.md), mirroring <see cref="Workspaces.WorkspaceEndpoints"/>
-/// exactly.
+/// HTTP endpoints of the Sessions module. They realize the documented request flow
+/// end-to-end for the session routes: "authentication middleware -> tenant/workspace
+/// context resolver -> endpoint -> authorization policy" (docs/02_ARCHITECTURE.md),
+/// mirroring <see cref="Workspaces.WorkspaceEndpoints"/> and
+/// <see cref="Scenes.SceneEndpoints"/> exactly.
 ///
-/// Routes owned by this story (csv/api_routes.csv):
+/// Routes owned here (csv/api_routes.csv), spanning two stories:
 /// <list type="bullet">
-///   <item><c>POST /api/v1/sessions/{sessionId}/start</c> — starts the session's
-///   live timeline (drives <see cref="Session.Start"/>), authorized to the
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/sessions</c> (CORE-API-003) —
+///   creates a new <see cref="SessionStatus.Prepared"/> session in the route's
+///   workspace (drives <see cref="Session.Create"/>), authorized to the
+///   session-control roles "Owner,Admin,Host,CoHost". The workspace's
+///   <c>session.active.max</c> quota is enforced on create via the existing
+///   <see cref="Entitlements.QuotaEnforcementService"/> (see <c>CreateSessionAsync</c>
+///   for why the create CHECKS the quota but does not RECORD consumption — start does).</item>
+///   <item><c>GET /api/v1/workspaces/{workspaceId}/sessions</c> (CORE-API-003) —
+///   lists the route workspace's sessions (via
+///   <see cref="ISessionRepository.ListByWorkspaceAsync"/>), authorized to "workspace
+///   members" (any membership role). The list is "Filtered" to the caller's workspace
+///   (it never crosses the tenant or workspace boundary); see <c>ListSessionsAsync</c>
+///   for why there is a single generic projection rather than a host-vs-participant
+///   split.</item>
+///   <item><c>POST /api/v1/sessions/{sessionId}/start</c> (CORE-SES-004) — starts the
+///   session's live timeline (drives <see cref="Session.Start"/>), authorized to the
 ///   session-control roles "Host,CoHost,Owner,Admin".</item>
-///   <item><c>POST /api/v1/sessions/{sessionId}/end</c> — ends the session's live
-///   timeline (drives <see cref="Session.End"/>), authorized to the same roles.</item>
+///   <item><c>POST /api/v1/sessions/{sessionId}/end</c> (CORE-SES-004) — ends the
+///   session's live timeline (drives <see cref="Session.End"/>), authorized to the
+///   same roles.</item>
 /// </list>
 ///
 /// Authoritative behavior — the session STATUS TRANSITION, persisted. The route
@@ -88,14 +102,226 @@ internal static class SessionEndpoints
     {
         // Authenticated group: the bearer middleware authenticates the caller, so
         // a missing/invalid token is challenged as 401 before any handler runs.
-        var group = endpoints
+        var byId = endpoints
             .MapGroup("/api/v1/sessions")
             .RequireAuthorization();
 
-        group.MapPost("/{sessionId}/start", StartSessionAsync);
-        group.MapPost("/{sessionId}/end", EndSessionAsync);
+        byId.MapPost("/{sessionId}/start", StartSessionAsync);
+        byId.MapPost("/{sessionId}/end", EndSessionAsync);
+
+        // Workspace-scoped create/list routes (CORE-API-003). The workspace is in the
+        // path (exactly like the scene routes), so these live under the workspaces
+        // prefix; the full templates differ from the scene templates, so the two
+        // modules can share the prefix without collision.
+        var workspaceScoped = endpoints
+            .MapGroup("/api/v1/workspaces")
+            .RequireAuthorization();
+
+        workspaceScoped.MapGet("/{workspaceId}/sessions", ListSessionsAsync);
+        workspaceScoped.MapPost("/{workspaceId}/sessions", CreateSessionAsync);
 
         return endpoints;
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/sessions?organizationSlug={slug}
+    private static async Task<IResult> ListSessionsAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route
+        // path carries no organization, so it is a query parameter exactly like the
+        // scene list and the workspace by-id read.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as
+        // hidden (404), never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 so a foreign or non-existent
+            // tenant is indistinguishable from a missing workspace (docs/08; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace.
+        // The list is allowed to ANY membership role ("workspace members",
+        // csv/api_routes.csv); a non-member is hidden as 404 (not 403) so resource
+        // existence is not leaked — the same rule as the scene list and the workspace
+        // read-one route (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // The "Filtered" note on this route (csv/api_routes.csv) is the tenant- AND
+        // workspace-scoping the repository enforces: the list never crosses the tenant
+        // or workspace boundary, so a member only ever sees their own workspace's
+        // sessions. Unlike the scene list, there is NO host-vs-participant projection
+        // split: a session is a single generic resource with no hidden content to leak
+        // (the SessionResponse carries only ids, the display title, the lifecycle status
+        // and the server timestamps — the same safe DTO the start/end commands return,
+        // docs/08; threat T7), so every workspace member receives the same projection.
+        // Sessions themselves are not gated by visibility rules (those govern
+        // scenes/content/entities, not the session aggregate); deciding which session
+        // CONTENT an audience may see remains the Visibility module's concern.
+        var sessions = await deps.Sessions
+            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+
+        var response = sessions.Select(SessionResponse.From).ToArray();
+        return Results.Ok(response);
+    }
+
+    // POST /api/v1/workspaces/{workspaceId}/sessions
+    private static async Task<IResult> CreateSessionAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromBody] CreateSessionRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // Validate the session inputs before touching the tenant, so a broken body is a
+        // 400 regardless of authorization. The rejected title is never echoed back
+        // (threat T7).
+        if (!Session.IsValidTitle(request.Title?.Trim()))
+        {
+            return ValidationError("A valid session title is required.");
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as
+        // hidden (404), never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the workspace as 404 (threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace. A
+        // caller who is a member of the tenant but NOT of the workspace must not learn
+        // the workspace exists, so a missing membership is hidden as 404 (not 403) — the
+        // same rule as the scene create and the workspace read-one route (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // The caller is a known member of the workspace, so an insufficient role is a
+        // 403 (authorized to know the workspace exists, but not to create a session in
+        // it). "Create session" is "Owner,Admin,Host,CoHost" (csv/api_routes.csv;
+        // docs/06_AUTHORIZATION_MATRIX.md "Create session"). MembershipRole is
+        // non-linear, so this is an EXACT set membership check, never a >/< ordering
+        // comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Quota enforcement (CORE-API-003): creating a session is gated by the
+        // workspace's session.active.max quota via the existing QuotaEnforcementService,
+        // AFTER role authorization and BEFORE the session is created, computed entirely
+        // server-side and fail-closed ("Free limits cannot be bypassed by clients";
+        // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). The create only CHECKS the
+        // quota; it deliberately does NOT record consumption. session.active.max counts a
+        // workspace's currently-LIVE sessions (it is consumed at start and released at
+        // end, see RunLifecycleCommandAsync), and a created session is Prepared, not
+        // live. Recording here would double-count when the session later starts and would
+        // make the very session just created un-startable, so the active-session count
+        // must remain owned by start/end. The check therefore means: a workspace already
+        // running its maximum number of concurrent live sessions cannot create another
+        // until it ends one. When no quota governs the deployment the create proceeds
+        // unchanged.
+        var quotaDecision = await deps.QuotaEnforcement
+            .CheckAsync(
+                EntitlementSubjectType.Workspace,
+                workspaceGuid,
+                QuotaEntitlementKeys.SessionActiveMax,
+                amount: 1,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!quotaDecision.IsAllowed)
+        {
+            return QuotaExceeded(quotaDecision);
+        }
+
+        // The injected TimeProvider stamps the creation timestamp, exactly like the
+        // scene create and the lifecycle handlers. The session is created Prepared with
+        // no live timeline (the state behind SessionCreated, docs/09_EVENT_CATALOG.md);
+        // the durable SessionCreated event and its delivery belong to the later Session
+        // Event Stream epic (CORE-EVT-001) and are deliberately NOT emitted here.
+        var now = timeProvider.GetUtcNow();
+        var session = Session.Create(context.OrganizationId, workspaceGuid, request.Title!.Trim(), now);
+
+        // A session has no uniqueness constraint, so there is no 409 outcome to translate;
+        // AddAsync always returns Added on success (a foreign-key violation would surface
+        // as a DbUpdateException, which the membership check above already precludes for a
+        // resolved, existing workspace).
+        await deps.Sessions.AddAsync(session, cancellationToken).ConfigureAwait(false);
+
+        var response = SessionResponse.From(session);
+        return Results.Created($"/api/v1/sessions/{session.Id}", response);
     }
 
     // POST /api/v1/sessions/{sessionId}/start?organizationSlug={slug}
@@ -419,6 +645,13 @@ internal static class SessionEndpoints
     // caller does not belong to are ALL reported as 404, never distinguishable from
     // each other and never echoing the reason (docs/08; threats T1/T5).
     private static IResult HiddenSession() => NotFound();
+
+    // Workspace existence is hidden on the workspace-scoped create/list routes: a
+    // malformed workspace id, a workspace in a foreign or non-entitled tenant, an
+    // unknown workspace, and a workspace the caller does not belong to are ALL
+    // reported as 404, never distinguishable and never echoing the reason — the same
+    // rule the scene routes apply (docs/08; threats T1/T5).
+    private static IResult HiddenWorkspace() => NotFound();
 
     private static IResult NotFound()
         => Results.Problem(
