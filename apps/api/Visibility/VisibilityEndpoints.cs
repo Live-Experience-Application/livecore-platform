@@ -8,12 +8,12 @@ using Microsoft.AspNetCore.Mvc;
 namespace LiveCore.Api.Visibility;
 
 /// <summary>
-/// HTTP endpoint of the Visibility module's participant-visible feed
-/// (CORE-SES-005: "Implement participant-visible feed endpoint skeleton"). It
-/// realizes the documented request flow end-to-end for the single by-participant-id
-/// route: "authentication middleware -> tenant/workspace context resolver ->
-/// endpoint -> authorization policy" (docs/02_ARCHITECTURE.md), mirroring
-/// <see cref="Sessions.SessionEndpoints"/> exactly.
+/// HTTP endpoint of the Visibility module's participant-visible feed (route skeleton
+/// CORE-SES-005, real projection CORE-API-005: "Implement the real participant
+/// visible-feed projection"). It realizes the documented request flow end-to-end for
+/// the single by-participant-id route: "authentication middleware -> tenant/workspace
+/// context resolver -> endpoint -> authorization policy" (docs/02_ARCHITECTURE.md),
+/// mirroring <see cref="Sessions.SessionEndpoints"/> exactly.
 ///
 /// Route owned by this story (csv/api_routes.csv line 18):
 /// <list type="bullet">
@@ -26,21 +26,28 @@ namespace LiveCore.Api.Visibility;
 /// to the Visibility module, and docs/05_MODULE_CONTRACTS.md gives the Visibility
 /// module "audience calculations", "preview-as-participant" and "visible state
 /// reconstruction" and the provided operation
-/// <c>GetVisibleResourcesForParticipant</c>. This story creates the Visibility
-/// module's FIRST file: the skeleton endpoint. The visibility engine itself
-/// (<c>CanViewResource</c> / <c>GetVisibleResourcesForParticipant</c> /
-/// <c>PreviewVisibilityForHost</c>, the visibility rules and audience math) arrives
-/// in the CORE-VIS epic and is deliberately NOT built here.
+/// <c>GetVisibleResourcesForParticipant</c>. The route skeleton (CORE-SES-005)
+/// established the Visibility module's first endpoint with its fail-closed
+/// authorization; CORE-API-005 wires the handler to the now participant-aware
+/// <see cref="VisibilityPreviewService"/> so the feed returns the participant's real
+/// visible set.
 ///
-/// SKELETON SCOPE — THE FEED IS EMPTY. The route, its fail-closed authorization and
-/// a participant-SAFE feed envelope are the deliverable; the ACTUAL visible content
-/// (filtered reveal events, content blocks, server-side visibility-rule evaluation)
-/// is produced by the later Visibility + Reveal + Realtime epics (CORE-VIS-* /
-/// CORE-RT-*). There is no visibility engine, no content and no session events yet
-/// (csv/database_tables.csv assigns <c>session_events</c> to the Realtime module),
-/// so the feed is LEGITIMATELY empty — an empty
-/// <see cref="ParticipantVisibleFeedResponse"/>, never a stub that fabricates
-/// content.
+/// THE REAL VISIBLE SET (CORE-API-005). After the fail-closed authorization below, the
+/// feed is computed server-side by
+/// <see cref="VisibilityPreviewService.GetVisibleResourcesForParticipantAsync"/> (the
+/// participant-aware preview, CORE-API-004), which decides every candidate resource
+/// through the central <see cref="VisibilityPolicy"/> — the SAME primitive the realtime
+/// recipient resolver (<see cref="EventRecipientVisibility"/>) uses — so a participant
+/// sees a resource iff an audience-wide visible rule, or a visible rule scoped to
+/// exactly them, applies, and the REST feed can never diverge from realtime delivery or
+/// per-resource access (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic
+/// elsewhere"). A resource revealed only to a DIFFERENT participant is excluded (the
+/// selected-participant guarantee; threat T5). Each visible resource is projected to a
+/// participant-SAFE feed item carrying only the resource IDENTITY (kind + id), matching
+/// the realtime audience event payload
+/// (<see cref="Realtime.SessionEventEnvelope.ForAudience"/>) — never resolved content
+/// (threats T2/T7). The feed is empty only when the participant currently has nothing
+/// visible, never by construction.
 ///
 /// Tenant resolution (mirrors the session/workspace by-id routes): the route path
 /// carries only <c>{participantId}</c>, so the target organization is supplied by a
@@ -198,14 +205,33 @@ internal static class VisibilityEndpoints
             return HiddenFeed();
         }
 
-        // Authorized. The feed is legitimately EMPTY in this skeleton (there is no
-        // visibility engine and no content yet — the filtered content is the
-        // CORE-VIS/Reveal/Realtime epics). Return the participant-safe envelope
-        // with an empty item list and a server timestamp from the injected
-        // TimeProvider (docs/08: "Include server timestamps").
-        var feed = ParticipantVisibleFeedResponse.Empty(
+        // Authorized. Compute the participant's ACTUALLY-VISIBLE set server-side
+        // (CORE-API-005) through the participant-aware preview query (CORE-API-004),
+        // which routes every candidate resource through the central VisibilityPolicy
+        // — so this REST feed, the realtime recipient calculation and per-resource
+        // access can never diverge and the visibility decision lives in exactly one
+        // place (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic
+        // elsewhere"). The set is the resources visible to THIS participant: an
+        // audience-wide reveal OR a reveal scoped to exactly them, never one revealed
+        // only to a different participant (the selected-participant guarantee, decided
+        // fail-closed by the policy; threat T5). It is scoped to the participant's own
+        // tenant and workspace, both already enforced above.
+        var visibleResources = await deps.Preview
+            .GetVisibleResourcesForParticipantAsync(
+                context.OrganizationId,
+                participant.WorkspaceId,
+                participant.Id,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // Project each visible resource to its participant-safe item (kind + id only,
+        // never resolved content — threat T7) and return the participant-safe envelope
+        // with a server timestamp from the injected TimeProvider (docs/08: "Include
+        // server timestamps").
+        var feed = ParticipantVisibleFeedResponse.From(
             participant.Id,
             participant.WorkspaceId,
+            visibleResources,
             timeProvider.GetUtcNow());
 
         return Results.Ok(feed);
@@ -278,16 +304,18 @@ internal static class VisibilityEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var participants = services.GetService<IParticipantRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var preview = services.GetService<VisibilityPreviewService>();
 
         if (resolver is null
             || participants is null
-            || workspaceMembers is null)
+            || workspaceMembers is null
+            || preview is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new VisibilityEndpointDependencies(resolver, participants, workspaceMembers);
+        dependencies = new VisibilityEndpointDependencies(resolver, participants, workspaceMembers, preview);
         return true;
     }
 
@@ -349,5 +377,6 @@ internal static class VisibilityEndpoints
     private readonly record struct VisibilityEndpointDependencies(
         TenantContextResolver Resolver,
         IParticipantRepository Participants,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        VisibilityPreviewService Preview);
 }

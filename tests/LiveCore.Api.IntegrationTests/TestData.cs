@@ -246,6 +246,35 @@ internal static class TestData
     }
 
     /// <summary>
+    /// Creates and persists a SELECTED-participant visibility rule for the given resource in the given
+    /// workspace, driving the real <see cref="VisibilityRule.CreateForParticipant"/> aggregate factory.
+    /// The rule's visibility applies ONLY to <paramref name="targetParticipantId"/> — a private reveal —
+    /// so a non-selected participant must not see it. Used to arrange the selected-participant guarantee
+    /// (the crown-jewel: one participant does not see another participant's private reveal).
+    /// </summary>
+    public static async Task<VisibilityRule> AddParticipantVisibilityRuleAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid targetParticipantId,
+        VisibilityState visibility)
+    {
+        var rule = VisibilityRule.CreateForParticipant(
+            organizationId,
+            workspaceId,
+            resourceType,
+            resourceId,
+            targetParticipantId,
+            visibility,
+            SeedTime);
+        context.VisibilityRules.Add(rule);
+        await context.SaveChangesAsync();
+        return rule;
+    }
+
+    /// <summary>
     /// Creates and persists an entity type in the given workspace, driving the real
     /// <see cref="EntityType.Create"/> aggregate factory. Used to arrange a type that an entity instance
     /// (and, through it, an asset link) can reference. The schema is a generic, well-formed JSON object.

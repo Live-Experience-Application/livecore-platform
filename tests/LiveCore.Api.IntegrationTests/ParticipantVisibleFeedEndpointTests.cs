@@ -2,24 +2,32 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Visibility;
 
 namespace LiveCore.Api.IntegrationTests;
 
 /// <summary>
-/// HTTP integration tests for the participant-visible feed endpoint skeleton
-/// (CORE-SES-005, <c>GET /api/v1/participants/{participantId}/visible-feed</c>).
+/// HTTP integration tests for the participant-visible feed endpoint
+/// (route skeleton CORE-SES-005, real projection CORE-API-005,
+/// <c>GET /api/v1/participants/{participantId}/visible-feed</c>).
 /// They drive the real application over real HTTP through
 /// <see cref="WorkspaceApiFactory"/> (test authentication scheme + EF Core SQLite,
 /// foreign keys ON), so the documented request flow (authentication -> tenant
-/// context resolver -> endpoint -> inline object-level authorization) is exercised
-/// end-to-end exactly as in production.
+/// context resolver -> endpoint -> inline object-level authorization -> visibility
+/// projection) is exercised end-to-end exactly as in production.
 ///
-/// Two families of tests, per the story's required coverage ("Lifecycle tests and
-/// authorization tests"):
+/// Three families of tests, per the story's required coverage:
 /// <list type="bullet">
+///   <item>VISIBLE SET (CORE-API-005): an authorized own-feed read returns exactly the
+///   participant's actually-visible resources — an audience-wide reveal AND a private
+///   reveal scoped to them, but never a Hidden or unruled resource nor a foreign
+///   workspace's resource; the CROWN-JEWEL is that a participant does NOT see a
+///   resource revealed only to ANOTHER participant, while the selected participant
+///   DOES; a Host preview returns the previewed participant's own (private) visible
+///   set.</item>
 ///   <item>LIFECYCLE: a participant who OWNS the feed (user-linked to the caller)
-///   gets 200 with the participant-safe EMPTY envelope (ParticipantId/WorkspaceId
-///   present, Items empty, a GeneratedAt timestamp, and no hidden/content fields);
+///   gets 200 with the participant-safe envelope (ParticipantId/WorkspaceId present,
+///   Items the visible set, a GeneratedAt timestamp, and no hidden/content fields);
 ///   a Host and a CoHost of the participant's workspace get 200 (preview); a
 ///   REMOVED participant is hidden as 404 (a removed participant holds no
 ///   standing).</item>
@@ -515,6 +523,186 @@ public sealed class ParticipantVisibleFeedEndpointTests
     }
 
     // =====================================================================
+    // THE REAL VISIBLE SET (CORE-API-005) — the feed returns the participant's
+    // actually-visible resources, computed through the participant-aware
+    // VisibilityPreviewService / VisibilityPolicy. Includes the crown-jewel:
+    // a participant does NOT see another participant's private reveal.
+    // =====================================================================
+
+    [Fact]
+    public async Task Own_feed_returns_audience_wide_and_own_private_reveals_but_not_hidden_or_unruled()
+    {
+        // A participant's own feed is exactly what is visible to THEM: an
+        // audience-wide visible resource AND a resource revealed privately to them,
+        // but NOT a Hidden resource and NOT a resource that carries no rule at all.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid audienceWideSceneId = Guid.Empty;
+        Guid privateToMeContentId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+
+            // Visible to the whole audience -> in the feed.
+            audienceWideSceneId = Guid.CreateVersion7();
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.Scene, audienceWideSceneId, VisibilityState.Visible);
+
+            // Revealed privately to THIS participant -> in the feed.
+            privateToMeContentId = Guid.CreateVersion7();
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, privateToMeContentId,
+                participant.Id, VisibilityState.Visible);
+
+            // Hidden from the audience -> NOT in the feed (carries a rule, but Hidden).
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.Entity, Guid.CreateVersion7(), VisibilityState.Hidden);
+
+            // A second workspace with an audience-wide visible scene -> NOT in this
+            // participant's feed (a foreign workspace never contributes; threat T5).
+            var otherWorkspace = await db.AddWorkspaceAsync(org.Id, "other-show", "Other Show");
+            await db.AddVisibilityRuleAsync(
+                org.Id, otherWorkspace.Id, VisibilityResourceType.Scene, Guid.CreateVersion7(), VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await AssertFeedContainsExactlyAsync(
+            response,
+            participantId,
+            workspaceId,
+            ("Scene", audienceWideSceneId),
+            ("ContentBlock", privateToMeContentId));
+    }
+
+    [Fact]
+    public async Task Participant_does_not_see_another_participants_private_reveal()
+    {
+        // CROWN-JEWEL. A resource is revealed privately to participant Q. Participant
+        // P (a different participant in the same workspace) requests their OWN feed:
+        // they are authorized to read it, but the privately-revealed resource is NOT
+        // in it — a participant never sees content revealed only to another
+        // participant (the selected-participant guarantee; threat T5).
+        await using var factory = new WorkspaceApiFactory();
+        const string subjectP = "participant-p-owner";
+        Guid participantPId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid privateToQResourceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var ownerP = await db.AddUserAsync(_issuer, subjectP);
+            var ownerQ = await db.AddUserAsync(_issuer, "participant-q-owner");
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, ownerP.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participantP = await db.AddParticipantAsync(org.Id, workspace.Id, ownerP.Id, displayName: "P");
+            participantPId = participantP.Id;
+            var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
+
+            // The resource is revealed ONLY to Q.
+            privateToQResourceId = Guid.CreateVersion7();
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.Scene, privateToQResourceId,
+                participantQ.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subjectP, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantPId}/visible-feed?organizationSlug={_orgA}");
+
+        // P is authorized (own feed) but sees NOTHING — the reveal belongs to Q.
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await AssertFeedContainsExactlyAsync(response, participantPId, workspaceId);
+    }
+
+    [Fact]
+    public async Task The_selected_participant_does_see_their_own_private_reveal()
+    {
+        // The other half of the crown-jewel: the SELECTED participant Q DOES see the
+        // resource revealed privately to them, so the exclusion above is a real
+        // visibility decision and not a blanket "private reveals are never shown".
+        await using var factory = new WorkspaceApiFactory();
+        const string subjectQ = "participant-q-owner";
+        Guid participantQId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid privateToQResourceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var ownerQ = await db.AddUserAsync(_issuer, subjectQ);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, ownerQ.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
+            participantQId = participantQ.Id;
+
+            privateToQResourceId = Guid.CreateVersion7();
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.Scene, privateToQResourceId,
+                participantQ.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subjectQ, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await AssertFeedContainsExactlyAsync(
+            response, participantQId, workspaceId, ("Scene", privateToQResourceId));
+    }
+
+    [Fact]
+    public async Task Host_preview_returns_the_previewed_participants_private_visible_set()
+    {
+        // A Host previewing participant Q's feed sees exactly what Q sees — including
+        // the resource revealed privately to Q. Preview-as-participant is computed for
+        // the TARGET participant, not the caller, so the same selected-participant
+        // visibility applies.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid participantQId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid privateToQResourceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var host = await db.AddUserAsync(_issuer, subject);
+            var ownerQ = await db.AddUserAsync(_issuer, "participant-q-owner");
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, host.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, host.Id, MembershipRole.Host);
+            var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
+            participantQId = participantQ.Id;
+
+            privateToQResourceId = Guid.CreateVersion7();
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, VisibilityResourceType.Entity, privateToQResourceId,
+                participantQ.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await AssertFeedContainsExactlyAsync(
+            response, participantQId, workspaceId, ("Entity", privateToQResourceId));
+    }
+
+    // =====================================================================
     // Helpers.
     // =====================================================================
 
@@ -556,6 +744,72 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 nameof(FeedDto.GeneratedAt),
             },
             properties);
+    }
+
+    /// <summary>
+    /// Asserts a 200 body is the participant-safe feed envelope whose items are
+    /// EXACTLY the expected set of visible resources (by resource type name + id),
+    /// order-independent. The envelope-level checks of <see cref="AssertEmptyFeedAsync"/>
+    /// still hold (only the documented top-level fields), and EACH item is asserted to
+    /// carry ONLY the participant-safe identity fields (resourceType + resourceId) — no
+    /// content, payload or host-only field can slip in (docs/08 DTO rules; threats
+    /// T2/T7).
+    /// </summary>
+    private static async Task AssertFeedContainsExactlyAsync(
+        HttpResponseMessage response,
+        Guid expectedParticipantId,
+        Guid expectedWorkspaceId,
+        params (string ResourceType, Guid ResourceId)[] expectedItems)
+    {
+        var payload = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+
+        // Top-level envelope: only the documented participant-safe fields.
+        var properties = root.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                nameof(FeedDto.ParticipantId),
+                nameof(FeedDto.WorkspaceId),
+                nameof(FeedDto.Items),
+                nameof(FeedDto.GeneratedAt),
+            },
+            properties);
+
+        var feed = JsonSerializer.Deserialize<FeedDto>(payload, _json);
+        Assert.NotNull(feed);
+        Assert.Equal(expectedParticipantId, feed.ParticipantId);
+        Assert.Equal(expectedWorkspaceId, feed.WorkspaceId);
+        Assert.NotEqual(default, feed.GeneratedAt);
+        Assert.NotNull(feed.Items);
+
+        var actual = new HashSet<(string, Guid)>();
+        foreach (var item in feed.Items)
+        {
+            // Each item carries ONLY the participant-safe identity fields.
+            var itemProperties = item.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "resourceType", "resourceId" },
+                itemProperties);
+
+            var resourceType = item.GetProperty("resourceType").GetString();
+            Assert.NotNull(resourceType);
+            var resourceId = item.GetProperty("resourceId").GetGuid();
+            Assert.True(actual.Add((resourceType, resourceId)), "the feed must not contain duplicate items");
+        }
+
+        var expected = expectedItems
+            .Select(item => (item.ResourceType, item.ResourceId))
+            .ToHashSet();
+        Assert.Equal(expected.Count, actual.Count);
+        Assert.True(
+            actual.SetEquals(expected),
+            $"feed items [{string.Join(", ", actual)}] did not match expected [{string.Join(", ", expected)}]");
     }
 
     private sealed record FeedDto(

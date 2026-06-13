@@ -655,9 +655,9 @@ projection exactly as the export/recap projectors are the reusable core their la
 endpoints sit on. `csv/api_routes.csv` defines no audit route, so there is still no audit
 HTTP route.
 
-### Participant visible feed (skeleton)
+### Participant visible feed
 
-The Visibility module's first route returns a single participant's visible feed:
+The Visibility module's by-participant route returns a single participant's visible feed:
 
 | Method | Route                                               | Authorized callers                                                |
 | ------ | --------------------------------------------------- | ----------------------------------------------------------------- |
@@ -673,12 +673,24 @@ granted only when the caller **owns** the participant (own feed) or is a `Host` 
 participant, or a host of a different workspace — is hidden as `404` (never `403`),
 and the participant-safe response never echoes any authorization rationale.
 
-This is a **skeleton**: it establishes the route, its fail-closed object-level
-authorization and a participant-safe response envelope whose item list is always
-**empty**. The actual visible content (filtered reveal events / content blocks and
-the server-side visibility-rule engine) belongs to the later Visibility, Reveal and
-Realtime epics; broad external/anonymous participant feed delivery over the realtime
-hub is likewise a Realtime-epic follow-up.
+Once authorized, the feed returns the participant's **actually-visible** resources
+(CORE-API-005), computed server-side by the participant-aware
+`VisibilityPreviewService` (CORE-API-004), which decides every candidate resource
+through the central `VisibilityPolicy` — **the same** primitive the realtime recipient
+resolver uses, so the REST feed can never diverge from realtime delivery or
+per-resource access (the visibility decision lives in exactly one place). A participant
+sees a resource when an **audience-wide** visible rule, or a visible rule scoped to
+**exactly them** (a selected-participant private reveal), applies; a resource revealed
+only to a **different** participant is excluded — the selected-participant guarantee, so
+a participant never sees another participant's private reveal. Each feed item carries
+only the participant-safe resource **identity** (the resource kind name and id),
+matching the realtime audience event payload (`SessionEventEnvelope.ForAudience`) — never
+resolved content. The feed is empty only when the participant currently has nothing
+visible.
+
+Resolving each visible-resource identity into rendered, participant-safe content
+(text/media/data), and broad external/anonymous participant feed delivery over the
+realtime hub, remain Realtime-epic follow-ups.
 
 ### Scene content APIs
 
