@@ -142,6 +142,20 @@ public sealed class StoreNotificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_handled_notification_records_the_stores_event_time_on_the_ledger()
+    {
+        // The ledger row carries the store's reported event time (occurred_at), distinct from received_at — the
+        // ordering key the reconciliation job (CORE-JOB-003) re-derives a purchase's converged status from.
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        await HandleAsync(Notification(type: StoreNotificationType.Refunded, transactionId: "txn-1"));
+
+        var ledgerRow = Assert.Single(await NotificationsAsync());
+        Assert.Equal(_occurredAt.ToUniversalTime(), ledgerRow.OccurredAt);
+        Assert.Equal(_receivedAt.ToUniversalTime(), ledgerRow.ReceivedAt);
+    }
+
+    [Fact]
     public async Task A_cancellation_notification_downgrades_to_cancelled()
     {
         await RecordPurchaseAsync(PurchaseProvider.Google, "order-1");

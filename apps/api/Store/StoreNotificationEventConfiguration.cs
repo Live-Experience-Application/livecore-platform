@@ -79,6 +79,10 @@ internal sealed class StoreNotificationEventConfiguration : IEntityTypeConfigura
             .HasMaxLength(32)
             .IsRequired();
 
+        builder.Property(notification => notification.OccurredAt)
+            .HasColumnName("occurred_at")
+            .IsRequired();
+
         builder.Property(notification => notification.ReceivedAt)
             .HasColumnName("received_at")
             .IsRequired();
@@ -88,5 +92,17 @@ internal sealed class StoreNotificationEventConfiguration : IEntityTypeConfigura
         builder.HasIndex(notification => new { notification.Provider, notification.ProviderNotificationId })
             .HasDatabaseName("ix_store_notification_events_provider_provider_notification_id")
             .IsUnique();
+
+        // Reconciliation lookup index (CORE-JOB-003): the reconciliation job reads a purchase's notifications by
+        // (provider, provider_transaction_id) and takes the one with the latest occurred_at to re-derive the
+        // converged status. This non-unique index serves both the per-transaction "latest notification" lookup and
+        // the candidate scan, so a re-derivation never table-scans the ledger.
+        builder.HasIndex(notification => new
+        {
+            notification.Provider,
+            notification.ProviderTransactionId,
+            notification.OccurredAt,
+        })
+            .HasDatabaseName("ix_store_notification_events_provider_transaction_occurred_at");
     }
 }

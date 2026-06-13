@@ -48,6 +48,7 @@ public sealed class StoreNotificationEvent
         string providerTransactionId,
         PurchaseTransactionStatus appliedStatus,
         StoreNotificationProcessingOutcome outcome,
+        DateTimeOffset occurredAt,
         DateTimeOffset receivedAt)
     {
         if (id == Guid.Empty)
@@ -98,7 +99,10 @@ public sealed class StoreNotificationEvent
         NotificationType = notificationType;
         AppliedStatus = appliedStatus;
         Outcome = outcome;
-        // Normalized to UTC so the persisted timestamptz value is offset-independent (docs/10_DATABASE_SCHEMA.md).
+        // Both timestamps are normalized to UTC so the persisted timestamptz values are offset-independent
+        // (docs/10_DATABASE_SCHEMA.md). OccurredAt is the store's reported event time; ReceivedAt is when Core
+        // handled the delivery.
+        OccurredAt = occurredAt.ToUniversalTime();
         ReceivedAt = receivedAt.ToUniversalTime();
     }
 
@@ -136,6 +140,16 @@ public sealed class StoreNotificationEvent
     /// <summary>What handling the notification did to the purchase (applied / unchanged / no purchase found).</summary>
     public StoreNotificationProcessingOutcome Outcome { get; }
 
+    /// <summary>
+    /// When the store reported the notified event occurred (UTC) — the value the parser read from the payload
+    /// (<see cref="StoreNotification.OccurredAt"/>). It is the AUTHORITATIVE ordering key for reconciliation
+    /// (CORE-JOB-003): the synchronous webhook applies a notification in delivery order, but a store delivers at
+    /// least once and can reorder, so the reconciliation job re-derives a purchase's converged status from the
+    /// notification with the latest <see cref="OccurredAt"/> rather than the one received last. Distinct from
+    /// <see cref="ReceivedAt"/> (the delivery time), which never reflects the store's true event ordering.
+    /// </summary>
+    public DateTimeOffset OccurredAt { get; }
+
     /// <summary>When the notification was received and handled (UTC).</summary>
     public DateTimeOffset ReceivedAt { get; }
 
@@ -165,6 +179,7 @@ public sealed class StoreNotificationEvent
             notification.ProviderTransactionId,
             notification.Type.ToTransactionStatus(),
             outcome,
+            notification.OccurredAt,
             receivedAt);
     }
 
@@ -193,5 +208,6 @@ public sealed class StoreNotificationEvent
     /// </summary>
     public override string ToString()
         => $"StoreNotificationEvent {Id} provider={Provider} notificationId={ProviderNotificationId} "
-            + $"type={NotificationType} transactionId={ProviderTransactionId} appliedStatus={AppliedStatus} outcome={Outcome}";
+            + $"type={NotificationType} transactionId={ProviderTransactionId} appliedStatus={AppliedStatus} "
+            + $"outcome={Outcome} occurredAt={OccurredAt:O}";
 }

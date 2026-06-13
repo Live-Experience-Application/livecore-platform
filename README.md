@@ -74,7 +74,7 @@ eslint.config.mjs        ESLint flat config for the TypeScript packages
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/api/Migrations.Dockerfile  one-shot migrations runner image (applies EF Core migrations before API rollout)
-apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup, recap generation and export processing jobs
+apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup, recap generation and export processing jobs (and the billing-gated store-notification reconciliation job)
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
@@ -329,8 +329,10 @@ dotnet run --project apps/api
 ```
 
 Start the background worker host (runs the asset cleanup, recap generation and
-export processing jobs when a database is configured; see "Asset cleanup job",
-"Recap generation job" and "Export processing job" below):
+export processing jobs when a database is configured, plus the billing-gated
+store-notification reconciliation job when it is enabled; see "Asset cleanup job",
+"Recap generation job", "Export processing job" and "Store notification
+reconciliation job" below):
 
 ```bash
 dotnet run --project apps/worker
@@ -1890,14 +1892,59 @@ connection string** (no database -> the worker starts but runs no processing loo
 read and processing) is logged and counted, and that job is left non-terminal for the next sweep to retry,
 without aborting the run. An export-request HTTP route and a user-data export pipeline remain follow-up stories.
 
+### Store notification reconciliation job
+
+CORE-JOB-003 adds the Store module's background reconciliation — the worker's fourth periodic job
+(`apps/worker`; `docs/02_ARCHITECTURE.md`: the worker owns "background jobs, ... async processing"), behind no
+HTTP route. Store server notifications (renewals, cancellations, refunds, grace periods) are processed only on
+the **synchronous inbound webhook** (CORE-STORE-005), in **delivery order** — but a store delivers at least
+once and can **reorder or drop** deliveries, so a purchase's persisted status can drift from the status the
+latest event implies: an older notification applied after a newer one (out-of-order), or a notification that
+arrived before the purchase was ever recorded and so applied nothing (missed). This job re-derives each drifted
+purchase's status from the recorded ledger and converges it, so **"missed or out-of-order store notifications
+are reconciled so entitlement state converges; idempotent"** (the acceptance criterion).
+
+It **re-derives entitlement state from `store_notification_events`** (extended this story with the store's
+reported `occurred_at` event time) **and `purchase_events`** (the current purchase status is the head of that
+append-only trail): the converged status is the applied status of the notification with the **latest
+`occurred_at`**, regardless of the order notifications were delivered or applied. It **reuses
+`StoreNotificationService`** — the new `ReconcileTransactionAsync` converges a purchase by reusing the same
+audited, idempotent `PurchaseTransactionService.ChangeStatusAsync` the webhook uses (stamped with the
+authoritative notification's event time), so no parallel pipeline is built and every convergence is audited on
+the `purchase_events` trail exactly as a webhook-driven change is. Drifted purchases come from
+`IReconcilablePurchaseReader`; a reconciled purchase matches its latest notification and drops out, so a bounded
+sweep makes progress.
+
+It is **idempotent** and **fail-closed**. Reconciliation re-derives from immutable ledger facts and converges
+to the same state every time (a consistent purchase is a no-op, no status change and no audit event), so a
+re-run — or a sweep retried after a crash — changes nothing. A notification recorded for a purchase Core never
+persisted converges nothing (`TransactionNotFound`): nothing is fabricated, so no entitlement is granted without
+a real verified purchase behind it. Purchases are **global** (keyed only by provider + provider transaction id,
+no tenant or buyer column, CORE-STORE-002), so there is no tenant boundary to scope on this system job.
+
+Crucially, unlike the other worker jobs it is **gated on billing**. Store receipts/billing are **out of scope
+for Core v1** (`docs/01_PRODUCT_VISION_AND_SCOPE.md`), so the job runs **only when a deployment explicitly
+enables it** — both a configured database connection string **and** `Store:Reconciliation:Enabled=true`. With
+the flag unset (the default) the worker registers no reconciliation loop — **"only runs when billing is
+configured"**, the same fail-closed posture as the store verification/notification parser resolvers that
+register no adapter until a deployment supplies one. The reconciliation logic lives in the Store module
+(`StoreNotificationReconciliationService`, reusing `StoreNotificationService`); the worker only schedules it
+(`StoreNotificationReconciliationBackgroundService`, every `Store:Reconciliation:SweepInterval`, in bounded
+`Store:Reconciliation:BatchSize` batches). The sweep is per-purchase **resilient**: a purchase whose
+convergence fails is logged and counted and left for the next sweep, without aborting the run. Granting/revoking
+the linked `SubjectEntitlement` from the converged purchase status (which needs the buyer linkage,
+`billing_account_links`) remains a follow-up, as does a SQL window-function candidate query for high-volume
+deployments.
+
 ### Worker liveness heartbeat
 
 CORE-OPS-005 adds the worker's liveness signal so orchestration can detect a **wedged** job loop. A
 loop is resilient to a sweep that _throws_ (it logs and retries on the next tick), but a sweep that
 **hangs** — a stuck database or storage call that never returns — would leave the worker process alive
 yet doing no work, which a process-liveness check cannot see. Because the worker serves no HTTP traffic
-and exposes no port, the heartbeat is a **file**, not a health port: each job loop (asset cleanup and
-recap generation) writes the current UTC timestamp to `Worker:Heartbeat:FilePath` (default
+and exposes no port, the heartbeat is a **file**, not a health port: every job loop (asset cleanup,
+recap generation, export processing and the billing-gated store-notification reconciliation) writes the
+current UTC timestamp to `Worker:Heartbeat:FilePath` (default
 `<temp>/livecore-worker.heartbeat`) on startup and after **every** completed sweep tick. The file is
 the worker process's liveness signal, refreshed whenever a loop makes progress, so a worker whose loops
 all hang stops refreshing it and the file goes stale — the signal orchestration uses to restart the
@@ -2615,7 +2662,8 @@ docker stop livecore-api
 ```
 
 Run the worker container (no ports; runs the asset cleanup, recap generation and export processing jobs
-when a database is configured, otherwise idles):
+when a database is configured — plus the store-notification reconciliation job when billing enables it —
+otherwise idles):
 
 ```bash
 docker run --rm livecore-worker

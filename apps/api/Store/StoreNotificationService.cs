@@ -43,6 +43,14 @@ namespace LiveCore.Api.Store;
 /// AUTHORIZATION IS UPSTREAM. The notification endpoint resolves the deployment-supplied parser and validates the
 /// payload's signature/source BEFORE this service is invoked; this service performs the dedup, the purchase status
 /// change and the audit only, and is only ever handed an already-validated, normalized notification.
+///
+/// RECONCILIATION (CORE-JOB-003). Because <see cref="HandleAsync"/> applies notifications in delivery order, a
+/// store's at-least-once, possibly-reordered delivery can leave the persisted purchase status drifted from the
+/// status the latest-by-event-time notification implies. <see cref="ReconcileTransactionAsync"/> re-derives the
+/// converged status from the ledger this service already wrote (the latest <see cref="StoreNotificationEvent"/> by
+/// <see cref="StoreNotificationEvent.OccurredAt"/>) and converges the purchase by REUSING the same idempotent,
+/// audited <see cref="PurchaseTransactionService.ChangeStatusAsync"/> — so the reconciliation job reuses this
+/// service rather than building a parallel pipeline.
 /// </summary>
 public sealed class StoreNotificationService
 {
@@ -119,5 +127,74 @@ public sealed class StoreNotificationService
         }
 
         return new StoreNotificationProcessingResult(outcome);
+    }
+
+    /// <summary>
+    /// Reconciles ONE purchase against its recorded store notifications so its persisted status converges on the
+    /// status the AUTHORITATIVE (latest-by-event-time) notification implies (CORE-JOB-003, the store-notification
+    /// reconciliation job of the "Worker Background Jobs" epic). The synchronous webhook (<see cref="HandleAsync"/>)
+    /// applies notifications in DELIVERY order, but a store delivers at least once and can reorder or drop
+    /// deliveries, so the persisted status can drift; this re-derives the correct status from the ledger and
+    /// (only if it differs) drives the purchase to it — "missed or out-of-order store notifications are reconciled
+    /// so entitlement state converges" (the story's acceptance criterion).
+    ///
+    /// <para>
+    /// RE-DERIVES FROM THE LEDGER, NOT DELIVERY ORDER. The converged status is the
+    /// <see cref="StoreNotificationEvent.AppliedStatus"/> of the recorded notification with the latest
+    /// <see cref="StoreNotificationEvent.OccurredAt"/> (the store's reported event time;
+    /// <see cref="IStoreNotificationEventRepository.FindLatestByProviderTransactionAsync"/>) — regardless of the
+    /// order the notifications were delivered or applied. So an out-of-order delivery (an older notification
+    /// applied after a newer one) and a missed delivery (a notification that arrived before the purchase existed,
+    /// recorded but never applied, and whose effect is the latest) both converge to the same correct status.
+    /// </para>
+    ///
+    /// <para>
+    /// IDEMPOTENT AND REUSES THE WEBHOOK PATH. The status change REUSES
+    /// <see cref="PurchaseTransactionService.ChangeStatusAsync"/> — the exact same audited, idempotent status
+    /// change the webhook uses — stamped with the authoritative notification's event time. A purchase already at
+    /// the converged status is an idempotent no-op (no status change, no audit event), so re-running the sweep
+    /// changes nothing.
+    /// </para>
+    ///
+    /// <para>
+    /// FAIL-CLOSED. A purchase Core never recorded yields
+    /// <see cref="StoreNotificationReconciliationOutcome.TransactionNotFound"/> — nothing is fabricated, so no
+    /// entitlement is granted without a real verified purchase behind it. This method neither dedups nor records a
+    /// ledger row: it derives from the existing ledger and only converges the purchase, so it is safe to run on a
+    /// cadence with the webhook.
+    /// </para>
+    /// </summary>
+    /// <param name="provider">The store that issued the purchase.</param>
+    /// <param name="providerTransactionId">The provider-assigned transaction id naming the purchase to reconcile.</param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <exception cref="ArgumentException">The provider transaction id is blank.</exception>
+    public async Task<StoreNotificationReconciliationOutcome> ReconcileTransactionAsync(
+        PurchaseProvider provider,
+        string providerTransactionId,
+        CancellationToken cancellationToken)
+    {
+        var latest = await _notifications
+            .FindLatestByProviderTransactionAsync(provider, providerTransactionId, cancellationToken)
+            .ConfigureAwait(false);
+        if (latest is null)
+        {
+            // No recorded notifications for this purchase: nothing to reconcile against.
+            return StoreNotificationReconciliationOutcome.NoNotifications;
+        }
+
+        // The authoritative status is the one the latest-by-event-time notification drove the purchase to. Stamp
+        // the convergence with that notification's event time so the persisted UpdatedAt and the purchase event
+        // reflect when the authoritative event actually occurred, not when reconciliation ran.
+        var changeOutcome = await _transactions
+            .ChangeStatusAsync(provider, providerTransactionId, latest.AppliedStatus, latest.OccurredAt, cancellationToken)
+            .ConfigureAwait(false);
+
+        return changeOutcome switch
+        {
+            PurchaseStatusChangeOutcome.Changed => StoreNotificationReconciliationOutcome.Converged,
+            PurchaseStatusChangeOutcome.Unchanged => StoreNotificationReconciliationOutcome.AlreadyConsistent,
+            PurchaseStatusChangeOutcome.TransactionNotFound => StoreNotificationReconciliationOutcome.TransactionNotFound,
+            _ => throw new InvalidOperationException($"Unhandled purchase status change outcome '{changeOutcome}'."),
+        };
     }
 }

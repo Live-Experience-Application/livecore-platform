@@ -44,6 +44,40 @@ internal sealed class StoreNotificationEventRepository : IStoreNotificationEvent
     }
 
     /// <inheritdoc />
+    public async Task<StoreNotificationEvent?> FindLatestByProviderTransactionAsync(
+        PurchaseProvider provider,
+        string providerTransactionId,
+        CancellationToken cancellationToken)
+    {
+        // A blank id can never address a stored notification, so the lookup fails fast instead of matching an
+        // arbitrary row.
+        if (string.IsNullOrWhiteSpace(providerTransactionId))
+        {
+            throw new ArgumentException("Provider transaction id must not be empty.", nameof(providerTransactionId));
+        }
+
+        var normalized = providerTransactionId.Trim();
+
+        // Read the purchase's notifications (filtered in SQL by the (provider, provider_transaction_id) index) and
+        // pick the latest in memory. A purchase has only a handful of lifecycle notifications, so materializing them
+        // is cheap — and ordering happens client-side because the SQLite provider used in the test harness cannot
+        // ORDER BY a DateTimeOffset column (a provider limitation, not a Postgres one). Latest is by the store's
+        // reported event time, ties broken by the time-ordered (UUID v7) row id so the result is deterministic when
+        // two notifications report the same occurred_at.
+        var notifications = await _dbContext.StoreNotificationEvents
+            .AsNoTracking()
+            .Where(notification => notification.Provider == provider
+                && notification.ProviderTransactionId == normalized)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return notifications
+            .OrderByDescending(notification => notification.OccurredAt)
+            .ThenByDescending(notification => notification.Id)
+            .FirstOrDefault();
+    }
+
+    /// <inheritdoc />
     public async Task<StoreNotificationEventAddResult> AddAsync(
         StoreNotificationEvent notificationEvent,
         CancellationToken cancellationToken)

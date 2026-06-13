@@ -326,6 +326,49 @@ periods update entitlements safely** (the story's acceptance criterion). It adds
   story consumes as its trigger. The `store_notification_events` row stores only the **normalized** identifiers,
   never the raw notification body (which may embed signed receipt content — threat T7).
 
+## Store notification reconciliation job (CORE-JOB-003)
+
+CORE-STORE-005 processes store notifications **only on the synchronous inbound webhook**, in delivery order. But a
+store delivers at least once and can **reorder or drop** deliveries, so a purchase's persisted status can drift
+from the status the latest event implies: an older notification applied after a newer one (out-of-order), or a
+notification that arrived before the purchase was ever recorded and so applied nothing (missed,
+`TransactionNotFound`). CORE-JOB-003 adds the **reconciliation job** that re-derives entitlement state from the
+ledger so it converges — "Missed or out-of-order store notifications are reconciled so entitlement state
+converges; idempotent; only runs when billing is configured" (the story's acceptance criterion). It is the
+worker's fourth periodic job (`apps/worker`; `docs/02_ARCHITECTURE.md`: the worker owns async jobs), behind no
+HTTP route.
+
+- **Re-derives from `store_notification_events` and `purchase_events`.** `store_notification_events` is extended
+  with the store's reported `occurred_at` event time (a new column on the CORE-STORE-005 ledger, distinct from the
+  existing `received_at` delivery time, because the delivery time never reflects the store's true event ordering).
+  The converged status is the `applied_status` of the notification with the **latest `occurred_at`** for a purchase
+  — regardless of the order the notifications were delivered or applied — and the purchase's current status is the
+  head of the append-only `purchase_events` trail. A non-unique index on
+  `store_notification_events(provider, provider_transaction_id, occurred_at)` serves the re-derivation lookup.
+- **Reuses `StoreNotificationService`** (the story note). `StoreNotificationService.ReconcileTransactionAsync`
+  re-derives a purchase's converged status and drives it there by **reusing** the same audited, idempotent
+  `PurchaseTransactionService.ChangeStatusAsync` the webhook uses (CORE-STORE-002), stamped with the authoritative
+  notification's event time — so the convergence is audited on the `purchase_events` trail exactly as a
+  webhook-driven change is, and no parallel reconciliation pipeline is built. The
+  `StoreNotificationReconciliationService` sweep (in the Store module) picks drifted purchases from
+  `IReconcilablePurchaseReader` and converges each; a reconciled purchase matches its latest notification and drops
+  out, so a bounded sweep makes progress.
+- **Idempotent and fail-closed.** Reconciliation re-derives from immutable ledger facts and converges to the same
+  state every time (a consistent purchase is a no-op — no status change, no audit event), so a re-run or a
+  crash-retried sweep changes nothing. A notification recorded for a purchase Core never persisted converges
+  nothing (`TransactionNotFound`): nothing is fabricated, so no entitlement is granted without a real verified
+  purchase. Purchases are global (no tenant/buyer column), so there is no tenant boundary on this system job.
+- **Gated on billing, fail-closed (`only runs when billing is configured`).** Store receipts/billing are out of
+  scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`), so the job runs only when a deployment has both a
+  configured database **and** `Store:Reconciliation:Enabled=true`. With the flag unset (the default) the worker
+  registers no reconciliation loop — the same fail-closed posture as the verification/notification parser
+  resolvers, which register no adapter until a deployment supplies one. The worker schedules it every
+  `Store:Reconciliation:SweepInterval` in bounded `Store:Reconciliation:BatchSize` batches.
+- **Out of scope (later stories).** Granting/revoking the linked `SubjectEntitlement` from the converged purchase
+  status (which needs the buyer linkage, the separate `billing_account_links` table) is deferred, as is a SQL
+  window-function candidate query for high-volume deployments (the candidate scan computes the latest-per-purchase
+  client-side, which suits this off-by-default, low-volume job).
+
 ## Security requirements
 
 - Never trust client-side premium flags.

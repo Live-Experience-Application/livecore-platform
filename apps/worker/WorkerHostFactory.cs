@@ -2,6 +2,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.Exports;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Recaps;
+using LiveCore.Api.Store;
 
 namespace LiveCore.Worker;
 
@@ -22,7 +23,14 @@ namespace LiveCore.Worker;
 ///   <item>the export processing job (CORE-JOB-002), which processes every queued workspace export job into a
 ///   workspace export manifest, idempotently and tenant-scoped — the Exports module owns the processing logic
 ///   (<see cref="ExportProcessingService"/>) and this host schedules it through
-///   <see cref="ExportProcessingBackgroundService"/>.</item>
+///   <see cref="ExportProcessingBackgroundService"/>;</item>
+///   <item>the store-notification reconciliation job (CORE-JOB-003), which re-derives every drifted purchase's
+///   status from the recorded store-notification ledger so missed/out-of-order deliveries converge, idempotently
+///   — the Store module owns the reconciliation logic (<see cref="StoreNotificationReconciliationService"/>,
+///   reusing <see cref="StoreNotificationService"/>) and this host schedules it through
+///   <see cref="StoreNotificationReconciliationBackgroundService"/>. Unlike the others it is GATED ON BILLING:
+///   it runs only when a deployment has enabled it (<c>Store:Reconciliation:Enabled=true</c>), because store
+///   receipts/billing are out of scope for Core v1 (docs/01_PRODUCT_VISION_AND_SCOPE.md).</item>
 /// </list>
 /// Each job's logic lives in its owning domain module in <c>apps/api</c>; this host only handles timing,
 /// scoping and resilience.
@@ -65,7 +73,12 @@ public static class WorkerHostFactory
         var recapGenerationConfigured = builder.Services.AddRecapGeneration(builder.Configuration);
         var exportProcessingConfigured = builder.Services.AddExportProcessing(builder.Configuration);
 
-        if (assetCleanupConfigured || recapGenerationConfigured || exportProcessingConfigured)
+        // CORE-JOB-003: gated on a configured database AND an explicit billing/store-reconciliation opt-in
+        // (Store:Reconciliation:Enabled=true). With billing not configured this returns false and registers no
+        // loop — "only runs when billing is configured" (fail-closed; billing is out of scope for Core v1).
+        var storeReconciliationConfigured = builder.Services.AddStoreNotificationReconciliation(builder.Configuration);
+
+        if (assetCleanupConfigured || recapGenerationConfigured || exportProcessingConfigured || storeReconciliationConfigured)
         {
             // Worker liveness heartbeat (CORE-OPS-005): each job loop writes a heartbeat each tick so a wedged
             // loop is detectable by orchestration (the shared file goes stale). Registered once, alongside the
@@ -90,6 +103,11 @@ public static class WorkerHostFactory
         if (exportProcessingConfigured)
         {
             builder.Services.AddHostedService<ExportProcessingBackgroundService>();
+        }
+
+        if (storeReconciliationConfigured)
+        {
+            builder.Services.AddHostedService<StoreNotificationReconciliationBackgroundService>();
         }
 
         return builder;
