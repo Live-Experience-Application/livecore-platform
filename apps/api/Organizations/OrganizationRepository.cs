@@ -79,6 +79,38 @@ internal sealed class OrganizationRepository : IOrganizationRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<OrganizationMembershipView>> ListMembershipsByMemberAsync(
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // Join the subject's membership rows to their organizations on the
+        // (organization_id, user_id) pair, so only an organization the subject is
+        // genuinely a member of is returned (deny-by-default; threat T5). The
+        // membership's role is carried alongside its organization in one query, so
+        // the principal-context read needs no per-organization round trip.
+        // Ordering by the (time-ordered) UUIDv7 organization id keeps the listing
+        // stable. The membership role is not interpreted here; the caller
+        // intersects the result with the token's organization claims.
+        var query =
+            from member in _dbContext.OrganizationMembers
+            where member.UserProfileId == userProfileId
+            join organization in _dbContext.Organizations
+                on member.OrganizationId equals organization.Id
+            orderby organization.Id
+            select new OrganizationMembershipView(organization, member.Role);
+
+        return await query
+            .AsNoTracking()
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<OrganizationAddResult> AddAsync(
         Organization organization,
         CancellationToken cancellationToken)

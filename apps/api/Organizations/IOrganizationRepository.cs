@@ -62,6 +62,32 @@ public interface IOrganizationRepository
     Task<IReadOnlyList<Organization>> ListByMemberAsync(Guid userProfileId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the given subject's organization memberships, each paired with the
+    /// organization the subject belongs to and the generic role it holds there,
+    /// ordered by the organizations' time-ordered surrogate id. This is the
+    /// role-bearing read backing the principal context of <c>GET /api/v1/me</c>
+    /// (csv/api_routes.csv: "Returns principal context only", CORE-API-002).
+    ///
+    /// It is the role-bearing sibling of <see cref="ListByMemberAsync"/>: that
+    /// method answers "which tenants does this subject belong to?", this one also
+    /// answers "in what role?" in a single query (no per-organization round trip).
+    /// Like <see cref="ListByMemberAsync"/> it returns only organizations the
+    /// subject is genuinely a member of — never any tenant the subject does not
+    /// belong to (deny-by-default; threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md) — and applies no token-claim filter; the
+    /// caller intersects the result with the principal's organization claims so
+    /// the principal context never exposes a tenant the token does not assert.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The subject id is empty. An empty id can never address a stored
+    /// membership, so the lookup is rejected instead of silently returning an
+    /// empty list.
+    /// </exception>
+    Task<IReadOnlyList<OrganizationMembershipView>> ListMembershipsByMemberAsync(
+        Guid userProfileId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new organization. Returns
     /// <see cref="OrganizationAddResult.DuplicateSlug"/> when an organization
     /// with the same slug already exists (enforced by the unique database

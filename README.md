@@ -368,8 +368,9 @@ error, never a partially trusted principal, and organization claim matching is
 exact and case-sensitive (threat T5 in `docs/07_SECURITY_THREAT_MODEL.md`).
 
 The JWT bearer middleware that validates provider tokens at the edge landed
-later with the first HTTP endpoints (see "Tenant model and HTTP API" below);
-the `/api/v1/me` endpoint is still a follow-up.
+later with the first HTTP endpoints (see "Tenant model and HTTP API" below), and
+the `/api/v1/me` current-principal endpoint is now implemented (see "Current
+principal" below).
 
 ### Persistence (user profile reference)
 
@@ -422,6 +423,39 @@ health endpoints stay reachable. Authorization is enforced server-side on every
 request: the target organization is resolved from the request and verified
 against the caller's membership, and cross-tenant or non-member access is hidden
 as `404` rather than `403`.
+
+### Current principal
+
+The IdentityAccess module exposes the current-principal endpoint (CORE-API-002):
+
+| Method | Route        | Authorized callers                             |
+| ------ | ------------ | ---------------------------------------------- |
+| `GET`  | `/api/v1/me` | any authenticated **user** (their own context) |
+
+`GET /api/v1/me` returns the authenticated caller's principal context: their own
+user profile (the surrogate profile id, the OIDC identity pair and the optional
+display metadata) plus the organization memberships they hold and the generic
+role in each. The caller's profile is resolved (and provisioned on first sight)
+through the same `UserProfileReferenceService` the other current-user routes use,
+and the memberships are read with their roles in a single query
+(`IOrganizationRepository.ListMembershipsByMemberAsync`).
+
+It is fail-closed and tenant-isolated:
+
+- an anonymous caller is challenged with `401` (the route group requires
+  authorization);
+- `/me` is a user concept, so a service-account principal is denied `403` (only a
+  human user holds a profile and organization memberships) — the same rule the
+  sibling `/me/quota-status` and `/me/ad-eligibility` routes apply;
+- the membership list is the **intersection** of the caller's persisted
+  memberships and the token's organization claims — the same token-asserted
+  boundary the `TenantContextResolver` and the `GET /api/v1/organizations` listing
+  enforce — so a persisted membership the token does not assert (a foreign tenant
+  from the token's point of view) is never exposed (threat T5).
+
+The response is a safe DTO of identifiers and the caller's own display metadata
+only: it carries no access token, no raw organization-claim payload and no
+authorization rationale (threat T7).
 
 ### Organization create and read
 

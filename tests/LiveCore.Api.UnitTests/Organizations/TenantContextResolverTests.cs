@@ -361,6 +361,11 @@ public sealed class TenantContextResolverTests
             CancellationToken cancellationToken)
             => throw new NotSupportedException("The tenant context resolver does not list organizations.");
 
+        public Task<IReadOnlyList<OrganizationMembershipView>> ListMembershipsByMemberAsync(
+            Guid userProfileId,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException("The tenant context resolver does not list memberships.");
+
         public Task<OrganizationAddResult> AddAsync(Organization organization, CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(organization);

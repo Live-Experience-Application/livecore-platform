@@ -712,6 +712,20 @@ app.UseAuthorization();
 // Health endpoints (CORE-FND-004): unauthenticated by convention.
 app.MapLiveCoreHealthEndpoints();
 
+// Current-principal endpoint (CORE-API-002): GET /api/v1/me, the IdentityAccess
+// module's read of the authenticated caller's principal context (their user
+// profile + organization memberships + roles). It lives in an authenticated route
+// group (anonymous callers get 401) and fails closed (503) when persistence is not
+// configured, exactly like the organization endpoints. No new DI registration is
+// required: the user-profile reference service and the organization repository it
+// consumes are already registered above inside the persistence conditional. A
+// service-account principal is denied 403 (only a human user holds a profile and
+// memberships), and the membership list is intersected with the token's
+// organization claims so the principal context never exposes a tenant the token
+// does not assert; the response is a safe DTO with no token/secret (threats
+// T5/T7).
+app.MapMeEndpoints();
+
 // Organization endpoints (CORE-API-001): the tenant create/read API,
 // GET/POST /api/v1/organizations. They live in an authenticated route group and
 // fail closed (503) when persistence is not configured, exactly like the

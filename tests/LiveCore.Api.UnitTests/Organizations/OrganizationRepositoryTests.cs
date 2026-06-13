@@ -431,4 +431,105 @@ public sealed class OrganizationRepositoryTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(
             () => repository.ListByMemberAsync(Guid.Empty, CancellationToken.None));
     }
+
+    // ---- ListMembershipsByMemberAsync (subject's orgs + role, CORE-API-002) ---
+
+    [Fact]
+    public async Task ListMembershipsByMember_returns_only_the_subjects_memberships_with_their_roles()
+    {
+        // The subject is an Owner of A and a Participant of B; another subject is
+        // the sole member of C. The principal-context read returns exactly A and B
+        // — each carrying the subject's own role — and never C (deny-by-default;
+        // threat T5). The assertion is order-independent so it never depends on the
+        // sub-millisecond ordering of two UUIDv7 ids.
+        var subject = await SeedUserAsync("subject");
+        var other = await SeedUserAsync("other");
+        var orgA = await SeedOrganizationAsync(_slug, _name);
+        var orgB = await SeedOrganizationAsync(_foreignSlug, _foreignName);
+        var orgC = await SeedOrganizationAsync("third-tenant", "Third Tenant");
+
+        await using (var context = CreateContext())
+        {
+            var members = new OrganizationMemberRepository(context);
+            await members.AddAsync(
+                OrganizationMember.Create(orgA.Id, subject.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgB.Id, subject.Id, MembershipRole.Participant, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgC.Id, other.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+        }
+
+        await using var context2 = CreateContext();
+        var repository = new OrganizationRepository(context2);
+        var listed = await repository.ListMembershipsByMemberAsync(subject.Id, CancellationToken.None);
+
+        Assert.Equal(2, listed.Count);
+        var byId = listed.ToDictionary(view => view.Organization.Id, view => view.Role);
+        Assert.Equal(MembershipRole.Owner, byId[orgA.Id]);
+        Assert.Equal(MembershipRole.Participant, byId[orgB.Id]);
+        Assert.DoesNotContain(orgC.Id, byId.Keys);
+        // The organization detail is carried alongside the role for the projection.
+        var a = listed.Single(view => view.Organization.Id == orgA.Id);
+        Assert.Equal(_slug, a.Organization.Slug);
+        Assert.Equal(_name, a.Organization.Name);
+    }
+
+    [Fact]
+    public async Task ListMembershipsByMember_is_ordered_by_organization_id()
+    {
+        // The listing is ordered by the (time-ordered) organization id so the
+        // principal context is stable across calls.
+        var subject = await SeedUserAsync("ordered-subject");
+        var orgA = await SeedOrganizationAsync(_slug, _name);
+        var orgB = await SeedOrganizationAsync(_foreignSlug, _foreignName);
+        var orgC = await SeedOrganizationAsync("third-tenant", "Third Tenant");
+
+        await using (var context = CreateContext())
+        {
+            var members = new OrganizationMemberRepository(context);
+            await members.AddAsync(
+                OrganizationMember.Create(orgA.Id, subject.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgB.Id, subject.Id, MembershipRole.Admin, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgC.Id, subject.Id, MembershipRole.Observer, _createdAt),
+                CancellationToken.None);
+        }
+
+        await using var context2 = CreateContext();
+        var repository = new OrganizationRepository(context2);
+        var listed = await repository.ListMembershipsByMemberAsync(subject.Id, CancellationToken.None);
+
+        var orderedIds = listed.Select(view => view.Organization.Id).ToArray();
+        var expected = new[] { orgA.Id, orgB.Id, orgC.Id }.OrderBy(id => id).ToArray();
+        Assert.Equal(expected, orderedIds);
+    }
+
+    [Fact]
+    public async Task ListMembershipsByMember_returns_empty_for_a_subject_with_no_memberships()
+    {
+        var subject = await SeedUserAsync("loner");
+        await SeedOrganizationAsync(_slug, _name);
+
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+        var listed = await repository.ListMembershipsByMemberAsync(subject.Id, CancellationToken.None);
+
+        Assert.Empty(listed);
+    }
+
+    [Fact]
+    public async Task ListMembershipsByMember_rejects_an_empty_subject_id()
+    {
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListMembershipsByMemberAsync(Guid.Empty, CancellationToken.None));
+    }
 }
