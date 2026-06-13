@@ -110,6 +110,43 @@ follow-up — the instruments are export-agnostic.
 
 Add trace propagation later when multiple services are deployed.
 
+### Implementation (CORE-OBS-003)
+
+The tracing hooks land ahead of that multi-service deployment so the seams exist when they are needed. They
+are implemented with OpenTelemetry tracing over the vendor-neutral `System.Diagnostics` activity API. A single
+owner, `LiveCoreActivitySource` (`apps/api/Observability/`), defines one `ActivitySource` named `LiveCore`
+carrying the spans for the **key request and realtime flows**, and the existing seams produce spans on it:
+
+| Flow                 | Span (operation name)             | Kind     | Produced by                                                  |
+| -------------------- | --------------------------------- | -------- | ----------------------------------------------------------- |
+| HTTP request         | `http.server.request`             | Server   | `RequestTracingMiddleware` (the whole request pipeline)     |
+| Reveal command       | `livecore.reveal`                 | Internal | the reveal endpoint (`RevealEndpoints`, the reveal/hide path) |
+| Session-event publish| `livecore.session_event.publish`  | Producer | `SessionEventPublisher` (append + deliver)                  |
+
+The request span is opened at the top of the application pipeline, so it **wraps** authentication,
+authorization and the endpoint — every span produced deeper nests under it. A reveal therefore produces one
+trace shaped `request → reveal → publish` (each durable reveal/hide event a `publish` child of the reveal
+span), which a collector reconstructs into the request's span tree.
+
+The spans are exported with the OpenTelemetry SDK + host integration already present for the metrics
+(`OpenTelemetry.Extensions.Hosting`). One new dependency is added to `apps/api`:
+`OpenTelemetry.Exporter.OpenTelemetryProtocol` — the **OTLP** trace exporter, OpenTelemetry's vendor-neutral
+export protocol that every major collector ingests (the OpenTelemetry Collector, Jaeger, Tempo, vendor
+backends). It is wired **only when a collector endpoint is configured** (`Tracing:Otlp:Endpoint`); with nothing
+configured the source is still registered with the `TracerProvider` (so spans are produced and any in-process
+listener observes them) but shipped nowhere, so an unconfigured host never reaches a non-existent collector —
+the same fail-closed/inert posture as the storage adapter, the realtime backplane and OIDC. The collector
+endpoint is read from configuration only; none lives in source.
+
+Like the metrics, every span carries only **low-cardinality, non-sensitive** attributes (threat T7 in
+`docs/07_SECURITY_THREAT_MODEL.md`): the request span is tagged with the HTTP method, the route **template**
+(never the concrete path, so no resource id becomes an attribute) and the status code; the reveal span with a
+coarse `operation` name; the publish span with the stable session-event **type** name. No access token, tenant
+identifier, participant id, asset coordinate or resource content is ever attached to a span. The frequently
+polled, context-free infrastructure endpoints (`/health/*`, `/metrics`) are not traced. The background
+**worker** is not yet instrumented for tracing (it owns no request/reveal flow); extending tracing to its jobs
+and adding cross-service context propagation are follow-ups.
+
 ## Health checks
 
 Required:

@@ -231,6 +231,15 @@ internal static class RevealEndpoints
         var metrics = httpContext.RequestServices.GetRequiredService<LiveCoreMetrics>();
         var revealStartTimestamp = Stopwatch.GetTimestamp();
 
+        // Trace the reveal/publish path (CORE-OBS-003, the docs/15_OBSERVABILITY.md realtime tracing flow).
+        // The span wraps the reveal command AND the durable session-event emission below, so each publish
+        // produces a child span nested under this reveal span (and under the request span the tracing
+        // middleware opened). LiveCoreActivitySource is always registered (unconditional), like the metrics;
+        // when no tracer is listening StartReveal is a no-op returning null. The span carries only the coarse
+        // operation name, never the resource id or content (threat T7).
+        var activitySource = httpContext.RequestServices.GetRequiredService<LiveCoreActivitySource>();
+        using var revealActivity = activitySource.StartReveal(operation: "reveal");
+
         var result = await deps.Reveal
             .RevealAsync(
                 context.OrganizationId,

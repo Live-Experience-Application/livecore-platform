@@ -56,6 +56,19 @@
          aggregates, never content (threat T7). -->
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.16.0-beta.1" />
+    <!-- OpenTelemetry distributed tracing export (CORE-OBS-003). docs/15_OBSERVABILITY.md requires the key
+         request and realtime flows to be exportable to a configured collector. LiveCoreActivitySource produces
+         the spans on the vendor-neutral System.Diagnostics activity API and the OpenTelemetry SDK + host
+         integration (OpenTelemetry.Extensions.Hosting, already referenced above for the metrics) samples and
+         batches them, but shipping them to a collector needs a wire-protocol exporter. OTLP is OpenTelemetry's
+         vendor-neutral export protocol that every major collector ingests (the OpenTelemetry Collector,
+         Jaeger, Tempo, vendor backends); reimplementing span batching and the OTLP wire format by hand would
+         duplicate a correctness-sensitive subsystem. A justified new dependency. It is wired ONLY when a
+         collector endpoint is configured (Tracing:Otlp:Endpoint); unconfigured the host still produces spans
+         but ships none, so it never reaches a non-existent collector. The endpoint is supplied at runtime via
+         configuration only; none lives in source, and the spans carry only low-cardinality, non-sensitive
+         attributes, never content (threat T7). Version-aligned to the OpenTelemetry SDK above (1.16.0). -->
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
   </ItemGroup>
 
 </Project>

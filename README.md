@@ -427,6 +427,37 @@ logs no `organization_id`) and skips the unauthenticated `/health/*` and
 logged — never the access token, the display name, the email or resource content
 (threat T7).
 
+### Distributed tracing
+
+`docs/15_OBSERVABILITY.md` defers trace propagation to "later, when multiple
+services are deployed"; CORE-OBS-003 lands the tracing hooks ahead of that so the
+seams exist. A single owner, `LiveCoreActivitySource` (`apps/api/Observability/`),
+defines one `LiveCore` `ActivitySource`, and the **key request and realtime
+flows** produce spans on it: the HTTP request pipeline (`RequestTracingMiddleware`,
+a `http.server.request` Server span), the reveal/hide command (`livecore.reveal`)
+and the session-event publish (`livecore.session_event.publish`). The request span
+is opened at the top of the pipeline so it wraps the whole request, so a reveal
+produces one trace shaped `request → reveal → publish` (each durable event a
+publish child of the reveal span) that a collector reconstructs into the request's
+span tree.
+
+The spans are exported with the OpenTelemetry SDK + host integration already
+present for the metrics; one new dependency is added to `apps/api`:
+`OpenTelemetry.Exporter.OpenTelemetryProtocol`, the **OTLP** trace exporter —
+OpenTelemetry's vendor-neutral export protocol that every major collector ingests
+(the OpenTelemetry Collector, Jaeger, Tempo, vendor backends); reimplementing span
+batching and the OTLP wire format by hand would duplicate a correctness-sensitive
+subsystem. It is wired **only when a collector endpoint is configured**
+(`Tracing:Otlp:Endpoint`): unconfigured, spans are still produced (and any
+in-process listener observes them) but shipped nowhere, so the host never reaches a
+non-existent collector — the same fail-closed/inert posture as the storage adapter
+and realtime backplane. The endpoint is read from configuration only; none lives in
+source. Every span carries only low-cardinality, non-sensitive attributes — the
+HTTP method, the route **template** (never the concrete path), the status code, a
+coarse operation name and the stable session-event type name — never a token,
+tenant identifier or resource content (threat T7), and the `/health/*` and
+`/metrics` infrastructure endpoints are not traced.
+
 ### Identity (OIDC principal model)
 
 Authentication is OIDC-first (`docs/adr/0005-oidc-first-authentication.md`):

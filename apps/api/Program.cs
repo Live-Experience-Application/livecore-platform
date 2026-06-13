@@ -55,6 +55,19 @@ builder.Services.AddHealthChecks();
 // docs/13_SELF_HOSTING_REQUIREMENTS.md).
 builder.Services.AddLiveCorePrometheusMetrics();
 
+// Distributed tracing (CORE-OBS-003). LiveCoreActivitySource owns the single ActivitySource the key request
+// and realtime flows docs/15_OBSERVABILITY.md calls out produce spans through — the HTTP request pipeline
+// (RequestTracingMiddleware, added below) and the reveal/publish path (the reveal endpoint + the session-event
+// publisher) — and this wires the OpenTelemetry TracerProvider that exports them. It is registered
+// UNCONDITIONALLY (it needs no database/identity), so the source exists even when the host runs without
+// persistence, exactly like the metrics. The OTLP exporter is attached ONLY when a collector endpoint is
+// configured (Tracing:Otlp:Endpoint); with nothing configured spans are still produced (and any in-process
+// listener observes them) but shipped nowhere, so an unconfigured host never reaches a non-existent collector
+// (the same fail-closed/inert posture as the storage adapter and realtime backplane). The endpoint comes from
+// configuration only, and spans carry only low-cardinality, non-sensitive attributes — never content or a
+// token (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+builder.Services.AddLiveCoreOpenTelemetryTracing(builder.Configuration);
+
 // Per-request structured log context (CORE-OBS-002). RequestLogContext is the single, request-scoped holder
 // of the identifiers docs/15_OBSERVABILITY.md requires on every request/event log line (request_id,
 // organization_id, workspace_id, session_id, user_id, event_id). The RequestLogContextMiddleware (added to
@@ -885,6 +898,13 @@ app.UseForwardedHeaders();
 // the measurement with the route TEMPLATE (never the concrete path) and skips the /metrics scrape endpoint
 // itself (docs/15_OBSERVABILITY.md; threat T7).
 app.UseMiddleware<RequestMetricsMiddleware>();
+
+// Request tracing (CORE-OBS-003) runs at the top of the application pipeline so its SERVER span WRAPS the
+// whole request — every span produced deeper (the reveal span and its session-event publish spans) nests
+// under it. It names/tags the span with the route TEMPLATE (never the concrete path) once routing has run and
+// skips the /health and /metrics infrastructure endpoints (docs/15_OBSERVABILITY.md; threat T7). When no
+// tracer/exporter is listening, starting the span is a no-op, so this is free when tracing is off.
+app.UseMiddleware<RequestTracingMiddleware>();
 
 // CORS runs before authentication so a browser preflight (an OPTIONS request that
 // carries no credentials) is answered by the CORS middleware itself rather than

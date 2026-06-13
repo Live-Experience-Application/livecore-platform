@@ -39,12 +39,19 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
     // opened in the running host, and it is left null in tests.
     private readonly RequestLogContext? _requestLogContext;
 
+    // The distributed-tracing source (CORE-OBS-003): the "publish" half of the reveal/publish path produces a
+    // span here, nested under the reveal span. Optional for the SAME reason as the log context — DI injects
+    // the singleton in the running host, and it is left null in tests; when absent (or when nothing is
+    // listening) span creation is a no-op and behavior is unchanged.
+    private readonly LiveCoreActivitySource? _activitySource;
+
     public SessionEventPublisher(
         ISessionEventRepository events,
         IRealtimeBackplane backplane,
         ISessionEventRecipientResolver recipients,
         LiveCoreMetrics metrics,
-        RequestLogContext? requestLogContext = null)
+        RequestLogContext? requestLogContext = null,
+        LiveCoreActivitySource? activitySource = null)
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(backplane);
@@ -55,12 +62,18 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
         _recipients = recipients;
         _metrics = metrics;
         _requestLogContext = requestLogContext;
+        _activitySource = activitySource;
     }
 
     /// <inheritdoc />
     public async Task PublishAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(sessionEvent);
+
+        // Trace the publish (CORE-OBS-003). The span is tagged with the stable event-type name only — never
+        // the payload (threat T7) — and nests under the reveal/request span via Activity.Current. A no-op
+        // when no source is injected or nothing is listening, so the best-effort delivery is unaffected.
+        using var activity = _activitySource?.StartSessionEventPublish(sessionEvent.EventType);
 
         // 1. Persist the durable event first (the source of truth for replay).
         await _events.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
