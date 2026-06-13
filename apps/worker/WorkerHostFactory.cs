@@ -1,5 +1,6 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.Observability;
+using LiveCore.Api.Recaps;
 
 namespace LiveCore.Worker;
 
@@ -7,10 +8,19 @@ namespace LiveCore.Worker;
 /// Builds the background worker host.
 ///
 /// The worker owns the platform's asynchronous jobs (docs/02_ARCHITECTURE.md: "background jobs, exports,
-/// cleanup, async processing"). Its first job is the asset cleanup job (CORE-AST-006): a periodic sweep
-/// that reclaims abandoned, unconfirmed asset upload intents (their stale metadata rows and any orphaned
-/// objects in private storage). The Assets module owns the cleanup logic (<see cref="ExpiredPendingAssetCleanupService"/>);
-/// this host only schedules it through <see cref="AssetCleanupBackgroundService"/>.
+/// cleanup, async processing"). It schedules two periodic jobs, each gated on a configured database:
+/// <list type="bullet">
+///   <item>the asset cleanup job (CORE-AST-006), which reclaims abandoned, unconfirmed asset upload intents
+///   (their stale metadata rows and any orphaned objects in private storage) — the Assets module owns the
+///   cleanup logic (<see cref="ExpiredPendingAssetCleanupService"/>) and this host schedules it through
+///   <see cref="AssetCleanupBackgroundService"/>;</item>
+///   <item>the recap generation job (CORE-JOB-001), which produces a recap for every ENDED session that has
+///   no recap yet, idempotently and tenant-scoped — the Recaps module owns the generation logic
+///   (<see cref="RecapGenerationService"/>) and this host schedules it through
+///   <see cref="RecapGenerationBackgroundService"/>.</item>
+/// </list>
+/// Each job's logic lives in its owning domain module in <c>apps/api</c>; this host only handles timing,
+/// scoping and resilience.
 /// </summary>
 public static class WorkerHostFactory
 {
@@ -37,24 +47,37 @@ public static class WorkerHostFactory
         // metrics over a scrape/OTLP surface is a documented follow-up. The API host owns the /metrics surface.
         builder.Services.AddLiveCoreMetrics();
 
-        // Asset cleanup job (CORE-AST-006). AddAssetCleanup registers the Assets module's cleanup
-        // dependencies (the EF Core DbContext, the asset repository, the fail-closed IAssetStorage default,
-        // the cleanup policy, a TimeProvider and the cleanup service) and returns whether persistence is
-        // configured. Like the API host, the job is GATED on a configured database connection string: with
-        // none, no DbContext and no cleanup loop are registered, so the worker still starts (it just has no
-        // job to run) rather than failing closed. The scheduling background service is only added when the job
-        // is configured.
-        if (builder.Services.AddAssetCleanup(builder.Configuration))
+        // Background jobs (CORE-AST-006 asset cleanup, CORE-JOB-001 recap generation). Each Add* extension
+        // registers its owning module's dependencies (the EF Core DbContext, the module repositories, a
+        // TimeProvider, the job policy and the job's application service) and returns whether persistence is
+        // configured. Like the API host, both jobs are GATED on a configured database connection string: with
+        // none, no DbContext and no loop are registered, so the worker still starts (it just has no job to run)
+        // rather than failing closed. The shared infrastructure (the DbContext and the TimeProvider) is
+        // registered with TryAdd/AddDbContext semantics in each extension, so wiring both in the same container
+        // composes safely. Each scheduling background service is added only when its job is configured.
+        var assetCleanupConfigured = builder.Services.AddAssetCleanup(builder.Configuration);
+        var recapGenerationConfigured = builder.Services.AddRecapGeneration(builder.Configuration);
+
+        if (assetCleanupConfigured || recapGenerationConfigured)
         {
-            // Worker liveness heartbeat (CORE-OPS-005): the cleanup loop writes a heartbeat each tick so a
-            // wedged AssetCleanupBackgroundService loop is detectable by orchestration (its file goes stale).
-            // Registered alongside the cleanup job because the heartbeat IS the loop's liveness signal; with no
-            // database there is no loop to stall, so there is nothing to heartbeat. The file path is read from
-            // configuration with a safe default (Worker:Heartbeat:FilePath); the TimeProvider the heartbeat
-            // stamps with is registered by AddAssetCleanup above.
+            // Worker liveness heartbeat (CORE-OPS-005): each job loop writes a heartbeat each tick so a wedged
+            // loop is detectable by orchestration (the shared file goes stale). Registered once, alongside the
+            // jobs, because the heartbeat IS the worker process's liveness signal; with no database there is no
+            // loop to stall, so there is nothing to heartbeat. The file path is read from configuration with a
+            // safe default (Worker:Heartbeat:FilePath); the TimeProvider the heartbeat stamps with is registered
+            // by the Add* extensions above.
             builder.Services.AddSingleton(WorkerHeartbeatOptions.FromConfiguration(builder.Configuration));
             builder.Services.AddSingleton<WorkerHeartbeat>();
+        }
+
+        if (assetCleanupConfigured)
+        {
             builder.Services.AddHostedService<AssetCleanupBackgroundService>();
+        }
+
+        if (recapGenerationConfigured)
+        {
+            builder.Services.AddHostedService<RecapGenerationBackgroundService>();
         }
 
         return builder;

@@ -287,13 +287,15 @@ configured `Authority` with a blank `Audience` refuses to start, see above.)
 ### Worker liveness heartbeat
 
 The worker host serves no HTTP traffic and exposes no port, so its liveness signal
-is a **heartbeat file** rather than a health port. The asset cleanup loop
-(`AssetCleanupBackgroundService`) writes the current UTC timestamp to the heartbeat
-file on startup and after **every completed sweep tick**. The loop is resilient to a
-sweep that _throws_, but a sweep that **hangs** (a stuck database or storage call)
-would leave the process alive yet doing no work; because the file is refreshed only
-by the loop making progress, a hung sweep stops refreshing it and the file goes
-**stale** — the signal orchestration uses to restart the wedged worker.
+is a **heartbeat file** rather than a health port. Each job loop — the asset cleanup
+loop (`AssetCleanupBackgroundService`) and the recap generation loop
+(`RecapGenerationBackgroundService`, CORE-JOB-001) — writes the current UTC timestamp
+to the heartbeat file on startup and after **every completed sweep tick**. A loop is
+resilient to a sweep that _throws_, but a sweep that **hangs** (a stuck database or
+storage call) would leave the process alive yet doing no work; the file is the worker
+process's liveness signal, refreshed whenever a loop makes progress, so a worker whose
+loops all hang stops refreshing it and the file goes **stale** — the signal
+orchestration uses to restart the wedged worker.
 
 - Configure the path with `Worker:Heartbeat:FilePath`
   (`Worker__Heartbeat__FilePath`); the default is `<temp>/livecore-worker.heartbeat`.
@@ -301,14 +303,14 @@ by the loop making progress, a hung sweep stops refreshing it and the file goes
   volume, or simply the container's own filesystem for an `exec` probe).
 - Check **freshness**, not just existence. A liveness probe should restart the
   worker when the file's age exceeds a few sweep intervals
-  (`Assets:Cleanup:SweepInterval`, default 1 hour) — for example a Kubernetes
-  `livenessProbe` running
+  (`Assets:Cleanup:SweepInterval` / `Recaps:Generation:SweepInterval`, both default 1
+  hour) — for example a Kubernetes `livenessProbe` running
   `exec: ["sh","-c","test $(( $(date +%s) - $(stat -c %Y /var/run/livecore/worker.heartbeat) )) -lt 7200"]`.
-- The heartbeat is wired **alongside** the cleanup job, so with **no** database
-  there is no loop and no heartbeat (there is nothing to stall). A heartbeat write
-  never crashes the worker (a transient error is logged and swallowed; a persistent
-  failure just makes the file go stale, which is fail-safe). It carries only a
-  timestamp — no identifiers, no secrets (threat T7).
+- The heartbeat is wired **alongside** the jobs, so with **no** database there is no
+  loop and no heartbeat (there is nothing to stall). A heartbeat write never crashes
+  the worker (a transient error is logged and swallowed; a persistent failure just
+  makes the file go stale, which is fail-safe). It carries only a timestamp — no
+  identifiers, no secrets (threat T7).
 
 ## Object storage (CORE-OPS-006)
 
@@ -422,10 +424,12 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Realtime:Backplane:ConnectionString` | `Realtime__Backplane__ConnectionString` | yes | for multi-instance   | API         | In-process backplane (single instance only, CORE-OPS-007) |
 | `Tracing:Otlp:Endpoint`             | `Tracing__Otlp__Endpoint`          |   no   | for trace export        | API         | Spans produced but not exported (no collector, CORE-OBS-003) |
 | `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat`                      |
+| `Recaps:Generation:SweepInterval`   | `Recaps__Generation__SweepInterval` |  no   | no                      | worker      | `01:00:00` (recap generation cadence, CORE-JOB-001)     |
 
-The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`) and
-`Realtime:Backplane:ChannelPrefix` are optional tuning with safe defaults (see CORE-OPS-006 / CORE-OPS-007
-above). The **store** purchase-verification and notification credentials (Apple/Google server keys, signing
+The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`),
+`Realtime:Backplane:ChannelPrefix` and the background-job batch sizes (`Assets:Cleanup:BatchSize`,
+`Recaps:Generation:BatchSize`, both default 50–100) are optional tuning with safe defaults (see CORE-OPS-006 /
+CORE-OPS-007 above). The **store** purchase-verification and notification credentials (Apple/Google server keys, signing
 keys) are consumed by the deployment-supplied verification/notification **adapter**, not read from a fixed Core
 key; supply them to that adapter through your secret store, and with no adapter configured store verification
 and notifications fail closed (`503`).

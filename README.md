@@ -74,7 +74,7 @@ eslint.config.mjs        ESLint flat config for the TypeScript packages
 apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints, IdentityAccess module
 apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/api/Migrations.Dockerfile  one-shot migrations runner image (applies EF Core migrations before API rollout)
-apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup job
+apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup and recap generation jobs
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
@@ -328,8 +328,9 @@ Start the API host (listens on `http://localhost:5062` by default, see
 dotnet run --project apps/api
 ```
 
-Start the background worker host (runs the asset cleanup job when a database is
-configured; see "Asset cleanup job" below):
+Start the background worker host (runs the asset cleanup and recap generation jobs
+when a database is configured; see "Asset cleanup job" and "Recap generation job"
+below):
 
 ```bash
 dotnet run --project apps/worker
@@ -1821,22 +1822,51 @@ deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Becaus
 reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
 `apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
 
+### Recap generation job
+
+CORE-JOB-001 adds the Recaps module's background generation — the worker's second periodic job
+(`apps/worker`; `docs/02_ARCHITECTURE.md`: the worker owns async jobs), behind no HTTP route. It
+produces a recap for every session that **needs** one — a session that has **ended** but has no
+recap yet — so the durable `Recap` record (CORE-AUD-004) is produced asynchronously rather than only
+through a synchronous host path (`docs/00_START_HERE.md`: a Host can "produce Recaps"). Each recap is
+**system-produced** (no user; `docs/09_EVENT_CATALOG.md` `RecapGenerated` source "System/Host") with a
+generic, product-neutral body composed from the session's own live-timeline facts only — never the
+session title or any content (threat T7) — and is appended through the existing `IRecapRepository`.
+
+It is **idempotent** and **tenant-scoped** (the acceptance criteria). Eligibility is read by
+`IRecapEligibleSessionReader` as an anti-join — ended sessions with no recap — so a session that
+already has a recap is never eligible and is recapped **at most once** across any number of sweeps;
+the read spans all tenants (a system sweep) but each produced recap carries its own session's
+organization, workspace and id, so a session in one tenant only ever receives a recap attributed to
+that same tenant (threat T5). The eligibility read lives in the Recaps module because it already
+depends on the Sessions module (a recap has a foreign key into `sessions`); it only **reads** session
+coordinates, never writes the sessions table.
+
+The generation logic lives in the Recaps module (`RecapGenerationService`); the worker only schedules
+it (`RecapGenerationBackgroundService`, every `Recaps:Generation:SweepInterval`, in bounded
+`Recaps:Generation:BatchSize` batches), and like the cleanup job it is **gated on a configured database
+connection string** (no database -> the worker starts but runs no generation loop). The sweep is
+per-session **resilient**: a recap that fails to persist (for example because the session was deleted
+between the eligibility read and the append) is logged and counted, and that session stays eligible for
+the next sweep, without aborting the run. The `RecapGenerated` realtime event and audit fact, and any
+recap HTTP route, remain follow-up stories — this job produces and persists the durable recap only.
+
 ### Worker liveness heartbeat
 
-CORE-OPS-005 adds the worker's liveness signal so orchestration can detect a **wedged** cleanup
-loop. The loop is resilient to a sweep that _throws_ (it logs and retries on the next tick), but a
-sweep that **hangs** — a stuck database or storage call that never returns — would leave the worker
-process alive yet doing no work, which a process-liveness check cannot see. Because the worker serves
-no HTTP traffic and exposes no port, the heartbeat is a **file**, not a health port: the cleanup loop
-writes the current UTC timestamp to `Worker:Heartbeat:FilePath` (default
+CORE-OPS-005 adds the worker's liveness signal so orchestration can detect a **wedged** job loop. A
+loop is resilient to a sweep that _throws_ (it logs and retries on the next tick), but a sweep that
+**hangs** — a stuck database or storage call that never returns — would leave the worker process alive
+yet doing no work, which a process-liveness check cannot see. Because the worker serves no HTTP traffic
+and exposes no port, the heartbeat is a **file**, not a health port: each job loop (asset cleanup and
+recap generation) writes the current UTC timestamp to `Worker:Heartbeat:FilePath` (default
 `<temp>/livecore-worker.heartbeat`) on startup and after **every** completed sweep tick. The file is
-refreshed only by the loop making progress, so a hung sweep stops refreshing it and the file goes
-stale — the signal orchestration uses to restart the stalled worker (a Kubernetes liveness probe or a
-Compose healthcheck that checks the file's age). The heartbeat is wired **alongside** the cleanup job,
-so with no database there is no loop and no heartbeat (nothing to stall). A heartbeat write never
-crashes the worker: a transient filesystem error is logged and swallowed, and a persistent failure
-just makes the file go stale (fail-safe). It carries only a timestamp — no identifiers, no secrets
-(threat T7).
+the worker process's liveness signal, refreshed whenever a loop makes progress, so a worker whose loops
+all hang stops refreshing it and the file goes stale — the signal orchestration uses to restart the
+stalled worker (a Kubernetes liveness probe or a Compose healthcheck that checks the file's age). The
+heartbeat is wired **alongside** the jobs, so with no database there is no loop and no heartbeat
+(nothing to stall). A heartbeat write never crashes the worker: a transient filesystem error is logged
+and swallowed, and a persistent failure just makes the file go stale (fail-safe). It carries only a
+timestamp — no identifiers, no secrets (threat T7).
 
 ### Asset deletion
 
@@ -2544,8 +2574,8 @@ curl http://localhost:8080/health/live
 docker stop livecore-api
 ```
 
-Run the worker container (no ports; runs the asset cleanup job when a database is configured,
-otherwise idles):
+Run the worker container (no ports; runs the asset cleanup and recap generation jobs when a database
+is configured, otherwise idles):
 
 ```bash
 docker run --rm livecore-worker

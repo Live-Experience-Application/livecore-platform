@@ -175,6 +175,7 @@ Owns:
 
 - session recaps
 - recap projection
+- background recap generation for eligible (ended) sessions
 
 May not:
 

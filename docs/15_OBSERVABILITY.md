@@ -73,7 +73,7 @@ meter named `LiveCore` carrying all eight instruments, and the existing seams re
 middleware (request duration + error rate), the realtime hub (connections), the reveal endpoint (reveal
 latency), the session-event publisher (event-delivery failures), a transparent `IAssetStorage` decorator
 (asset upload/download failures), an EF Core command interceptor (database failures) and the worker's
-background job (job failures).
+background jobs (job failures, tagged by a coarse `job` name — `asset-cleanup` and `recap-generation`).
 
 The API host exposes a **Prometheus scrape endpoint** at `GET /metrics` (the OpenTelemetry Prometheus
 exporter). It is registered unconditionally — like the health endpoints, it needs no database or identity
@@ -101,9 +101,10 @@ deployment network, exactly as orchestration probes the unauthenticated `/health
 only aggregate series, never content. A deployment restricts it at the reverse-proxy/network edge
 (`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
-The background **worker** records job failures onto the same `LiveCore` meter, but as a non-HTTP host it does
-not yet expose its own scrape surface; surfacing the worker's metrics over a scrape/OTLP endpoint is a
-follow-up (the API host owns the `/metrics` surface today). Likewise, an OTLP push exporter is a configuration
+The background **worker** records job failures onto the same `LiveCore` meter from both of its job loops (the
+asset cleanup sweep and the recap generation sweep, CORE-JOB-001), but as a non-HTTP host it does not yet
+expose its own scrape surface; surfacing the worker's metrics over a scrape/OTLP endpoint is a follow-up (the
+API host owns the `/metrics` surface today). Likewise, an OTLP push exporter is a configuration
 follow-up — the instruments are export-agnostic.
 
 ## Tracing

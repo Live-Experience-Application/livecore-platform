@@ -49,4 +49,31 @@ public class WorkerSmokeTests
 
         Assert.DoesNotContain(hostedServices, service => service is AssetCleanupBackgroundService);
     }
+
+    [Fact]
+    public void WorkerHost_registers_the_recap_generation_job_when_a_database_is_configured()
+    {
+        // CORE-JOB-001: with a database configured the worker schedules the recap generation job alongside the
+        // cleanup job. The connection string is supplied through configuration only (no connection is opened by
+        // building the host), exactly as the API host reads it.
+        using var host = WorkerHostFactory.Create(
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
+            .Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.Contains(hostedServices, service => service is RecapGenerationBackgroundService);
+    }
+
+    [Fact]
+    public void WorkerHost_registers_no_recap_generation_job_without_a_database()
+    {
+        // Persistence-gated, fail-safe: with no database configured the worker schedules no recap generation
+        // loop (mirroring the cleanup job's gating).
+        using var host = WorkerHostFactory.Create([]).Build();
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.DoesNotContain(hostedServices, service => service is RecapGenerationBackgroundService);
+    }
 }
