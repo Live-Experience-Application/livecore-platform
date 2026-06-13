@@ -9,4 +9,4 @@ purchase_providers,Configured purchase providers,Store,DEFERRED - not in the imp
 purchase_transactions,Stores verified purchase records,Store,Idempotent transaction handling required
 purchase_events,Append-only purchase lifecycle events,Store,Renewal/cancel/refund/grace events
 store_notification_events,Raw and normalized store notifications,Store,Idempotent and auditable
-billing_account_links,Links store accounts to Core subjects,Store,DEFERRED - not in the implemented schema; billing is out-of-scope for Core v1 (docs/01); see CORE-DOC-002
+billing_account_links,Links store accounts to Core subjects,Store,DEFERRED - not in the implemented schema; CORE-DOC-002 formally defers it (and the purchase-to-entitlement grant chain) to post-v1; billing is out-of-scope for Core v1 (docs/01); see docs/24

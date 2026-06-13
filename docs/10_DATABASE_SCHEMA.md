@@ -21,8 +21,9 @@ per table, with its owning module, scope and notes). The list below mirrors
 that file and the implemented EF Core model; keep all three in step (see
 `docs/24_SPEC_CONSISTENCY.md`). Tables documented elsewhere but not present in
 this list are not in the implemented schema and are tracked as deferred (for
-example `purchase_providers` and `billing_account_links`; see
-`csv/entitlement_database_tables.csv` and CORE-DOC-002).
+example `purchase_providers` and `billing_account_links`, which CORE-DOC-002
+formally defers to post-v1; see `csv/entitlement_database_tables.csv` and
+`docs/24_SPEC_CONSISTENCY.md`).
 
 Current Core tables:
 

@@ -369,6 +369,39 @@ HTTP route.
   window-function candidate query for high-volume deployments (the candidate scan computes the latest-per-purchase
   client-side, which suits this off-by-default, low-volume job).
 
+## Purchase-to-entitlement grant chain — formally deferred for Core v1 (CORE-DOC-002)
+
+Every store story above stops at the **persisted, audited purchase status** and
+explicitly defers "granting the resulting `SubjectEntitlement` from the recorded
+purchase (the product → plan → entitlement mapping) and linking the buyer
+(`billing_account_links`)" to "a later story". CORE-DOC-002 is the decision on
+that deferred chain, and it records it **formally deferred to post-v1**: billing
+is out of scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`, "Out of
+scope"), so the monetization loop is not closed in v1.
+
+Deferred (tracked in `docs/24_SPEC_CONSISTENCY.md`, not drift):
+
+- the `billing_account_links` "Database addition" (store-account-to-subject
+  link) — `purchase_transactions` deliberately carries no buyer column for it —
+  and the still-in-code-only `purchase_providers`;
+- the product → plan → entitlement mapping;
+- the trigger that would call `SubjectEntitlementAssignmentService` from a
+  verified purchase (CORE-STORE-003/004) or a store notification
+  (CORE-STORE-005, CORE-JOB-003).
+
+In scope and shipped in v1 (so this area is not orphaned dead code): the
+provider-neutral verify-and-record gate (CORE-STORE-001..004), the idempotent
+store-notification → purchase-status pipeline and its reconciliation job
+(CORE-STORE-005, CORE-JOB-003), the reusable `SubjectEntitlement`
+assignment/lookup primitive and server-side quota enforcement
+(CORE-ENTL-001..004), and the entitlement-driven ad eligibility read
+(CORE-ADS-001). These operate on entitlements assigned by other means
+(administrative/seed assignment); **no verified purchase grants a
+`SubjectEntitlement` in Core v1**. When billing leaves deferral, the grant story
+adds `billing_account_links` + the product→plan mapping and wires the existing
+verify/notify pipeline to the existing assignment primitive — no part of the v1
+work is wasted.
+
 ## Security requirements
 
 - Never trust client-side premium flags.

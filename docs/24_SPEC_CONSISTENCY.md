@@ -44,6 +44,50 @@ contain an entry absent from its source of truth.
   Phase 1 (15 epics, matching `csv/core_epics_stories.csv`) and Phase 2
   (8 epics, matching `csv/core_phase2_epics_stories.csv`) separately.
 
+## Decision recorded (CORE-DOC-002): billing deferred for Core v1
+
+`billing_account_links` was documented as a Store "Database addition"
+(`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`) but never built, so a
+verified purchase has no way to link a store account to a Core subject and grant
+that buyer a `SubjectEntitlement` — the purchase-to-entitlement chain is
+incomplete. CORE-DOC-002 is the explicit decision on that gap.
+
+**Decision: formally defer billing and the purchase-to-entitlement grant chain
+to post-v1.** Billing is out of scope for Core v1
+(`docs/01_PRODUCT_VISION_AND_SCOPE.md`, "Out of scope"), so completing the
+monetization loop is deferred rather than built now. The following remain
+**deferred** (documented design intent, not drift):
+
+- the `billing_account_links` table (store-account-to-subject link) and the
+  `purchase_providers` table (provider handling is in-code, CORE-STORE-001);
+- the product → plan → entitlement mapping that turns a verified purchase into a
+  plan grant;
+- the trigger that would wire purchase verification (CORE-STORE-003/004) and
+  store notifications (CORE-STORE-005, CORE-JOB-003) to
+  `SubjectEntitlementAssignmentService.AssignFromPlanAsync`/`RevokeAsync`.
+
+What Core v1 **does** ship of this area is intact and in scope (it is annotated
+as such on the store/ad/entitlement rows of `csv/core_epics_stories.csv`):
+
+- the provider-neutral verify-and-record gate — a verified purchase is persisted
+  as an idempotent, auditable `purchase_transactions`/`purchase_events` record
+  (CORE-STORE-001..004);
+- the idempotent store-notification → purchase-status pipeline and its
+  reconciliation job, which keep the persisted purchase status (the server-side
+  source of truth) convergent (CORE-STORE-005, CORE-JOB-003);
+- the reusable `SubjectEntitlement` assignment/lookup primitive and server-side
+  quota enforcement (CORE-ENTL-001..004), and the entitlement-driven ad
+  eligibility read (CORE-ADS-001), which operate on entitlements assigned by
+  other means (administrative/seed assignment), not by a verified purchase.
+
+**No verified purchase grants a `SubjectEntitlement` in Core v1.** This is a
+scope decision consistent with `docs/01`, not an architecture change, so it is
+recorded here rather than in an ADR (ADR 0010 already records Core-owned
+entitlements/quotas and ADR 0011 that mobile ads stay outside Core). When
+billing leaves deferral, the grant story adds `billing_account_links` + the
+product→plan mapping and wires the existing verify/notify pipeline to the
+existing assignment primitive, so no part of the v1 work is wasted.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented
@@ -54,8 +98,10 @@ Core v1 schema/behavior. They are not drift; they are explicit deferrals.
   `csv/entitlement_database_tables.csv`.
 - **`billing_account_links`** — the store-account-to-subject link table.
   Billing is out of scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`);
-  whether to build it or formally defer the purchase-to-entitlement chain is the
-  subject of **CORE-DOC-002**.
+  **CORE-DOC-002 formally defers it** (and the rest of the
+  purchase-to-entitlement grant chain) to post-v1 — see "Decision recorded
+  (CORE-DOC-002)" above. Marked DEFERRED in
+  `csv/entitlement_database_tables.csv`.
 - **Planned-but-unemitted session events** — `SessionCreated`, `SceneCreated`,
   `ContentBlockCreated`, `PrivateMessageSent`, `AssetRevealed`,
   `SessionNoteCreated` and `RecapGenerated` are in the catalog but not yet

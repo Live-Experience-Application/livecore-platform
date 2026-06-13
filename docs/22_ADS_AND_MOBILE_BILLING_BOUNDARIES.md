@@ -104,6 +104,10 @@ eligibility is entirely **entitlement-driven**; it adds no table and no EF migra
 - **Out of scope (later stories).** A temporary per-session (rewarded-ad) ad-free window that would populate
   `sessionAdFreeUntil`, and the product → plan → entitlement mapping that grants `ads.disabled` from a verified
   purchase, are later stories; CORE-ADS-001 is the policy and the read over the entitlements those stories grant.
+  The verified-purchase → `ads.disabled` grant is part of the purchase-to-entitlement chain that **CORE-DOC-002
+  formally defers to post-v1** (billing is out of scope for Core v1, `docs/01_PRODUCT_VISION_AND_SCOPE.md`; see
+  `docs/24_SPEC_CONSISTENCY.md`). Until then this read reflects only entitlements assigned by other means, and a
+  subject with no ad-free grant fails closed to ads-required.
 
 ## Forbidden
 
