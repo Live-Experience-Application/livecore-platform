@@ -155,4 +155,19 @@ public enum AuditAction
     /// (<see cref="AuditLogEntry.ForWorkspaceArchive"/>).
     /// </summary>
     WorkspaceArchived = 10,
+
+    /// <summary>
+    /// A host cancelled a not-yet-started session, taking it out of use before it ever ran — the session
+    /// cancel command (CORE-LIFE-010, the "Resource Lifecycle and Deletion" epic). Until now a session could
+    /// be created, started and ended but never cancelled; this records the soft, terminal Prepared -&gt;
+    /// Cancelled transition. Auditing the cancel satisfies the story's "authorized" criterion: it records that
+    /// an authorized host took a session out of use (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// Unlike the deletion actions — and exactly like <see cref="WorkspaceArchived"/> — a cancel is a real
+    /// STATE TRANSITION (the session row survives so its append-only <c>session_events</c> and audit history is
+    /// preserved), so it records the before/after status NAMES (<c>Prepared</c> -&gt; <c>Cancelled</c>) like
+    /// <see cref="VisibilityRuleChanged"/> records a visibility transition; its actor is the host who cancelled
+    /// the session and its resource is the session itself (its generic kind name and surrogate id). A generic,
+    /// workspace-scoped audit fact (<see cref="AuditLogEntry.ForSessionCancellation"/>).
+    /// </summary>
+    SessionCancelled = 11,
 }

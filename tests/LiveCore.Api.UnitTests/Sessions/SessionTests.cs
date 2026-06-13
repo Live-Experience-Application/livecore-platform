@@ -120,6 +120,7 @@ public class SessionTests
         Assert.True(Session.IsValidStatus(SessionStatus.Prepared));
         Assert.True(Session.IsValidStatus(SessionStatus.Live));
         Assert.True(Session.IsValidStatus(SessionStatus.Ended));
+        Assert.True(Session.IsValidStatus(SessionStatus.Cancelled));
         Assert.False(Session.IsValidStatus((SessionStatus)999));
     }
 
@@ -391,6 +392,126 @@ public class SessionTests
         // Ended (terminal): may neither start nor end.
         Assert.False(session.CanStart);
         Assert.False(session.CanEnd);
+    }
+
+    // --- State machine: CANCEL off-ramp (CORE-LIFE-010) ------------------------
+
+    [Fact]
+    public void Cancel_transitions_prepared_to_cancelled_without_a_live_timeline()
+    {
+        // Happy path: a not-yet-started session goes Prepared -> Cancelled (a soft,
+        // terminal off-ramp). It never opened a live timeline, so StartedAt/EndedAt
+        // stay null; only the status and the update timestamp change.
+        var session = CreatePrepared();
+
+        Assert.True(session.CanCancel);
+        session.Cancel(_startedAt);
+
+        Assert.Equal(SessionStatus.Cancelled, session.Status);
+        Assert.True(session.IsCancelled);
+        Assert.False(session.IsLive);
+        Assert.Null(session.StartedAt);
+        Assert.Null(session.EndedAt);
+        Assert.Equal(_startedAt, session.UpdatedAt);
+        Assert.Equal(_createdAt, session.CreatedAt);
+        // The tenant boundary and the workspace are immutable across a cancel (threat T5).
+        Assert.Equal(_organizationId, session.OrganizationId);
+        Assert.Equal(_workspaceId, session.WorkspaceId);
+    }
+
+    [Fact]
+    public void Cancel_normalizes_the_timestamp_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 11, 11, 0, 0, TimeSpan.FromHours(2));
+        var session = CreatePrepared();
+
+        session.Cancel(local);
+
+        Assert.Equal(TimeSpan.Zero, session.UpdatedAt.Offset);
+        Assert.Equal(local.ToUniversalTime(), session.UpdatedAt);
+    }
+
+    [Fact]
+    public void A_cancelled_session_can_be_neither_started_ended_nor_cancelled_again()
+    {
+        // Cancelled is terminal: every further transition is rejected as a genuine
+        // state error with NO mutation.
+        var session = CreatePrepared();
+        session.Cancel(_startedAt);
+        var updatedBefore = session.UpdatedAt;
+
+        Assert.False(session.CanStart);
+        Assert.False(session.CanEnd);
+        Assert.False(session.CanCancel);
+
+        Assert.Throws<InvalidSessionStateTransitionException>(() => session.Start(_endedAt));
+        Assert.Throws<InvalidSessionStateTransitionException>(() => session.End(_endedAt));
+        var ex = Assert.Throws<InvalidSessionStateTransitionException>(() => session.Cancel(_endedAt));
+
+        Assert.Equal(SessionStatus.Cancelled, ex.From);
+        Assert.Equal(SessionStatus.Cancelled, ex.To);
+        // Nothing changed on any rejected transition.
+        Assert.Equal(SessionStatus.Cancelled, session.Status);
+        Assert.Null(session.StartedAt);
+        Assert.Null(session.EndedAt);
+        Assert.Equal(updatedBefore, session.UpdatedAt);
+    }
+
+    [Fact]
+    public void Cancel_from_live_is_an_invalid_transition_and_does_not_mutate()
+    {
+        // A live session must be ENDED, not cancelled: cancelling it is rejected with
+        // no mutation (a live timeline is never silently discarded).
+        var session = CreatePrepared();
+        session.Start(_startedAt);
+        var statusBefore = session.Status;
+        var startedBefore = session.StartedAt;
+        var updatedBefore = session.UpdatedAt;
+
+        var ex = Assert.Throws<InvalidSessionStateTransitionException>(() => session.Cancel(_endedAt));
+
+        Assert.Equal(session.Id, ex.SessionId);
+        Assert.Equal(SessionStatus.Live, ex.From);
+        Assert.Equal(SessionStatus.Cancelled, ex.To);
+        Assert.False(session.CanCancel);
+        Assert.Equal(statusBefore, session.Status);
+        Assert.Equal(startedBefore, session.StartedAt);
+        Assert.Null(session.EndedAt);
+        Assert.Equal(updatedBefore, session.UpdatedAt);
+    }
+
+    [Fact]
+    public void Cancel_from_ended_is_an_invalid_transition_and_does_not_mutate()
+    {
+        var session = CreatePrepared();
+        session.Start(_startedAt);
+        session.End(_endedAt);
+        var statusBefore = session.Status;
+        var endedBefore = session.EndedAt;
+        var updatedBefore = session.UpdatedAt;
+
+        var ex = Assert.Throws<InvalidSessionStateTransitionException>(() => session.Cancel(_endedAt.AddHours(1)));
+
+        Assert.Equal(SessionStatus.Ended, ex.From);
+        Assert.Equal(SessionStatus.Cancelled, ex.To);
+        Assert.False(session.CanCancel);
+        Assert.Equal(statusBefore, session.Status);
+        Assert.Equal(endedBefore, session.EndedAt);
+        Assert.Equal(updatedBefore, session.UpdatedAt);
+    }
+
+    [Fact]
+    public void Start_after_cancel_is_rejected_so_a_cancelled_session_never_runs()
+    {
+        // Explicit guard for the story's promise: a cancelled session cannot be
+        // resurrected by a start, so it never opens a live timeline.
+        var session = CreatePrepared();
+        session.Cancel(_startedAt);
+
+        Assert.Throws<InvalidSessionStateTransitionException>(() => session.Start(_endedAt));
+
+        Assert.Equal(SessionStatus.Cancelled, session.Status);
+        Assert.Null(session.StartedAt);
     }
 
     // --- Log safety ------------------------------------------------------------

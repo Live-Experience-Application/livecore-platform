@@ -60,6 +60,19 @@ namespace LiveCore.Api.Sessions;
 /// use <see cref="CanStart"/>/<see cref="CanEnd"/>. The events themselves and the
 /// start/end COMMANDS are emitted by CORE-SES-004, not here.
 ///
+/// Cancel off-ramp (CORE-LIFE-010): <see cref="Cancel"/> is valid only from
+/// <see cref="SessionStatus.Prepared"/> and moves a not-yet-started session to the
+/// soft, terminal <see cref="SessionStatus.Cancelled"/> — a status transition like
+/// <see cref="Start"/>/<see cref="End"/> (and like <c>Workspace.Archive</c>), NOT a
+/// hard delete, so the session row survives to anchor its append-only
+/// <c>session_events</c> and <c>audit_logs</c> history. A cancelled session never
+/// opened a live timeline, so <see cref="StartedAt"/>/<see cref="EndedAt"/> stay
+/// null; once cancelled it can be neither started, ended nor cancelled again
+/// (<see cref="CanStart"/>/<see cref="CanEnd"/>/<see cref="CanCancel"/> are all
+/// false). Cancelling a session that already started, ended or was cancelled is an
+/// <see cref="InvalidSessionStateTransitionException"/>, NOT a no-op; callers that
+/// want to branch without catching use <see cref="CanCancel"/>.
+///
 /// There is deliberately no "Paused" state and no active-scene pointer here.
 /// docs/09_EVENT_CATALOG.md documents no <c>SessionPaused</c> event and
 /// csv/api_routes.csv has no pause route, so a persisted Paused state would be
@@ -213,6 +226,12 @@ public sealed class Session
     public bool IsLive => Status == SessionStatus.Live;
 
     /// <summary>
+    /// Whether the session has been cancelled (the soft, terminal off-ramp of the
+    /// session cancel command, CORE-LIFE-010): <see cref="SessionStatus.Cancelled"/>.
+    /// </summary>
+    public bool IsCancelled => Status == SessionStatus.Cancelled;
+
+    /// <summary>
     /// Whether the session may be started right now: a session may be started only
     /// from <see cref="SessionStatus.Prepared"/>. Lets the application layer branch
     /// without catching <see cref="InvalidSessionStateTransitionException"/>.
@@ -227,6 +246,16 @@ public sealed class Session
     /// <see cref="InvalidSessionStateTransitionException"/>.
     /// </summary>
     public bool CanEnd => Status == SessionStatus.Live;
+
+    /// <summary>
+    /// Whether the session may be cancelled right now: a session may be cancelled only
+    /// from <see cref="SessionStatus.Prepared"/> — a not-yet-started session
+    /// (CORE-LIFE-010). A live, ended or already-cancelled session cannot be cancelled
+    /// (a live session must be ended, not cancelled; the others are already terminal).
+    /// Lets the application layer branch (returning a 409 conflict) without catching
+    /// <see cref="InvalidSessionStateTransitionException"/>.
+    /// </summary>
+    public bool CanCancel => Status == SessionStatus.Prepared;
 
     /// <summary>
     /// Creates a new prepared session in the given workspace (owned by the given
@@ -370,6 +399,37 @@ public sealed class Session
         Status = SessionStatus.Ended;
         EndedAt = endedAtUtc;
         UpdatedAt = endedAtUtc;
+    }
+
+    /// <summary>
+    /// Cancels a not-yet-started session (CORE-LIFE-010): transitions
+    /// <see cref="SessionStatus.Prepared"/> -&gt; <see cref="SessionStatus.Cancelled"/>
+    /// and stamps <see cref="UpdatedAt"/>. This is a SOFT, terminal transition like
+    /// <see cref="Start"/>/<see cref="End"/> (and like <c>Workspace.Archive</c>), NOT a
+    /// hard delete: the session row survives so its append-only <c>session_events</c>
+    /// and <c>audit_logs</c> history is preserved (the story note: "NEVER delete
+    /// append-only session_events or audit_logs - prefer a Cancelled status"). The
+    /// session never opened a live timeline, so <see cref="StartedAt"/> and
+    /// <see cref="EndedAt"/> stay null and are deliberately not touched. The
+    /// organization, workspace and id are immutable, so cancelling never moves the
+    /// session (threat T5). Cancelling is valid ONLY from
+    /// <see cref="SessionStatus.Prepared"/>: cancelling a session that has started, has
+    /// ended, or was already cancelled is an invalid transition, NOT a no-op (a live
+    /// session must be ended, not cancelled, and the terminal states are final).
+    /// Callers that want to avoid the exception can pre-check <see cref="CanCancel"/>.
+    /// </summary>
+    /// <exception cref="InvalidSessionStateTransitionException">
+    /// The session is not <see cref="SessionStatus.Prepared"/>.
+    /// </exception>
+    public void Cancel(DateTimeOffset at)
+    {
+        if (!CanCancel)
+        {
+            throw new InvalidSessionStateTransitionException(Id, Status, SessionStatus.Cancelled);
+        }
+
+        Status = SessionStatus.Cancelled;
+        UpdatedAt = at.ToUniversalTime();
     }
 
     /// <summary>

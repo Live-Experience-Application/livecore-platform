@@ -66,7 +66,7 @@ export type MembershipRoleIsExact = Assert<
 >;
 
 export type SessionStatusIsExact = Assert<
-  Equal<SessionStatus, "Prepared" | "Live" | "Ended">
+  Equal<SessionStatus, "Prepared" | "Live" | "Ended" | "Cancelled">
 >;
 
 export type ContentBlockTypeIsExact = Assert<

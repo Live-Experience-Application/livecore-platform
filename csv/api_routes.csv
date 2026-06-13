@@ -14,6 +14,7 @@ GET,/api/v1/workspaces/{workspaceId}/sessions,Sessions,workspace members,Filtere
 POST,/api/v1/workspaces/{workspaceId}/sessions,Sessions,"Owner,Admin,Host,CoHost",Create session
 POST,/api/v1/sessions/{sessionId}/start,Sessions,"Host,CoHost,Owner,Admin",Emits SessionStarted; enforces session.active.max quota
 POST,/api/v1/sessions/{sessionId}/end,Sessions,"Host,CoHost,Owner,Admin",Emits SessionEnded; releases session.active.max quota
+POST,/api/v1/sessions/{sessionId}/cancel,Sessions,"Host,CoHost,Owner,Admin",Cancel a not-yet-started (Prepared) session; soft terminal status transition (Prepared->Cancelled) not a delete; preserves append-only session_events/audit_logs; non-Prepared is 409; audited; hidden-404
 GET,/api/v1/sessions/{sessionId}/events,Realtime,session audience,Filtered replay
 POST,/api/v1/sessions/{sessionId}/reveal,Visibility,"Host,CoHost,Owner,Admin",Idempotent reveal
 POST,/api/v1/sessions/{sessionId}/hide,Visibility,"Host,CoHost,Owner,Admin",Idempotent hide/un-reveal; emits ContentHidden

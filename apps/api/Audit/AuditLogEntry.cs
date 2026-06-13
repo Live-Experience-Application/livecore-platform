@@ -790,6 +790,91 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a session cancellation (<see cref="AuditAction.SessionCancelled"/>) — the audit fact written when
+    /// an authorized host cancels a not-yet-started session, taking it out of use before it ever runs
+    /// (CORE-LIFE-010). It is the session counterpart of <see cref="ForWorkspaceArchive"/> and, like it, a thin
+    /// specialization of <see cref="Create"/> that pins the action and applies the cancel producer's stricter
+    /// contract: the tenant, the workspace the session belonged to, the authenticated actor (the host who
+    /// cancelled the session) and the cancelled session resource (its generic kind name and surrogate id) are all
+    /// REQUIRED, where the generic factory leaves them optional. Unlike the deletion factories, a cancel is a real
+    /// STATE TRANSITION — the session row survives so its append-only <c>session_events</c> and audit history is
+    /// preserved (the story note: "NEVER delete append-only session_events or audit_logs - prefer a Cancelled
+    /// status") — so it records the before/after status NAMES (e.g. <c>Prepared</c> -&gt; <c>Cancelled</c>),
+    /// exactly as <see cref="ForWorkspaceArchive"/> records the archive transition. The session is both the scope
+    /// (<paramref name="workspaceId"/> is the session's workspace) and the governed resource (its id), because the
+    /// action is performed ON the session. The resource kind and the state names are passed as generic strings so
+    /// the Audit module does not depend on the Sessions module's types. Every value is an identifier, an enum or a
+    /// generic state name — never free-form content (threat T7) — and the audit row outlives any later change to
+    /// the session it references because the reference is a recorded fact, not a foreign key (see the type
+    /// summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the cancellation happened in (required).</param>
+    /// <param name="workspaceId">The workspace the cancelled session belonged to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the cancellation (required; the audited actor).</param>
+    /// <param name="sessionResourceType">The cancelled session's generic kind name (e.g. Session).</param>
+    /// <param name="sessionId">The cancelled session's surrogate id.</param>
+    /// <param name="previousState">The lifecycle status name before the cancel (e.g. Prepared; required).</param>
+    /// <param name="newState">The lifecycle status name after the cancel (e.g. Cancelled; required).</param>
+    /// <param name="createdAt">When the cancellation happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the session resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForSessionCancellation(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string sessionResourceType,
+        Guid sessionId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionResourceType))
+        {
+            throw new ArgumentException("Session resource type must not be empty.", nameof(sessionResourceType));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        // A cancel is a real state transition, so both before and after status names are required even though the
+        // generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.SessionCancelled,
+            actorUserProfileId,
+            sessionResourceType,
+            sessionId,
+            targetParticipantId: null,
+            previousState: previousState,
+            newState: newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

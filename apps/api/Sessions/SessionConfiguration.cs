@@ -21,11 +21,14 @@ namespace LiveCore.Api.Sessions;
 /// (docs/06_AUTHORIZATION_MATRIX.md authorization principles).
 ///
 /// Lifecycle columns: <c>status</c> stores the lifecycle status name
-/// (Prepared/Live/Ended), and the NULLABLE <c>started_at</c>/<c>ended_at</c>
-/// timestamptz columns capture the live-timeline boundaries — null while the
-/// session is still prepared, then stamped by the start and end transitions
-/// (docs/09_EVENT_CATALOG.md: <c>SessionStarted</c> "starts live timeline",
-/// <c>SessionEnded</c> "ends live timeline").
+/// (Prepared/Live/Ended, plus Cancelled for a soft cancel — CORE-LIFE-010), and the
+/// NULLABLE <c>started_at</c>/<c>ended_at</c> timestamptz columns capture the
+/// live-timeline boundaries — null while the session is still prepared (and they stay
+/// null for a cancelled session, which never ran), then stamped by the start and end
+/// transitions (docs/09_EVENT_CATALOG.md: <c>SessionStarted</c> "starts live
+/// timeline", <c>SessionEnded</c> "ends live timeline"). Cancelled is a new value in
+/// the existing string <c>status</c> column (persisted by name), so it needs NO schema
+/// migration.
 ///
 /// Two indexes back the documented access patterns:
 /// <list type="bullet">

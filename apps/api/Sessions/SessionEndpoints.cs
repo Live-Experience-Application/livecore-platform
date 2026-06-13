@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
@@ -38,6 +39,16 @@ namespace LiveCore.Api.Sessions;
 ///   <item><c>POST /api/v1/sessions/{sessionId}/end</c> (CORE-SES-004) — ends the
 ///   session's live timeline (drives <see cref="Session.End"/>), authorized to the
 ///   same roles.</item>
+///   <item><c>POST /api/v1/sessions/{sessionId}/cancel</c> (CORE-LIFE-010) — cancels a
+///   not-yet-started (<see cref="SessionStatus.Prepared"/>) session (drives
+///   <see cref="Session.Cancel"/>), authorized to the same session-control roles. A
+///   SOFT, audited, terminal status transition (Prepared -&gt; Cancelled) — never a
+///   hard delete — so the session's append-only <c>session_events</c> and
+///   <c>audit_logs</c> history is preserved (the story note: "NEVER delete
+///   append-only session_events or audit_logs - prefer a Cancelled status"). Any
+///   non-Prepared state (live, ended, already-cancelled) is a 409 Conflict that
+///   changes nothing and writes no audit fact. Appends a
+///   <see cref="AuditAction.SessionCancelled"/> audit record.</item>
 /// </list>
 ///
 /// Authoritative behavior — the session STATUS TRANSITION, persisted. The route
@@ -110,6 +121,7 @@ internal static class SessionEndpoints
 
         byId.MapPost("/{sessionId}/start", StartSessionAsync);
         byId.MapPost("/{sessionId}/end", EndSessionAsync);
+        byId.MapPost("/{sessionId}/cancel", CancelSessionAsync);
 
         // Workspace-scoped create/list routes (CORE-API-003). The workspace is in the
         // path (exactly like the scene routes), so these live under the workspaces
@@ -374,13 +386,33 @@ internal static class SessionEndpoints
             SessionLifecycleCommand.End,
             cancellationToken);
 
+    // POST /api/v1/sessions/{sessionId}/cancel?organizationSlug={slug}
+    private static Task<IResult> CancelSessionAsync(
+        HttpContext httpContext,
+        string sessionId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+        => RunLifecycleCommandAsync(
+            httpContext,
+            sessionId,
+            organizationSlug,
+            timeProvider,
+            SessionLifecycleCommand.Cancel,
+            cancellationToken);
+
     /// <summary>
-    /// Shared handler for the start and end lifecycle commands. The two routes
-    /// differ only in the transition they apply (and the conflict wording), so the
-    /// fail-closed authorization pipeline — dependencies, principal, organization,
+    /// Shared handler for the start, end and cancel lifecycle commands. The three
+    /// routes differ only in the transition they apply (and the conflict wording), so
+    /// the fail-closed authorization pipeline — dependencies, principal, organization,
     /// session id, tenant resolution, session load, workspace membership load,
     /// exact non-linear role check — is factored here and runs identically for
-    /// both before <paramref name="command"/> applies the actual transition.
+    /// all three before <paramref name="command"/> applies the actual transition.
+    /// All three share the same session-control roles (Owner/Admin/Host/CoHost), so the
+    /// cancel command (CORE-LIFE-010) reuses this pipeline rather than duplicating it;
+    /// it differs only in its terminal Prepared -&gt; Cancelled transition and its
+    /// append-only audit record (the start/end durable events are the Realtime epic's
+    /// concern and are still deferred).
     /// </summary>
     private static async Task<IResult> RunLifecycleCommandAsync(
         HttpContext httpContext,
@@ -473,13 +505,15 @@ internal static class SessionEndpoints
         }
 
         // Apply the transition. The state machine is the authoritative behavior:
-        // CanStart/CanEnd guard the only legal predecessor state, so an
+        // CanStart/CanEnd/CanCancel guard the only legal predecessor state, so an
         // out-of-state command is a 409 Conflict (not a no-op and not a 5xx). The
-        // injected TimeProvider stamps the live-timeline boundary, exactly like the
+        // injected TimeProvider stamps the transition timestamp, exactly like the
         // workspace write handlers. The durable SessionStarted/SessionEnded events
         // these commands will eventually emit are deferred to the Realtime epic
         // (there is no event store/transport yet); the persisted status transition
-        // is the behavior delivered here.
+        // is the behavior delivered here. The cancel command (CORE-LIFE-010) instead
+        // appends an append-only audit record of the Prepared -> Cancelled transition
+        // (the story's "authorized [and audited]" criterion).
         //
         // Quota enforcement (CORE-ENTL-004): starting a session consumes one unit of the session's WORKSPACE's
         // session.active.max quota, and ending it releases that unit, so the quota reflects the workspace's CURRENT
@@ -546,6 +580,44 @@ internal static class SessionEndpoints
                     .ConfigureAwait(false);
                 break;
 
+            case SessionLifecycleCommand.Cancel:
+                // Cancel is valid ONLY from Prepared (a not-yet-started session): any other current state
+                // (live, ended, already-cancelled) is a 409 Conflict that leaves the session unchanged and
+                // writes no audit fact. A live session must be ended, not cancelled, so cancel never short-
+                // circuits the active-session quota release that end owns.
+                if (!session.CanCancel)
+                {
+                    return CannotCancelConflict();
+                }
+
+                // No quota interaction: session.active.max counts a workspace's currently-LIVE sessions, and a
+                // Prepared session has consumed none (start consumes, end releases), so cancelling one releases
+                // nothing — unlike end, cancel never touches the quota.
+                //
+                // Capture the previous status name BEFORE the transition for the audit record, so the audited
+                // "before" state is independent of the mutation below.
+                var previousStatus = session.Status.ToString();
+
+                session.Cancel(now);
+                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
+
+                // AUDIT: a cancel is a security-relevant lifecycle change, so append an append-only audit record
+                // capturing the actor (the host who cancelled it), the cancelled session and the Prepared ->
+                // Cancelled status transition (threats T1/T5). Unlike a deletion, a cancel records the
+                // before/after status because the session SURVIVES (a soft transition, like the workspace
+                // archive); the session's append-only session_events and audit_logs are preserved, never deleted.
+                var entry = AuditLogEntry.ForSessionCancellation(
+                    context.OrganizationId,
+                    session.WorkspaceId,
+                    context.UserProfileId,
+                    nameof(Session),
+                    session.Id,
+                    previousStatus,
+                    session.Status.ToString(),
+                    now);
+                await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+                break;
+
             default:
                 // Unreachable: the enum has exactly the two commands above. Fail
                 // closed rather than silently succeeding.
@@ -560,6 +632,7 @@ internal static class SessionEndpoints
     {
         Start = 1,
         End = 2,
+        Cancel = 3,
     }
 
     /// <summary>
@@ -575,19 +648,21 @@ internal static class SessionEndpoints
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
+        var auditLog = services.GetService<IAuditLogRepository>();
 
         if (resolver is null
             || sessions is null
             || workspaces is null
             || workspaceMembers is null
-            || quotaEnforcement is null)
+            || quotaEnforcement is null
+            || auditLog is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new SessionEndpointDependencies(
-            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement);
+            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement, auditLog);
         return true;
     }
 
@@ -666,6 +741,13 @@ internal static class SessionEndpoints
     private static IResult CannotEndConflict()
         => Conflict("The session cannot be ended from its current state.");
 
+    // The session cannot be cancelled from its current state: cancel is valid only from Prepared (a
+    // not-yet-started session), so a live, ended or already-cancelled session is a 409. The detail names only
+    // the rejected transition, never the session's actual status, so it leaks no internal state beyond the
+    // fact that the command is not legal now (docs/08; threat T7).
+    private static IResult CannotCancelConflict()
+        => Conflict("The session cannot be cancelled from its current state.");
+
     private static IResult Conflict(string detail)
         => Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
@@ -696,5 +778,6 @@ internal static class SessionEndpoints
         ISessionRepository Sessions,
         IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers,
-        QuotaEnforcementService QuotaEnforcement);
+        QuotaEnforcementService QuotaEnforcement,
+        IAuditLogRepository AuditLog);
 }

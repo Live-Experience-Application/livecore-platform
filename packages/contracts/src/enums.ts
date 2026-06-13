@@ -51,8 +51,17 @@ export const WorkspaceInvitationStatuses = [
 export type WorkspaceInvitationStatus =
   (typeof WorkspaceInvitationStatuses)[number];
 
-/** Lifecycle status of a session (`Prepared` → `Live` → `Ended`). */
-export const SessionStatuses = ["Prepared", "Live", "Ended"] as const;
+/**
+ * Lifecycle status of a session (`Prepared` → `Live` → `Ended`). A host may also
+ * `cancel` a not-yet-started (`Prepared`) session, which moves it to the soft,
+ * terminal `Cancelled` status instead of deleting it (CORE-LIFE-010).
+ */
+export const SessionStatuses = [
+  "Prepared",
+  "Live",
+  "Ended",
+  "Cancelled",
+] as const;
 
 /** A session lifecycle status name. */
 export type SessionStatus = (typeof SessionStatuses)[number];

@@ -657,6 +657,46 @@ These commands persist the session status transition (the authoritative state).
 The durable `SessionStarted` / `SessionEnded` events and their realtime delivery
 belong to the later realtime event stream and are not emitted yet.
 
+### Session cancel (lifecycle off-ramp)
+
+A host can cancel a not-yet-started session so it never runs (CORE-LIFE-010):
+
+| Method | Route                                 | Authorized callers                             |
+| ------ | ------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/cancel` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+Sessions could previously be created, started and ended but had **no cancel/delete**.
+The decision recorded for this story is a **soft cancel** — a new `Cancelled` value on
+the `Session` aggregate's lifecycle status (`Prepared` → `Cancelled`), **not a hard
+delete** — because a session is the foreign-key anchor of the **append-only**
+`session_events` stream and the `audit_logs` trail, whose history must **never** be
+deleted or cascade-erased. Cancelling flips the status through a guarded transition
+like `Session.Start`/`Session.End` (and like the workspace archive, CORE-LIFE-009) and
+preserves every append-only row. It is a new value in the existing `status` string
+column (persisted by name), so it needs **no schema migration**.
+
+Cancel is valid **only from `Prepared`** — a not-yet-started session: a live session
+must be **ended**, not cancelled, and the terminal states are final, so cancelling a
+session that is `Live`, `Ended` or already `Cancelled` is a `409 Conflict` that changes
+nothing and writes no audit fact. A cancelled session never opened a live timeline, so
+its `startedAt`/`endedAt` stay null, and it can be neither started, ended nor cancelled
+again. Because a `Prepared` session has consumed no `session.active.max` quota (that is
+owned by `start`/`end`), cancelling one releases nothing.
+
+The route, tenant resolution and authorization are **identical to the start/end
+commands** — the same required `?organizationSlug=`, the same session-control roles
+(`Owner`/`Admin`/`Host`/`CoHost`, matched exactly because `MembershipRole` is
+non-linear), and the same fail-closed, hidden-`404` mapping (a caller who cannot see
+the tenant or is not a member of the session's workspace is `404`, never `403`; a known
+workspace member who lacks the role is `403`). The endpoint reuses the **same** shared
+lifecycle pipeline as start/end rather than duplicating it.
+
+Every successful cancel appends an append-only `SessionCancelled` audit record (see
+"Audit log" below) capturing the tenant, the workspace, the authenticated **actor** (the
+host who cancelled it), the cancelled session and the `Prepared → Cancelled` status
+transition — never any content (threats T1/T5/T7). Like the workspace archive, the
+cancel records the before/after status because the session survives the transition.
+
 ### Reveal command
 
 The Visibility module's reveal command makes a resource visible to the audience,
@@ -765,7 +805,8 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`) is
+`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`,
+`SessionCancelled`) is
 extensible without a schema change because the action persists by its stable name; each producer command wires its
 own action in its own story. The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
@@ -785,7 +826,10 @@ being consequences of the one action; the storage object key is never recorded (
 T4/T7). The workspace-archive command (CORE-LIFE-009) wires `WorkspaceArchived` — but unlike the deletion
 producers it records a real STATE TRANSITION (the workspace survives), so the entry carries the before/after
 status names (`Active` → `Archived`) like a visibility change, capturing the owner who archived the workspace
-and the archived workspace itself.
+and the archived workspace itself. The session-cancel command (CORE-LIFE-010) wires `SessionCancelled` the same
+way — another surviving STATE TRANSITION rather than a deletion, so the entry carries the before/after status
+names (`Prepared` → `Cancelled`), capturing the host who cancelled the session and the cancelled session itself;
+the session row (and its append-only `session_events`) survives, never deleted.
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final

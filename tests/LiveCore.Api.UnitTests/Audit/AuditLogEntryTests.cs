@@ -290,6 +290,89 @@ public sealed class AuditLogEntryTests
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Entity", Guid.NewGuid(),
             targetParticipantId: null, previousState: null, newState: null!, createdAt: _now));
 
+    // --- Session cancellation factory (CORE-LIFE-010) ---
+
+    [Fact]
+    public void ForSessionCancellation_sets_the_action_resource_and_state_transition()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var session = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForSessionCancellation(
+            org, ws, actor, "Session", session,
+            previousState: "Prepared", newState: "Cancelled", createdAt: _now);
+
+        Assert.Equal(AuditAction.SessionCancelled, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        // The session is both the scope (workspace) and the governed resource (its id).
+        Assert.Equal("Session", entry.ResourceType);
+        Assert.Equal(session, entry.ResourceId);
+        // A cancel is a surviving STATE TRANSITION, so it records before/after status names.
+        Assert.Equal("Prepared", entry.PreviousState);
+        Assert.Equal("Cancelled", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForSessionCancellation_rejects_an_empty_workspace()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), "Session", Guid.NewGuid(),
+            "Prepared", "Cancelled", _now));
+
+    [Fact]
+    public void ForSessionCancellation_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, "Session", Guid.NewGuid(),
+            "Prepared", "Cancelled", _now));
+
+    [Fact]
+    public void ForSessionCancellation_rejects_an_empty_session_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.Empty,
+            "Prepared", "Cancelled", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForSessionCancellation_rejects_a_blank_resource_type(string resourceType)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), resourceType, Guid.NewGuid(),
+            "Prepared", "Cancelled", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForSessionCancellation_rejects_a_blank_previous_state(string previousState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
+            previousState, "Cancelled", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForSessionCancellation_rejects_a_blank_new_state(string newState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
+            "Prepared", newState, _now));
+
+    [Fact]
+    public void ForSessionCancellation_normalizes_created_at_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        var entry = AuditLogEntry.ForSessionCancellation(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
+            "Prepared", "Cancelled", local);
+
+        Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
+    }
+
     [Fact]
     public void ToString_of_a_generic_entry_renders_absent_parts()
     {

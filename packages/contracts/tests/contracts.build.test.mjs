@@ -41,7 +41,10 @@ test("the membership-role vocabulary matches the Core authorization matrix", () 
 });
 
 test("the lifecycle and kind vocabularies are the stable Core names", () => {
-  assert.deepEqual([...SessionStatuses], ["Prepared", "Live", "Ended"]);
+  assert.deepEqual(
+    [...SessionStatuses],
+    ["Prepared", "Live", "Ended", "Cancelled"],
+  );
   assert.deepEqual([...ContentBlockTypes], ["Text", "Media", "Data"]);
   assert.deepEqual(
     [...VisibilityResourceTypes],

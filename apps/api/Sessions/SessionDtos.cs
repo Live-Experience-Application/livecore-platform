@@ -30,9 +30,12 @@ public sealed record CreateSessionRequest(string? OrganizationSlug, string? Titl
 /// <summary>
 /// Response projection of a session (CORE-SES-004,
 /// <c>POST /api/v1/sessions/{sessionId}/start</c> and
-/// <c>POST /api/v1/sessions/{sessionId}/end</c>). It is the body returned by the
-/// start/end lifecycle commands: the generic, product-neutral, server-side view
-/// of the session AFTER the transition has been applied and persisted.
+/// <c>POST /api/v1/sessions/{sessionId}/end</c>; CORE-LIFE-010,
+/// <c>POST /api/v1/sessions/{sessionId}/cancel</c>). It is the body returned by the
+/// start/end/cancel lifecycle commands: the generic, product-neutral, server-side
+/// view of the session AFTER the transition has been applied and persisted (a
+/// cancelled session is returned with its new <see cref="SessionStatus.Cancelled"/>
+/// status and its still-null live-timeline timestamps, since it never ran).
 ///
 /// The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md,
 /// docs/08_API_CONTRACTS.md DTO design rules): identifiers, the tenant and
@@ -46,10 +49,10 @@ public sealed record CreateSessionRequest(string? OrganizationSlug, string? Titl
 ///   <item>NO internal authorization rationale — it never echoes why the caller
 ///   was allowed or how the tenant/workspace was resolved (docs/08; threat
 ///   T7).</item>
-///   <item>The <see cref="Status"/> as the stable enum NAME (Prepared/Live/Ended),
-///   never the in-memory numeric discriminator, mirroring how the status is
-///   persisted (<see cref="SessionConfiguration"/>) and how
-///   <c>WorkspaceInvitationResponse</c> projects its role/status.</item>
+///   <item>The <see cref="Status"/> as the stable enum NAME
+///   (Prepared/Live/Ended/Cancelled), never the in-memory numeric discriminator,
+///   mirroring how the status is persisted (<see cref="SessionConfiguration"/>) and
+///   how <c>WorkspaceInvitationResponse</c> projects its role/status.</item>
 /// </list>
 ///
 /// Server timestamps are included per docs/08 ("Include server timestamps"):
@@ -71,7 +74,7 @@ public sealed record CreateSessionRequest(string? OrganizationSlug, string? Titl
 /// <param name="WorkspaceId">Workspace the session belongs to.</param>
 /// <param name="Title">Human-readable display title of the session.</param>
 /// <param name="Status">
-/// Lifecycle status name (Prepared/Live/Ended) after the applied transition.
+/// Lifecycle status name (Prepared/Live/Ended/Cancelled) after the applied transition.
 /// </param>
 /// <param name="StartedAt">
 /// When the live timeline started (UTC), or <see langword="null"/> while the

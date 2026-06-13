@@ -130,12 +130,14 @@ internal static class TestData
 
     /// <summary>
     /// Creates and persists a session in the given lifecycle status by driving the
-    /// real aggregate state machine (Create, then Start/End as required), so the
+    /// real aggregate state machine (Create, then Start/End/Cancel as required), so the
     /// seeded session has exactly the timestamps and status the production
     /// transitions would produce. A <see cref="SessionStatus.Prepared"/> session is
     /// just created; a <see cref="SessionStatus.Live"/> session is created and
     /// started; an <see cref="SessionStatus.Ended"/> session is created, started and
-    /// ended.
+    /// ended; a <see cref="SessionStatus.Cancelled"/> session is created and then
+    /// cancelled (from Prepared, the only legal source), so it never opened a live
+    /// timeline (CORE-LIFE-010).
     /// </summary>
     public static async Task<Session> AddSessionAsync(
         this LiveCoreDbContext context,
@@ -154,6 +156,11 @@ internal static class TestData
         if (status is SessionStatus.Ended)
         {
             session.End(SeedTime);
+        }
+
+        if (status is SessionStatus.Cancelled)
+        {
+            session.Cancel(SeedTime);
         }
 
         context.Sessions.Add(session);
