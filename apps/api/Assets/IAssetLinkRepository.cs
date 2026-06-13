@@ -68,6 +68,22 @@ public interface IAssetLinkRepository
     Task<AssetLinkAddResult> AddAsync(AssetLink assetLink, CancellationToken cancellationToken);
 
     /// <summary>
+    /// HARD-DELETES the given link row, detaching one asset from one target (CORE-LIFE-007, the "Resource
+    /// Lifecycle and Deletion" epic). Until now a link could be ADDED (CORE-AST-005) or removed only as a
+    /// bulk CASCADE when its asset, target or workspace was deleted (the
+    /// <see cref="RemoveByTargetAsync"/> / <see cref="RemoveByAssetAsync"/> cleanups of
+    /// CORE-LIFE-003/004/005/006); this is the inverse of <see cref="AddAsync"/> for ONE link — a host
+    /// unlinks an asset from a single content block or entity. The caller (the unlink command,
+    /// <see cref="AssetLinkService.UnlinkAsync"/>) is responsible for having loaded the link through the
+    /// tenant- AND workspace-scoped <see cref="FindByIdAsync"/> first (and confirmed it attaches the
+    /// addressed asset), so a foreign tenant's or workspace's link is never reachable to remove even when
+    /// its id is known (threat T5/T1); this method removes exactly the row it is handed. Removal touches
+    /// only this one link row — the linked asset and the target content block / entity are BOTH untouched
+    /// (it is the reverse of the per-link insert, not a cascade from the asset or the target).
+    /// </summary>
+    Task RemoveAsync(AssetLink assetLink, CancellationToken cancellationToken);
+
+    /// <summary>
     /// HARD-DELETES every link attaching ANY asset to the given target (named by type + id) WITHIN the
     /// given organization and workspace, and returns the number removed (CORE-LIFE-003, the "Resource
     /// Lifecycle and Deletion" epic). This is the cleanup a target resource's deletion requires:

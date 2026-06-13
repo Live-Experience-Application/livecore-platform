@@ -1433,6 +1433,42 @@ storage coordinate (only the asset id; threats T4/T7). The audit record is a rec
 now-deleted asset it references. Faithful to the entity-, content-block- and scene-deletion precedents, the
 deletion emits no realtime session event (the event catalog defines none for asset deletion).
 
+### Asset-link removal
+
+A host can unlink an asset from a content block or entity; the asset and the target are unaffected
+(CORE-LIFE-007, the "Resource Lifecycle and Deletion" epic):
+
+| Method   | Route                                     | Authorized callers                        |
+| -------- | ----------------------------------------- | ----------------------------------------- |
+| `DELETE` | `/api/v1/assets/{assetId}/links/{linkId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+An `AssetLink` was created (`POST /api/v1/assets/{assetId}/links`, CORE-AST-005) but, until now, could only be
+removed as a **cascade** when its asset, target or workspace was deleted (CORE-LIFE-003/004/005/006) — there was
+no way to detach a single link. This adds the **inverse** of the create-link route, reusing the existing
+`AssetLinkRepository`. The route path carries the `{assetId}` (pairing with the link create route), so the target
+organization is a required `?organizationSlug=` query parameter (the same token-claim-and-membership tenant check
+as the signed download and asset-delete routes). The asset is loaded **within** the resolved tenant
+(`FindByIdInOrganizationAsync`, the predicate leads with `organization_id`), its own workspace is **discovered
+from the loaded row** after the tenant boundary is enforced, and the caller is authorized by their role in the
+asset's own workspace.
+
+The link is then resolved through the tenant- **and** workspace-scoped `FindByIdAsync` of the asset's **own**
+organization and workspace and must attach **exactly the addressed asset** (`AssetLink.LinksAsset`) — so a link
+that lives in another workspace or tenant, or one whose id resolves in the workspace but attaches a **different**
+asset, is never reachable to remove even when its id is known (threats T1/T5). On success the addressed link is
+hard-deleted and the route returns `204 No Content`; **only that one link row is removed** — the linked **asset**
+and the target **content block / entity** are both left intact (the inverse of the per-link insert, never a
+cascade onto the asset or target).
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, is not a member of
+the asset's workspace, names an asset in another workspace/tenant, or names a link that does not exist (or that
+attaches another asset) — and **removing a non-existent link is a safe `404`** (it reveals nothing and changes
+nothing). A known workspace member who lacks the unlink role is `403`; asset links are host-prepared content, so
+the role set is the host-capable `Owner`/`Admin`/`Host`/`CoHost` (the same set that creates the link and deletes
+assets/scenes/entities/content blocks), matched exactly (`MembershipRole` is non-linear). Faithful to the
+add-link precedent (CORE-AST-005) and the entity-relationship removal (CORE-LIFE-002), the removal emits no event
+and writes no audit record, and the schema is unchanged so no migration is needed.
+
 ### Export jobs
 
 The Exports module owns generic, **asynchronous** data exports (`docs/05_MODULE_CONTRACTS.md`:

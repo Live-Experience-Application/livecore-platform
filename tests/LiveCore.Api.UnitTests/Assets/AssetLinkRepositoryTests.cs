@@ -405,6 +405,44 @@ public sealed class AssetLinkRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveAsync_removes_only_the_addressed_link()
+    {
+        // CORE-LIFE-007: the asset-link removal hard-deletes exactly the one loaded link row. Another link of
+        // the SAME asset, and the asset itself, survive — the removal is the inverse of the per-link insert,
+        // never a cascade onto the asset.
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_subject);
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id, "org/ws/a.bin");
+        var toRemove = await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+        var survivor = await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, Guid.CreateVersion7(), user.Id);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AssetLinkRepository(context);
+            var loaded = await repository.FindByIdAsync(org.Id, ws.Id, toRemove.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.RemoveAsync(loaded, CancellationToken.None);
+        }
+
+        await using var verify = CreateContext();
+        var verifyRepository = new AssetLinkRepository(verify);
+        Assert.Null(await verifyRepository.FindByIdAsync(org.Id, ws.Id, toRemove.Id, CancellationToken.None));
+        // The other link of the same asset survives, and so does the asset row itself.
+        Assert.NotNull(await verifyRepository.FindByIdAsync(org.Id, ws.Id, survivor.Id, CancellationToken.None));
+        Assert.NotNull(await new AssetRepository(verify).FindByIdAsync(org.Id, ws.Id, asset.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RemoveAsync_throws_for_a_null_link()
+    {
+        await using var context = CreateContext();
+        var repository = new AssetLinkRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => repository.RemoveAsync(null!, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Lookups_reject_empty_ids()
     {
         await using var context = CreateContext();

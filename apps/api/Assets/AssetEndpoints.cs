@@ -20,6 +20,13 @@ namespace LiveCore.Api.Assets;
 ///   "Signed URL after permission check" (CORE-AST-004).</item>
 ///   <item><c>POST /api/v1/assets/{assetId}/links</c> — module <b>Assets</b>, roles
 ///   "Host,CoHost,Owner,Admin", "Link asset to content block or entity" (CORE-AST-005).</item>
+///   <item><c>DELETE /api/v1/assets/{assetId}/links/{linkId}</c> — module <b>Assets</b>, roles
+///   "Host,CoHost,Owner,Admin", asset-link removal (CORE-LIFE-007): a host UNLINKS an asset from a content
+///   block or entity. The inverse of the link route; it removes only the one link row through
+///   <see cref="AssetLinkService.UnlinkAsync"/> — the asset and the linked target are BOTH unaffected. The
+///   tenant resolution and object-level authorization mirror the asset link/delete routes; on success it
+///   returns <c>204 No Content</c>, and removing a non-existent link is a safe hidden-404. Faithful to the
+///   add-link precedent, the removal emits no event and writes no audit record.</item>
 ///   <item><c>DELETE /api/v1/assets/{assetId}</c> — module <b>Assets</b>, roles "Host,CoHost,Owner,Admin",
 ///   host-initiated asset deletion (CORE-LIFE-006): removes the asset together with its links and its
 ///   underlying storage object, atomically and audited, through <see cref="AssetDeletionService"/>. The
@@ -117,6 +124,7 @@ internal static class AssetEndpoints
         group.MapPost("/upload-intent", CreateUploadIntentAsync);
         group.MapGet("/{assetId}/download-url", CreateDownloadUrlAsync);
         group.MapPost("/{assetId}/links", CreateAssetLinkAsync);
+        group.MapDelete("/{assetId}/links/{linkId}", DeleteAssetLinkAsync);
         group.MapDelete("/{assetId}", DeleteAssetAsync);
 
         return endpoints;
@@ -453,6 +461,126 @@ internal static class AssetEndpoints
         };
     }
 
+    // DELETE /api/v1/assets/{assetId}/links/{linkId}?organizationSlug={slug}
+    //
+    // Removes ONE asset link (CORE-LIFE-007, the "Resource Lifecycle and Deletion" epic): a host UNLINKS an
+    // asset from a content block or entity. The asset and the linked target are BOTH unaffected — only the
+    // link row is removed (the inverse of POST /api/v1/assets/{assetId}/links). The tenant resolution and
+    // object-level authorization mirror the asset link/delete routes exactly — the route path carries the
+    // asset id, so the target organization is a required ?organizationSlug= QUERY parameter resolved by the
+    // TenantContextResolver; the asset is loaded WITHIN that resolved tenant via FindByIdInOrganizationAsync
+    // (the predicate leads with the organization id, so a foreign-tenant asset is never found), the asset's
+    // own workspace id is discovered from the loaded row AFTER the tenant boundary has been enforced, and the
+    // caller is authorized by their WORKSPACE role in the ASSET'S own workspace. Load-then-authorize,
+    // fail-closed at every step and never leaking why:
+    //   * 503 when persistence is off; 401 when the principal cannot be mapped.
+    //   * A missing organizationSlug is 400; a malformed/empty asset id, a malformed/empty link id, a denied
+    //     tenant resolution, an asset not present in the resolved tenant, a caller who is not a member of the
+    //     asset's workspace, an unknown link, and a link that attaches a DIFFERENT asset are ALL hidden as 404
+    //     (never distinguishable, never 403 for a non-member; threats T1/T5).
+    //   * A known member of the asset's workspace who lacks the unlink role is 403. Asset links are
+    //     host-prepared content, so the unlink role set is the host-capable Owner/Admin/Host/CoHost (the same
+    //     set that creates upload intents and links, and that deletes scenes/entities/content blocks/assets;
+    //     docs/06_AUTHORIZATION_MATRIX.md). MembershipRole is non-linear, so the role check is EXACT, never an
+    //     ordering comparison.
+    // On success the one link row is removed and the route returns 204 No Content; removing a non-existent link
+    // is a safe hidden-404 that changes nothing. Faithful to the add-link precedent (CORE-AST-005) and the
+    // entity-relationship removal (CORE-LIFE-002), the removal emits no event and writes no audit record.
+    private static async Task<IResult> DeleteAssetLinkAsync(
+        HttpContext httpContext,
+        string assetId,
+        string linkId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required to resolve the tenant; the route path carries only the asset
+        // and link ids, so it is a query parameter exactly like the signed download and asset delete routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty asset id can never address a stored asset; hidden as 404, never echoing why.
+        if (!Guid.TryParse(assetId, out var assetGuid) || assetGuid == Guid.Empty)
+        {
+            return HiddenAsset();
+        }
+
+        // A malformed/empty link id can never address a stored link; hidden as 404, never echoing why.
+        if (!Guid.TryParse(linkId, out var linkGuid) || linkGuid == Guid.Empty)
+        {
+            return HiddenAssetLink();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the asset as 404 (threat T5).
+            return HiddenAsset();
+        }
+
+        var context = resolution.Context;
+
+        // Load the asset WITHIN the resolved tenant (org boundary leads); a cross-tenant or unknown asset is
+        // hidden as 404. The asset's own workspace is then discovered from the loaded row, AFTER the tenant
+        // boundary has been enforced (mirrors the signed download, link and delete routes).
+        var asset = await deps.Assets
+            .FindByIdInOrganizationAsync(context.OrganizationId, assetGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (asset is null)
+        {
+            return HiddenAsset();
+        }
+
+        // Object-level authorization: the caller must be a member of the ASSET'S workspace. A caller who is a
+        // member of the tenant but NOT of the asset's workspace must not learn the asset exists, so a missing
+        // membership is hidden as 404 (not 403) — the same rule as the link/download routes (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, asset.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenAsset();
+        }
+
+        // The caller is a known member of the asset's workspace, so an insufficient role is 403. The unlink
+        // (host-preparation) roles are Owner/Admin/Host/CoHost (the same host-capable set that links assets
+        // and deletes scenes/entities/content blocks/assets; docs/06_AUTHORIZATION_MATRIX.md). MembershipRole
+        // is non-linear, so this is an EXACT set membership check, never an ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized: remove the one link that attaches this asset to its target. The command re-resolves the
+        // link through the tenant- AND workspace-scoped FindByIdAsync and confirms it attaches the addressed
+        // asset, so a link in another workspace/tenant, or one attaching a different asset, is never removed
+        // even when its id is known; an unknown id is a SAFE 404 that changes nothing (threats T1/T5). Only
+        // the link row is removed — the asset and the linked target are both untouched.
+        var result = await deps.AssetLinks
+            .UnlinkAsync(asset, linkGuid, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result == AssetUnlinkResult.Removed
+            ? Results.NoContent()
+            : HiddenAssetLink();
+    }
+
     // DELETE /api/v1/assets/{assetId}?organizationSlug={slug}
     //
     // Deletes ONE asset (CORE-LIFE-006, the "Resource Lifecycle and Deletion" epic): a host removes an asset
@@ -695,6 +823,12 @@ internal static class AssetEndpoints
     // unknown asset, and an asset in a workspace the caller does not belong to are ALL reported as 404,
     // never distinguishable from each other and never echoing the reason (docs/08; threats T1/T5).
     private static IResult HiddenAsset() => NotFound();
+
+    // Asset-link existence is hidden: a malformed link id, an unknown link, a link in a foreign or
+    // non-entitled tenant/workspace, and a link that attaches a DIFFERENT asset than the one addressed are
+    // ALL reported as 404, never distinguishable from each other and never echoing the reason (docs/08;
+    // threats T1/T5).
+    private static IResult HiddenAssetLink() => NotFound();
 
     // An authorized viewer asked to download an asset whose upload is not yet confirmed: the object is not
     // downloadable in its current state (mirrors the session lifecycle's 409 for an out-of-state command).

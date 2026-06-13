@@ -132,6 +132,19 @@ internal sealed class AssetLinkRepository : IAssetLinkRepository
     }
 
     /// <inheritdoc />
+    public async Task RemoveAsync(AssetLink assetLink, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(assetLink);
+
+        // The caller resolved this exact row through the tenant- and workspace-scoped FindByIdAsync (and
+        // confirmed it attaches the addressed asset), so removing the loaded entity deletes precisely that
+        // one link. Only the link row is touched — the linked asset and the target content block / entity
+        // are left intact (this is the inverse of the per-link insert, not a cascade from an endpoint).
+        _dbContext.AssetLinks.Remove(assetLink);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<int> RemoveByTargetAsync(
         Guid organizationId,
         Guid workspaceId,

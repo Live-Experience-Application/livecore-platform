@@ -32,6 +32,15 @@ namespace LiveCore.Api.Assets;
 /// authorized, short-lived signed URL (the epic acceptance criterion; threat T4 "Asset leak"). The
 /// per-workspace unique key makes a repeat link a reported <see cref="AssetLinkOutcome.AlreadyLinked"/>,
 /// not a duplicate.
+///
+/// REMOVAL (CORE-LIFE-007, the "Resource Lifecycle and Deletion" epic). <see cref="UnlinkAsync"/> is the
+/// inverse command, living in the same cohesive command service (as the Visibility module's reveal/hide
+/// share one service): a host UNLINKS an asset from a single content block or entity. It resolves the link
+/// through the same workspace-scoped lookup of the asset's OWN organization and workspace and requires it to
+/// attach the addressed asset, so a link in another tenant or workspace — or one attaching a different
+/// asset — is never reachable to remove even when its id is known (threats T5/T1). Removal only detaches:
+/// the asset and the linked target are BOTH unaffected (the inverse of the per-link insert, never a cascade
+/// onto the asset or target). It performs no authorization itself either.
 /// </summary>
 internal sealed class AssetLinkService
 {
@@ -120,6 +129,55 @@ internal sealed class AssetLinkService
         return added == AssetLinkAddResult.Duplicate
             ? AssetLinkResult.AlreadyLinked()
             : AssetLinkResult.Created(link);
+    }
+
+    /// <summary>
+    /// Removes the link with the given id that attaches the given asset to a target (CORE-LIFE-007), the
+    /// inverse of <see cref="LinkAsync"/>: a host unlinks an asset from one content block or entity. The
+    /// link is resolved through the WORKSPACE-SCOPED lookup of the asset's OWN organization and workspace
+    /// and must attach exactly the addressed asset, so a link in another tenant or workspace, or a link that
+    /// attaches a DIFFERENT asset, is never reachable to remove even when its id is known — it is reported
+    /// as <see cref="AssetUnlinkResult.NotFound"/> and nothing is changed (threats T5/T1). On success the
+    /// one link row is hard-deleted and <see cref="AssetUnlinkResult.Removed"/> is returned; the asset and
+    /// the linked target are BOTH untouched (removing a link only detaches; it never deletes the asset or
+    /// the target). The calling endpoint resolves the tenant, loads the asset, discovers its workspace and
+    /// authorizes the caller's role BEFORE invoking this; the command performs no authorization itself.
+    /// </summary>
+    /// <param name="asset">The already-resolved, tenant- and workspace-scoped asset whose link to remove.</param>
+    /// <param name="linkId">The surrogate id of the link to remove (must attach <paramref name="asset"/>).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentNullException">The asset is null.</exception>
+    /// <exception cref="ArgumentException">The link id is empty.</exception>
+    public async Task<AssetUnlinkResult> UnlinkAsync(
+        Asset asset,
+        Guid linkId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+
+        if (linkId == Guid.Empty)
+        {
+            throw new ArgumentException("Link id must not be empty.", nameof(linkId));
+        }
+
+        // Resolve the link through the workspace-scoped lookup of the asset's OWN organization and workspace
+        // (the org boundary leads), so a link in another tenant or workspace is never reachable even when
+        // its id is known (threats T5/T1).
+        var link = await _links
+            .FindByIdAsync(asset.OrganizationId, asset.WorkspaceId, linkId, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The link must attach exactly the addressed asset. A link id that resolves in the asset's workspace
+        // but attaches a DIFFERENT asset is not addressable through this asset's route, so it is hidden as
+        // not found — the same workspace-scoped existence rule, applied to the asset/link pairing (threats
+        // T1/T5).
+        if (link is null || !link.LinksAsset(asset.Id))
+        {
+            return AssetUnlinkResult.NotFound;
+        }
+
+        await _links.RemoveAsync(link, cancellationToken).ConfigureAwait(false);
+        return AssetUnlinkResult.Removed;
     }
 
     /// <summary>

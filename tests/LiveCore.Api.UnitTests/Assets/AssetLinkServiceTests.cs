@@ -140,6 +140,15 @@ public sealed class AssetLinkServiceTests : IDisposable
         return await context.AssetLinks.CountAsync(CancellationToken.None);
     }
 
+    private async Task<AssetLink> SeedLinkAsync(
+        Guid organizationId, Guid workspaceId, Guid assetId, AssetLinkTargetType targetType, Guid targetId, Guid createdBy)
+    {
+        var link = AssetLink.Create(organizationId, workspaceId, assetId, targetType, targetId, createdBy, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(AssetLinkAddResult.Added, await new AssetLinkRepository(context).AddAsync(link, CancellationToken.None));
+        return link;
+    }
+
     [Fact]
     public async Task Linking_to_a_content_block_in_the_assets_workspace_succeeds()
     {
@@ -239,6 +248,82 @@ public sealed class AssetLinkServiceTests : IDisposable
         Assert.Null(second.Link);
         // Still exactly one link.
         Assert.Equal(1, await LinkCountAsync());
+    }
+
+    [Fact]
+    public async Task Unlinking_an_existing_link_removes_only_that_link()
+    {
+        // CORE-LIFE-007: the inverse command removes exactly the addressed link. Another link of the same
+        // asset survives — removal only detaches one target.
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync();
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id);
+        var toRemove = await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+        var survivor = await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, Guid.CreateVersion7(), user.Id);
+
+        await using var context = CreateContext();
+        var result = await CreateService(context).UnlinkAsync(asset, toRemove.Id, CancellationToken.None);
+
+        Assert.Equal(AssetUnlinkResult.Removed, result);
+        Assert.Equal(1, await LinkCountAsync());
+        await using var verify = CreateContext();
+        var repository = new AssetLinkRepository(verify);
+        Assert.Null(await repository.FindByIdAsync(org.Id, ws.Id, toRemove.Id, CancellationToken.None));
+        Assert.NotNull(await repository.FindByIdAsync(org.Id, ws.Id, survivor.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Unlinking_a_link_that_attaches_a_different_asset_reports_not_found()
+    {
+        // The crown jewel of the asset/link pairing (threats T5/T1): a link whose id resolves in the
+        // workspace but attaches a DIFFERENT asset is not addressable through this asset's route — it is
+        // reported as not found and nothing is removed.
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync();
+        var assetA = await SeedAssetAsync(org.Id, ws.Id, user.Id);
+        var assetB = await SeedAssetAsync(org.Id, ws.Id, user.Id);
+        var linkOnB = await SeedLinkAsync(org.Id, ws.Id, assetB.Id, AssetLinkTargetType.Entity, Guid.CreateVersion7(), user.Id);
+
+        await using var context = CreateContext();
+        var result = await CreateService(context).UnlinkAsync(assetA, linkOnB.Id, CancellationToken.None);
+
+        Assert.Equal(AssetUnlinkResult.NotFound, result);
+        // Asset B's link is untouched.
+        Assert.Equal(1, await LinkCountAsync());
+        await using var verify = CreateContext();
+        Assert.NotNull(await new AssetLinkRepository(verify).FindByIdAsync(org.Id, ws.Id, linkOnB.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Unlinking_an_unknown_link_reports_not_found()
+    {
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync();
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id);
+
+        await using var context = CreateContext();
+        var result = await CreateService(context).UnlinkAsync(asset, Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.Equal(AssetUnlinkResult.NotFound, result);
+        Assert.Equal(0, await LinkCountAsync());
+    }
+
+    [Fact]
+    public async Task UnlinkAsync_rejects_invalid_arguments()
+    {
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var ws = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var user = await SeedUserAsync();
+        var asset = await SeedAssetAsync(org.Id, ws.Id, user.Id);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => service.UnlinkAsync(null!, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => service.UnlinkAsync(asset, Guid.Empty, CancellationToken.None));
     }
 
     [Fact]
