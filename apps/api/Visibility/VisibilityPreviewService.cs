@@ -1,56 +1,55 @@
-using LiveCore.Api.Organizations;
-
 namespace LiveCore.Api.Visibility;
 
 /// <summary>
-/// The Visibility module's preview-as-participant query (CORE-VIS-003), providing the
-/// <c>GetVisibleResourcesForParticipant</c> / <c>PreviewVisibilityForHost</c> operations
-/// docs/05_MODULE_CONTRACTS.md assigns to the Visibility module ("audience calculations",
-/// "preview-as-participant", "visible state reconstruction"). It computes the SET of resources an
-/// audience participant may currently see in a workspace — "Participant visibility is computed
-/// server-side" (docs/06_AUTHORIZATION_MATRIX.md). A host invokes it to PREVIEW what a participant
-/// sees (preview-as-participant); a participant's own visible feed is the same set. It is a plain,
-/// unit-testable query service over explicit inputs, exactly like
+/// The Visibility module's preview-as-participant query (CORE-VIS-003, made participant-aware by
+/// CORE-API-004), providing the <c>GetVisibleResourcesForParticipant</c> /
+/// <c>PreviewVisibilityForHost</c> operations docs/05_MODULE_CONTRACTS.md assigns to the Visibility
+/// module ("audience calculations", "preview-as-participant", "visible state reconstruction"). It
+/// computes the SET of resources a SPECIFIC participant may currently see in a workspace —
+/// "Participant visibility is computed server-side" (docs/06_AUTHORIZATION_MATRIX.md). A host invokes
+/// it to PREVIEW what a participant sees (preview-as-participant); a participant's own visible feed is
+/// the same set. It is a plain, unit-testable query service over explicit inputs, exactly like
 /// <see cref="VisibilityPolicy"/> (CORE-VIS-002) and <c>EntitySearchService</c> (CORE-ENT-005);
-/// csv/api_routes.csv defines no dedicated preview route, so this story adds NO HTTP endpoint (the
-/// participant-visible-feed route GET /api/v1/participants/{participantId}/visible-feed is the
-/// CORE-SES-005 skeleton; wiring this query into it, alongside the Realtime reveal-event projection,
-/// is a later step — see the scope note below).
+/// csv/api_routes.csv defines no dedicated preview route, so this service adds NO HTTP endpoint. It is
+/// the single source the participant visible-feed projection (CORE-API-005, the
+/// GET /api/v1/participants/{participantId}/visible-feed handler) and the entity-search audience
+/// filtering (CORE-API-006) consume, so those retrofits never grow a parallel visibility filter.
 ///
-/// REUSES THE CENTRAL DECISION — does NOT re-derive it. The audience-visible set is computed by
-/// routing every candidate resource through <see cref="VisibilityPolicy.CanViewResourceAsync"/> (the
-/// CORE-VIS-002 authority) under the audience viewpoint (<see cref="MembershipRole.Participant"/>), so
-/// preview-as-participant and per-resource access can NEVER diverge and the visibility decision lives
-/// in exactly ONE place (docs/05_MODULE_CONTRACTS.md: "Do not duplicate visibility logic elsewhere";
-/// docs/02_ARCHITECTURE.md: "entity visibility is not computed ad hoc in many places"). The candidate
-/// resources are exactly the resources that have at least one visibility rule in the workspace
-/// (a resource with no rule is host-only by default and the policy denies it to the audience), drawn
-/// from the tenant- and workspace-scoped <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/>
-/// — so a rule in another tenant or workspace can never contribute to this workspace's visible set
-/// (threat T5 in docs/07_SECURITY_THREAT_MODEL.md; the organization boundary is checked before the
-/// workspace boundary).
+/// REUSES THE CENTRAL DECISION — does NOT re-derive it. The participant-visible set is computed by
+/// routing every candidate resource through
+/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/> (the CORE-VIS-005 participant-aware
+/// primitive, the SAME one <see cref="EventRecipientVisibility"/> uses for realtime delivery), so the
+/// REST preview, the realtime recipient calculation and per-resource access can NEVER diverge and the
+/// visibility decision lives in exactly ONE place (docs/05_MODULE_CONTRACTS.md: "Do not duplicate
+/// visibility logic elsewhere"; docs/02_ARCHITECTURE.md: "entity visibility is not computed ad hoc in
+/// many places"). The candidate resources are exactly the resources that have at least one visibility
+/// rule in the workspace (a resource with no rule is host-only by default and the policy denies it to
+/// a participant), drawn from the tenant- and workspace-scoped
+/// <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/> — so a rule in another tenant or
+/// workspace can never contribute to this workspace's visible set (threat T5 in
+/// docs/07_SECURITY_THREAT_MODEL.md; the organization boundary is checked before the workspace
+/// boundary).
 ///
-/// AUDIENCE-WIDE FOR NOW. Because the CORE-VIS-001 rules are audience-wide (a resource is visible to
-/// the whole audience or to none), the visible set does not yet depend on WHICH participant is
-/// previewed — it is the workspace's audience-visible set. Restricting visibility to a SELECTED
-/// subset of participants (so two participants see different sets) is the later selected-participant
-/// reveal (CORE-VIS-005); when it lands, this query gains the per-participant refinement. The
-/// participant's workspace is the input; the participant's identity does not refine the result yet,
-/// so it is deliberately not a parameter (adding one now would be dead input).
+/// PARTICIPANT-AWARE: AUDIENCE-WIDE AND PRIVATE REVEALS BOTH HANDLED. The result is the set this ONE
+/// participant may see: a resource made visible by an AUDIENCE-WIDE rule (visible to everyone) OR by a
+/// visible rule scoped to exactly this participant (a selected-participant private reveal). A resource
+/// revealed only to a DIFFERENT participant is a candidate (it carries a rule) but is excluded for this
+/// participant — the selected-participant guarantee, decided fail-closed by the policy: a non-selected
+/// participant must not see a private reveal (threat T5; docs/06 "Send private content"). Two
+/// participants therefore see different sets when private reveals are in play.
 ///
-/// AUTHORIZATION IS THE CALLER'S CONCERN. This query computes WHAT an audience participant sees; WHO
-/// may invoke it (the participant who owns the feed, or a Host/CoHost previewing it — the
-/// participant-visible-feed authorization model of docs/06) is enforced by the calling endpoint (the
-/// CORE-SES-005 visible-feed route), exactly as <see cref="VisibilityPolicy"/> trusts the caller to
-/// pass a verified role. This service performs no role authorization itself; it always returns the
-/// audience viewpoint.
+/// AUTHORIZATION IS THE CALLER'S CONCERN. This query computes WHAT a participant sees; WHO may invoke
+/// it (the participant who owns the feed, or a Host/CoHost previewing it — the participant-visible-feed
+/// authorization model of docs/06) is enforced by the calling endpoint (the CORE-SES-005 visible-feed
+/// route, wired in CORE-API-005), exactly as <see cref="VisibilityPolicy"/> trusts the caller to pass a
+/// verified participant. This service performs no role authorization itself; it always computes the
+/// given participant's content-visibility set.
 ///
-/// SCOPE: this story implements only the preview query. The reveal COMMAND with idempotency and an
+/// SCOPE: this service implements only the preview query. The reveal COMMAND with idempotency and an
 /// append-only event is CORE-VIS-004; selected-participant reveal is CORE-VIS-005; audit records are
-/// CORE-VIS-006. Wiring this set into the CORE-SES-005 visible-feed response (and the CORE-ENT-005
-/// entity-search audience path), together with the participant-safe content projection of each
-/// resource, is a follow-up that also depends on the Realtime reveal-event model — it is deliberately
-/// not done here.
+/// CORE-VIS-006. Wiring this set into the CORE-SES-005 visible-feed response (CORE-API-005) and the
+/// CORE-ENT-005 entity-search audience path (CORE-API-006), together with the participant-safe content
+/// projection of each resource, are follow-up stories and are deliberately not done here.
 /// </summary>
 internal sealed class VisibilityPreviewService
 {
@@ -66,24 +65,30 @@ internal sealed class VisibilityPreviewService
     }
 
     /// <summary>
-    /// Computes the set of resources an audience participant may currently see in the given workspace
-    /// — the preview-as-participant result. Every candidate resource (any resource with a visibility
-    /// rule in the workspace) is decided by <see cref="VisibilityPolicy.CanViewResourceAsync"/> under
-    /// the audience viewpoint, and only those it allows are returned, in a deterministic order
-    /// (by resource type then id). The set is tenant- and workspace-scoped.
+    /// Computes the set of resources the given participant may currently see in the given workspace —
+    /// the preview-as-participant result. Every candidate resource (any resource with a visibility
+    /// rule in the workspace) is decided by
+    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/>, so the participant sees a
+    /// resource iff an audience-wide visible rule, or a visible rule scoped to exactly them, applies;
+    /// only those the policy allows are returned, in a deterministic order (by resource type then id).
+    /// The set is tenant- and workspace-scoped and fails closed (a resource the participant may not
+    /// see, including one revealed only to another participant, is excluded).
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The participant's workspace whose visible set is computed.</param>
+    /// <param name="participantId">The participant whose visible set is computed.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The distinct resources visible to the audience, in deterministic order.</returns>
-    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <returns>The distinct resources visible to that participant, in deterministic order.</returns>
+    /// <exception cref="ArgumentException">The organization id, workspace id or participant id is empty.</exception>
     public async Task<IReadOnlyList<VisibleResource>> GetVisibleResourcesForParticipantAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid participantId,
         CancellationToken cancellationToken)
     {
-        // Empty ids can never address a stored workspace's rules, so the query fails fast instead of
-        // computing over an arbitrary set (mirrors the repository/policy empty-id guards).
+        // Empty ids can never address a stored workspace's rules or a real participant, so the query
+        // fails fast instead of computing over an arbitrary set (mirrors the repository/policy empty-id
+        // guards; fail-closed).
         if (organizationId == Guid.Empty)
         {
             throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
@@ -94,8 +99,13 @@ internal sealed class VisibilityPreviewService
             throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
         }
 
+        if (participantId == Guid.Empty)
+        {
+            throw new ArgumentException("Participant id must not be empty.", nameof(participantId));
+        }
+
         // Candidate resources = exactly the resources that carry at least one rule in this workspace
-        // (a rule-less resource is host-only by default and the policy denies it to the audience). The
+        // (a rule-less resource is host-only by default and the policy denies it to a participant). The
         // list is tenant- and workspace-scoped, so no foreign tenant/workspace rule contributes
         // (threat T5). Distinct, deterministically ordered, so the result is stable.
         var allRules = await _rules
@@ -112,20 +122,22 @@ internal sealed class VisibilityPreviewService
         var visible = new List<VisibleResource>(candidates.Length);
         foreach (var candidate in candidates)
         {
-            // Route every candidate through the canonical CanViewResource decision under the audience
-            // viewpoint, so preview-as-participant can never diverge from per-resource access and the
-            // visibility decision lives in exactly one place (docs/05).
-            var decision = await _policy
-                .CanViewResourceAsync(
+            // Route every candidate through the canonical per-participant decision (CORE-VIS-005), so
+            // the preview can never diverge from per-resource access or the realtime recipient gate and
+            // the visibility decision lives in exactly one place (docs/05). Visible to THIS participant
+            // iff an audience-wide visible rule, or a visible rule scoped to exactly them; a reveal to a
+            // different participant is excluded (fail-closed; the selected-participant guarantee).
+            var canView = await _policy
+                .CanParticipantViewResourceAsync(
                     organizationId,
                     workspaceId,
-                    MembershipRole.Participant,
+                    participantId,
                     candidate.ResourceType,
                     candidate.ResourceId,
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            if (decision.CanView)
+            if (canView)
             {
                 visible.Add(candidate);
             }

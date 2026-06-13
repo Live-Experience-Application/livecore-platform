@@ -346,18 +346,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // and audit records (CORE-VIS-006) are later stories not wired here.
     builder.Services.AddScoped<VisibilityPolicy>();
 
-    // Visibility preview-as-participant query (CORE-VIS-003): computes the SET of resources an
-    // audience participant may currently see in a workspace (GetVisibleResourcesForParticipant /
-    // PreviewVisibilityForHost, docs/05_MODULE_CONTRACTS.md). Registered here, inside the persistence
-    // conditional, because it depends on the visibility rule repository and the VisibilityPolicy above.
-    // It REUSES VisibilityPolicy.CanViewResourceAsync per candidate resource under the audience
-    // viewpoint, so the preview can never diverge from the per-resource access decision and visibility
-    // is decided in exactly one place (docs/05: do not duplicate visibility logic elsewhere). The set
-    // is audience-wide for now (per-participant subset = CORE-VIS-005). There is NO HTTP endpoint
-    // (csv/api_routes.csv defines no preview route); wiring this set into the CORE-SES-005
-    // participant-visible-feed response — alongside the Realtime reveal-event projection — is a later
-    // step. The reveal command (CORE-VIS-004), selected-participant reveal (CORE-VIS-005) and audit
-    // records (CORE-VIS-006) are also later stories not wired here.
+    // Visibility preview-as-participant query (CORE-VIS-003, made participant-aware by CORE-API-004):
+    // computes the SET of resources a SPECIFIC participant may currently see in a workspace
+    // (GetVisibleResourcesForParticipant / PreviewVisibilityForHost, docs/05_MODULE_CONTRACTS.md).
+    // Registered here, inside the persistence conditional, because it depends on the visibility rule
+    // repository and the VisibilityPolicy above. It REUSES VisibilityPolicy.CanParticipantViewResourceAsync
+    // per candidate resource (the same participant-aware primitive EventRecipientVisibility uses), so the
+    // preview handles audience-wide AND selected-participant private reveals, fails closed for a reveal
+    // scoped to another participant, and can never diverge from the per-resource access decision or the
+    // realtime recipient gate — visibility is decided in exactly one place (docs/05: do not duplicate
+    // visibility logic elsewhere). There is NO HTTP endpoint (csv/api_routes.csv defines no preview
+    // route); this is the single source the participant-visible-feed projection (CORE-API-005) and the
+    // entity-search audience filtering (CORE-API-006) consume. The reveal command (CORE-VIS-004),
+    // selected-participant reveal (CORE-VIS-005) and audit records (CORE-VIS-006) are separate stories.
     builder.Services.AddScoped<VisibilityPreviewService>();
 
     // Per-recipient event-visibility decision (CORE-RT-004): the Visibility module's
