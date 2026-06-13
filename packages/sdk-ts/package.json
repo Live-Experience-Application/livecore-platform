@@ -2,7 +2,7 @@
   "name": "@livecore/sdk-ts",
   "version": "0.0.0",
   "private": true,
-  "description": "Typed TypeScript client for vertical apps consuming the LiveCore Core API. Skeleton only; client content arrives with CORE-SDK-002.",
+  "description": "Typed TypeScript client for vertical apps consuming the LiveCore Core API. Wraps the implemented /api/v1 routes with methods returning @livecore/contracts types over an authenticated transport.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,11 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test"
+  },
+  "dependencies": {
+    "@livecore/contracts": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

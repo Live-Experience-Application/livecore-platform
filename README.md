@@ -73,7 +73,7 @@ apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup job
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
 packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
-packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
+packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
 packages/design-tokens   @livecore/design-tokens - design tokens/theme contracts (skeleton)
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
@@ -163,8 +163,9 @@ Apply formatting:
 pnpm run format
 ```
 
-Run package test scripts (the `@livecore/contracts` package defines type and
-package-build tests; packages without a `test` script are skipped):
+Run package test scripts (the `@livecore/contracts` and `@livecore/sdk-ts`
+packages define type and package-build tests; packages without a `test` script
+are skipped):
 
 ```bash
 pnpm --recursive run test
@@ -188,6 +189,32 @@ The package is types-first and adds no runtime dependencies. Its `test` script
 builds the package, type-checks the compile-time type assertions
 (`tsconfig.test.json`) and runs package-build tests against the compiled output
 with the Node built-in test runner.
+
+### TypeScript SDK package
+
+`@livecore/sdk-ts` (`packages/sdk-ts`) is the typed client a vertical app uses to
+call the Core API (CORE-SDK-002). It wraps the implemented `/api/v1` routes with
+methods that return the exact `@livecore/contracts` response types, grouped into
+resource clients that mirror the Core server modules
+(`client.workspaces`, `client.sessions`, `client.scenes`, `client.content`,
+`client.visibility`, `client.realtime`, `client.assets`, `client.entitlements`,
+`client.store`). Its only dependency is `@livecore/contracts`; transport uses the
+global `fetch` (Node 22+, browsers), so it adds no runtime dependency, and a
+`fetch` implementation can be injected for testing or a custom transport.
+
+The SDK is OIDC-first and product-neutral: the caller supplies an access-token
+provider (the SDK never holds a password and never mints a token), and every
+method carries only generic Core vocabulary. Authorization stays server-side —
+the SDK is a typed transport, not a security boundary
+(`docs/07_SECURITY_THREAT_MODEL.md`). It fails closed when no token is available
+(no request is sent), reuses a caller-supplied `Idempotency-Key` for the reveal
+command (never a fresh key per retry), and turns a non-success response into a
+typed `LiveCoreApiError` carrying the HTTP status and the RFC 7807 Problem
+Details — never the access token or request body, so a `404` hidden resource or a
+`403` denial surfaces as an error rather than a value. Its `test` script builds
+the package, type-checks the compile-time type assertions (`tsconfig.test.json`)
+and runs package-build tests against an injected transport with the Node built-in
+test runner.
 
 ### Boundary scan
 
