@@ -169,4 +169,20 @@ internal sealed class ContentBlockRepository : IContentBlockRepository
         _dbContext.ContentBlocks.Update(contentBlock);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(ContentBlock contentBlock, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(contentBlock);
+
+        // The caller resolved this exact row through the tenant-, workspace- and
+        // scene-scoped FindByIdAsync, so removing the loaded content block deletes
+        // precisely that one block. Its revision history is the inline revision_number on
+        // this row (no separate revisions table), so the revisions go with the row; the
+        // polymorphic visibility_rules and asset_links are removed by
+        // ContentBlockDeletionService in the same unit of work (the database cannot cascade
+        // a non-FK reference). See docs/adr/0012-resource-deletion-cascades-dependents.md.
+        _dbContext.ContentBlocks.Remove(contentBlock);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

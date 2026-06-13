@@ -715,15 +715,18 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`) is extensible without a schema change because the action persists
-by its stable name; each producer command wires its own action in its own story.
+`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`) is extensible without a schema change because the
+action persists by its stable name; each producer command wires its own action in its own story.
 The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
 workspace or organization member (the threat-model control for access revocation).
 The entity-deletion command (CORE-LIFE-003) wires `EntityDeleted`, appending an entry
 whenever an authorized host deletes an entity (the deletion's "authorized and audited"
 control); the dependents it cascades are consequences of the one action and are not
-separately audited.
+separately audited. The content-block-deletion command (CORE-LIFE-004) wires
+`ContentBlockDeleted` the same way — one append-only fact per content-block deletion, its cascaded
+visibility rules and asset links being consequences of the one action — the consistent application of
+`docs/adr/0012-resource-deletion-cascades-dependents.md` ("audit the deletion").
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
@@ -907,6 +910,54 @@ capturing the tenant, the workspace, the authenticated **actor** (the host who d
 entity — never any content (threats T1/T5/T7). The audit record is a recorded fact, so it survives the
 now-deleted entity it references. Faithful to the member-removal / edge-removal precedents, the deletion
 emits no realtime session event (the event catalog defines none for entity deletion).
+
+### Content block deletion
+
+A host can delete a content block from a scene, and its dependents are cleaned up consistently
+(CORE-LIFE-004, the "Resource Lifecycle and Deletion" epic):
+
+| Method   | Route                                                      | Authorized callers                        |
+| -------- | ---------------------------------------------------------- | ----------------------------------------- |
+| `DELETE` | `/api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+The route pins the `{sceneId}` in its path (pairing with the content-block create route
+`POST /api/v1/scenes/{sceneId}/content-blocks`) and resolves the target organization from a required
+`?organizationSlug=` query parameter (the same token-claim-and-membership tenant check as the create
+route). The **parent scene is resolved first** (within the resolved tenant), the scene's own workspace is
+discovered from the loaded row, the caller is authorized by their role in that workspace, and the content
+block is then loaded through the tenant-, workspace- **and** scene-scoped repository lookup — so a content
+block that lives in another scene, workspace or tenant is never reachable to delete even when its id is
+known (threats T1/T5).
+
+**Cascade, not block** (`docs/adr/0012-resource-deletion-cascades-dependents.md`), handled consistently
+with the entity deletion (CORE-LIFE-003). Deleting a content block removes it **together with** its
+dependents, atomically in one transaction:
+
+- its **revisions** are not a separate table — a content block's revision history is the inline monotonic
+  `revision_number` on the `content_blocks` row (`csv/database_tables.csv` lists no revisions table), so
+  removing the row removes the block together with its revisions; no separate revision cleanup is needed;
+- its **`visibility_rules`** (the audience-wide rule and every selected-participant rule governing the
+  content block) and its **`asset_links`** reference the content block **polymorphically** (`resource_id` /
+  `target_id` are not foreign keys), so the database cannot cascade them and the application removes them
+  explicitly. Leaving them behind would dangle: a stale visible rule a later resource could inherit (a
+  visibility leak; threats T2/T5) or a link through which an asset could claim access via a target that no
+  longer exists (threat T4). Only the link rows are removed — the linked **assets** are untouched.
+
+The removals, the content block delete and the audit append run inside a **single database transaction**, so
+a deletion is applied whole or not at all.
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, is not a member
+of the scene's workspace, or names a content block that belongs to another scene/workspace/tenant — and
+**deleting a non-existent content block is a safe `404`** (it reveals nothing and changes nothing). A known
+workspace member who lacks the delete role is `403`; content blocks are host-prepared content, so the delete
+role set is the host-capable `Owner`/`Admin`/`Host`/`CoHost` (the same set that creates content blocks and
+deletes entities), matched exactly (`MembershipRole` is non-linear).
+
+Every successful deletion appends an append-only `ContentBlockDeleted` audit record (see "Audit log" above)
+capturing the tenant, the workspace, the authenticated **actor** (the host who deleted) and the deleted
+content block — never any content body (threats T1/T5/T7). The audit record is a recorded fact, so it
+survives the now-deleted content block it references. Faithful to the entity-deletion precedent, the
+deletion emits no realtime session event (the event catalog defines none for content block deletion).
 
 ### Realtime hub
 

@@ -88,4 +88,20 @@ public enum AuditAction
     /// performs (<see cref="AuditLogEntry.ForEntityDeletion"/>).
     /// </summary>
     EntityDeleted = 6,
+
+    /// <summary>
+    /// A host deleted a content block from a scene, removing it (together with its revision history, which
+    /// lives inline on the row) and its dependent visibility rules and asset links — the content block
+    /// deletion command (CORE-LIFE-004, the "Resource Lifecycle and Deletion" epic). Recording the deletion
+    /// keeps a content-block removal auditable exactly as an entity removal is, the consistent application of
+    /// docs/adr/0012-resource-deletion-cascades-dependents.md ("All resource-deletion implementations follow
+    /// this decision: cascade the dependents, in the application, inside one transaction, and audit the
+    /// deletion"). A generic, workspace-scoped audit fact whose actor is the host who deleted the content
+    /// block and whose resource is the deleted content block (its generic kind name and surrogate id). The
+    /// deletion is a removal, not a transition to a new state, so there is no before/after state pair (a
+    /// content block has no lifecycle state); the dependent rows the deletion cascades are consequences of
+    /// the same action and are not separately audited, exactly as <see cref="EntityDeleted"/> records one
+    /// fact for the deletion it performs (<see cref="AuditLogEntry.ForContentBlockDeletion"/>).
+    /// </summary>
+    ContentBlockDeleted = 7,
 }

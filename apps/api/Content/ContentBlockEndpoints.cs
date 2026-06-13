@@ -8,21 +8,33 @@ using Microsoft.AspNetCore.Mvc;
 namespace LiveCore.Api.Content;
 
 /// <summary>
-/// HTTP endpoint of the Content module's scene content APIs (CORE-SCENE-003:
-/// "Implement scene content APIs"). This is the FIRST HTTP endpoint of the Content
-/// module. It realizes the documented request flow end-to-end for the by-scene-id
-/// content-block create route: "authentication middleware -> tenant/workspace context
-/// resolver -> endpoint -> authorization policy" (docs/02_ARCHITECTURE.md), mirroring
+/// HTTP endpoints of the Content module's scene content APIs. The CREATE route is CORE-SCENE-003
+/// ("Implement scene content APIs"); the DELETE route is CORE-LIFE-004 ("Implement content block
+/// deletion", the "Resource Lifecycle and Deletion" epic). Both realize the documented request flow
+/// end-to-end for a by-scene-id route: "authentication middleware -> tenant/workspace context resolver
+/// -> endpoint -> authorization policy" (docs/02_ARCHITECTURE.md), mirroring
 /// <see cref="Sessions.SessionEndpoints"/>'s by-session-id routes exactly.
 ///
-/// Route owned by this story (csv/api_routes.csv line 17):
+/// Routes owned here (csv/api_routes.csv):
 /// <list type="bullet">
 ///   <item><c>POST /api/v1/scenes/{sceneId}/content-blocks</c> — module Content, roles
-///   "Host,CoHost,Owner,Admin". Creates a content block in the route's scene via
+///   "Host,CoHost,Owner,Admin" (CORE-SCENE-003). Creates a content block in the route's scene via
 ///   <see cref="ContentBlock.Create"/> + <see cref="IContentBlockRepository.AddAsync"/>
 ///   at the initial revision (1). The request body carries the generic content
 ///   <see cref="ContentBlockType"/> (Text/Media/Data) and body.</item>
+///   <item><c>DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}</c> — module Content, roles
+///   "Host,CoHost,Owner,Admin" (CORE-LIFE-004). Deletes ONE content block, addressed within its parent
+///   scene, cascading its dependent visibility rules and asset links (its inline revision history goes with
+///   the row) via <see cref="ContentBlockDeletionService"/>, and appends an append-only
+///   <see cref="LiveCore.Api.Audit.AuditAction.ContentBlockDeleted"/> audit record. Returns
+///   <c>204 No Content</c> on success.</item>
 /// </list>
+///
+/// SCENE/WORKSPACE-SCOPED LOOKUP (the deletion story's headline requirement): the parent scene is resolved
+/// FIRST and the content block is then loaded THROUGH it (its scene, workspace and tenant), so a content
+/// block that lives in another scene, workspace or tenant is never reachable to delete even when its
+/// surrogate id is known (threats T1/T5). The deletion CASCADES its dependents rather than blocking on them,
+/// consistently with the entity deletion (docs/adr/0012-resource-deletion-cascades-dependents.md).
 ///
 /// There is deliberately NO content-block list/get/update/revise endpoint here: no such
 /// route exists in csv/api_routes.csv, so they are out of scope (the revise capability
@@ -76,6 +88,7 @@ internal static class ContentBlockEndpoints
             .RequireAuthorization();
 
         group.MapPost("/{sceneId}/content-blocks", CreateContentBlockAsync);
+        group.MapDelete("/{sceneId}/content-blocks/{contentBlockId}", DeleteContentBlockAsync);
 
         return endpoints;
     }
@@ -210,6 +223,121 @@ internal static class ContentBlockEndpoints
             response);
     }
 
+    // DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}?organizationSlug={slug}
+    //
+    // Deletes ONE content block from its parent scene (CORE-LIFE-004). The flow mirrors the create handler
+    // above (the same fail-closed, load-then-authorize, hidden-404 shape) and the entity deletion route: the
+    // scene is resolved within the query-supplied organization FIRST, its own workspace is discovered from
+    // the loaded row AFTER the tenant boundary is enforced, the caller is authorized by their role in the
+    // scene's own workspace, and only then is the content block deleted (and its dependents cascaded +
+    // audited) atomically through the scene-, workspace- and tenant-scoped deletion service.
+    private static async Task<IResult> DeleteContentBlockAsync(
+        HttpContext httpContext,
+        string sceneId,
+        string contentBlockId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the create route and the session by-id
+        // routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed scene or content block id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        if (!Guid.TryParse(contentBlockId, out var contentBlockGuid) || contentBlockGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 so a foreign or non-existent tenant is
+            // indistinguishable from a missing scene/content block (threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Load the scene WITHIN the resolved tenant. The lookup leads with the organization id, so a scene
+        // in another tenant is never returned even when the surrogate id matches; a cross-tenant or unknown
+        // scene is hidden as 404 (threats T1/T5). The scene's own workspace id is then discovered from the
+        // loaded row, AFTER the tenant boundary has been enforced.
+        var scene = await deps.Scenes
+            .FindByIdInOrganizationAsync(context.OrganizationId, sceneGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (scene is null)
+        {
+            return HiddenScene();
+        }
+
+        // Object-level authorization: the caller must be a member of the SCENE'S workspace. A caller who is a
+        // member of the tenant but NOT of the scene's workspace must not learn the scene exists, so a missing
+        // membership is hidden as 404 (not 403) — the same rule as the create route (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, scene.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // The caller is a known member of the scene's workspace, so an insufficient role is a 403. Content
+        // blocks are host-prepared content, so the delete role set is the host-capable Owner/Admin/Host/CoHost
+        // (csv/api_routes.csv; docs/06_AUTHORIZATION_MATRIX.md), the same set that creates content blocks and
+        // deletes entities. MembershipRole is non-linear, so this is an EXACT set membership check, never a
+        // >/< ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized: delete the content block (and cascade its dependents + append the audit record)
+        // atomically. The service loads the block through the tenant-, workspace- AND scene-scoped
+        // FindByIdAsync, so a block in another scene/workspace/tenant is never deleted even when its id is
+        // known; an unknown id is a SAFE 404 that changes nothing (threats T1/T5).
+        var now = timeProvider.GetUtcNow();
+        var result = await deps.ContentBlockDeletion
+            .DeleteAsync(
+                context.OrganizationId,
+                scene.WorkspaceId,
+                scene.Id,
+                contentBlockGuid,
+                context.UserProfileId,
+                now,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return result == ContentBlockDeletionResult.Deleted
+            ? Results.NoContent()
+            : HiddenScene();
+    }
+
     /// <summary>
     /// Parses a generic content block type name (case-insensitive) and confirms it is a
     /// DEFINED type. A null, blank, numeric, unknown or undefined value is rejected so a
@@ -248,18 +376,21 @@ internal static class ContentBlockEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var scenes = services.GetService<ISceneRepository>();
         var contentBlocks = services.GetService<IContentBlockRepository>();
+        var contentBlockDeletion = services.GetService<ContentBlockDeletionService>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
 
         if (resolver is null
             || scenes is null
             || contentBlocks is null
+            || contentBlockDeletion is null
             || workspaceMembers is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new ContentBlockEndpointDependencies(resolver, scenes, contentBlocks, workspaceMembers);
+        dependencies = new ContentBlockEndpointDependencies(
+            resolver, scenes, contentBlocks, contentBlockDeletion, workspaceMembers);
         return true;
     }
 
@@ -325,5 +456,6 @@ internal static class ContentBlockEndpoints
         TenantContextResolver Resolver,
         ISceneRepository Scenes,
         IContentBlockRepository ContentBlocks,
+        ContentBlockDeletionService ContentBlockDeletion,
         IWorkspaceMemberRepository WorkspaceMembers);
 }

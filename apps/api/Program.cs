@@ -587,6 +587,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}.
     builder.Services.AddScoped<EntityDeletionService>();
 
+    // Content block deletion command (CORE-LIFE-004, the "Resource Lifecycle and Deletion" epic): the
+    // Content module's "a host can delete a content block from a scene" command. Registered here, inside the
+    // persistence conditional, because it composes the content-block, visibility-rule, asset-link and audit
+    // repositories (all registered above) plus the shared DbContext for a single transaction. It loads the
+    // content block through the tenant-, workspace- AND scene-scoped IContentBlockRepository.FindByIdAsync
+    // FIRST (a block in another scene/workspace/tenant is never reachable; threats T1/T5), then CASCADES its
+    // dependents — the POLYMORPHIC (non-FK) visibility_rules and asset_links the database cannot cascade
+    // (its REVISIONS are the inline revision_number on the row, so they go with the row) — and appends a
+    // ContentBlockDeleted audit record, all atomically (cascade, not block; handled consistently with the
+    // entity deletion, docs/adr/0012-resource-deletion-cascades-dependents.md). Consumed by
+    // DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId} (wired by MapContentBlockEndpoints).
+    builder.Services.AddScoped<ContentBlockDeletionService>();
+
     // Entitlement and plan definition catalog (CORE-ENTL-001, the first story of the "Entitlements and Quotas"
     // epic): the Entitlements module — FIRST appearing here — owns the GLOBAL entitlement_definitions,
     // plan_definitions and plan_entitlements tables that hold the deployment-wide monetization catalog
@@ -832,18 +845,22 @@ app.MapSessionEventReplayEndpoints();
 // client-supplied order, no reorder route).
 app.MapSceneEndpoints();
 
-// Scene content-block endpoint (CORE-SCENE-003): the Content module's first HTTP route,
-// POST /api/v1/scenes/{sceneId}/content-blocks. It lives in an authenticated route group
-// and fails closed (503) when persistence is not configured, exactly like the session
-// endpoints. No new DI registration is required: the tenant context resolver, the scene
-// repository (for the org-scoped scene lookup), the content block repository and the
-// workspace member repository it consumes are already registered above inside the
-// persistence conditional. The scene is resolved within the query-supplied organization,
-// its own workspace is discovered from the loaded row after the tenant boundary is
-// enforced, and the create is authorized by the caller's role in the scene's own
-// workspace (every denial hidden as 404, an insufficient role as 403). The
-// host-vs-participant DTO projection (CORE-SCENE-004) and content validation/size limits
-// (CORE-SCENE-005) are later stories and are deliberately not built here.
+// Scene content-block endpoints: the Content module's HTTP routes,
+// POST /api/v1/scenes/{sceneId}/content-blocks (create, CORE-SCENE-003) and
+// DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId} (delete, CORE-LIFE-004). They live in an
+// authenticated route group and fail closed (503) when persistence is not configured, exactly like the
+// session endpoints. No new DI registration beyond the ContentBlockDeletionService above is required: the
+// tenant context resolver, the scene repository (for the org-scoped scene lookup), the content block
+// repository and the workspace member repository they consume are already registered above inside the
+// persistence conditional. The scene is resolved within the query-supplied organization, its own workspace
+// is discovered from the loaded row after the tenant boundary is enforced, and the request is authorized by
+// the caller's role in the scene's own workspace (every denial hidden as 404, an insufficient role as 403).
+// The create assigns the initial revision (1) server-side; the delete loads the content block through the
+// scene-, workspace- and tenant-scoped lookup, CASCADES its dependent visibility rules and asset links (its
+// inline revision history goes with the row) and appends a ContentBlockDeleted audit record, all atomically
+// (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md). Deleting a non-existent
+// content block is a safe 404. The host-vs-participant DTO projection (CORE-SCENE-004) and content
+// validation/size limits (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
 
 // Entity relationship removal endpoint (CORE-LIFE-002, the "Resource Lifecycle and Deletion" epic):

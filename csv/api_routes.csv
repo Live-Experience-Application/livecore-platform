@@ -19,6 +19,7 @@ GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection 
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
 GET,/api/v1/scenes/{sceneId},Scenes,workspace members,Projection by role
 POST,/api/v1/scenes/{sceneId}/content-blocks,Content,"Host,CoHost,Owner,Admin",Create content block
+DELETE,/api/v1/scenes/{sceneId}/content-blocks/{contentBlockId},Content,"Host,CoHost,Owner,Admin",Delete content block; cascade dependent visibility rules/asset links (revisions inline on row); scene/workspace-scoped lookup; audited; hidden-404
 DELETE,/api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId},Entities,"Host,CoHost,Owner,Admin",Remove directed entity relationship edge; workspace-scoped lookup; hidden-404
 DELETE,/api/v1/workspaces/{workspaceId}/entities/{entityId},Entities,"Host,CoHost,Owner,Admin",Delete entity; cascade dependent edges/visibility rules/asset links; workspace-scoped lookup; audited; hidden-404
 GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant owner or Host,Participant-safe feed

@@ -116,4 +116,25 @@ public interface IContentBlockRepository
     /// caller is responsible for having loaded the block through a scoped lookup.
     /// </summary>
     Task UpdateAsync(ContentBlock contentBlock, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES the given content block row (CORE-LIFE-004, the "Resource Lifecycle
+    /// and Deletion" epic). The caller
+    /// (<see cref="ContentBlockDeletionService"/>) is responsible for having loaded the
+    /// content block through the tenant-, workspace- AND scene-scoped
+    /// <see cref="FindByIdAsync(Guid, Guid, Guid, Guid, CancellationToken)"/> first, so a
+    /// foreign tenant's, workspace's or scene's content block is never reachable to remove
+    /// (threat T5/T1); this method removes exactly the row it is handed. The content
+    /// block's REVISIONS live inline on this row (the monotonic
+    /// <see cref="ContentBlock.RevisionNumber"/> counter — csv/database_tables.csv lists no
+    /// separate content-block revisions table), so removing the row removes the block
+    /// together with its revision history; no separate revision cleanup is needed. The
+    /// dependent <c>visibility_rules</c> and <c>asset_links</c> reference the content block
+    /// POLYMORPHICALLY (no foreign key) so the database cannot cascade them — the
+    /// application <see cref="ContentBlockDeletionService"/> removes those in the SAME unit
+    /// of work BEFORE this call, consistently with the entity deletion
+    /// (docs/adr/0012-resource-deletion-cascades-dependents.md).
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The content block is null.</exception>
+    Task RemoveAsync(ContentBlock contentBlock, CancellationToken cancellationToken);
 }
