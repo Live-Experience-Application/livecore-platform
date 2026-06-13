@@ -320,9 +320,17 @@ jobs:
       - name: Restore .NET local tools (dotnet-ef)
         run: dotnet tool restore
 
+      - name: Restore the solution
+        # dotnet ef retrieves project metadata through a design-time build that
+        # does not restore implicitly, so without an explicit restore the next
+        # step fails with NETSDK1004 (apps/api/obj/project.assets.json missing).
+        # Restoring here also primes the integration test build below.
+        run: dotnet restore LiveCore.slnx
+
       - name: Fail on model-vs-migration drift
         # Returns non-zero when the EF Core model has changes not captured in a
-        # migration, so model and migrations can never silently diverge.
+        # migration, so model and migrations can never silently diverge. Builds
+        # on the restore above (the EF tooling builds the project before checking).
         run: dotnet ef migrations has-pending-model-changes --project apps/api
 
       - name: Run integration suite against PostgreSQL
