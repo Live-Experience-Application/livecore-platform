@@ -81,9 +81,9 @@ public sealed class RecapEligibleSessionReaderTests : IDisposable
 
     /// <summary>Seeds a session and drives it to the requested lifecycle status before persisting it.</summary>
     private async Task<Session> SeedSessionAsync(
-        Guid organizationId, Guid workspaceId, string title, SessionStatus status)
+        Guid organizationId, Guid workspaceId, string title, SessionStatus status, DateTimeOffset? createdAt = null)
     {
-        var session = Session.Create(organizationId, workspaceId, title, _createdAt);
+        var session = Session.Create(organizationId, workspaceId, title, createdAt ?? _createdAt);
         switch (status)
         {
             case SessionStatus.Prepared:
@@ -199,9 +199,12 @@ public sealed class RecapEligibleSessionReaderTests : IDisposable
     {
         var organization = await SeedOrganizationAsync("northwind-labs");
         var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
-        var first = await SeedSessionAsync(organization.Id, workspace.Id, "First", SessionStatus.Ended);
-        var second = await SeedSessionAsync(organization.Id, workspace.Id, "Second", SessionStatus.Ended);
-        var third = await SeedSessionAsync(organization.Id, workspace.Id, "Third", SessionStatus.Ended);
+        // Seed at distinct, increasing times so the UUIDv7 session ids are strictly monotonic: within a single
+        // timestamp tick UUIDv7's trailing bits are random (not a monotonic counter), so same-instant ids would
+        // order arbitrarily and "oldest first" could not be asserted deterministically.
+        var first = await SeedSessionAsync(organization.Id, workspace.Id, "First", SessionStatus.Ended, _createdAt);
+        var second = await SeedSessionAsync(organization.Id, workspace.Id, "Second", SessionStatus.Ended, _createdAt.AddSeconds(1));
+        var third = await SeedSessionAsync(organization.Id, workspace.Id, "Third", SessionStatus.Ended, _createdAt.AddSeconds(2));
 
         await using var context = CreateContext();
         var reader = new RecapEligibleSessionReader(context);
