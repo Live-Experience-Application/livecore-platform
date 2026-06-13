@@ -55,6 +55,19 @@ builder.Services.AddHealthChecks();
 // docs/13_SELF_HOSTING_REQUIREMENTS.md).
 builder.Services.AddLiveCorePrometheusMetrics();
 
+// Per-request structured log context (CORE-OBS-002). RequestLogContext is the single, request-scoped holder
+// of the identifiers docs/15_OBSERVABILITY.md requires on every request/event log line (request_id,
+// organization_id, workspace_id, session_id, user_id, event_id). The RequestLogContextMiddleware (added to
+// the pipeline below) opens one logging scope around the request with it as the scope state and seeds the
+// edge-available keys; the authoritative owners enrich the rest in their own scope — the TenantContextResolver
+// sets organization_id from the resolved tenant, the SessionEventPublisher sets event_id from the published
+// event — so JSON logging (already wired with IncludeScopes, CORE-FND-004) carries the documented context
+// without any module logging sensitive content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md). Registered
+// scoped and UNCONDITIONALLY (it needs no database), so the request scope exists even when the host runs
+// without persistence; the resolver/publisher that enrich it are registered inside the persistence
+// conditional and resolve the same scoped instance.
+builder.Services.AddScoped<RequestLogContext>();
+
 // CORS allow-list for browser/PWA clients (CORE-OPS-003). One named policy
 // (CorsConfiguration.PolicyName) is applied to BOTH the REST API and the SignalR
 // hub, read from configuration only (Cors:AllowedOrigins) and FAIL-CLOSED by
@@ -888,6 +901,17 @@ app.UseCors(CorsConfiguration.PolicyName);
 // are mapped after this and stay anonymous because they are not in the
 // authenticated workspace route group.
 app.UseAuthentication();
+
+// Per-request structured log scope (CORE-OBS-002). Placed AFTER authentication so the authenticated principal
+// is available to seed user_id, and BEFORE authorization so the scope wraps the authorization step and the
+// endpoint — a fail-closed 401/403 is logged with its request_id too. It opens one logging scope carrying the
+// documented per-request context (request_id, user_id and the route-derived workspace_id/session_id) and emits
+// a request-summary log line; the tenant context resolver and the session event publisher enrich the same
+// scope with organization_id and event_id as the request runs (docs/15_OBSERVABILITY.md). It skips the
+// unauthenticated /health and /metrics endpoints (no tenant/principal context) and never logs content, tokens
+// or PII (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+app.UseMiddleware<RequestLogContextMiddleware>();
+
 app.UseAuthorization();
 
 // Health endpoints (CORE-FND-004): unauthenticated by convention.

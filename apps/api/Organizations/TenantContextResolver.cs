@@ -1,4 +1,5 @@
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Observability;
 
 namespace LiveCore.Api.Organizations;
 
@@ -53,10 +54,17 @@ public sealed class TenantContextResolver
     private readonly IUserProfileRepository _userProfiles;
     private readonly IOrganizationMemberRepository _members;
 
+    // The per-request structured log context (CORE-OBS-002), enriched with the resolved organization_id on a
+    // successful resolution. Optional so the resolver stays a plain, unit-testable service: DI injects the
+    // request-scoped instance the log-scope middleware opened in the running host, and it is left null in
+    // tests that exercise the decision logic directly.
+    private readonly RequestLogContext? _requestLogContext;
+
     public TenantContextResolver(
         IOrganizationRepository organizations,
         IUserProfileRepository userProfiles,
-        IOrganizationMemberRepository members)
+        IOrganizationMemberRepository members,
+        RequestLogContext? requestLogContext = null)
     {
         ArgumentNullException.ThrowIfNull(organizations);
         ArgumentNullException.ThrowIfNull(userProfiles);
@@ -65,6 +73,7 @@ public sealed class TenantContextResolver
         _organizations = organizations;
         _userProfiles = userProfiles;
         _members = members;
+        _requestLogContext = requestLogContext;
     }
 
     /// <summary>
@@ -155,6 +164,13 @@ public sealed class TenantContextResolver
         // re-asserts that the membership belongs to exactly this organization
         // and subject, so the context can never carry foreign data.
         var context = TenantContext.Create(organization, userProfile.Id, membership);
+
+        // Enrich the per-request log context with the resolved organization id (CORE-OBS-002). Only an
+        // ENTITLED resolution reaches here, so the logged organization_id is always one the caller is a member
+        // of — a denied/foreign tenant is never enriched (it is a fail-closed denial above) and never logged.
+        // The id is a surrogate identifier, never content (threat T7).
+        _requestLogContext?.SetOrganizationId(context.OrganizationId);
+
         return TenantContextResolutionResult.Success(context);
     }
 }

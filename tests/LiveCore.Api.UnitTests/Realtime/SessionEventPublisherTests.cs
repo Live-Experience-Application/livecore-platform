@@ -99,6 +99,24 @@ public sealed class SessionEventPublisherTests
         Assert.True(recorded.Count("livecore.event.delivery.failures") >= 1);
     }
 
+    [Fact]
+    public async Task It_enriches_the_request_log_context_with_the_published_event_id()
+    {
+        // CORE-OBS-002: publishing enriches the per-request log context with the event's id, so the request's
+        // log lines carry the documented event_id. The id is the opaque surrogate, never the payload (T7).
+        var repository = new RecordingEventRepository();
+        var sessionEvent = Event();
+        var resolver = new FixedRecipientResolver([]);
+        var logContext = new RequestLogContext();
+        var publisher = new SessionEventPublisher(
+            repository, new RecordingBackplane(), resolver, new LiveCoreMetrics(), logContext);
+
+        await publisher.PublishAsync(sessionEvent, CancellationToken.None);
+
+        var logged = logContext.ToDictionary(pair => pair.Key, pair => pair.Value);
+        Assert.Equal(sessionEvent.Id.ToString("D"), logged[RequestLogContext.EventIdKey]);
+    }
+
     // --- Test doubles ----------------------------------------------------------
 
     private sealed class FixedRecipientResolver : ISessionEventRecipientResolver

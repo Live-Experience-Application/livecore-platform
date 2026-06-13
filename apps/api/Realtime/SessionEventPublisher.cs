@@ -33,11 +33,18 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
     private readonly ISessionEventRecipientResolver _recipients;
     private readonly LiveCoreMetrics _metrics;
 
+    // The per-request structured log context (CORE-OBS-002), enriched with the published event's id so the
+    // request's log lines carry event_id (docs/15_OBSERVABILITY.md "event_id when applicable"). Optional so
+    // the publisher stays unit-testable: DI injects the request-scoped instance the log-scope middleware
+    // opened in the running host, and it is left null in tests.
+    private readonly RequestLogContext? _requestLogContext;
+
     public SessionEventPublisher(
         ISessionEventRepository events,
         IRealtimeBackplane backplane,
         ISessionEventRecipientResolver recipients,
-        LiveCoreMetrics metrics)
+        LiveCoreMetrics metrics,
+        RequestLogContext? requestLogContext = null)
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(backplane);
@@ -47,6 +54,7 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
         _backplane = backplane;
         _recipients = recipients;
         _metrics = metrics;
+        _requestLogContext = requestLogContext;
     }
 
     /// <inheritdoc />
@@ -56,6 +64,11 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
 
         // 1. Persist the durable event first (the source of truth for replay).
         await _events.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+
+        // Enrich the per-request log context with the published event's id (CORE-OBS-002), so this request's
+        // remaining log lines carry event_id. The id is an opaque surrogate, never the event payload (threat
+        // T7 in docs/07_SECURITY_THREAT_MODEL.md).
+        _requestLogContext?.SetEventId(sessionEvent.Id);
 
         // 2. Compute the per-recipient deliveries (groups + projected envelopes) and forward each over the
         //    scale-out backplane. The resolver omits any recipient that may not see the event's subject, so

@@ -1,4 +1,5 @@
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Observability;
 using LiveCore.Api.Organizations;
 
 namespace LiveCore.Api.UnitTests.Organizations;
@@ -92,6 +93,43 @@ public sealed class TenantContextResolverTests
         Assert.Equal(MembershipRole.Host, result.Context.Role);
         Assert.True(result.Context.HasRole(MembershipRole.Host));
         Assert.False(result.Context.HasRole(MembershipRole.Owner));
+    }
+
+    [Fact]
+    public async Task Enriches_the_request_log_context_with_the_resolved_organization_id_on_success()
+    {
+        // CORE-OBS-002: a successful resolution enriches the per-request log context with the resolved
+        // organization_id, so the request's log lines carry the documented tenant identifier.
+        var organization = SeedOrganization(_slugA);
+        var user = SeedUser();
+        SeedMembership(organization.Id, user.Id, MembershipRole.Host);
+        var logContext = new RequestLogContext();
+        var resolver = new TenantContextResolver(_organizations, _userProfiles, _members, logContext);
+        var principal = CreateUserPrincipal(organizationClaims: _slugA);
+
+        var result = await resolver.ResolveAsync(principal, _slugA, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        var logged = logContext.ToDictionary(pair => pair.Key, pair => pair.Value);
+        Assert.Equal(organization.Id.ToString("D"), logged[RequestLogContext.OrganizationIdKey]);
+    }
+
+    [Fact]
+    public async Task Does_not_enrich_the_request_log_context_when_the_resolution_is_denied()
+    {
+        // Fail-closed (threat T5/T7): a denied (foreign-tenant) resolution never logs the organization_id it
+        // refused to grant. Here the token does not assert the target tenant, so resolution is denied.
+        var organization = SeedOrganization(_slugA);
+        var user = SeedUser();
+        SeedMembership(organization.Id, user.Id, MembershipRole.Owner);
+        var logContext = new RequestLogContext();
+        var resolver = new TenantContextResolver(_organizations, _userProfiles, _members, logContext);
+        var principal = CreateUserPrincipal(organizationClaims: _slugB);
+
+        var result = await resolver.ResolveAsync(principal, _slugA, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.DoesNotContain(RequestLogContext.OrganizationIdKey, logContext.Select(pair => pair.Key));
     }
 
     [Fact]

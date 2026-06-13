@@ -17,6 +17,41 @@ user_id when applicable
 event_id when applicable
 ```
 
+### Implementation (CORE-OBS-002)
+
+JSON logging is wired with `IncludeScopes` (CORE-FND-004), but nothing populated the per-request context
+above. CORE-OBS-002 adds it. A single request-scoped owner, `RequestLogContext`
+(`apps/api/Observability/`), holds the documented identifiers as their exact snake_case keys. The
+`RequestLogContextMiddleware` opens **one** logging scope around the request with that object as the scope
+state, so the JSON console formatter renders the populated identifiers on **every** log line the request
+emits (including a request-summary line the middleware logs at completion). Because the scope state is mutable
+and the formatter enumerates it when it writes each entry, a key set partway through the request appears on
+the log lines that follow — so a request's log lines converge on the full applicable context.
+
+The keys are populated by the **authoritative owner** of each identifier, never duplicated:
+
+| Key               | Set by                          | Source                                                        |
+| ----------------- | ------------------------------- | ------------------------------------------------------------- |
+| `request_id`      | `RequestLogContextMiddleware`   | the per-request correlation id (`HttpContext.TraceIdentifier`) |
+| `user_id`         | `RequestLogContextMiddleware`   | the authenticated principal's OIDC issuer-local subject        |
+| `workspace_id`    | `RequestLogContextMiddleware`   | the matched route value (a surrogate `Guid` only)              |
+| `session_id`      | `RequestLogContextMiddleware`   | the matched route value (a surrogate `Guid` only)              |
+| `organization_id` | `TenantContextResolver`         | the resolved tenant (set only on a successful resolution)      |
+| `event_id`        | `SessionEventPublisher`         | the published session event's id                               |
+
+The middleware runs **after authentication and before authorization**, so the principal is available to seed
+`user_id` while the scope still wraps the authorization step and the endpoint — a fail-closed `401`/`403` is
+logged with its `request_id` too. It is **fail-safe**: an anonymous or unmappable caller carries no `user_id`,
+a denied (foreign) tenant resolution logs no `organization_id`, and only a well-formed surrogate `Guid` route
+value is taken as `workspace_id`/`session_id` (so a free-form path segment can never become a log value). The
+unauthenticated infrastructure endpoints (`/health/*`, `/metrics`) are skipped — they carry no tenant or
+principal context and are polled frequently.
+
+The context carries **only identifiers and authorization metadata** — opaque surrogate ids and the
+principal's subject — never the access token, the display name, the email or any resource content, so the log
+surface cannot leak sensitive content (threat T7 in `docs/07_SECURITY_THREAT_MODEL.md`). No external logging
+dependency is added; this is the built-in JSON console formatter plus scope enrichment.
+
 ## Metrics
 
 Track:

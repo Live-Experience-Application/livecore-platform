@@ -44,6 +44,11 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
     // one. End-user clients omit it and stay user principals (OidcPrincipalMapper).
     public const string ClientIdHeader = "X-Test-ClientId";
 
+    // Optional: emits the standard OIDC email claim, so a test can present a caller whose token carries PII.
+    // Used by the structured-log-context tests (CORE-OBS-002) to assert that the per-request log context never
+    // logs the email (threat T7). End-user tokens may carry it; logging never echoes it.
+    public const string EmailHeader = "X-Test-Email";
+
     public const string DefaultIssuer = "https://issuer.test";
 
     public TestAuthenticationHandler(
@@ -93,6 +98,14 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
             && !string.IsNullOrWhiteSpace(clientIdValues.ToString()))
         {
             claims.Add(new Claim(OidcClaimTypes.ClientId, clientIdValues.ToString()));
+        }
+
+        // The optional OIDC email claim (PII). Present only when a test opts in; the principal carries it but
+        // logging never echoes it (CORE-OBS-002; threat T7).
+        if (Request.Headers.TryGetValue(EmailHeader, out var emailValues)
+            && !string.IsNullOrWhiteSpace(emailValues.ToString()))
+        {
+            claims.Add(new Claim(OidcClaimTypes.Email, emailValues.ToString()));
         }
 
         var identity = new ClaimsIdentity(claims, SchemeName);

@@ -407,6 +407,26 @@ levels are configured per host in `appsettings.json`. Logs must carry
 identifiers and metadata, never sensitive content (threat T7 in
 `docs/07_SECURITY_THREAT_MODEL.md`).
 
+`docs/15_OBSERVABILITY.md` requires a documented per-request context on every
+request/event log line (`request_id`, `organization_id`, `workspace_id`,
+`session_id`, `user_id`, `event_id`). CORE-OBS-002 populates it. A single
+request-scoped owner, `RequestLogContext` (`apps/api/Observability/`), holds
+those identifiers under their documented snake_case keys, and the
+`RequestLogContextMiddleware` opens **one** logging scope around the request with
+it as the scope state — so the JSON formatter renders the populated identifiers
+on every log line the request emits, plus a request-summary line the middleware
+logs at completion. The middleware runs after authentication and before
+authorization, seeding `request_id` (always), `user_id` (the authenticated
+principal's OIDC subject) and the route-derived `workspace_id`/`session_id`
+(surrogate `Guid`s only); the authoritative owners enrich the rest in the same
+scope — `TenantContextResolver` sets `organization_id` from the resolved tenant
+(only on success), and `SessionEventPublisher` sets `event_id` from the published
+event. It is fail-safe (an anonymous caller carries no `user_id`, a denied tenant
+logs no `organization_id`) and skips the unauthenticated `/health/*` and
+`/metrics` endpoints. Only identifiers and authorization metadata are ever
+logged — never the access token, the display name, the email or resource content
+(threat T7).
+
 ### Identity (OIDC principal model)
 
 Authentication is OIDC-first (`docs/adr/0005-oidc-first-authentication.md`):
