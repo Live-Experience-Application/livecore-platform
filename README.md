@@ -72,7 +72,7 @@ apps/api                 ASP.NET Core API host (LiveCore.Api) - health endpoints
 apps/api/Dockerfile      container image for the API host (multi-stage)
 apps/worker              Background worker host (LiveCore.Worker) - runs the asset cleanup job
 apps/worker/Dockerfile   container image for the worker host (multi-stage)
-packages/contracts       @livecore/contracts  - TypeScript contract types (skeleton)
+packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs, enums, events)
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (skeleton)
 packages/ui-core         @livecore/ui-core    - generic UI primitives (skeleton)
 packages/design-tokens   @livecore/design-tokens - design tokens/theme contracts (skeleton)
@@ -163,12 +163,31 @@ Apply formatting:
 pnpm run format
 ```
 
-Run package test scripts (packages define none yet; this exits 0 and picks up
-`test` scripts automatically as packages add them):
+Run package test scripts (the `@livecore/contracts` package defines type and
+package-build tests; packages without a `test` script are skipped):
 
 ```bash
 pnpm --recursive run test
 ```
+
+### TypeScript contract package
+
+`@livecore/contracts` (`packages/contracts`) is the stable, product-neutral
+TypeScript mirror of the Core API surface that vertical apps consume
+(CORE-SDK-001). It exports the request/response DTOs for the implemented
+`/api/v1` routes, the generic enumerations (roles, lifecycle statuses, resource
+and content kinds, quota/store/ad-eligibility codes) as both string-literal
+unions and runtime `as const` tuples, the RFC 7807 `ProblemDetails` error shape,
+the transport constants (`API_BASE_PATH`, request header names) and the realtime
+session event vocabulary. Every type matches the API's JSON exactly (camelCase
+fields, enums as stable string names); the package carries no vertical domain
+language. The typed SDK client that calls these contracts is a separate package
+(`@livecore/sdk-ts`, CORE-SDK-002).
+
+The package is types-first and adds no runtime dependencies. Its `test` script
+builds the package, type-checks the compile-time type assertions
+(`tsconfig.test.json`) and runs package-build tests against the compiled output
+with the Node built-in test runner.
 
 ### Boundary scan
 
