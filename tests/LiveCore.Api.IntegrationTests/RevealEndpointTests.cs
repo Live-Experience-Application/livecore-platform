@@ -102,19 +102,29 @@ public sealed class RevealEndpointTests
         Assert.Equal(nameof(VisibilityState.Visible), entry.NewState);
         Assert.Equal(await SingleHostProfileIdAsync(factory), entry.ActorUserProfileId);
 
-        // CORE-RT-003: the reveal appended a durable ContentRevealed event to the session's stream
-        // (audience-wide, since no participant was targeted), carrying the resource ids in its payload.
+        // CORE-RT-003 + CORE-EVT-003: the reveal appended TWO durable events to the session's stream — the
+        // central ContentRevealed and the security-relevant VisibilityRuleChanged (no SceneActivated for a
+        // non-Scene resource). Both are audience-wide (no participant targeted) and record the revealed
+        // resource as their visibility subject, so the recipient resolver can project per-recipient through
+        // the Visibility engine.
         var events = await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId);
-        var sessionEvent = Assert.Single(events);
-        Assert.Equal(SessionEventTypes.ContentRevealed, sessionEvent.EventType);
+        Assert.Equal(2, events.Count);
+        Assert.DoesNotContain(events, e => e.EventType == SessionEventTypes.SceneActivated);
+
+        var sessionEvent = Assert.Single(events, e => e.EventType == SessionEventTypes.ContentRevealed);
         Assert.Equal(seed.SessionId, sessionEvent.SessionId);
         Assert.Null(sessionEvent.TargetParticipantId);
         Assert.Contains(resourceId.ToString(), sessionEvent.Payload, StringComparison.Ordinal);
-
-        // CORE-RT-004: the revealed resource is recorded as the event's visibility subject, so the
-        // recipient resolver can project per-recipient through the Visibility engine.
         Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
         Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
+
+        // CORE-EVT-003: the realtime VisibilityRuleChanged event (distinct from the audit record) carries
+        // the changed resource as its visibility subject and its new state (Visible) in the payload.
+        var ruleChanged = Assert.Single(events, e => e.EventType == SessionEventTypes.VisibilityRuleChanged);
+        Assert.Null(ruleChanged.TargetParticipantId);
+        Assert.Equal("Entity", ruleChanged.VisibilitySubjectType);
+        Assert.Equal(resourceId, ruleChanged.VisibilitySubjectId);
+        Assert.Contains(nameof(VisibilityState.Visible), ruleChanged.Payload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -140,8 +150,9 @@ public sealed class RevealEndpointTests
         // Exactly one rule: the retry produced no duplicate effect.
         Assert.Equal(1, await RuleCountAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.ContentBlock, resourceId));
 
-        // CORE-RT-003: exactly ONE ContentRevealed event — the idempotent retry emitted no second event.
-        Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
+        // CORE-RT-003/CORE-EVT-003: the first reveal emitted its two durable events (ContentRevealed +
+        // VisibilityRuleChanged) and the idempotent retry emitted none, so exactly two events total.
+        Assert.Equal(2, (await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId)).Count);
     }
 
     [Theory]
@@ -336,16 +347,22 @@ public sealed class RevealEndpointTests
         Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, selected, VisibilityResourceType.Entity, resourceId));
         Assert.False(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, other, VisibilityResourceType.Entity, resourceId));
 
-        // CORE-RT-003/004: the ContentRevealed event is routed to the SELECTED participant, so the
-        // recipient resolver delivers it to that participant's group (plus hosts) only — a non-selected
-        // participant is neither in that group nor passes the per-participant visibility gate (verified at
-        // the service level in SessionEventRecipientResolverTests). The revealed resource is recorded as
-        // the event's visibility subject.
-        var sessionEvent = Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
-        Assert.Equal(SessionEventTypes.ContentRevealed, sessionEvent.EventType);
+        // CORE-RT-003/004 + CORE-EVT-003: both durable events (ContentRevealed + VisibilityRuleChanged) are
+        // routed to the SELECTED participant, so the recipient resolver delivers each to that participant's
+        // group (plus hosts) only — a non-selected participant is neither in that group nor passes the
+        // per-participant visibility gate (verified at the service level in SessionEventRecipientResolverTests).
+        // The revealed resource is recorded as each event's visibility subject.
+        var events = await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId);
+        Assert.Equal(2, events.Count);
+        var sessionEvent = Assert.Single(events, e => e.EventType == SessionEventTypes.ContentRevealed);
         Assert.Equal(selected, sessionEvent.TargetParticipantId);
         Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
         Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
+
+        var ruleChanged = Assert.Single(events, e => e.EventType == SessionEventTypes.VisibilityRuleChanged);
+        Assert.Equal(selected, ruleChanged.TargetParticipantId);
+        Assert.Equal("Entity", ruleChanged.VisibilitySubjectType);
+        Assert.Equal(resourceId, ruleChanged.VisibilitySubjectId);
     }
 
     [Fact]
@@ -367,8 +384,11 @@ public sealed class RevealEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        // One durable audience-wide event with the resource recorded as its visibility subject.
-        var sessionEvent = Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
+        // Two durable audience-wide events (ContentRevealed + VisibilityRuleChanged) with the resource
+        // recorded as their visibility subject.
+        var events = await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId);
+        Assert.Equal(2, events.Count);
+        var sessionEvent = Assert.Single(events, e => e.EventType == SessionEventTypes.ContentRevealed);
         Assert.Null(sessionEvent.TargetParticipantId);
         Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
         Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);

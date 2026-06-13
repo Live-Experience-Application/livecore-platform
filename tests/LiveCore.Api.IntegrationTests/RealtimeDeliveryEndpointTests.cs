@@ -67,8 +67,10 @@ public sealed class RealtimeDeliveryEndpointTests
         // The crown jewel: the UNSELECTED participant and the observers receive NOTHING.
         Assert.DoesNotContain(ParticipantGroup(seed.SessionId, unselected), groups);
         Assert.DoesNotContain(ObserversGroup(seed.SessionId), groups);
-        // Exactly those two deliveries — no broadcast leaked beyond them.
-        Assert.Equal(2, groups.Count);
+        // Exactly those two recipient groups — no broadcast leaked beyond them. CORE-EVT-003 makes a reveal
+        // emit two subject-gated events (ContentRevealed + VisibilityRuleChanged) to the SAME recipient
+        // groups, so we assert on the distinct group set.
+        Assert.Equal(2, groups.Distinct().Count());
     }
 
     [Fact]
@@ -91,8 +93,10 @@ public sealed class RealtimeDeliveryEndpointTests
         Assert.Contains(ObserversGroup(seed.SessionId), groups);
         Assert.Contains(ParticipantGroup(seed.SessionId, participantOne), groups);
         Assert.Contains(ParticipantGroup(seed.SessionId, participantTwo), groups);
-        // Exactly hosts + observers + the two active participants.
-        Assert.Equal(4, groups.Count);
+        // Exactly hosts + observers + the two active participants (distinct recipient groups). CORE-EVT-003
+        // makes a reveal emit two subject-gated events (ContentRevealed + VisibilityRuleChanged) to the
+        // SAME recipient groups, so we assert on the distinct group set.
+        Assert.Equal(4, groups.Distinct().Count());
     }
 
     [Fact]

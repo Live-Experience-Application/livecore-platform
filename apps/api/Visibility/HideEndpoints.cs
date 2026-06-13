@@ -40,14 +40,18 @@ namespace LiveCore.Api.Visibility;
 /// hide). Both a first apply and an idempotent retry return 200 — the command is idempotent and both leave
 /// the resource hidden.
 ///
-/// REALTIME EVENT (<c>ContentHidden</c>). When — and only when — a hide actually changes visibility (the
-/// same change signal the audit uses, so a retry or a no-op hide of an already-hidden resource emits
-/// nothing), the command appends a durable <c>ContentHidden</c> event and delivers it. Unlike a reveal,
-/// the hide event carries NO visibility subject: the resource is now hidden, so subject-gated projection
-/// would (correctly, for a reveal) exclude the audience that must be told to remove the resource. Instead
-/// the event is routed by its coarse target — a selected-participant hide reaches only that participant
-/// (plus hosts), an audience-wide hide reaches the observers and every active participant — carrying
-/// resource IDENTIFIERS only, never resolved content (threats T2/T3/T7).
+/// REALTIME EVENTS (<c>ContentHidden</c> + <c>VisibilityRuleChanged</c>). When — and only when — a hide
+/// actually changes visibility (the same change signal the audit uses, so a retry or a no-op hide of an
+/// already-hidden resource emits nothing), the command appends and delivers TWO durable events. The
+/// <c>ContentHidden</c> event carries NO visibility subject: the resource is now hidden, so a subject-gated
+/// projection would (correctly, for a reveal) exclude the audience that must be told to remove the
+/// resource; instead it is routed by its coarse target — a selected-participant hide reaches only that
+/// participant (plus hosts), an audience-wide hide reaches the observers and every active participant. The
+/// <c>VisibilityRuleChanged</c> event (CORE-EVT-003, the security-relevant rule-change event, DISTINCT from
+/// the audit record) CARRIES the resource as its visibility subject, so the recipient resolver gates it to
+/// the HOSTS ONLY (the resource is now hidden, so no participant/observer may receive it) — the host-facing
+/// delivery the catalog documents, with no leakage of a hidden resource. Both carry resource IDENTIFIERS
+/// only, never resolved content (threats T2/T3/T7).
 ///
 /// Tenant resolution + authorization mirror the reveal command (and the session start/end commands)
 /// exactly: the route path carries only <c>{sessionId}</c>, the target organization is the body's
@@ -238,8 +242,9 @@ internal static class HideEndpoints
         // carries resource IDENTIFIERS only, never resolved content (threats T2/T3/T7).
         if (result.VisibilityChanged)
         {
+            var resourceTypeName = result.ResourceType.ToString();
             var payload = JsonSerializer.Serialize(new HideEventPayload(
-                result.ResourceType.ToString(),
+                resourceTypeName,
                 result.ResourceId));
 
             var sessionEvent = SessionEvent.Create(
@@ -254,6 +259,27 @@ internal static class HideEndpoints
                 now);
 
             await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+
+            // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Hidden, so emit the
+            // durable VisibilityRuleChanged session event (the realtime counterpart of the audit record,
+            // DISTINCT from it) reusing the SAME composer as the reveal endpoint. Unlike ContentHidden it
+            // CARRIES the resource as its visibility subject: the resource is now hidden, so the recipient
+            // resolver gates this event to the HOSTS ONLY (a participant/observer cannot see the now-hidden
+            // resource), which is exactly the security-relevant, host-facing delivery the catalog documents
+            // — and no participant ever receives a hidden-resource event (threats T2/T3).
+            await RevealEndpoints.PublishVisibilityRuleChangedAsync(
+                deps.EventPublisher,
+                context.OrganizationId,
+                session.WorkspaceId,
+                sessionGuid,
+                context.UserProfileId,
+                targetParticipantId,
+                resourceTypeName,
+                result.ResourceId,
+                VisibilityState.Hidden,
+                now,
+                cancellationToken)
+                .ConfigureAwait(false);
         }
 
         return Results.Ok(HideResponse.From(result));

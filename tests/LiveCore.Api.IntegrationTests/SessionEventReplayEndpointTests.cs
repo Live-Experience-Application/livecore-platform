@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -63,7 +64,9 @@ public sealed class SessionEventReplayEndpointTests
         var replay = await ReplayAsync(participantOne, scenario.SessionId, participantId: scenario.ParticipantOneId);
 
         var payloads = Payloads(replay);
-        Assert.Equal(2, replay.Events.Count);
+        // CORE-EVT-003: each reveal now emits ContentRevealed AND the subject-gated VisibilityRuleChanged,
+        // both visible to the selected participant, so they replay all four events.
+        Assert.Equal(4, replay.Events.Count);
         Assert.Contains(payloads, payload => payload.Contains(privateResource.ToString(), StringComparison.Ordinal));
         Assert.Contains(payloads, payload => payload.Contains(audienceResource.ToString(), StringComparison.Ordinal));
         // A participant never learns who else a reveal targeted: the audience projection omits the target.
@@ -88,8 +91,10 @@ public sealed class SessionEventReplayEndpointTests
         var replay = await ReplayAsync(participantTwo, scenario.SessionId, participantId: scenario.ParticipantTwoId);
 
         var payloads = Payloads(replay);
-        var item = Assert.Single(replay.Events);
-        Assert.Contains(audienceResource.ToString(), item.Payload, StringComparison.Ordinal);
+        // CORE-EVT-003: the unselected participant replays the audience reveal's two events (ContentRevealed
+        // + VisibilityRuleChanged) but NEVER the private reveal's events — the crown jewel, threat T3.
+        Assert.Equal(2, replay.Events.Count);
+        Assert.All(replay.Events, item => Assert.Contains(audienceResource.ToString(), item.Payload, StringComparison.Ordinal));
         Assert.DoesNotContain(payloads, payload => payload.Contains(privateResource.ToString(), StringComparison.Ordinal));
     }
 
@@ -107,14 +112,19 @@ public sealed class SessionEventReplayEndpointTests
 
         var replay = await ReplayAsync(host, scenario.SessionId);
 
-        Assert.Equal(2, replay.Events.Count);
-        var privateItem = replay.Events.Single(item => item.Payload.Contains(privateResource.ToString(), StringComparison.Ordinal));
-        var audienceItem = replay.Events.Single(item => item.Payload.Contains(audienceResource.ToString(), StringComparison.Ordinal));
+        // CORE-EVT-003: the host replays every event — each reveal's ContentRevealed and VisibilityRuleChanged.
+        Assert.Equal(4, replay.Events.Count);
 
-        // The host projection carries the "to whom" confirmation on the private reveal, and none on the
-        // audience-wide reveal (docs/09 "host receives audit/confirmation event").
-        Assert.Equal(scenario.ParticipantOneId, privateItem.TargetParticipantId);
-        Assert.Null(audienceItem.TargetParticipantId);
+        // The host projection carries the "to whom" confirmation on the private reveal's ContentRevealed,
+        // and none on the audience-wide reveal's (docs/09 "host receives audit/confirmation event").
+        var privateRevealed = replay.Events.Single(
+            item => item.EventType == SessionEventTypes.ContentRevealed
+                && item.Payload.Contains(privateResource.ToString(), StringComparison.Ordinal));
+        var audienceRevealed = replay.Events.Single(
+            item => item.EventType == SessionEventTypes.ContentRevealed
+                && item.Payload.Contains(audienceResource.ToString(), StringComparison.Ordinal));
+        Assert.Equal(scenario.ParticipantOneId, privateRevealed.TargetParticipantId);
+        Assert.Null(audienceRevealed.TargetParticipantId);
     }
 
     [Fact]
@@ -128,14 +138,17 @@ public sealed class SessionEventReplayEndpointTests
         await RevealToAudienceAsync(host, scenario.SessionId, Guid.CreateVersion7(), "k-2");
 
         var full = await ReplayAsync(host, scenario.SessionId);
-        Assert.Equal(2, full.Events.Count);
+        // CORE-EVT-003: each audience reveal emits ContentRevealed + VisibilityRuleChanged, so two reveals
+        // append four events.
+        Assert.Equal(4, full.Events.Count);
 
-        // Acknowledge the first event (whichever sorts first in append order) and replay after it.
+        // Acknowledge the first event (whichever sorts first in append order) and replay after it: only the
+        // three later events come back, in order.
         var cursor = full.Events[0].EventId;
         var tail = await ReplayAsync(host, scenario.SessionId, afterEventId: cursor);
 
-        var item = Assert.Single(tail.Events);
-        Assert.Equal(full.Events[1].EventId, item.EventId);
+        Assert.Equal(3, tail.Events.Count);
+        Assert.Equal(full.Events[1].EventId, tail.Events[0].EventId);
     }
 
     [Fact]

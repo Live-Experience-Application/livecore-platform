@@ -100,11 +100,14 @@ public sealed class HideEndpointTests
         Assert.Equal(nameof(VisibilityState.Visible), hideEntry.PreviousState);
         Assert.Equal(await SingleHostProfileIdAsync(factory), hideEntry.ActorUserProfileId);
 
-        // A durable ContentHidden event is appended alongside the ContentRevealed one. It is audience-wide
-        // (no target) and carries NO visibility subject, so the recipient resolver delivers it to the
-        // observers and every active participant by coarse routing (not gated on the now-hidden resource).
+        // CORE-EVT-003: the reveal appended ContentRevealed + VisibilityRuleChanged(Visible); the hide
+        // appends ContentHidden + VisibilityRuleChanged(Hidden) — four events total. The ContentHidden is
+        // audience-wide (no target) and carries NO visibility subject, so the recipient resolver delivers it
+        // to the observers and every active participant by coarse routing (not gated on the now-hidden
+        // resource). The hide's VisibilityRuleChanged, by contrast, DOES carry the now-hidden subject, so it
+        // is gated to the hosts only — a participant never receives a hidden-resource event.
         var events = await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId);
-        Assert.Equal(2, events.Count);
+        Assert.Equal(4, events.Count);
         Assert.Contains(events, e => e.EventType == SessionEventTypes.ContentRevealed);
         var hideEvent = Assert.Single(events, e => e.EventType == SessionEventTypes.ContentHidden);
         Assert.Equal(seed.SessionId, hideEvent.SessionId);
@@ -112,6 +115,14 @@ public sealed class HideEndpointTests
         Assert.Contains(resourceId.ToString(), hideEvent.Payload, StringComparison.Ordinal);
         Assert.Null(hideEvent.VisibilitySubjectType);
         Assert.Null(hideEvent.VisibilitySubjectId);
+
+        var ruleHidden = Assert.Single(
+            events,
+            e => e.EventType == SessionEventTypes.VisibilityRuleChanged
+                && e.Payload.Contains(nameof(VisibilityState.Hidden), StringComparison.Ordinal));
+        Assert.Equal("Entity", ruleHidden.VisibilitySubjectType);
+        Assert.Equal(resourceId, ruleHidden.VisibilitySubjectId);
+        Assert.Null(ruleHidden.TargetParticipantId);
     }
 
     [Fact]
@@ -174,8 +185,9 @@ public sealed class HideEndpointTests
         Assert.Equal(1, await RuleCountAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.ContentBlock, resourceId));
         Assert.False(await ResourceVisibleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.ContentBlock, resourceId));
 
-        // Exactly ONE ContentHidden event — the idempotent retry emitted no second event; one audit too.
-        Assert.Single(await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId));
+        // The first hide emitted its two durable events (ContentHidden + VisibilityRuleChanged) and the
+        // idempotent retry emitted none, so exactly two events total; one audit record too.
+        Assert.Equal(2, (await SessionEventsAsync(factory, seed.OrganizationId, seed.SessionId)).Count);
         Assert.Single(await ListAuditAsync(factory, seed.OrganizationId));
     }
 

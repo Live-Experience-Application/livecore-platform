@@ -826,6 +826,37 @@ hide reaches only that participant (plus hosts), an audience-wide hide reaches t
 observers and every active participant — carrying resource **identifiers only**,
 never resolved content.
 
+### Scene and content lifecycle session events
+
+Activating a scene and changing a resource's visibility now surface as the documented
+session events so a reconnecting client can reconstruct state (CORE-EVT-003). Two catalog
+events (`docs/09_EVENT_CATALOG.md`) existed but were never emitted; this story wires them onto
+the **existing** reveal/hide commands — on (and only on) a real visibility change, the same
+change signal the audit record and the `ContentRevealed`/`ContentHidden` events already use, so
+a retry or a no-op emits nothing:
+
+- **`SceneActivated`** — emitted when a reveal makes a `Scene` visible. There is no separate
+  active-scene command, so revealing a scene to the audience **is** the documented "scene
+  switch". The payload carries the scene **id** only.
+- **`VisibilityRuleChanged`** — emitted on every reveal **and** hide that actually changes a
+  rule, carrying the resource identifiers and the new visibility **state** name. This is the
+  realtime session event, **distinct from** the append-only `VisibilityRuleChanged` audit record
+  the same command writes (one is live-state delivery, the other a security record).
+
+Each new event **concerns a governed resource**, so it carries that resource as its **visibility
+subject** and is delivered through the **reused** `ISessionEventPublisher` + `SessionEventRecipientResolver`
+projection (CORE-RT-004) — the Realtime module stays the sole owner of delivery; this flow adds
+no parallel routing. The resolver **gates** each event through the central Visibility engine: the
+session hosts always receive it (host-content roles see everything) and the audience receives it
+only when they may see the resource. So an audience-wide `SceneActivated` reaches the hosts and
+every recipient who may see the scene (the "authorized session audience"), a selected scene reveal
+reaches only that one participant (plus hosts), and a `VisibilityRuleChanged` for a **hide** —
+whose subject is now hidden — reaches the **hosts only**, the security-relevant host-facing case.
+A participant for whom a resource is hidden **never** receives an event about it: there is **no
+leakage of hidden resources** (threats T2/T3), and reconnect replay re-applies the same gate.
+The payloads are server-composed **identifiers and state names only**, never resolved content
+(threat T7).
+
 ### Audit log
 
 The Audit module owns the tenant-scoped, append-only `audit_logs` table (the

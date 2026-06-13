@@ -28,11 +28,18 @@ namespace LiveCore.Api.Visibility;
 /// (<see cref="RevealService"/>, reusing the CORE-VIS-001 aggregate) and, when that actually changes the
 /// visibility, appends an append-only AUDIT record (CORE-VIS-006) capturing the authenticated actor (the
 /// resolved tenant context's user profile id), the resource, the optional selected-participant target and
-/// the before/after state. The durable realtime EVENT, by contrast, IS DEFERRED to the Realtime epic
-/// exactly as CORE-SES-004 deferred SessionStarted/SessionEnded: the
-/// <c>ContentRevealed</c>/<c>VisibilityRuleChanged</c> session events (docs/09_EVENT_CATALOG.md) and
-/// their delivery are CORE-RT-003, and the <c>session_events</c> table is Realtime-owned. The persisted
-/// visibility change and its audit record are the behavior delivered here.
+/// the before/after state.
+///
+/// REALTIME EVENTS. On the SAME change signal (and only on a real change, so a retry or a no-op reveal of
+/// an already-visible resource emits nothing) the endpoint emits the durable session events through
+/// <see cref="ISessionEventPublisher"/>: <c>ContentRevealed</c> (CORE-RT-003, the central participant-facing
+/// event) and — completing the catalog — <c>VisibilityRuleChanged</c> and, for a Scene, <c>SceneActivated</c>
+/// (CORE-EVT-003). Each of these CONCERNS A GOVERNED RESOURCE, so it carries the revealed resource as its
+/// VISIBILITY SUBJECT and the recipient resolver gates delivery through the central Visibility engine — the
+/// hosts always receive it and the audience only when they may see the resource — so no recipient ever gets
+/// an event about a resource they may not see (threats T2/T3). The events carry resource IDENTIFIERS only,
+/// never resolved content (threat T7). The <c>VisibilityRuleChanged</c> session event is DISTINCT from the
+/// audit record above (one is realtime live-state, the other an append-only security record).
 ///
 /// IDEMPOTENCY (docs/08_API_CONTRACTS.md). A client-supplied <c>Idempotency-Key</c> request HEADER is
 /// REQUIRED; a repeated reveal with the same key does not apply a second effect
@@ -261,9 +268,95 @@ internal static class RevealEndpoints
                 visibilitySubjectId: result.ResourceId);
 
             await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+
+            // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Visible, so emit the
+            // durable VisibilityRuleChanged session event — the realtime counterpart of the audit record
+            // (CORE-VIS-006), DISTINCT from it. It carries the changed resource as its visibility subject
+            // so the recipient resolver gates it: the hosts always receive it and the audience receives it
+            // only insofar as they may now see the resource (a non-selected participant who cannot see it
+            // never does; threats T2/T3). The payload carries identifiers + the new state name only (T7).
+            await PublishVisibilityRuleChangedAsync(
+                deps.EventPublisher,
+                context.OrganizationId,
+                session.WorkspaceId,
+                sessionGuid,
+                context.UserProfileId,
+                targetParticipantId,
+                resourceTypeName,
+                result.ResourceId,
+                VisibilityState.Visible,
+                now,
+                cancellationToken)
+                .ConfigureAwait(false);
+
+            // SCENE-ACTIVATED EVENT (CORE-EVT-003): revealing a Scene to the audience IS the documented
+            // "scene switch" (there is no separate active-scene command), so a Scene reveal additionally
+            // emits SceneActivated. Like the events above it carries the activated scene as its visibility
+            // subject, so the resolver delivers it only to the authorized session audience (the hosts plus
+            // every recipient who may see the scene) — no leakage of a scene a participant cannot see.
+            if (result.ResourceType == VisibilityResourceType.Scene)
+            {
+                var sceneActivatedPayload = JsonSerializer.Serialize(new SceneActivatedEventPayload(result.ResourceId));
+                var sceneActivated = SessionEvent.Create(
+                    context.OrganizationId,
+                    session.WorkspaceId,
+                    sessionGuid,
+                    SessionEventTypes.SceneActivated,
+                    context.UserProfileId,
+                    targetParticipantId,
+                    sceneActivatedPayload,
+                    schemaVersion: 1,
+                    now,
+                    visibilitySubjectType: resourceTypeName,
+                    visibilitySubjectId: result.ResourceId);
+
+                await deps.EventPublisher.PublishAsync(sceneActivated, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return Results.Ok(RevealResponse.From(result));
+    }
+
+    /// <summary>
+    /// Appends and delivers the durable <c>VisibilityRuleChanged</c> session event (CORE-EVT-003) for a
+    /// reveal/hide that actually changed a rule. Shared by the reveal and hide endpoints (the hide endpoint
+    /// passes <see cref="VisibilityState.Hidden"/>) so the rule-change event is composed identically for
+    /// both directions. The event records the changed resource as its visibility SUBJECT (so the recipient
+    /// resolver gates it through the central Visibility engine) and the new visibility state in its
+    /// identifier-only payload.
+    /// </summary>
+    internal static async Task PublishVisibilityRuleChangedAsync(
+        ISessionEventPublisher publisher,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Guid actorUserProfileId,
+        Guid? targetParticipantId,
+        string resourceTypeName,
+        Guid resourceId,
+        VisibilityState newState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new VisibilityRuleChangedEventPayload(
+            resourceTypeName,
+            resourceId,
+            newState.ToString()));
+
+        var sessionEvent = SessionEvent.Create(
+            organizationId,
+            workspaceId,
+            sessionId,
+            SessionEventTypes.VisibilityRuleChanged,
+            actorUserProfileId,
+            targetParticipantId,
+            payload,
+            schemaVersion: 1,
+            now,
+            visibilitySubjectType: resourceTypeName,
+            visibilitySubjectId: resourceId);
+
+        await publisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -271,6 +364,19 @@ internal static class RevealEndpoints
     /// revealed resource. Identifiers only — never the resolved content (threat T7).
     /// </summary>
     private sealed record RevealEventPayload(string ResourceType, Guid ResourceId);
+
+    /// <summary>
+    /// The server-composed payload of a <c>VisibilityRuleChanged</c> event: the changed resource's generic
+    /// kind and id plus the new visibility STATE name (e.g. <c>Visible</c>/<c>Hidden</c>). Identifiers and
+    /// a state name only — never resolved content (threat T7).
+    /// </summary>
+    private sealed record VisibilityRuleChangedEventPayload(string ResourceType, Guid ResourceId, string Visibility);
+
+    /// <summary>
+    /// The server-composed payload of a <c>SceneActivated</c> event: the id of the activated scene.
+    /// Identifier only — never resolved content (threat T7).
+    /// </summary>
+    private sealed record SceneActivatedEventPayload(Guid SceneId);
 
     /// <summary>
     /// Reads the required <c>Idempotency-Key</c> header. Returns <see langword="false"/> when it is

@@ -56,6 +56,37 @@ public static class SessionEventTypes
     public const string ParticipantLeft = "ParticipantLeft";
 
     /// <summary>
+    /// A host activated a scene — the "scene switch" (docs/09_EVENT_CATALOG.md: "SceneActivated |
+    /// Host/CoHost | authorized session audience | yes | scene switch"). Emitted by the reveal command
+    /// (CORE-EVT-003) when a reveal actually makes a <see cref="LiveCore.Api.Visibility.VisibilityResourceType.Scene"/>
+    /// visible — there is no separate active-scene command, so revealing a scene to the audience IS the
+    /// scene switch. Unlike the subjectless lifecycle events (<see cref="SessionStarted"/>) this event
+    /// CONCERNS A GOVERNED RESOURCE, so it carries the activated scene as its VISIBILITY SUBJECT (the
+    /// (Scene, id) pair, CORE-RT-004): the recipient resolver gates it through the central Visibility
+    /// engine, delivering it to the hosts and to exactly the audience that may see the scene, so a
+    /// participant for whom the scene is hidden never receives the activation (threats T2/T3). The payload
+    /// carries the scene IDENTIFIER only, never resolved content (threat T7).
+    /// </summary>
+    public const string SceneActivated = "SceneActivated";
+
+    /// <summary>
+    /// A host changed a resource's visibility rule — the security-relevant rule-change event
+    /// (docs/09_EVENT_CATALOG.md: "VisibilityRuleChanged | Host/CoHost | Host/CoHost/Auditor | yes |
+    /// security relevant"). Emitted by the reveal AND hide commands (CORE-EVT-003) whenever a command
+    /// actually changes a rule's visibility — the same change signal the append-only audit record uses
+    /// (CORE-VIS-006), but this is the durable REALTIME session event, DISTINCT from that audit record.
+    /// It CONCERNS A GOVERNED RESOURCE, so it carries the changed resource as its VISIBILITY SUBJECT (the
+    /// (resource kind, id) pair, CORE-RT-004) and the recipient resolver gates it through the central
+    /// Visibility engine: the hosts always receive it (host-content roles see everything), and the
+    /// audience receives it only when the rule's NEW state lets them see the resource. So a HIDE (the
+    /// resource is now hidden) reaches ONLY the hosts — the security-relevant, host-facing case — and a
+    /// REVEAL additionally reaches the audience that may now see it; a participant for whom the resource is
+    /// hidden never receives the event (no leakage of hidden resources, threats T2/T3). The payload carries
+    /// the resource IDENTIFIERS and the new visibility STATE name only, never resolved content (threat T7).
+    /// </summary>
+    public const string VisibilityRuleChanged = "VisibilityRuleChanged";
+
+    /// <summary>
     /// A host revealed a resource to the audience or to a selected participant — the central
     /// participant-facing event (docs/09_EVENT_CATALOG.md: "ContentRevealed | Host/CoHost | selected
     /// recipients | yes | central event"). Emitted by the reveal command (CORE-VIS-004/005) when a
