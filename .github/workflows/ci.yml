@@ -6,16 +6,23 @@
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
+#   publish-dry-run      - verify image tags + dry-run build the publish path, no push (CORE-OPS-009)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002)
+#   publish              - push immutable, versioned images on a release tag only (CORE-OPS-009)
 #
-# No deployment, no registry push, no product features: foundation quality
-# gates only.
+# Every push and pull request runs the quality gates only. The publish job runs
+# only on a release tag push ('v<MAJOR>.<MINOR>.<PATCH>') and only after every
+# gate passes, so a registry push never happens on a pull request or a branch.
 name: CI
 
 on:
   push:
     branches: [main]
+    # Release tags publish versioned container images (CORE-OPS-009). The same
+    # push also runs every quality gate below; the publish job is gated on them.
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
   pull_request:
 
 permissions:
@@ -129,6 +136,43 @@ jobs:
       - name: Clean up smoke test containers
         if: always()
         run: docker rm --force livecore-api-smoke livecore-worker-smoke || true
+
+  publish-dry-run:
+    name: Publish dry-run (tags verified, images built, never pushed)
+    runs-on: ubuntu-latest
+    # CORE-OPS-009: proves the publish path on every push and pull request
+    # without ever pushing. It verifies the tag derivation (immutable, versioned,
+    # fail-closed off a release tag) and, when this is not a release tag, builds
+    # the images with the derived reference to dry-run the publish build. On a
+    # release tag the build steps are skipped because the real publish job runs.
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify image tags are immutable and versioned
+        shell: pwsh
+        run: ./scripts/test-image-tags.ps1
+
+      - name: Derive a release-shaped reference for the dry-run build
+        id: tags
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: pwsh
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          DRY_RUN_REF: refs/tags/v0.0.0-cidryrun
+        run: ./scripts/derive-image-tags.ps1 -Ref $env:DRY_RUN_REF -Registry $env:REGISTRY -Owner $env:REPOSITORY_OWNER -OutputPath $env:GITHUB_OUTPUT
+
+      - name: Dry-run build the API and worker images (built, never pushed)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
+          docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
+          echo "Dry-run built $API_REFERENCE and $WORKER_REFERENCE; this job never logs in or pushes."
 
   powershell-lint:
     name: PowerShell script analysis
@@ -253,3 +297,77 @@ jobs:
 
       - name: Run integration suite against PostgreSQL
         run: dotnet test tests/LiveCore.Api.IntegrationTests/LiveCore.Api.IntegrationTests.csproj
+
+  publish:
+    name: Publish versioned container images
+    runs-on: ubuntu-latest
+    # CORE-OPS-009: publish only on a release tag push (never on a pull request
+    # or a branch push), and only after every quality gate above has passed, so
+    # an image is pushed only from a green, immutable, versioned release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - dotnet
+      - typescript
+      - boundary-scan
+      - powershell-lint
+      - docker
+      - publish-dry-run
+      - migrations
+      - integration-postgres
+    permissions:
+      # Least privilege: only this job may write packages; everything else keeps
+      # the read-only top-level token. The GITHUB_TOKEN pushes to this repo's
+      # GitHub Container Registry namespace - no registry credential is stored.
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive immutable, versioned image references
+        id: tags
+        shell: pwsh
+        env:
+          GIT_REF: ${{ github.ref }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: ./scripts/derive-image-tags.ps1 -Ref $env:GIT_REF -Registry $env:REGISTRY -Owner $env:REPOSITORY_OWNER -OutputPath $env:GITHUB_OUTPUT
+
+      - name: Log in to the container registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
+
+      - name: Build and push the versioned API and worker images
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          # Immutability guard: a release version is cut once, so an already
+          # published tag must never be overwritten. Refuse to push when the tag
+          # already exists in the registry rather than mutating a shipped image.
+          for reference in "$API_REFERENCE" "$WORKER_REFERENCE"; do
+            if docker manifest inspect "$reference" > /dev/null 2>&1; then
+              echo "Refusing to overwrite an already-published immutable tag: $reference"
+              exit 1
+            fi
+          done
+          docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
+          docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
+          docker push "$API_REFERENCE"
+          docker push "$WORKER_REFERENCE"
+
+      - name: Summarize the published images
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          {
+            echo "### Published container images"
+            echo ""
+            echo "- \`$API_REFERENCE\`"
+            echo "- \`$WORKER_REFERENCE\`"
+          } >> "$GITHUB_STEP_SUMMARY"

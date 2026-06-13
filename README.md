@@ -64,7 +64,10 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds)
+.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds; pushes versioned images on a release tag)
+scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
+scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
+scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
 .dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
@@ -2482,21 +2485,63 @@ Local development orchestration (Compose with database, auth and storage
 services) lives in `livecore-deploy`, not in this repository (see
 `docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
+### Publishing release images (CORE-OPS-009)
+
+CI publishes the API and worker images to the GitHub Container Registry
+(`ghcr.io`) **only on a release tag push** — never on a pull request or a branch
+push, so an unreviewed or in-progress build is never published. Cut a release by
+pushing an annotated SemVer tag (the same version the packages use, see
+`docs/23_PACKAGE_VERSIONING.md`):
+
+```bash
+git tag -a v1.2.3 -m "Core v1.2.3"
+git push origin v1.2.3
+```
+
+The tag push runs **every** quality gate (build, tests, format, boundary scan,
+the container builds/smoke tests, migrations and the integration suite), and the
+`publish` job runs only after they all pass. The published image references are
+**immutable and versioned** — the image tag is the exact release version, never a
+moving tag such as `latest`:
+
+```text
+ghcr.io/<owner>/livecore-api:1.2.3
+ghcr.io/<owner>/livecore-worker:1.2.3
+```
+
+The tag derivation (`scripts/LiveCoreImageTags.psm1`, driven by
+`scripts/derive-image-tags.ps1`) is fail-closed: only a `v<MAJOR>.<MINOR>.<PATCH>`
+SemVer tag (optionally a prerelease) yields a reference; a branch, a pull
+request, a moving tag (`latest`) or a malformed/build-metadata tag is rejected,
+so the publish path can never produce a mutable or unversioned image tag. Before
+pushing, the job refuses to overwrite a tag that already exists in the registry,
+so a shipped version is never mutated. No registry credential is stored: the job
+authenticates with the workflow's `GITHUB_TOKEN` (granted `packages: write` only
+for that job). `scripts/test-image-tags.ps1` tests these properties and the
+`publish-dry-run` job exercises the same derivation and build on every push and
+pull request without pushing.
+
 ## Continuous integration
 
-GitHub Actions runs `.github/workflows/ci.yml` on every push to `main` and on
-every pull request. All jobs run on `ubuntu-latest` and execute the commands
-documented above verbatim:
+GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
+pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
+run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job               | What it runs                                                                                     |
-| ----------------- | ------------------------------------------------------------------------------------------------ |
-| `dotnet`          | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`            |
-| `typescript`      | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`           |
-| `boundary-scan`   | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)      |
-| `powershell-lint` | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                   |
-| `docker`          | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup) |
+| Job                    | What it runs                                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| `dotnet`               | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                    |
+| `typescript`           | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                   |
+| `boundary-scan`        | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)              |
+| `powershell-lint`      | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                           |
+| `docker`               | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)         |
+| `publish-dry-run`      | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)          |
+| `migrations`           | builds the migrations runner image and applies all migrations to an empty Postgres                       |
+| `integration-postgres` | model-vs-migration drift gate, then the integration suite against a real Postgres                        |
+| `publish`              | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass |
 
-Line endings are normalized to LF in the repository via `.gitattributes`, so
+The `publish` job runs **only on a release tag** and **only after every other job
+passes**; pull requests and branch pushes never reach it, so a registry push never
+happens off a release (CORE-OPS-009). Line endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
 

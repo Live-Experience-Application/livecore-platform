@@ -455,3 +455,49 @@ environment:
   so orchestration never routes traffic at it. The one **hard fail-to-start** case is the security foot-gun where
   an `Authority` is configured but the `Audience` is blank (audience validation silently disabled), which the
   audience guard refuses outright (CORE-OPS-004).
+
+## Release container images (CORE-OPS-009)
+
+A deployment runs the published API and worker images rather than building them on the host. CI publishes them to
+the **GitHub Container Registry** (`ghcr.io`) on a release, so a self-hoster pulls a known, immutable version:
+
+```text
+ghcr.io/<owner>/livecore-api:<version>
+ghcr.io/<owner>/livecore-worker:<version>
+```
+
+(The one-shot **migrations runner image** of `apps/api/Migrations.Dockerfile` is built from the same source at the
+same release version; see "Database migrations" above for how a rollout gates the API on it.)
+
+### How a release is published
+
+Publishing is triggered **only by a release tag push** — never by a pull request or a branch push, so an
+unreviewed or in-progress build is never published. The release tag is a SemVer tag matching the package version
+(`docs/23_PACKAGE_VERSIONING.md`):
+
+```bash
+git tag -a v1.2.3 -m "Core v1.2.3"
+git push origin v1.2.3
+```
+
+The tag push runs **every** quality gate (build, tests, format/code-style, the boundary scan, the container
+builds/smoke tests, the migrations apply and the integration suite). The `publish` job
+(`.github/workflows/ci.yml`) runs **only after all of them pass**, so an image is pushed only from a green build.
+It needs no stored registry credential: it authenticates with the workflow's `GITHUB_TOKEN`, which is granted
+`packages: write` **for that job only** (the rest of the pipeline keeps a read-only token).
+
+### Immutable, versioned tags
+
+The image tag is the **exact release version** (for example `1.2.3`, or a `1.2.3-rc.1` prerelease) — never a moving
+tag such as `latest`. The derivation (`scripts/LiveCoreImageTags.psm1`, run through `scripts/derive-image-tags.ps1`)
+is **fail-closed**: only a `v<MAJOR>.<MINOR>.<PATCH>` SemVer tag yields a reference; a branch, a pull request, a
+moving tag (`latest`), or a malformed/build-metadata tag is rejected, so the publish path can never produce a
+mutable or unversioned tag. Before pushing, the job **refuses to overwrite a tag that already exists** in the
+registry, so a shipped version is never silently mutated — a re-publish of an existing version fails the build
+instead. Because the tags are immutable and version-pinned, a deployment that references
+`ghcr.io/<owner>/livecore-api:1.2.3` always resolves the same image, and a pin to the image **digest**
+(`...@sha256:...`, reported on the registry) is exact.
+
+`scripts/test-image-tags.ps1` tests these properties (immutable, versioned, fail-closed off a release tag), and the
+`publish-dry-run` CI job exercises the same derivation and build on every push and pull request **without
+pushing**, so the publish path is verified continuously, not only at release time.
