@@ -3,11 +3,30 @@ namespace LiveCore.Api.Realtime;
 /// <summary>
 /// The Core-level catalog of session event type names (CORE-RT-003), the product-neutral
 /// <c>eventType</c> values of docs/09_EVENT_CATALOG.md. Names are generic Core events, never vertical
-/// terms. Extensible: later stories add members as their commands begin emitting events (the
-/// <c>SessionStarted</c>/<c>SessionEnded</c> deferred by CORE-SES-004 and the other catalog events).
+/// terms. Extensible: later stories add members as their commands begin emitting events (the start/end
+/// lifecycle events were wired by CORE-EVT-001; the remaining catalog events follow).
 /// </summary>
 public static class SessionEventTypes
 {
+    /// <summary>
+    /// A session moved from <c>Prepared</c> to <c>Live</c> — the Sessions module's start command
+    /// (docs/09_EVENT_CATALOG.md: "SessionStarted | Host/CoHost | session audience | yes | starts live
+    /// timeline"). Emitted by the start endpoint (CORE-EVT-001) when a session actually starts. Unlike
+    /// <see cref="ContentRevealed"/> this is a SUBJECTLESS audience event (no visibility subject, no
+    /// selected participant), so the recipient resolver delivers it unconditionally to the session hosts,
+    /// the observers and every active participant — the whole session audience.
+    /// </summary>
+    public const string SessionStarted = "SessionStarted";
+
+    /// <summary>
+    /// A session moved from <c>Live</c> to <c>Ended</c> — the Sessions module's end command
+    /// (docs/09_EVENT_CATALOG.md: "SessionEnded | Host/CoHost | session audience | yes | ends live
+    /// timeline"). Emitted by the end endpoint (CORE-EVT-001) when a session actually ends. Like
+    /// <see cref="SessionStarted"/> it is a subjectless audience event delivered to the whole session
+    /// audience.
+    /// </summary>
+    public const string SessionEnded = "SessionEnded";
+
     /// <summary>
     /// A host revealed a resource to the audience or to a selected participant — the central
     /// participant-facing event (docs/09_EVENT_CATALOG.md: "ContentRevealed | Host/CoHost | selected

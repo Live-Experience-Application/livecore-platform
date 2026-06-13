@@ -373,6 +373,90 @@ public sealed class AuditLogEntryTests
         Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
     }
 
+    // --- Session start / end lifecycle transitions (CORE-EVT-001) --------------
+
+    [Fact]
+    public void ForSessionStart_sets_the_action_resource_and_prepared_to_live_transition()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var session = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForSessionStart(
+            org, ws, actor, "Session", session,
+            previousState: "Prepared", newState: "Live", createdAt: _now);
+
+        Assert.Equal(AuditAction.SessionStarted, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        // The session is both the scope (workspace) and the governed resource (its id).
+        Assert.Equal("Session", entry.ResourceType);
+        Assert.Equal(session, entry.ResourceId);
+        // A start is a surviving STATE TRANSITION, so it records before/after status names.
+        Assert.Equal("Prepared", entry.PreviousState);
+        Assert.Equal("Live", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForSessionEnd_sets_the_action_resource_and_live_to_ended_transition()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var session = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForSessionEnd(
+            org, ws, actor, "Session", session,
+            previousState: "Live", newState: "Ended", createdAt: _now);
+
+        Assert.Equal(AuditAction.SessionEnded, entry.Action);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        Assert.Equal("Session", entry.ResourceType);
+        Assert.Equal(session, entry.ResourceId);
+        Assert.Equal("Live", entry.PreviousState);
+        Assert.Equal("Ended", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+    }
+
+    [Fact]
+    public void ForSessionStart_rejects_an_empty_workspace()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionStart(
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), "Session", Guid.NewGuid(),
+            "Prepared", "Live", _now));
+
+    [Fact]
+    public void ForSessionStart_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionStart(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, "Session", Guid.NewGuid(),
+            "Prepared", "Live", _now));
+
+    [Fact]
+    public void ForSessionStart_rejects_an_empty_session_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionStart(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.Empty,
+            "Prepared", "Live", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForSessionStart_rejects_a_blank_previous_state(string previousState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionStart(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
+            previousState, "Live", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForSessionEnd_rejects_a_blank_new_state(string newState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForSessionEnd(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
+            "Live", newState, _now));
+
     [Fact]
     public void ToString_of_a_generic_entry_renders_absent_parts()
     {

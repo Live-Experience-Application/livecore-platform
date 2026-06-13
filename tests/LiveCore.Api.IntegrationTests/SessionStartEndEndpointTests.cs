@@ -24,9 +24,10 @@ namespace LiveCore.Api.IntegrationTests;
 ///   <item>LIFECYCLE: a Prepared session starts (200, Live, StartedAt set); a Live
 ///   session ends (200, Ended, EndedAt set); every out-of-state command is a 409
 ///   Conflict (start Live, start Ended, end Prepared, end Ended) and leaves the
-///   persisted status UNCHANGED. The state machine's 409-on-invalid-transition is
-///   the authoritative behavior; durable SessionStarted/SessionEnded events are
-///   deferred to the Realtime epic and are NOT asserted here.</item>
+///   persisted status UNCHANGED. This file pins the persisted status machine and the
+///   authorization model; the durable SessionStarted/SessionEnded events and audit
+///   records these commands now emit (CORE-EVT-001) are asserted in
+///   <see cref="SessionLifecycleEventEmissionEndpointTests"/>.</item>
 ///   <item>AUTHORIZATION + ISOLATION: 401 unauthenticated; the full seven-role
 ///   WORKSPACE-membership sweep on BOTH routes (allowed {Owner, Admin, Host,
 ///   CoHost} vs denied {Participant, Observer, Auditor} -> 403, every denial

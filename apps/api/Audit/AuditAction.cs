@@ -36,19 +36,23 @@ public enum AuditAction
     VisibilityRuleChanged = 1,
 
     /// <summary>
-    /// A session moved from <c>Prepared</c> to <c>Live</c> — the Sessions module's start command
-    /// (CORE-SES-004). The security-relevant <c>SessionStarted</c> event of docs/09_EVENT_CATALOG.md
-    /// ("starts live timeline"), recordable as a generic audit fact: a workspace-scoped action with no
-    /// governed resource and no before/after visibility state (the session status transition is the
-    /// session's own authoritative state, not an audit state pair).
+    /// A session moved from <c>Prepared</c> to <c>Live</c> — the Sessions module's start command, wired as
+    /// a producer by CORE-EVT-001. The security-relevant <c>SessionStarted</c> event of
+    /// docs/09_EVENT_CATALOG.md ("starts live timeline"). Like <see cref="SessionCancelled"/> it records a
+    /// real STATE TRANSITION (the session survives), so the entry carries the before/after status NAMES
+    /// (<c>Prepared</c> -&gt; <c>Live</c>), the session as the governed resource and the host who started
+    /// it as the actor — a generic, workspace-scoped audit fact
+    /// (<see cref="AuditLogEntry.ForSessionStart"/>).
     /// </summary>
     SessionStarted = 2,
 
     /// <summary>
-    /// A session moved from <c>Live</c> to <c>Ended</c> — the Sessions module's end command
-    /// (CORE-SES-004). The security-relevant <c>SessionEnded</c> event of docs/09_EVENT_CATALOG.md
-    /// ("ends live timeline"), recordable as a generic, workspace-scoped audit fact with no governed
-    /// resource and no state pair.
+    /// A session moved from <c>Live</c> to <c>Ended</c> — the Sessions module's end command, wired as a
+    /// producer by CORE-EVT-001. The security-relevant <c>SessionEnded</c> event of
+    /// docs/09_EVENT_CATALOG.md ("ends live timeline"). Like <see cref="SessionStarted"/> it records the
+    /// before/after status NAMES (<c>Live</c> -&gt; <c>Ended</c>), the session as the governed resource and
+    /// the host who ended it as the actor — a generic, workspace-scoped audit fact
+    /// (<see cref="AuditLogEntry.ForSessionEnd"/>).
     /// </summary>
     SessionEnded = 3,
 

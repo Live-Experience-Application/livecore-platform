@@ -376,6 +376,155 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a session start (<see cref="AuditAction.SessionStarted"/>) — the audit fact written when an
+    /// authorized host starts a session, opening its live timeline (CORE-EVT-001). It is the start
+    /// counterpart of <see cref="ForSessionCancellation"/> and, like it, a thin specialization of
+    /// <see cref="Create"/> that pins the action and applies the lifecycle producer's stricter contract: the
+    /// tenant, the workspace the session belongs to, the authenticated actor (the host who started the
+    /// session) and the started session resource (its generic kind name and surrogate id) are all REQUIRED,
+    /// where the generic factory leaves them optional. A start is a real STATE TRANSITION (the session
+    /// survives), so it records the before/after status NAMES (e.g. <c>Prepared</c> -&gt; <c>Live</c>),
+    /// exactly as <see cref="ForVisibilityRuleChange"/> records a visibility transition. The session is both
+    /// the scope (<paramref name="workspaceId"/> is the session's workspace) and the governed resource (its
+    /// id), because the action is performed ON the session. The resource kind and the state names are passed
+    /// as generic strings so the Audit module does not depend on the Sessions module's types. Every value is
+    /// an identifier, an enum or a generic state name — never free-form content (threat T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the start happened in (required).</param>
+    /// <param name="workspaceId">The workspace the started session belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the start (required; the audited actor).</param>
+    /// <param name="sessionResourceType">The started session's generic kind name (e.g. Session).</param>
+    /// <param name="sessionId">The started session's surrogate id.</param>
+    /// <param name="previousState">The lifecycle status name before the start (e.g. Prepared; required).</param>
+    /// <param name="newState">The lifecycle status name after the start (e.g. Live; required).</param>
+    /// <param name="createdAt">When the start happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the session resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForSessionStart(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string sessionResourceType,
+        Guid sessionId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+        => ForSessionLifecycleTransition(
+            AuditAction.SessionStarted,
+            organizationId,
+            workspaceId,
+            actorUserProfileId,
+            sessionResourceType,
+            sessionId,
+            previousState,
+            newState,
+            createdAt);
+
+    /// <summary>
+    /// Records a session end (<see cref="AuditAction.SessionEnded"/>) — the audit fact written when an
+    /// authorized host ends a session, closing its live timeline (CORE-EVT-001). It is the end counterpart of
+    /// <see cref="ForSessionStart"/> and records the same shape: a real STATE TRANSITION carrying the
+    /// before/after status NAMES (e.g. <c>Live</c> -&gt; <c>Ended</c>), the session as both the scope and the
+    /// governed resource, and the host who ended it as the actor. Every value is an identifier, an enum or a
+    /// generic state name — never free-form content (threat T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the end happened in (required).</param>
+    /// <param name="workspaceId">The workspace the ended session belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the end (required; the audited actor).</param>
+    /// <param name="sessionResourceType">The ended session's generic kind name (e.g. Session).</param>
+    /// <param name="sessionId">The ended session's surrogate id.</param>
+    /// <param name="previousState">The lifecycle status name before the end (e.g. Live; required).</param>
+    /// <param name="newState">The lifecycle status name after the end (e.g. Ended; required).</param>
+    /// <param name="createdAt">When the end happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the session resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForSessionEnd(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string sessionResourceType,
+        Guid sessionId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+        => ForSessionLifecycleTransition(
+            AuditAction.SessionEnded,
+            organizationId,
+            workspaceId,
+            actorUserProfileId,
+            sessionResourceType,
+            sessionId,
+            previousState,
+            newState,
+            createdAt);
+
+    /// <summary>
+    /// Shared specialization behind <see cref="ForSessionStart"/>, <see cref="ForSessionEnd"/> and
+    /// <see cref="ForSessionCancellation"/>: a session lifecycle STATE TRANSITION recorded as an
+    /// append-only audit fact. The three differ only in the <paramref name="action"/> they pin; each is a
+    /// real before/after status transition on the surviving session row (never a deletion), so the workspace,
+    /// actor, session resource and both status names are all required here even though the generic
+    /// <see cref="Create"/> factory leaves them optional.
+    /// </summary>
+    private static AuditLogEntry ForSessionLifecycleTransition(
+        AuditAction action,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string sessionResourceType,
+        Guid sessionId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionResourceType))
+        {
+            throw new ArgumentException("Session resource type must not be empty.", nameof(sessionResourceType));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        // A lifecycle transition always has both a before and an after status, so the producer requires them
+        // even though the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            action,
+            actorUserProfileId,
+            sessionResourceType,
+            sessionId,
+            targetParticipantId: null,
+            previousState: previousState,
+            newState: newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a member removal (<see cref="AuditAction.MemberRemoved"/>) — the audit fact written when an
     /// authorized admin removes a workspace or organization member, revoking the subject's access
     /// (CORE-LIFE-001). A thin specialization of <see cref="Create"/> that pins the action and applies the
@@ -828,51 +977,16 @@ public sealed class AuditLogEntry
         string previousState,
         string newState,
         DateTimeOffset createdAt)
-    {
-        if (workspaceId == Guid.Empty)
-        {
-            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
-        }
-
-        if (actorUserProfileId == Guid.Empty)
-        {
-            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
-        }
-
-        if (string.IsNullOrWhiteSpace(sessionResourceType))
-        {
-            throw new ArgumentException("Session resource type must not be empty.", nameof(sessionResourceType));
-        }
-
-        if (sessionId == Guid.Empty)
-        {
-            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
-        }
-
-        // A cancel is a real state transition, so both before and after status names are required even though the
-        // generic factory leaves the state pair optional.
-        if (string.IsNullOrWhiteSpace(previousState))
-        {
-            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
-        }
-
-        if (string.IsNullOrWhiteSpace(newState))
-        {
-            throw new ArgumentException("New state must not be empty.", nameof(newState));
-        }
-
-        return Create(
+        => ForSessionLifecycleTransition(
+            AuditAction.SessionCancelled,
             organizationId,
             workspaceId,
-            AuditAction.SessionCancelled,
             actorUserProfileId,
             sessionResourceType,
             sessionId,
-            targetParticipantId: null,
-            previousState: previousState,
-            newState: newState,
+            previousState,
+            newState,
             createdAt);
-    }
 
     /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,

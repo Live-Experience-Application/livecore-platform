@@ -653,9 +653,19 @@ workspace, is hidden as `404` (never `403`). `start` requires the session to be
 `Prepared` and `end` requires it to be `Live`; any other current state is a
 `409 Conflict` that leaves the session unchanged.
 
-These commands persist the session status transition (the authoritative state).
-The durable `SessionStarted` / `SessionEnded` events and their realtime delivery
-belong to the later realtime event stream and are not emitted yet.
+These commands persist the session status transition (the authoritative state)
+and, once it is persisted, emit the matching durable session event and audit fact
+(CORE-EVT-001). `start` publishes a `SessionStarted` event and appends a
+`SessionStarted` audit record (the `Prepared → Live` transition); `end` publishes a
+`SessionEnded` event and appends a `SessionEnded` audit record (the `Live → Ended`
+transition). The event is published through `ISessionEventPublisher` by the
+**endpoint** (matching the reveal command), so the Realtime module stays the sole
+owner of delivery. Both are **subjectless audience events** (no visibility subject,
+no selected participant), so the recipient resolver — reused, not duplicated —
+delivers each to the whole session audience (the hosts, the observers and every
+active participant), and reconnect replay re-delivers them. Because the emit happens
+only after a successful, guarded transition, each `start`/`end` persists **exactly
+one** event and one audit fact, while a `409` out-of-state command emits neither.
 
 ### Session cancel (lifecycle off-ramp)
 
@@ -829,7 +839,11 @@ status names (`Active` → `Archived`) like a visibility change, capturing the o
 and the archived workspace itself. The session-cancel command (CORE-LIFE-010) wires `SessionCancelled` the same
 way — another surviving STATE TRANSITION rather than a deletion, so the entry carries the before/after status
 names (`Prepared` → `Cancelled`), capturing the host who cancelled the session and the cancelled session itself;
-the session row (and its append-only `session_events`) survives, never deleted.
+the session row (and its append-only `session_events`) survives, never deleted. The session start/end commands
+(CORE-EVT-001) wire `SessionStarted` and `SessionEnded` the same surviving-transition way — the start endpoint
+records the `Prepared` → `Live` transition and the end endpoint the `Live` → `Ended` transition, each capturing
+the host who ran the command and the session itself — appended alongside the durable session event the same
+command emits (the audit fact is the security record; the session event is the realtime delivery).
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
@@ -1196,8 +1210,8 @@ the Realtime recipient resolver turns it into a set of deliveries:
 Every per-recipient and audience decision is delegated to the central Visibility engine
 (`CanViewResource` / `CanParticipantViewResource`, reused — not duplicated), so the
 realtime recipient set can never diverge from the REST visibility decision. An event with
-no visibility subject (a later unconditional audience event such as `SessionStarted`) is
-not gated.
+no visibility subject (an unconditional audience event such as `SessionStarted`/`SessionEnded`,
+CORE-EVT-001) is not gated: the whole audience receives it.
 
 **Reconnect replay with filtering (CORE-RT-005).** A client that reconnects rebuilds its
 live state from the durable stream over a REST route, with the same per-recipient filter
@@ -1243,7 +1257,10 @@ authorized. The per-recipient recipient computation therefore stays the **single
 "Realtime delivery never leaks hidden events" (threat T3 in `docs/07_SECURITY_THREAT_MODEL.md`) holds for
 every backplane — in-process or scaled-out — by construction.
 
-Wiring the remaining catalog events (`SessionStarted`/`SessionEnded`) over this delivery path is a later
+The `SessionStarted`/`SessionEnded` lifecycle events are wired over this delivery path by CORE-EVT-001 (see
+"Session lifecycle commands"): the start/end endpoints publish them through `ISessionEventPublisher` as
+**subjectless** audience events, so the recipient resolver delivers each to the whole session audience and
+reconnect replay re-delivers them. Wiring the remaining catalog events over this delivery path is a later
 Realtime story (`docs/11_REALTIME_SYNC.md`).
 
 ### Asset metadata
