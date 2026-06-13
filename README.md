@@ -490,6 +490,18 @@ request: the target organization is resolved from the request and verified
 against the caller's membership, and cross-tenant or non-member access is hidden
 as `404` rather than `403`.
 
+The `Audience` is **mandatory in a production environment** (CORE-OPS-004). Token
+validation only checks the audience when an `Audience` is configured, so a blank
+`Audience` would silently disable audience scoping — any token the configured
+issuer signs (including one minted for a different client/application of the same
+issuer) would be accepted. To stop that foot-gun, when an `Authority` is configured and the
+environment is `Production`, a blank `Audience` is treated as a misconfiguration
+and **the host refuses to start** (it never serves a request with audience
+validation off). Outside `Production` a blank `Audience` stays tolerated for local
+development (the same latitude `Authentication__Oidc__RequireHttpsMetadata=false`
+allows), and the unconfigured-`Authority` case keeps its fail-closed `401`
+behavior.
+
 ### Current principal
 
 The IdentityAccess module exposes the current-principal endpoint (CORE-API-002):

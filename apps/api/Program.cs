@@ -132,8 +132,11 @@ builder.Services.AddSingleton<StoreNotificationParserResolver>();
 // registered in its place so authenticated endpoints challenge with 401 rather
 // than crashing or allowing anonymous access. MapInboundClaims=false (set in the
 // extension) preserves the raw OIDC claim names for OidcPrincipalMapper
-// (CORE-ID-001 carry-over requirement).
-var oidcConfigured = builder.Services.AddOidcAuthentication(builder.Configuration);
+// (CORE-ID-001 carry-over requirement). In a Production environment a configured
+// Authority with a blank Audience is a misconfiguration (a blank Audience silently
+// disables audience scoping), so the host refuses to start (CORE-OPS-004); the
+// environment is passed in to make that guard environment-aware.
+var oidcConfigured = builder.Services.AddOidcAuthentication(builder.Configuration, builder.Environment);
 
 // Persistence (CORE-ID-002): PostgreSQL via EF Core per docs/02_ARCHITECTURE.md
 // and docs/10_DATABASE_SCHEMA.md. The connection string comes only from

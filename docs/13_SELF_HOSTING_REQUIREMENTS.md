@@ -173,6 +173,30 @@ double-redirect or fight the proxy. If a deployment ever runs the API with **no*
 proxy in front, it must terminate TLS in Kestrel directly — that is a deployment
 choice, not a Core default.
 
+### OIDC audience is mandatory in Production (CORE-OPS-004)
+
+`Authentication:Oidc:Audience` is the API's expected token audience (the `aud`
+claim a token must carry). Audience validation is enabled **only when an Audience is
+configured**, so a blank `Audience` silently disables audience scoping — the API
+would accept any token the configured issuer (`Authentication:Oidc:Authority`) signs,
+including one minted for a different client/application on the same identity provider.
+
+To stop that foot-gun, the `Audience` is **effectively mandatory in production**:
+
+- When an `Authority` **is** configured and `ASPNETCORE_ENVIRONMENT=Production`
+  (the default when the variable is unset), a **blank `Audience` is a
+  misconfiguration and the host refuses to start** — it never serves a single
+  request with audience validation off. Configure
+  `Authentication__Oidc__Audience=<your-api-audience>` for any production
+  deployment.
+- Outside `Production` (a local `Development` run against an `http` Keycloak) a blank
+  `Audience` stays tolerated, the same local-development latitude
+  `Authentication:Oidc:RequireHttpsMetadata=false` allows.
+- The **unconfigured-`Authority`** case is unchanged: with no `Authority` the host
+  still starts and every authenticated endpoint fails closed with `401` (the
+  fail-closed default scheme), and the audience guard does not apply because no token
+  is ever accepted.
+
 ### CORS allowed origins (`Cors:AllowedOrigins`)
 
 A browser/PWA front-end served from a different origin than the API (the Next.js

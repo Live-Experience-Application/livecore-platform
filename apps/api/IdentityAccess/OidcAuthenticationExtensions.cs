@@ -34,6 +34,19 @@ namespace LiveCore.Api.IdentityAccess;
 /// <see cref="OidcPrincipalMapper"/>. With mapping enabled the .NET JWT handler
 /// rewrites them to legacy SOAP-era URIs and the mapper — which reads the
 /// original names — would fail closed on every request.
+///
+/// Production audience guard (CORE-OPS-004): audience validation below is enabled
+/// only when an Audience is configured, so a blank Audience silently disables
+/// audience scoping — any token the Authority's issuer signs (including one minted
+/// for a different client/application of the same issuer) would be accepted. In a
+/// Production environment a configured Authority with a blank Audience is treated as a
+/// misconfiguration and the host REFUSES TO START
+/// (<see cref="IsMissingProductionAudience"/>), rather than serving a single request
+/// with audience validation off (threats T1/T5 in
+/// docs/07_SECURITY_THREAT_MODEL.md). Outside Production a blank Audience stays
+/// tolerated (the same local-development latitude
+/// <c>RequireHttpsMetadata=false</c> allows), and the unconfigured-Authority case
+/// keeps its fail-closed handler unchanged.
 /// </summary>
 public static class OidcAuthenticationExtensions
 {
@@ -54,10 +67,12 @@ public static class OidcAuthenticationExtensions
     /// </summary>
     public static bool AddOidcAuthentication(
         this IServiceCollection services,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IHostEnvironment environment)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(environment);
 
         var section = configuration.GetSection(ConfigurationSection);
         var authority = section["Authority"];
@@ -79,6 +94,25 @@ public static class OidcAuthenticationExtensions
                     FailClosedAuthenticationHandler.SchemeName, null);
             services.AddAuthorization();
             return false;
+        }
+
+        // Production audience guard (CORE-OPS-004): an Authority IS configured, so the
+        // bearer pipeline below will accept tokens. ValidateAudience is enabled only
+        // when an Audience is configured, so a blank Audience silently disables
+        // audience scoping — any token the Authority's issuer signs (including one
+        // minted for a different client/application of the same issuer) would be
+        // accepted. In a Production environment that is a misconfiguration, not a
+        // self-hosting choice: fail loud at startup so the host never serves a single
+        // request with audience validation off (threats T1/T5). Outside Production a
+        // blank Audience stays tolerated, the same dev-only latitude
+        // RequireHttpsMetadata allows.
+        if (IsMissingProductionAudience(authority, audience, environment.IsProduction()))
+        {
+            throw new InvalidOperationException(
+                $"OIDC is misconfigured: an Authority is configured under '{ConfigurationSection}:Authority' " +
+                $"but no Audience is configured under '{ConfigurationSection}:Audience'. A blank Audience " +
+                "disables audience validation, so any token the configured issuer signs would be accepted. " +
+                "Configure the API's expected token audience (the 'aud' claim) for a production deployment.");
         }
 
         // HTTPS metadata is required by default (production). A dev-only override
@@ -108,10 +142,13 @@ public static class OidcAuthenticationExtensions
                     ValidateLifetime = true,
                     ValidateIssuerSigningKey = true,
 
-                    // Validate the audience only when one is configured; an empty
-                    // Audience disables the audience check rather than rejecting
-                    // every token (self-hosting flexibility,
-                    // docs/13_SELF_HOSTING_REQUIREMENTS.md).
+                    // Validate the audience whenever one is configured. A blank
+                    // Audience disables the audience check (self-hosting latitude,
+                    // docs/13_SELF_HOSTING_REQUIREMENTS.md) — but the production guard
+                    // above has already refused to start if that happens in a
+                    // Production environment (CORE-OPS-004), so a live production host
+                    // always reaches here with a non-blank Audience and audience
+                    // scoping enabled.
                     ValidateAudience = !string.IsNullOrWhiteSpace(audience),
                     ValidAudience = audience,
                 };
@@ -144,6 +181,35 @@ public static class OidcAuthenticationExtensions
 
         return true;
     }
+
+    /// <summary>
+    /// Decides whether the OIDC configuration is the Production audience-scoping
+    /// foot-gun (CORE-OPS-004): an Authority IS configured (so tokens are accepted)
+    /// while the Audience is blank (so audience validation is silently disabled), in a
+    /// Production environment. This is the single decision the startup guard in
+    /// <see cref="AddOidcAuthentication"/> enforces; it is pure (no services, no
+    /// configuration side effects) so the behavior is unit-testable directly.
+    /// </summary>
+    /// <param name="authority">The configured OIDC Authority, or null/blank when none is set.</param>
+    /// <param name="audience">The configured OIDC Audience, or null/blank when none is set.</param>
+    /// <param name="isProductionEnvironment">
+    /// Whether the host runs in a Production environment
+    /// (<see cref="HostEnvironmentEnvExtensions.IsProduction"/>).
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> only when, in Production, an Authority is configured but
+    /// the Audience is blank. Returns <see langword="false"/> when no Authority is
+    /// configured (the fail-closed handler path, where no token is ever accepted),
+    /// when an Audience is configured (audience scoping is enabled), or outside
+    /// Production (local-development latitude).
+    /// </returns>
+    public static bool IsMissingProductionAudience(
+        string? authority,
+        string? audience,
+        bool isProductionEnvironment)
+        => isProductionEnvironment
+            && !string.IsNullOrWhiteSpace(authority)
+            && string.IsNullOrWhiteSpace(audience);
 }
 
 /// <summary>
