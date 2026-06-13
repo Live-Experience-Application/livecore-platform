@@ -779,6 +779,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
         .AddDbContextCheck<LiveCoreDbContext>("database", tags: [HealthEndpoints.ReadinessTag]);
 }
 
+// Production required-dependency readiness gate (CORE-OPS-005). Before this story /health/ready reported
+// Healthy whenever no readiness check failed, and the database check above is registered ONLY when a
+// connection string is configured — so a host deployed with NO persistence (or no OIDC identity provider)
+// advertised READY while every domain route fails closed (503/401). This check reports NOT-READY in a
+// Production environment when persistence or OIDC is unconfigured, so a misconfigured production host leaves
+// the ready rotation instead. It is registered UNCONDITIONALLY (outside the persistence conditional above)
+// precisely so it still runs when persistence is absent; outside Production it is inert, the same
+// local-development latitude the OIDC audience guard grants (CORE-OPS-004). The readiness response stays
+// status-only, so which dependency is missing never leaks to the unauthenticated endpoint (threat T7).
+builder.Services.AddRequiredDependencyReadinessCheck(
+    builder.Environment,
+    persistenceConfigured: !string.IsNullOrWhiteSpace(databaseConnectionString),
+    oidcConfigured: oidcConfigured);
+
 var app = builder.Build();
 
 if (string.IsNullOrWhiteSpace(databaseConnectionString))

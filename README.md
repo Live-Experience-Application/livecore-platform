@@ -332,10 +332,10 @@ dotnet run --project apps/worker
 
 The API host exposes two unauthenticated health endpoints:
 
-| Endpoint        | Purpose                                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                        |
-| `/health/ready` | Readiness: runs the health checks tagged `ready` (currently the `database` check, registered only when a connection string is configured). |
+| Endpoint        | Purpose                                                                                                                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                                                     |
+| `/health/ready` | Readiness: runs the health checks tagged `ready` (the `database` connectivity check, registered only when a connection string is configured, plus the production gate). |
 
 Both return `200 OK` with the minimal JSON body `{"status":"Healthy"}`;
 readiness returns `503` with `{"status":"Unhealthy"}` once a registered
@@ -343,6 +343,20 @@ readiness check fails. Because the endpoints are reachable without
 authentication, the response carries only the overall status: no version
 numbers, configuration values, host names or individual check details (see
 `docs/07_SECURITY_THREAT_MODEL.md`).
+
+In a **Production** environment readiness additionally fails when a required
+dependency is unconfigured (CORE-OPS-005): persistence (`ConnectionStrings:Database`)
+or OIDC (`Authentication:Oidc:Authority`). Previously `/health/ready` could report
+`Healthy` with no database configured, even though every domain route then fails
+closed with `503` — so orchestration would route live traffic at an API that cannot
+serve it. The production required-dependency gate reports not-ready in that case so a
+misconfigured production host leaves the ready rotation, while `/health/live` stays
+`200` (a not-ready misconfiguration must never trigger a restart of an otherwise live
+process). Outside `Production` the gate is inert, preserving the local-development
+latitude of running without a database or an identity provider (the same
+environment-aware posture as the OIDC audience guard, CORE-OPS-004). The response
+stays status-only, so which dependency is missing never leaks to the unauthenticated
+endpoint.
 
 ### Structured logging
 
@@ -1640,6 +1654,23 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Because the worker now
 reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
 `apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
+
+### Worker liveness heartbeat
+
+CORE-OPS-005 adds the worker's liveness signal so orchestration can detect a **wedged** cleanup
+loop. The loop is resilient to a sweep that _throws_ (it logs and retries on the next tick), but a
+sweep that **hangs** — a stuck database or storage call that never returns — would leave the worker
+process alive yet doing no work, which a process-liveness check cannot see. Because the worker serves
+no HTTP traffic and exposes no port, the heartbeat is a **file**, not a health port: the cleanup loop
+writes the current UTC timestamp to `Worker:Heartbeat:FilePath` (default
+`<temp>/livecore-worker.heartbeat`) on startup and after **every** completed sweep tick. The file is
+refreshed only by the loop making progress, so a hung sweep stops refreshing it and the file goes
+stale — the signal orchestration uses to restart the stalled worker (a Kubernetes liveness probe or a
+Compose healthcheck that checks the file's age). The heartbeat is wired **alongside** the cleanup job,
+so with no database there is no loop and no heartbeat (nothing to stall). A heartbeat write never
+crashes the worker: a transient filesystem error is logged and swallowed, and a persistent failure
+just makes the file go stale (fail-safe). It carries only a timestamp — no identifiers, no secrets
+(threat T7).
 
 ### Asset deletion
 

@@ -17,24 +17,37 @@ namespace LiveCore.Worker;
 /// only registered when persistence is configured (see <see cref="WorkerHostFactory"/>), so it always has a
 /// database to sweep.
 /// </para>
+///
+/// <para>
+/// Liveness heartbeat (CORE-OPS-005): the loop writes a <see cref="WorkerHeartbeat"/> on startup and after
+/// every sweep tick, so orchestration can detect a WEDGED loop. A resilient sweep survives transient
+/// failures, but a sweep that HANGS (a stuck database or storage call that never returns or throws) would
+/// otherwise leave the worker process alive yet doing no work — invisible to a process-liveness check. Because
+/// the heartbeat is refreshed only by the loop making progress, a hung sweep stops refreshing it and its file
+/// goes stale, which is the signal orchestration uses to restart the stalled worker.
+/// </para>
 /// </summary>
 internal sealed class AssetCleanupBackgroundService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly AssetCleanupOptions _options;
+    private readonly WorkerHeartbeat _heartbeat;
     private readonly ILogger<AssetCleanupBackgroundService> _logger;
 
     public AssetCleanupBackgroundService(
         IServiceScopeFactory scopeFactory,
         AssetCleanupOptions options,
+        WorkerHeartbeat heartbeat,
         ILogger<AssetCleanupBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(heartbeat);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
+        _heartbeat = heartbeat;
         _logger = logger;
     }
 
@@ -45,12 +58,20 @@ internal sealed class AssetCleanupBackgroundService : BackgroundService
             _options.SweepInterval,
             _options.PendingRetention);
 
+        // Emit an initial heartbeat so the liveness signal exists from the moment the loop starts, before the
+        // first sweep runs (CORE-OPS-005).
+        await _heartbeat.BeatAsync(stoppingToken).ConfigureAwait(false);
+
         // Run a sweep promptly on startup, then once per interval. PeriodicTimer does not drift and is
         // disposed when the loop ends (host shutdown).
         using var timer = new PeriodicTimer(_options.SweepInterval);
         do
         {
             await RunSweepAsync(stoppingToken).ConfigureAwait(false);
+
+            // Heartbeat after each completed sweep tick. A wedged sweep never reaches this point, so its
+            // heartbeat file goes stale and orchestration can detect the stalled loop (CORE-OPS-005).
+            await _heartbeat.BeatAsync(stoppingToken).ConfigureAwait(false);
         }
         while (await WaitForNextTickAsync(timer, stoppingToken).ConfigureAwait(false));
 

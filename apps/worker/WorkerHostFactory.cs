@@ -31,12 +31,21 @@ public static class WorkerHostFactory
 
         // Asset cleanup job (CORE-AST-006). AddAssetCleanup registers the Assets module's cleanup
         // dependencies (the EF Core DbContext, the asset repository, the fail-closed IAssetStorage default,
-        // the cleanup policy and the cleanup service) and returns whether persistence is configured. Like
-        // the API host, the job is GATED on a configured database connection string: with none, no DbContext
-        // and no cleanup loop are registered, so the worker still starts (it just has no job to run) rather
-        // than failing closed. The scheduling background service is only added when the job is configured.
+        // the cleanup policy, a TimeProvider and the cleanup service) and returns whether persistence is
+        // configured. Like the API host, the job is GATED on a configured database connection string: with
+        // none, no DbContext and no cleanup loop are registered, so the worker still starts (it just has no
+        // job to run) rather than failing closed. The scheduling background service is only added when the job
+        // is configured.
         if (builder.Services.AddAssetCleanup(builder.Configuration))
         {
+            // Worker liveness heartbeat (CORE-OPS-005): the cleanup loop writes a heartbeat each tick so a
+            // wedged AssetCleanupBackgroundService loop is detectable by orchestration (its file goes stale).
+            // Registered alongside the cleanup job because the heartbeat IS the loop's liveness signal; with no
+            // database there is no loop to stall, so there is nothing to heartbeat. The file path is read from
+            // configuration with a safe default (Worker:Heartbeat:FilePath); the TimeProvider the heartbeat
+            // stamps with is registered by AddAssetCleanup above.
+            builder.Services.AddSingleton(WorkerHeartbeatOptions.FromConfiguration(builder.Configuration));
+            builder.Services.AddSingleton<WorkerHeartbeat>();
             builder.Services.AddHostedService<AssetCleanupBackgroundService>();
         }
 

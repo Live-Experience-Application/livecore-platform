@@ -249,3 +249,63 @@ an insecure request was secure (threat T7).
 for example `AllowedHosts=app.example.com` (semicolon-separated for several), so
 the host-filtering middleware rejects requests carrying an unexpected `Host`
 header.
+
+## Readiness and worker liveness (CORE-OPS-005)
+
+### Production readiness gate
+
+The API exposes two unauthenticated health endpoints (see the README "Health
+endpoints"): `/health/live` (liveness — the process is up, no dependency checks)
+and `/health/ready` (readiness — the checks tagged `ready`). Wire them to the
+orchestrator: route traffic on `/health/ready`, restart on `/health/live`.
+
+`/health/ready` previously reported `Healthy` whenever no readiness check failed,
+and the only such check — database connectivity — is registered **only when a
+connection string is configured**. So a host deployed with **no** persistence (or
+no OIDC identity provider) reported **READY** even though every domain route then
+fails closed (`503` with no persistence, `401` with no identity provider):
+orchestration would route live traffic at an API that cannot serve it.
+
+In a **Production** environment (`ASPNETCORE_ENVIRONMENT=Production`, the default
+when the variable is unset) readiness now **fails** (`503`) when a required
+dependency is unconfigured:
+
+- persistence — `ConnectionStrings:Database`
+  (`ConnectionStrings__Database`), and
+- OIDC — `Authentication:Oidc:Authority`.
+
+So a misconfigured production host leaves the ready rotation instead of advertising
+a readiness it does not have. `/health/live` is **unaffected** (a not-ready
+misconfiguration must never trigger a restart of an otherwise live process).
+Outside `Production` the gate is **inert** — a `Development` run with no database
+or identity provider still reports `Healthy`, the same local-development latitude
+the OIDC audience guard grants (CORE-OPS-004). The readiness response stays
+**status-only**, so which dependency is missing never leaks to the unauthenticated
+endpoint (threat T7). (Audience is separately mandatory in production — a
+configured `Authority` with a blank `Audience` refuses to start, see above.)
+
+### Worker liveness heartbeat
+
+The worker host serves no HTTP traffic and exposes no port, so its liveness signal
+is a **heartbeat file** rather than a health port. The asset cleanup loop
+(`AssetCleanupBackgroundService`) writes the current UTC timestamp to the heartbeat
+file on startup and after **every completed sweep tick**. The loop is resilient to a
+sweep that _throws_, but a sweep that **hangs** (a stuck database or storage call)
+would leave the process alive yet doing no work; because the file is refreshed only
+by the loop making progress, a hung sweep stops refreshing it and the file goes
+**stale** — the signal orchestration uses to restart the wedged worker.
+
+- Configure the path with `Worker:Heartbeat:FilePath`
+  (`Worker__Heartbeat__FilePath`); the default is `<temp>/livecore-worker.heartbeat`.
+  Point it at a path the orchestration probe can also read (for example a mounted
+  volume, or simply the container's own filesystem for an `exec` probe).
+- Check **freshness**, not just existence. A liveness probe should restart the
+  worker when the file's age exceeds a few sweep intervals
+  (`Assets:Cleanup:SweepInterval`, default 1 hour) — for example a Kubernetes
+  `livenessProbe` running
+  `exec: ["sh","-c","test $(( $(date +%s) - $(stat -c %Y /var/run/livecore/worker.heartbeat) )) -lt 7200"]`.
+- The heartbeat is wired **alongside** the cleanup job, so with **no** database
+  there is no loop and no heartbeat (there is nothing to stall). A heartbeat write
+  never crashes the worker (a transient error is logged and swallowed; a persistent
+  failure just makes the file go stale, which is fail-safe). It carries only a
+  timestamp — no identifiers, no secrets (threat T7).
