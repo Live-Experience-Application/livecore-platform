@@ -386,3 +386,72 @@ Realtime__Backplane__ChannelPrefix=livecore
 A managed/secured server uses the full StackExchange.Redis connection-string form, e.g.
 `Realtime__Backplane__ConnectionString="redis.example.com:6380,password=<secret>,ssl=true"`. All API
 instances must point at the **same** server (and the same channel prefix) for cross-instance delivery to work.
+
+## Secret management and the configuration contract (CORE-OPS-008)
+
+Core holds **no secret in source**. Every connection string, identity setting and credential is supplied at
+runtime as configuration — an environment variable, or a value injected from the deployment's secret store —
+and the repository ships only the **names** of those settings, never their values (threat T7 in
+docs/07_SECURITY_THREAT_MODEL.md). This is the documented contract a self-hoster fills in.
+
+### The names-only env example
+
+A names-only [`.env.example`](../.env.example) ships at the repository root. Copy it to `.env` and fill in real
+values for your deployment; `.env` is git-ignored and `.env.example` carries **names only** (it must never
+contain a real secret). `.env.example` is the single, authoritative list of every setting the API and worker
+read, grouped by concern and annotated `[secret]` / `[prod-required]`.
+
+.NET reads the hierarchical key `A:B:C` from the environment variable `A__B__C` (double underscore); indexed
+lists use a numeric suffix (`A__B__0`). The same names work in an `appsettings.json` file, a container's
+environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secrets.
+
+### The contract: setting → injection mechanism
+
+| Setting (config key)                | Env var                            | Secret | Required                | Consumer    | Fail-closed default when unset                          |
+| ----------------------------------- | ---------------------------------- | :----: | ----------------------- | ----------- | ------------------------------------------------------- |
+| `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod  |
+| `Authentication:Oidc:Authority`     | `Authentication__Oidc__Authority`  |   no   | production              | API         | Auth disabled; authenticated routes `401`; not-ready    |
+| `Authentication:Oidc:Audience`      | `Authentication__Oidc__Audience`   |   no   | production              | API         | Refuses to start once Authority is set (CORE-OPS-004)   |
+| `Authentication:Oidc:RequireHttpsMetadata` | `Authentication__Oidc__RequireHttpsMetadata` | no | no (dev only)    | API         | `true` (HTTPS metadata required)                        |
+| `Cors:AllowedOrigins:N`             | `Cors__AllowedOrigins__0`          |   no   | for a cross-origin PWA  | API         | No cross-origin browser client allowed                  |
+| `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
+| `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
+| `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
+| `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
+| `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
+| `Realtime:Backplane:ConnectionString` | `Realtime__Backplane__ConnectionString` | yes | for multi-instance   | API         | In-process backplane (single instance only, CORE-OPS-007) |
+| `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat`                      |
+
+The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`) and
+`Realtime:Backplane:ChannelPrefix` are optional tuning with safe defaults (see CORE-OPS-006 / CORE-OPS-007
+above). The **store** purchase-verification and notification credentials (Apple/Google server keys, signing
+keys) are consumed by the deployment-supplied verification/notification **adapter**, not read from a fixed Core
+key; supply them to that adapter through your secret store, and with no adapter configured store verification
+and notifications fail closed (`503`).
+
+### Injecting from a secret store
+
+- **Kubernetes / Helm** — put `[secret]` values in a `Secret` and the rest in a `ConfigMap`, and project both
+  into the container's environment (`envFrom`). The migrations runner reads the same `ConnectionStrings__Database`.
+- **Railway** — set each name as a service variable (Railway stores them encrypted); reference shared secrets
+  across the API, worker and migrations services.
+- **Docker Compose** — keep secrets in an `.env` file (git-ignored) or Docker secrets, and pass them to the
+  `api` and `worker` services with `env_file:` / `environment:`.
+
+### Startup validation: fail loudly when a required production value is missing
+
+The host validates the contract at startup and **reuses the existing fail-closed-when-unconfigured posture**
+rather than adding a new one. The pure decision lives in `ProductionConfigurationValidator` and is driven by the
+environment:
+
+- **Outside Production** the contract is inert: a local `Development` run with no database or identity provider
+  still starts and fails closed, the same latitude the OIDC audience guard (CORE-OPS-004) and the readiness gate
+  (CORE-OPS-005) grant.
+- **In Production**, when a required value (`ConnectionStrings:Database`, `Authentication:Oidc:Authority`,
+  `Authentication:Oidc:Audience`) is missing, the host logs a **loud, named `Critical` startup error** listing
+  exactly which settings are unset — and only the **key names**, never the configured values, so a secret is
+  never written to the log (threat T7). The process does not crash an otherwise-live host: it stays up, fails
+  closed (authenticated routes `401`, persistence-backed routes `503`) and reports **not-ready** (CORE-OPS-005),
+  so orchestration never routes traffic at it. The one **hard fail-to-start** case is the security foot-gun where
+  an `Authority` is configured but the `Audience` is blank (audience validation silently disabled), which the
+  audience guard refuses outright (CORE-OPS-004).

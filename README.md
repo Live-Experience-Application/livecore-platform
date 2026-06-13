@@ -1446,6 +1446,28 @@ The `SessionStarted`/`SessionEnded` lifecycle events are wired over this deliver
 reconnect replay re-delivers them. Wiring the remaining catalog events over this delivery path is a later
 Realtime story (`docs/11_REALTIME_SYNC.md`).
 
+### Secret management and the configuration contract
+
+Core holds **no secret in source**: every connection string, identity setting and credential is supplied at
+runtime as configuration, and the repository ships only the **names** of those settings (CORE-OPS-008; threat
+T7 in `docs/07_SECURITY_THREAT_MODEL.md`). A names-only [`.env.example`](.env.example) at the repository root is
+the single, authoritative list of every setting the API and worker read, grouped by concern and annotated
+`[secret]` / `[prod-required]`; copy it to a git-ignored `.env` and fill in real values. The env-var →
+secret-store mapping (Kubernetes `Secret`/`ConfigMap`, Railway variables, Docker secrets) and the full
+setting-by-setting contract table live in `docs/13_SELF_HOSTING_REQUIREMENTS.md`. .NET reads the hierarchical
+key `A:B:C` from the environment variable `A__B__C` (double underscore).
+
+The host **validates the contract at startup and fails loudly**, reusing the existing
+fail-closed-when-unconfigured posture rather than adding a new one (`ProductionConfigurationValidator`). Outside
+`Production` the contract is inert (a local run with no database or identity provider still starts and fails
+closed). In `Production`, when a required value (`ConnectionStrings:Database`, `Authentication:Oidc:Authority`,
+`Authentication:Oidc:Audience`) is missing, the host logs a loud, **named `Critical`** startup error listing
+exactly which settings are unset — the key names only, never the configured values, so a secret is never
+written to the log (threat T7) — and does not crash an otherwise-live process: it stays up, fails closed
+(`401`/`503`) and reports **not-ready** (CORE-OPS-005), so orchestration never routes traffic at it. The one
+hard fail-to-start case stays the OIDC audience foot-gun (CORE-OPS-004): a configured `Authority` with a blank
+`Audience` refuses to start because it would silently disable audience scoping.
+
 ### Asset metadata
 
 The Assets module owns generic asset metadata: the record of a stored file or

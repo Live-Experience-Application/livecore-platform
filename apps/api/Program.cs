@@ -807,6 +807,27 @@ if (!oidcConfigured)
         "No OIDC Authority configured (Authentication:Oidc:Authority); authentication is disabled and authenticated endpoints fail closed.");
 }
 
+// Production configuration contract (CORE-OPS-008): fail loudly when a required production value is missing.
+// Every secret/config value is supplied from configuration only (no secret in source; threat T7), and the full
+// names-only contract ships as the repository-root .env.example with its env-var -> secret-store mapping in
+// docs/13_SELF_HOSTING_REQUIREMENTS.md. This reuses the existing fail-closed-when-unconfigured posture rather
+// than adding a new one: in Production a missing required value does NOT crash an otherwise-live process — the
+// host stays up and fails closed (401/503) and reports NOT-READY (CORE-OPS-005), while this logs a loud, NAMED
+// startup error so the misconfiguration is unmissable. The one hard fail-to-start case stays the audience
+// foot-gun (CORE-OPS-004). Only the missing KEY NAMES are logged, never the configured values, so a secret is
+// never written to the log (threat T7). Outside Production the contract is inert (local-development latitude).
+var missingRequiredSettings =
+    ProductionConfigurationValidator.FindMissingRequiredSettings(builder.Configuration, app.Environment.IsProduction());
+if (missingRequiredSettings.Count > 0)
+{
+    app.Logger.LogCritical(
+        "Production configuration is incomplete: the required setting(s) {MissingSettings} are not configured. " +
+        "Inject them as environment variables / from your secret store (see .env.example and " +
+        "docs/13_SELF_HOSTING_REQUIREMENTS.md). The host stays up and fails closed (401/503) and reports " +
+        "not-ready, but it cannot serve production traffic until they are set.",
+        string.Join(", ", missingRequiredSettings));
+}
+
 // Forwarded headers run FIRST, before any middleware that reads the request
 // scheme/host/IP (CORS, authentication, URL generation), so the rest of the
 // pipeline sees the real client's scheme/host as restored from a TRUSTED proxy's
