@@ -83,6 +83,10 @@ packages/design-tokens   @livecore/design-tokens - generic design tokens and the
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
+scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic for the systems of record (CORE-OPS-010)
+scripts/backup-livecore.ps1  backs up PostgreSQL + object storage and writes a coverage manifest
+scripts/restore-livecore.ps1 restores PostgreSQL + object storage and verifies the systems of record
+scripts/test-backup-restore-drill.ps1  runnable restore drill (round-trip + fail-closed checks)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -2521,6 +2525,36 @@ for that job). `scripts/test-image-tags.ps1` tests these properties and the
 `publish-dry-run` job exercises the same derivation and build on every push and
 pull request without pushing.
 
+### Backup and restore (CORE-OPS-010)
+
+The Core holds systems of record whose loss is unrecoverable: the tenant-isolated,
+append-only audit trail (`audit_logs`), the session-event stream (`session_events`)
+and the store purchase ledger (`purchase_transactions`, `purchase_events`,
+`store_notification_events`), plus the private object-storage bucket of asset
+binaries. A documented, **tested** backup/restore procedure covers all of them.
+
+- `scripts/backup-livecore.ps1` runs a `pg_dump` (custom format) of the Core
+  database and mirrors the private asset bucket, then writes a
+  `livecore-backup-manifest.json` recording a row count and an order-independent
+  content checksum for every system of record. It is fail-closed: it refuses to
+  write a manifest that does not cover them all.
+- `scripts/restore-livecore.ps1` restores the dump with `pg_restore` and the
+  bucket from its mirror, then re-measures and verifies every system of record
+  against the manifest, failing with a non-zero exit code if a record was
+  dropped, altered or lost.
+- `scripts/test-backup-restore-drill.ps1` is the runnable restore drill: a
+  self-contained backup → restore → verify round-trip over a fixture modeling the
+  systems of record, exercising the same coverage/integrity logic
+  (`scripts/LiveCoreBackup.psm1`) and proving a faithful restore is accepted while
+  a lossy or tampered one is rejected. It needs no database or object store and
+  runs as the `backup-restore-drill` CI gate.
+
+No credential is committed: the database password is read from the same
+`ConnectionStrings:Database` value the API uses and passed via `PGPASSWORD`. The
+full runbook (PostgreSQL `pg_dump` cadence and PITR, object-storage mirroring,
+the step-by-step restore drill, cadence/RPO/RTO and security) lives in
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`.
+
 ## Continuous integration
 
 GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
@@ -2532,6 +2566,7 @@ run on `ubuntu-latest` and execute the commands documented above verbatim:
 | `dotnet`               | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                    |
 | `typescript`           | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                   |
 | `boundary-scan`        | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)              |
+| `backup-restore-drill` | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)              |
 | `powershell-lint`      | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                           |
 | `docker`               | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)         |
 | `publish-dry-run`      | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)          |

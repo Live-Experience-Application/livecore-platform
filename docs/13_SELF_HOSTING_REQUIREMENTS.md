@@ -501,3 +501,169 @@ instead. Because the tags are immutable and version-pinned, a deployment that re
 `scripts/test-image-tags.ps1` tests these properties (immutable, versioned, fail-closed off a release tag), and the
 `publish-dry-run` CI job exercises the same derivation and build on every push and pull request **without
 pushing**, so the publish path is verified continuously, not only at release time.
+
+## Backup and restore (CORE-OPS-010)
+
+The Core holds **systems of record whose loss is unrecoverable**: the tenant-isolated, **append-only** audit
+trail, the session-event stream and the store purchase ledger, plus the **private object-storage bucket** that
+holds asset binaries. None of this can be reconstructed from elsewhere, so a self-hosted deployment **must** run
+a backup and must be able to **prove** a restore recovers every one of these. This section is the documented,
+tested procedure; the runnable scripts live under `scripts/`.
+
+### What must be backed up (the systems of record)
+
+The coverage contract is `scripts/LiveCoreBackup.psm1`'s catalog (`Get-LiveCoreSystemOfRecordCatalog`), drawn
+from `docs/10_DATABASE_SCHEMA.md` and `csv/database_tables.csv`:
+
+| System of record            | Where         | Append-only | Why it is unrecoverable                                       |
+| --------------------------- | ------------- | :---------: | ------------------------------------------------------------- |
+| `audit_logs`                | PostgreSQL    |     yes     | The tenant audit trail (member removals, archives, reveals).  |
+| `session_events`            | PostgreSQL    |     yes     | The durable session event stream (replayed on reconnect).     |
+| `purchase_transactions`     | PostgreSQL    |     no      | Verified store purchases — the server source of premium state.|
+| `purchase_events`           | PostgreSQL    |     yes     | The purchase state-change trail (renew/cancel/refund/grace).  |
+| `store_notification_events` | PostgreSQL    |     yes     | The handled store-notification ledger (idempotency evidence). |
+| `object-storage`            | S3-compatible |     no      | The private asset binaries (never stored in PostgreSQL).      |
+
+All the database tables live in the **one** Core database (`ConnectionStrings:Database`), so a full-database
+dump captures every database system of record together with the rest of the tenant data; the object store is
+backed up separately. Backups contain tenant data and the audit/purchase records, so treat them as **sensitive**
+(see "Security" below).
+
+### PostgreSQL backup
+
+Two complementary strategies; a production deployment should run **both**.
+
+- **Logical dump on a cadence (baseline).** A scheduled `pg_dump` in **custom format** (`--format=custom`, which
+  restores selectively with `pg_restore`). Simple, portable across major versions and what
+  `scripts/backup-livecore.ps1` runs. Recommended cadence: **nightly**, retained for example 7 daily + 4 weekly +
+  3 monthly copies (tune to your RPO and storage budget).
+
+  ```bash
+  pg_dump --format=custom --no-password \
+    --host "$DB_HOST" --port "$DB_PORT" --username "$DB_USER" --dbname "$DB_NAME" \
+    --file "livecore-postgres-$(date -u +%Y%m%dT%H%M%SZ).dump"
+  ```
+
+- **Point-in-time recovery (PITR, low RPO).** For a small recovery window, take a periodic **base backup**
+  (`pg_basebackup`) and **continuously archive WAL** (`archive_mode = on`, an `archive_command` that copies each
+  segment to durable, off-host storage). PITR lets you restore to **any moment** before a failure rather than to
+  the last nightly dump, which matters for the append-only ledgers. PITR is a PostgreSQL-server configuration (or
+  a managed-Postgres feature); the dump cadence above remains the portable, provider-independent baseline.
+
+The database password is **never** committed and **never** put on the command line: the scripts read it from the
+same `ConnectionStrings:Database` value the API and worker use and pass it through the `PGPASSWORD` environment
+variable (threat T7).
+
+### Object-storage backup
+
+The private asset bucket (`Assets:Storage:*`, CORE-OPS-006) is backed up by **mirroring** it to a separate,
+equally private destination — ideally a different bucket in another region or provider — with whatever
+S3-compatible tool the deployment already uses (`aws s3 sync`, MinIO/RustFS `mc mirror`, or `rclone sync`).
+Enable **object versioning** and a lifecycle policy on the destination so an overwrite or delete is itself
+recoverable. The mirror destination stays **private** — no public access and no public listing — exactly like the
+source (threat T4).
+
+```bash
+# Example: mirror the private bucket to a backup bucket (keep both private).
+aws s3 sync "s3://livecore-assets" "s3://livecore-assets-backup" --delete
+```
+
+### The coverage manifest and integrity model
+
+A dump file alone does not prove a restore is good. `scripts/backup-livecore.ps1` therefore writes a
+`livecore-backup-manifest.json` next to the dump that records, **for every system of record**, a row count and an
+**order-independent SHA-256 content checksum** (for the database tables, a hash over `to_jsonb(row)` for every
+row; for the bucket, a hash over the object inventory). The manifest builder is **fail-closed**: it refuses to
+write a manifest that does not cover every catalog entry, so a backup can never silently omit the audit,
+session-event or purchase records.
+
+On restore, `scripts/restore-livecore.ps1` re-measures the **restored** database and bucket the same way and
+verifies them against the manifest. Verification fails closed: a missing or incomplete manifest certifies
+nothing, and any system of record that comes back with a different row count or a different content checksum
+(a dropped record, or a tampered append-only row) makes the restore **FAIL** with a non-zero exit code rather
+than be silently accepted.
+
+### Backing up
+
+```powershell
+pwsh -NoProfile -File scripts/backup-livecore.ps1 `
+  -OutputDirectory ./backups `
+  -ConnectionString "Host=$env:DB_HOST;Port=5432;Database=livecore;Username=livecore;Password=$env:DB_PASSWORD" `
+  -StorageBucket livecore-assets `
+  -StorageMirrorProgram aws -StorageMirrorArgument @('s3','sync','s3://livecore-assets','./backups/assets','--delete') `
+  -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+```
+
+The script requires object-storage coverage (it fails closed without an inventory command), runs `pg_dump`,
+mirrors and inventories the bucket, and writes the dump plus `livecore-backup-manifest.json` to
+`-OutputDirectory`. Store the whole output directory — dump, mirrored assets and manifest together — on durable,
+private, encrypted storage.
+
+### Restore runbook (tested)
+
+A restore is a deliberate, ordered procedure. Run it as a **drill** on a schedule (for example monthly) into a
+throwaway database, not only during a real incident, so the procedure stays proven.
+
+1. **Provision an empty target.** Create a fresh, empty database (for a recovery, the production database; for a
+   drill, a scratch one such as `livecore_restore`). Apply the schema is **not** required first — the dump
+   carries it; a `--clean` restore can also drop-and-recreate over an existing database.
+2. **Restore PostgreSQL and verify coverage in one step.** Run the restore script, which runs `pg_restore`,
+   restores the object store from its mirror, re-measures every system of record and verifies it against the
+   manifest:
+
+   ```powershell
+   pwsh -NoProfile -File scripts/restore-livecore.ps1 `
+     -DumpPath ./backups/livecore-postgres-20260613T000000Z.dump `
+     -ManifestPath ./backups/livecore-backup-manifest.json `
+     -ConnectionString "Host=$env:DB_HOST;Port=5432;Database=livecore_restore;Username=livecore;Password=$env:DB_PASSWORD" `
+     -StorageRestoreProgram aws -StorageRestoreArgument @('s3','sync','./backups/assets','s3://livecore-assets-restore') `
+     -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets-restore','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+   ```
+
+   A green run prints `Restore verified: every system of record matches the backup manifest`. A non-zero exit
+   means the restore is **invalid** — do not cut over to it.
+3. **Apply pending migrations.** If the backup predates a schema change, run the migrations runner against the
+   restored database (see "Database migrations" above) before pointing the API at it.
+4. **Validate readiness.** Point a non-production API/worker at the restored database and confirm `/health/ready`
+   is healthy and a few authenticated reads succeed, then cut over.
+
+### The restore drill (the runnable, tested check)
+
+`scripts/test-backup-restore-drill.ps1` is the **verifiably runnable** restore drill. It runs a full
+backup → persist → restore → verify round-trip over a fixture that models every system of record, using the
+**same** coverage and integrity logic (`scripts/LiveCoreBackup.psm1`) the real backup/restore scripts use, and
+asserts the safety property both ways: a faithful restore (even with records re-ordered) is **accepted**, while a
+restore that drops a purchase record, tampers an append-only audit record, loses the asset bucket, or is
+certified by an incomplete manifest is **rejected fail-closed**. It needs no database or object store, so it runs
+anywhere:
+
+```powershell
+pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
+```
+
+CI runs it on every push and pull request (the `backup-restore-drill` job), so the procedure cannot regress
+silently. For a stronger, end-to-end drill against real tooling, run `scripts/backup-livecore.ps1` followed by
+`scripts/restore-livecore.ps1` into a throwaway PostgreSQL database (the CI integration Postgres or a local
+container) and a scratch bucket; a successful `restore-livecore.ps1` run is the real-tool equivalent of the drill.
+
+### Cadence, RPO/RTO and retention
+
+- **Cadence:** nightly logical dump + continuous WAL archiving (PITR) for the database; the asset mirror on the
+  same or a tighter cadence.
+- **RPO:** the dump cadence (≈ 24h) without PITR, or the WAL-archive interval (minutes) with PITR.
+- **RTO:** dominated by `pg_restore` + the asset re-sync; rehearse it in the drill so the real-incident time is
+  known.
+- **Retention:** keep enough generations to survive a late-detected corruption (for example 7 daily + 4 weekly +
+  3 monthly), and test restoring an **old** backup, not only the newest.
+
+### Security
+
+Backups contain tenant data and the audit/purchase systems of record, so they are as sensitive as the live
+database (threats T5/T7):
+
+- **Encrypt** backups at rest and in transit, and keep the mirror destination **private** (no public access, no
+  public listing) like the source bucket (threat T4).
+- **Restrict access** to the backup store to the operators who need it; a leaked backup is a tenant-data breach.
+- **No secrets in the repository:** the scripts read the database password from configuration and pass it via
+  `PGPASSWORD`; object-storage credentials belong to the mirror tool's own environment. Nothing here is
+  committed (CORE-OPS-008).

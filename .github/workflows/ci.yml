@@ -4,6 +4,7 @@
 #   dotnet               - build, smoke tests, format/code-style verification
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
+#   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   publish-dry-run      - verify image tags + dry-run build the publish path, no push (CORE-OPS-009)
@@ -93,6 +94,21 @@ jobs:
 
       - name: Run boundary scan
         run: pwsh -NoProfile -File scripts/boundary-scan.ps1
+
+  backup-restore-drill:
+    name: Backup/restore drill (CORE-OPS-010)
+    runs-on: ubuntu-latest
+    # Runs the verifiably-runnable restore drill: a full backup -> restore ->
+    # verify round-trip over a fixture modeling the append-only audit,
+    # session-event and purchase systems of record, proving a faithful restore is
+    # accepted and a lossy or tampered one is rejected fail-closed. No database or
+    # object store needed (scripts/test-backup-restore-drill.ps1).
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run the backup/restore drill
+        run: pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
 
   docker:
     name: Docker image builds and container smoke tests
@@ -309,6 +325,7 @@ jobs:
       - dotnet
       - typescript
       - boundary-scan
+      - backup-restore-drill
       - powershell-lint
       - docker
       - publish-dry-run
