@@ -29,9 +29,13 @@ Idempotency-Key: <required for reveal commands and write actions where retry is 
 
 ## Core endpoints
 
-See `csv/api_routes.csv` for route list.
+The complete, authoritative route list is `csv/api_routes.csv` (one row per
+mounted `/api/v1` route). `csv/mobile_store_api_routes.csv` additionally
+documents the store/entitlement endpoints in their mobile-facing path shape.
+See `docs/24_SPEC_CONSISTENCY.md` for the source-of-truth map.
 
-Minimum endpoint groups:
+The block below is a representative minimum, not the full list (every entry in
+it is a row in `csv/api_routes.csv`):
 
 ```text
 GET    /api/v1/me

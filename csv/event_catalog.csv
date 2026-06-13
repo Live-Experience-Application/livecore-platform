@@ -4,6 +4,7 @@ SessionStarted,Host/CoHost,authorized session audience,yes,Starts live run
 SessionEnded,Host/CoHost,authorized session audience,yes,Ends live run
 ParticipantJoined,Participant/System,Host/CoHost and configured audience,yes,Connection event
 ParticipantLeft,System,Host/CoHost,yes,Connection event
+SceneCreated,Host/CoHost,Host/CoHost,yes,Prep event
 SceneActivated,Host/CoHost,authorized session audience,yes,Scene switch; emitted on a scene reveal (CORE-EVT-003) and subject-gated to the audience that may see the scene
 ContentBlockCreated,Host/CoHost,Host/CoHost,yes,Prep event
 VisibilityRuleChanged,Host/CoHost,Host/CoHost/Auditor,yes,Security relevant; realtime event subject-gated and host-facing on a hide (CORE-EVT-003); distinct from the audit record

@@ -19,6 +19,16 @@ Each event has:
 
 ## Core events
 
+The source of truth for the session-event vocabulary is
+`csv/event_catalog.csv`; the table below mirrors it (see
+`docs/24_SPEC_CONSISTENCY.md`). The store/entitlement domain events live
+separately in `csv/entitlement_event_catalog.csv`. Not every catalog event is
+emitted yet: the events wired into the implementation today are
+`SessionStarted`, `SessionEnded`, `ParticipantJoined`, `ParticipantLeft`,
+`SceneActivated`, `VisibilityRuleChanged`, `ContentRevealed` and
+`ContentHidden` (`SessionEventTypes`); the remaining rows are planned and land
+with their own stories.
+
 | Event | Emitted by | Visible to | Persisted | Notes |
 |---|---|---|---:|---|
 | SessionCreated | Host/Admin | Host/Admin/CoHost | yes | not always participant-visible |

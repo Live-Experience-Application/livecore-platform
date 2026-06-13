@@ -16,9 +16,15 @@ Use PostgreSQL.
 
 ## Core tables
 
-See `csv/database_tables.csv` for table ownership.
+The source of truth for the Core schema is `csv/database_tables.csv` (one row
+per table, with its owning module, scope and notes). The list below mirrors
+that file and the implemented EF Core model; keep all three in step (see
+`docs/24_SPEC_CONSISTENCY.md`). Tables documented elsewhere but not present in
+this list are not in the implemented schema and are tracked as deferred (for
+example `purchase_providers` and `billing_account_links`; see
+`csv/entitlement_database_tables.csv` and CORE-DOC-002).
 
-Required initial tables:
+Current Core tables:
 
 ```text
 organizations
@@ -41,6 +47,18 @@ session_events
 audit_logs
 templates
 export_jobs
+export_manifests
+export_manifest_entries
+recaps
+entitlement_definitions
+plan_definitions
+plan_entitlements
+subject_entitlements
+quota_definitions
+quota_usage
+purchase_transactions
+purchase_events
+store_notification_events
 idempotency_keys
 ```
 

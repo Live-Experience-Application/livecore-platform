@@ -4,6 +4,7 @@
 #   dotnet               - build, smoke tests, format/code-style verification
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
+#   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
@@ -94,6 +95,19 @@ jobs:
 
       - name: Run boundary scan
         run: pwsh -NoProfile -File scripts/boundary-scan.ps1
+
+  spec-consistency:
+    name: Spec consistency (routes/tables/events/epics)
+    runs-on: ubuntu-latest
+    # CORE-DOC-001: fails when the route, table, event or epic specifications in
+    # docs/ and csv/ drift from each other or from their single source of truth
+    # (see docs/24_SPEC_CONSISTENCY.md). Pure docs/csv check, no build needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run spec consistency check
+        run: pwsh -NoProfile -File scripts/spec-consistency.ps1
 
   backup-restore-drill:
     name: Backup/restore drill (CORE-OPS-010)
@@ -325,6 +339,7 @@ jobs:
       - dotnet
       - typescript
       - boundary-scan
+      - spec-consistency
       - backup-restore-drill
       - powershell-lint
       - docker

@@ -83,6 +83,7 @@ packages/design-tokens   @livecore/design-tokens - generic design tokens and the
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
+scripts/spec-consistency.ps1  doc/csv route/table/event/epic consistency check (CORE-DOC-001)
 scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic for the systems of record (CORE-OPS-010)
 scripts/backup-livecore.ps1  backs up PostgreSQL + object storage and writes a coverage manifest
 scripts/restore-livecore.ps1 restores PostgreSQL + object storage and verifies the systems of record
@@ -317,6 +318,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/boundary-scan.ps1
 ```bash
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/boundary-scan.ps1
+```
+
+### Spec consistency check
+
+Run the spec consistency check (CORE-DOC-001). It fails with a non-zero exit
+code when the route, table, event or epic specifications in `docs/` and `csv/`
+drift from each other or from their single source of truth (the source-of-truth
+map is `docs/24_SPEC_CONSISTENCY.md`). CI runs it as the `spec-consistency` job.
+
+```powershell
+# Windows (Windows PowerShell 5.1 or pwsh)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
+```
+
+```bash
+# Linux/macOS (PowerShell 7+)
+pwsh -NoProfile -File scripts/spec-consistency.ps1
 ```
 
 ## Run the hosts locally
