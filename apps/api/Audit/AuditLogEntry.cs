@@ -167,7 +167,11 @@ public sealed class AuditLogEntry
     {
     }
 
-    /// <summary>Surrogate key of the row (UUID version 7, time-ordered per docs/10_DATABASE_SCHEMA.md).</summary>
+    /// <summary>
+    /// Surrogate key of the row (UUID version 7, time-ordered per docs/10_DATABASE_SCHEMA.md). Its
+    /// timestamp component is derived from <see cref="CreatedAt"/> (the event time), so ordering by this
+    /// id is chronological by when the action happened.
+    /// </summary>
     public Guid Id { get; }
 
     /// <summary>
@@ -275,7 +279,12 @@ public sealed class AuditLogEntry
         string? newState,
         DateTimeOffset createdAt)
         => new(
-            Guid.CreateVersion7(),
+            // Derive the UUIDv7 timestamp from the event time, not the wall clock at construction, so the
+            // time-ordered surrogate id orders chronologically by when the action happened — which is what
+            // ListByOrganizationAsync relies on when it orders by id (two entries created in the same wall-
+            // clock millisecond but at different event times would otherwise tie-break on UUIDv7's random
+            // bits and read back out of order).
+            Guid.CreateVersion7(createdAt),
             organizationId,
             workspaceId,
             action,

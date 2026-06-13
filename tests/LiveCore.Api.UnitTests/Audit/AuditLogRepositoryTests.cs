@@ -67,7 +67,7 @@ public sealed class AuditLogRepositoryTests : IDisposable
         return organization;
     }
 
-    private static AuditLogEntry GenericEntry(Guid organizationId, AuditAction action)
+    private static AuditLogEntry GenericEntry(Guid organizationId, AuditAction action, DateTimeOffset? createdAt = null)
         => AuditLogEntry.Create(
             organizationId,
             workspaceId: Guid.NewGuid(),
@@ -78,7 +78,7 @@ public sealed class AuditLogRepositoryTests : IDisposable
             targetParticipantId: null,
             previousState: null,
             newState: null,
-            createdAt: _now);
+            createdAt: createdAt ?? _now);
 
     [Fact]
     public async Task A_generic_entry_round_trips_through_the_database()
@@ -167,14 +167,19 @@ public sealed class AuditLogRepositoryTests : IDisposable
     public async Task Entries_are_listed_in_creation_order()
     {
         var organization = await SeedOrganizationAsync(_slugA);
-        var first = GenericEntry(organization.Id, AuditAction.SessionStarted);
-        var second = GenericEntry(organization.Id, AuditAction.SessionEnded);
+        // Distinct event times so the assertion is deterministic: the surrogate id is a UUIDv7 whose
+        // timestamp is derived from createdAt, so a later event sorts after an earlier one regardless of
+        // the wall-clock instant the rows were constructed (entries created in the same wall-clock
+        // millisecond would otherwise tie-break on the random UUIDv7 bits). "second" is appended first to
+        // prove the read order follows event time, not insertion order.
+        var first = GenericEntry(organization.Id, AuditAction.SessionStarted, _now);
+        var second = GenericEntry(organization.Id, AuditAction.SessionEnded, _now.AddSeconds(1));
 
         await using (var context = CreateContext())
         {
             var repository = new AuditLogRepository(context);
-            await repository.AppendAsync(first, CancellationToken.None);
             await repository.AppendAsync(second, CancellationToken.None);
+            await repository.AppendAsync(first, CancellationToken.None);
         }
 
         await using (var context = CreateContext())
@@ -182,7 +187,8 @@ public sealed class AuditLogRepositoryTests : IDisposable
             var loaded = await new AuditLogRepository(context)
                 .ListByOrganizationAsync(organization.Id, CancellationToken.None);
 
-            // Ordered by the time-ordered surrogate id (UUIDv7), so reads are chronological.
+            // Ordered by the time-ordered surrogate id (UUIDv7 derived from the event time), so reads are
+            // chronological by when the action happened, not by insertion order.
             Assert.Collection(
                 loaded,
                 e => Assert.Equal(first.Id, e.Id),
