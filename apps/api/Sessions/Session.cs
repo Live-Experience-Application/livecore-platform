@@ -274,7 +274,7 @@ public sealed class Session
         string title,
         DateTimeOffset createdAt)
         => new(
-            Guid.CreateVersion7(),
+            Guid.CreateVersion7(createdAt),
             organizationId,
             workspaceId,
             title?.Trim() ?? string.Empty,
