@@ -450,6 +450,72 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records an entity deletion (<see cref="AuditAction.EntityDeleted"/>) — the audit fact written when
+    /// an authorized host deletes an entity, removing it and its dependent edges, visibility rules and
+    /// asset links (CORE-LIFE-003). A thin specialization of <see cref="Create"/> that pins the action and
+    /// applies the deletion producer's stricter contract: the tenant, the workspace the entity belonged to,
+    /// the authenticated actor (the host who deleted the entity) and the deleted entity resource (its
+    /// generic kind name and surrogate id) are all REQUIRED, where the generic factory leaves them
+    /// optional. A deletion is a removal rather than a transition, and an entity has no lifecycle state, so
+    /// there is NO before/after state pair (both null) — unlike <see cref="ForMemberRemoval"/>, which
+    /// records the revoked role as the previous state. The resource kind is passed as a generic NAME string
+    /// (e.g. <c>Entity</c>) so the Audit module does not depend on the Entities module's types, exactly like
+    /// <see cref="ForVisibilityRuleChange"/> takes visibility state names as strings. Every value is an
+    /// identifier or a generic name — never free-form content (threat T7) — and the audit row outlives the
+    /// now-deleted entity it references because the reference is a recorded fact, not a foreign key (see the
+    /// type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the deletion happened in (required).</param>
+    /// <param name="workspaceId">The workspace the deleted entity belonged to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the deletion (required; the audited actor).</param>
+    /// <param name="entityResourceType">The deleted entity's generic kind name (e.g. Entity).</param>
+    /// <param name="entityId">The deleted entity's surrogate id.</param>
+    /// <param name="createdAt">When the deletion happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the entity resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForEntityDeletion(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string entityResourceType,
+        Guid entityId,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(entityResourceType))
+        {
+            throw new ArgumentException("Entity resource type must not be empty.", nameof(entityResourceType));
+        }
+
+        if (entityId == Guid.Empty)
+        {
+            throw new ArgumentException("Entity id must not be empty.", nameof(entityId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.EntityDeleted,
+            actorUserProfileId,
+            entityResourceType,
+            entityId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

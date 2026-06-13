@@ -218,4 +218,51 @@ internal sealed class EntityRelationshipRepository : IEntityRelationshipReposito
         _dbContext.EntityRelationships.Remove(relationship);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<int> RemoveByEntityAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid entityId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored entity's edges, so the deletion fails fast instead of
+        // matching an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (entityId == Guid.Empty)
+        {
+            throw new ArgumentException("Entity id must not be empty.", nameof(entityId));
+        }
+
+        // The predicate leads with the tenant column, then matches the workspace, then matches the
+        // entity as EITHER endpoint (source OR target): every edge touching the entity, in BOTH
+        // directions. It stays exactly tenant- and workspace-scoped, so another tenant's or workspace's
+        // edges are never removed even when the entity id would otherwise be addressable (threat T5/T1).
+        // Load-then-RemoveRange (the codebase's add/remove + SaveChanges convention) so the removed rows
+        // participate in any ambient transaction the EntityDeletionService controls.
+        var edges = await _dbContext.EntityRelationships
+            .Where(relationship => relationship.OrganizationId == organizationId
+                && relationship.WorkspaceId == workspaceId
+                && (relationship.SourceEntityId == entityId || relationship.TargetEntityId == entityId))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (edges.Count == 0)
+        {
+            return 0;
+        }
+
+        _dbContext.EntityRelationships.RemoveRange(edges);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return edges.Count;
+    }
 }

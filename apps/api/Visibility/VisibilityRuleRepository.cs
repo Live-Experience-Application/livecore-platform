@@ -152,4 +152,54 @@ internal sealed class VisibilityRuleRepository : IVisibilityRuleRepository
         _dbContext.VisibilityRules.Update(rule);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<int> RemoveByResourceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored resource's rules, so the deletion fails fast instead of
+        // matching an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (resourceId == Guid.Empty)
+        {
+            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
+        }
+
+        // The predicate is the documented critical index shape
+        // visibility_rules(workspace_id, resource_type, resource_id) led by organization_id, so it
+        // removes ALL rules for the resource (audience-wide and every selected-participant rule) while
+        // staying exactly tenant-, workspace- and resource-scoped: another tenant's or workspace's rules
+        // are never removed even when the resource id would otherwise be addressable (threat T5/T1).
+        // Load-then-RemoveRange (the codebase's add/remove + SaveChanges convention) so the removed rows
+        // participate in any ambient transaction the caller controls.
+        var rules = await _dbContext.VisibilityRules
+            .Where(rule => rule.OrganizationId == organizationId
+                && rule.WorkspaceId == workspaceId
+                && rule.ResourceType == resourceType
+                && rule.ResourceId == resourceId)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (rules.Count == 0)
+        {
+            return 0;
+        }
+
+        _dbContext.VisibilityRules.RemoveRange(rules);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return rules.Count;
+    }
 }

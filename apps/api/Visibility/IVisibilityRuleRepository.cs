@@ -98,4 +98,31 @@ public interface IVisibilityRuleRepository
     /// lookup.
     /// </summary>
     Task UpdateAsync(VisibilityRule rule, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES every visibility rule governing the given resource (named by type + id) WITHIN the
+    /// given organization and workspace — both the audience-wide rule and every selected-participant
+    /// rule for it — and returns the number removed (CORE-LIFE-003, the "Resource Lifecycle and
+    /// Deletion" epic). This is the cleanup a resource's deletion requires: <c>resource_id</c> is a
+    /// POLYMORPHIC reference (no database foreign key — a single column cannot foreign-key into
+    /// scenes/content_blocks/entities), so the database can NOT cascade a rule when its governed resource
+    /// is deleted; leaving the rule behind would be a DANGLING rule that a later resource minted with the
+    /// same id could silently inherit (a visibility leak; threats T2/T5). So the application removes the
+    /// rules explicitly when the resource is deleted (here, the <see cref="LiveCore.Api.Entities.EntityDeletionService"/>
+    /// for an Entity), documented in docs/adr/0012-resource-deletion-cascades-dependents.md. The deletion
+    /// is tenant-, workspace- AND resource-scoped (the predicate is the documented critical index shape
+    /// <c>visibility_rules(workspace_id, resource_type, resource_id)</c> led by <c>organization_id</c>),
+    /// so a foreign tenant's or workspace's rules are NEVER removed even when the resource id would
+    /// otherwise be addressable (threat T5/T1). Removing the rules of a resource that has none is a no-op
+    /// that returns 0.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or resource id is empty.
+    /// </exception>
+    Task<int> RemoveByResourceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        CancellationToken cancellationToken);
 }

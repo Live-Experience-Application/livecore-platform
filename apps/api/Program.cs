@@ -575,6 +575,18 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // before minting a URL.
     builder.Services.AddScoped<AssetDownloadPolicy>();
 
+    // Entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic): the Entities
+    // module's "a host can delete an entity" command. Registered here, inside the persistence conditional,
+    // because it composes the entity, entity-relationship, visibility-rule, asset-link and audit
+    // repositories (all registered above) plus the shared DbContext for a single transaction. It loads the
+    // entity through the tenant- AND workspace-scoped IEntityRepository.FindByIdAsync FIRST (an entity in
+    // another workspace/tenant is never reachable; threats T1/T5), then CASCADES its dependents — the
+    // FK-backed EntityRelationship edges and the POLYMORPHIC (non-FK) visibility_rules and asset_links the
+    // database cannot cascade — and appends an EntityDeleted audit record, all atomically (cascade, not
+    // block; docs/adr/0012-resource-deletion-cascades-dependents.md). Consumed by
+    // DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}.
+    builder.Services.AddScoped<EntityDeletionService>();
+
     // Entitlement and plan definition catalog (CORE-ENTL-001, the first story of the "Entitlements and Quotas"
     // epic): the Entitlements module — FIRST appearing here — owns the GLOBAL entitlement_definitions,
     // plan_definitions and plan_entitlements tables that hold the deployment-wide monetization catalog
@@ -850,6 +862,21 @@ app.MapContentBlockEndpoints();
 // removing a non-existent edge is a safe 404 (threats T1/T5). It adds no event and no audit record,
 // faithful to the CORE-ENT-003 add-edge precedent.
 app.MapEntityRelationshipEndpoints();
+
+// Entity deletion endpoint (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic):
+// DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}. It lives in the same authenticated route
+// group and fails closed (503) when persistence is not configured, exactly like the entity-relationship
+// removal endpoint. No new DI registration is required beyond the EntityDeletionService above: the tenant
+// context resolver and workspace member repository it consumes are already registered inside the
+// persistence conditional. The parent workspace is resolved FIRST (the route pins {workspaceId}, the
+// tenant comes from the required ?organizationSlug=), the caller is authorized by their role in that
+// workspace (Owner/Admin/Host/CoHost), and the entity is then loaded through the tenant- AND
+// workspace-scoped FindByIdAsync — so an entity in another workspace or tenant is never reachable to
+// delete even when its id is known. Every denial is hidden as 404 (an insufficient role as 403), and
+// deleting a non-existent entity is a safe 404 (threats T1/T5). The deletion CASCADES its dependent edges,
+// visibility rules and asset links and is appended to the append-only audit log (EntityDeleted), all
+// atomically (docs/adr/0012-resource-deletion-cascades-dependents.md).
+app.MapEntityEndpoints();
 
 // Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005
 // linking): the Assets module's HTTP routes, POST /api/v1/assets/upload-intent,

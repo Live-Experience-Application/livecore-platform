@@ -466,9 +466,12 @@ public sealed class HideServiceTests : IDisposable
 
         await HideAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-hide", participant.Id);
 
-        // Two audit entries in order: the reveal (Visible) then the hide (Hidden). Assert the latest.
+        // Two audit entries: the reveal (NewState Visible) then the hide (NewState Hidden). Select the
+        // HIDE entry by its resulting state rather than by list position — the reveal and hide here share
+        // the same command timestamp (_now), so their time-ordered surrogate ids tie-break on UUIDv7's
+        // random bits and can read back in either order (a position-based pick was flaky).
         var audit = await ListAuditAsync(org);
-        var entry = audit[^1];
+        var entry = Assert.Single(audit, e => e.NewState == nameof(VisibilityState.Hidden));
         Assert.Equal(participant.Id, entry.TargetParticipantId);
         Assert.Equal(nameof(VisibilityState.Visible), entry.PreviousState);
         Assert.Equal(nameof(VisibilityState.Hidden), entry.NewState);

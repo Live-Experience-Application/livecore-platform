@@ -149,4 +149,29 @@ public interface IEntityRelationshipRepository
     Task RemoveAsync(
         EntityRelationship relationship,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES every edge that TOUCHES the given entity as its source OR its target, WITHIN the
+    /// given organization and workspace, and returns the number removed (CORE-LIFE-003, the "Resource
+    /// Lifecycle and Deletion" epic). This is the bulk inverse of <see cref="AddAsync"/> used when an
+    /// entity is deleted: every directed edge the entity is an endpoint of must go (an edge has no
+    /// meaning once one of its endpoints is gone), so this is the application-level CASCADE the
+    /// <see cref="EntityDeletionService"/> applies before deleting the entity row
+    /// (docs/adr/0012-resource-deletion-cascades-dependents.md). The database endpoint foreign keys are
+    /// already <c>ON DELETE CASCADE</c>, so this is defence in depth that makes the cascade explicit,
+    /// observable and identical across providers; doing it BEFORE the entity delete also means there is
+    /// never a window where a dangling edge exists. The deletion is tenant- AND workspace-scoped (the
+    /// predicate leads with <c>organization_id</c> then <c>workspace_id</c>), so a foreign tenant's or
+    /// workspace's edges are NEVER removed even when the entity id would otherwise be addressable
+    /// (threat T5/T1). Removing the edges of an entity with no edges is a no-op that returns 0.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or entity id is empty. An empty id can never address a stored
+    /// entity's edges, so the deletion is rejected instead of silently affecting nothing.
+    /// </exception>
+    Task<int> RemoveByEntityAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid entityId,
+        CancellationToken cancellationToken);
 }

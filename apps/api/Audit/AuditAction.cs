@@ -74,4 +74,18 @@ public enum AuditAction
     /// (<see cref="AuditLogEntry.ForMemberRemoval"/>).
     /// </summary>
     MemberRemoved = 5,
+
+    /// <summary>
+    /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
+    /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
+    /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that
+    /// an authorized host removed a workspace resource (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// A generic, workspace-scoped audit fact whose actor is the host who deleted the entity and whose
+    /// resource is the deleted entity (its generic kind name and surrogate id). The deletion is a removal,
+    /// not a transition to a new state, so there is no before/after state pair (the entity has no lifecycle
+    /// state); the dependent rows the deletion cascades are consequences of the same action and are not
+    /// separately audited, exactly as the member-removal action records one fact for the removal it
+    /// performs (<see cref="AuditLogEntry.ForEntityDeletion"/>).
+    /// </summary>
+    EntityDeleted = 6,
 }

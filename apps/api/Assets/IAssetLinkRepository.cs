@@ -66,4 +66,30 @@ public interface IAssetLinkRepository
     /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
     /// </summary>
     Task<AssetLinkAddResult> AddAsync(AssetLink assetLink, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES every link attaching ANY asset to the given target (named by type + id) WITHIN the
+    /// given organization and workspace, and returns the number removed (CORE-LIFE-003, the "Resource
+    /// Lifecycle and Deletion" epic). This is the cleanup a target resource's deletion requires:
+    /// <c>target_id</c> is a POLYMORPHIC reference (no database foreign key — a single column cannot
+    /// foreign-key into content_blocks/entities), so the database can NOT cascade a link when its target
+    /// resource is deleted; leaving the link behind would be a DANGLING link (and an asset could then
+    /// claim audience access through a target that no longer exists; threat T4). So the application
+    /// removes the links explicitly when the target is deleted (here, the
+    /// <see cref="LiveCore.Api.Entities.EntityDeletionService"/> for an Entity target), documented in
+    /// docs/adr/0012-resource-deletion-cascades-dependents.md. This removes only the LINK rows, never the
+    /// linked assets (an asset can outlive a target it was linked to). The deletion is tenant-, workspace-
+    /// AND target-scoped (the predicate leads with <c>organization_id</c> then <c>workspace_id</c>), so a
+    /// foreign tenant's or workspace's links are NEVER removed even when the target id would otherwise be
+    /// addressable (threat T5/T1). Removing the links of a target that has none is a no-op that returns 0.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or target id is empty.
+    /// </exception>
+    Task<int> RemoveByTargetAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        AssetLinkTargetType targetType,
+        Guid targetId,
+        CancellationToken cancellationToken);
 }

@@ -151,4 +151,18 @@ internal sealed class EntityRepository : IEntityRepository
         _dbContext.Entities.Update(entity);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(Entity entity, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+
+        // The caller resolved this exact row through the tenant- and workspace-scoped FindByIdAsync,
+        // so removing the loaded entity deletes precisely that one entity. The database FKs cascade
+        // this delete to the entity's directed relationship edges; the polymorphic visibility_rules and
+        // asset_links are removed by EntityDeletionService in the same unit of work (the database cannot
+        // cascade a non-FK reference). See docs/adr/0012-resource-deletion-cascades-dependents.md.
+        _dbContext.Entities.Remove(entity);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

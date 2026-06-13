@@ -715,11 +715,15 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`) is extensible without a schema change because the action persists
+`MemberRemoved`, `EntityDeleted`) is extensible without a schema change because the action persists
 by its stable name; each producer command wires its own action in its own story.
 The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
 workspace or organization member (the threat-model control for access revocation).
+The entity-deletion command (CORE-LIFE-003) wires `EntityDeleted`, appending an entry
+whenever an authorized host deletes an entity (the deletion's "authorized and audited"
+control); the dependents it cascades are consequences of the one action and are not
+separately audited.
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final
@@ -856,6 +860,53 @@ is `403`; entity relationships are host-prepared content, so the remove role set
 host-capable `Owner`/`Admin`/`Host`/`CoHost` (the same set that creates scenes and content
 blocks), matched exactly (`MembershipRole` is non-linear). Faithful to the add-edge
 precedent (CORE-ENT-003), removal emits no event and writes no audit record.
+
+### Entity deletion
+
+A host can delete an entity, and its dependents are cleaned up consistently
+(CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic):
+
+| Method   | Route                                                  | Authorized callers                        |
+| -------- | ------------------------------------------------------ | ----------------------------------------- |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/entities/{entityId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+The route pins the `{workspaceId}` in its path and resolves the target organization from a required
+`?organizationSlug=` query parameter (the same token-claim-and-membership tenant check as the
+entity-relationship removal and other workspace by-id routes). The **parent workspace is resolved
+first** and the entity is then loaded through the tenant- **and** workspace-scoped repository lookup,
+so an entity that lives in another workspace, or in a workspace owned by another tenant, is never
+reachable to delete even when its id is known (threats T1/T5).
+
+**Cascade, not block** (`docs/adr/0012-resource-deletion-cascades-dependents.md`). Deleting an entity
+removes it **together with** its dependents, atomically in one transaction, rather than refusing the
+deletion while any dependent remains. The dependents come in two shapes and are handled by their nature:
+
+- its directed **`EntityRelationship` edges** (both endpoints) — these hold real foreign keys to the
+  entity (`ON DELETE CASCADE`), but the deletion removes them **explicitly** first so the cascade is
+  deterministic and provider-independent (the database cascade then remains as defence in depth);
+- its **`visibility_rules`** (the audience-wide rule and every selected-participant rule governing the
+  entity) and its **`asset_links`** — these reference the entity **polymorphically** (`resource_id` /
+  `target_id` are not foreign keys), so the database cannot cascade them and the application removes them
+  explicitly. Leaving them behind would dangle: a stale visible rule a later resource could inherit (a
+  visibility leak; threats T2/T5) or a link through which an asset could claim access via a target that
+  no longer exists (threat T4). Only the link rows are removed — the linked **assets** are untouched, and
+  the two endpoint entities of a removed edge are untouched.
+
+The removals, the entity delete and the audit append run inside a **single database transaction**, so a
+deletion is applied whole or not at all.
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the tenant, is not a
+member of the route's workspace, or names an entity that belongs to another workspace/tenant — and
+**deleting a non-existent entity is a safe `404`** (it reveals nothing and changes nothing). A known
+workspace member who lacks the delete role is `403`; entities are host-prepared content, so the delete
+role set is the host-capable `Owner`/`Admin`/`Host`/`CoHost` (the same set that creates scenes and
+content blocks and removes entity relationships), matched exactly (`MembershipRole` is non-linear).
+
+Every successful deletion appends an append-only `EntityDeleted` audit record (see "Audit log" below)
+capturing the tenant, the workspace, the authenticated **actor** (the host who deleted) and the deleted
+entity — never any content (threats T1/T5/T7). The audit record is a recorded fact, so it survives the
+now-deleted entity it references. Faithful to the member-removal / edge-removal precedents, the deletion
+emits no realtime session event (the event catalog defines none for entity deletion).
 
 ### Realtime hub
 

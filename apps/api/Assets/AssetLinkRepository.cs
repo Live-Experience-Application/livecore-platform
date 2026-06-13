@@ -130,4 +130,54 @@ internal sealed class AssetLinkRepository : IAssetLinkRepository
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<int> RemoveByTargetAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        AssetLinkTargetType targetType,
+        Guid targetId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored target's links, so the deletion fails fast instead of
+        // matching an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (targetId == Guid.Empty)
+        {
+            throw new ArgumentException("Target id must not be empty.", nameof(targetId));
+        }
+
+        // The predicate leads with the tenant column, then matches the workspace, the target type and the
+        // target id, so it removes ALL links attaching any asset to the target while staying exactly
+        // tenant-, workspace- and target-scoped: another tenant's or workspace's links are never removed
+        // even when the target id would otherwise be addressable (threat T5/T1). Only the LINK rows are
+        // removed; the linked assets are untouched. Load-then-RemoveRange (the codebase's add/remove +
+        // SaveChanges convention) so the removed rows participate in any ambient transaction the caller
+        // controls.
+        var links = await _dbContext.AssetLinks
+            .Where(link => link.OrganizationId == organizationId
+                && link.WorkspaceId == workspaceId
+                && link.TargetType == targetType
+                && link.TargetId == targetId)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (links.Count == 0)
+        {
+            return 0;
+        }
+
+        _dbContext.AssetLinks.RemoveRange(links);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return links.Count;
+    }
 }

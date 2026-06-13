@@ -114,4 +114,20 @@ public interface IEntityRepository
     /// having loaded the entity through a tenant-scoped lookup.
     /// </summary>
     Task UpdateAsync(Entity entity, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES the given entity row (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic).
+    /// The caller (<see cref="EntityDeletionService"/>) is responsible for having loaded the entity
+    /// through the tenant- AND workspace-scoped <see cref="FindByIdAsync"/> first, so a foreign tenant's
+    /// or foreign workspace's entity is never reachable to remove (threat T5/T1); this method removes
+    /// exactly the row it is handed. Removing the entity DOES cascade at the database level to its
+    /// directed <see cref="EntityRelationship"/> edges (both endpoint foreign keys are
+    /// <c>ON DELETE CASCADE</c>); the dependent <c>visibility_rules</c> and <c>asset_links</c> reference
+    /// the entity POLYMORPHICALLY (no foreign key) so the database does not cascade them — the
+    /// application <see cref="EntityDeletionService"/> removes those (and, for determinism, the edges
+    /// too) inside the SAME unit of work BEFORE this call, so the cascade is consistent across providers
+    /// (docs/adr/0012-resource-deletion-cascades-dependents.md).
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The entity is null.</exception>
+    Task RemoveAsync(Entity entity, CancellationToken cancellationToken);
 }
