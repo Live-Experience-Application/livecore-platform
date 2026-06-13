@@ -1405,12 +1405,11 @@ caller does not own — is hidden as `404` (never `403`).
 **Scale-out abstraction (CORE-RT-006).** `docs/11_REALTIME_SYNC.md` ("Scale-out") calls for a
 "Valkey/Redis-compatible backplane later when multiple API instances run". The Realtime module now defines
 that seam: `IRealtimeBackplane` is the single transport boundary a server-computed event delivery crosses
-on its way to the connected clients. The default `InProcessRealtimeBackplane` fans a delivery out to the
-connections held by **this** API instance over the SignalR hub (`IHubContext<SessionHub>`, part of the
-shared framework — no new dependency); a multi-instance deployment substitutes a Valkey/Redis-backed
-implementation so the **same** delivery also reaches connections held by **other** instances. The real
-backplane wiring (the Redis package and its configuration) lives with deployment, not in this repository
-(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+on its way to the connected clients. The `InProcessRealtimeBackplane` fans each delivery out to its
+server-computed SignalR group over the hub (`IHubContext<SessionHub>`, part of the shared framework — no new
+dependency). On a single API instance that reaches only the connections held by **this** instance; the actual
+cross-instance scale-out is wired by CORE-OPS-007 below, which makes the SignalR backplane Redis/Valkey-backed
+so the **same** group send also reaches connections held by **other** instances.
 
 The backplane receives an **already-authorized** delivery — one recipient-safe payload addressed to exactly
 **one** server-managed group (`RealtimeGroups`), produced by the per-recipient recipient resolver
@@ -1419,6 +1418,27 @@ enumerate recipients, so it **cannot** widen the audience: it only forwards what
 authorized. The per-recipient recipient computation therefore stays the **single send path**, and
 "Realtime delivery never leaks hidden events" (threat T3 in `docs/07_SECURITY_THREAT_MODEL.md`) holds for
 every backplane — in-process or scaled-out — by construction.
+
+**Redis/Valkey scale-out backplane (CORE-OPS-007).** A SignalR hub tracks group membership **per process**,
+so with more than one API instance an event computed on one instance reaches only the clients connected to
+**that** instance and is silently dropped for clients on the others. Core now wires the official ASP.NET Core
+SignalR backplane (`Microsoft.AspNetCore.SignalR.StackExchangeRedis`) **conditionally** on the deployment's
+`Realtime:Backplane:*` configuration (`AddLiveCoreRealtime`):
+
+- **Configured** (a connection string is present at `Realtime:Backplane:ConnectionString`): `AddStackExchangeRedis`
+  replaces the in-memory SignalR `HubLifetimeManager` with the Redis-backed one, so every group send through
+  `IHubContext<SessionHub>` is published over Redis pub/sub and reaches the connections held by **every**
+  instance — realtime events reach clients across multiple API instances.
+- **Unconfigured:** SignalR keeps its in-memory `HubLifetimeManager` — correct for a **single** API instance
+  only (the documented single-instance constraint; a multi-replica deployment must configure a backplane).
+
+Enabling the backplane swaps only the **transport beneath** `IHubContext`: the `IRealtimeBackplane` stays the
+same `InProcessRealtimeBackplane`, the publisher still hands it one already-authorized per-recipient delivery,
+and the per-recipient recipient computation is **unchanged** — so the Redis backplane only transports an
+already-authorized group send and **cannot widen the audience** (threat T3) whether or not it is configured.
+The connection string is supplied at runtime via configuration only — no backplane connection string lives in
+this repository (threat T7); the Redis/Valkey server and its connection string belong to the deployment
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
 The `SessionStarted`/`SessionEnded` lifecycle events are wired over this delivery path by CORE-EVT-001 (see
 "Session lifecycle commands"): the start/end endpoints publish them through `ISessionEventPublisher` as

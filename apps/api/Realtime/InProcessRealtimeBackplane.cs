@@ -3,14 +3,16 @@ using Microsoft.AspNetCore.SignalR;
 namespace LiveCore.Api.Realtime;
 
 /// <summary>
-/// The default, single-instance <see cref="IRealtimeBackplane"/> (CORE-RT-006): it delivers a computed
-/// delivery to the connections held by THIS API instance by sending to the SignalR group over
-/// <see cref="IHubContext{SessionHub}"/> (registered by <c>AddSignalR()</c> — part of the ASP.NET Core
-/// shared framework, so no new dependency). This is exactly the send the <c>SessionEventPublisher</c>
-/// performed inline before the scale-out seam existed; extracting it behind <see cref="IRealtimeBackplane"/>
-/// is what lets a multi-instance deployment swap in a Valkey/Redis-compatible backplane
-/// (docs/11_REALTIME_SYNC.md "Scale-out") without touching the per-recipient recipient computation, so the
-/// anti-leak guarantee (threat T3) is preserved across the swap.
+/// The <see cref="IRealtimeBackplane"/> implementation (CORE-RT-006): it delivers a computed delivery to the
+/// SignalR group by sending over <see cref="IHubContext{SessionHub}"/> (registered by <c>AddSignalR()</c> —
+/// part of the ASP.NET Core shared framework, so no new dependency). This is exactly the send the
+/// <c>SessionEventPublisher</c> performed inline before the scale-out seam existed. On a single API instance
+/// it reaches only that instance's connections; when a deployment configures the SignalR Redis/Valkey
+/// HubLifetimeManager (CORE-OPS-007, <see cref="RealtimeServiceCollectionExtensions.AddLiveCoreRealtime"/>)
+/// the SAME group send is published over Redis and also reaches connections on OTHER instances — this class
+/// is REUSED UNCHANGED, because scale-out swaps only the transport beneath <c>IHubContext</c>, not this seam
+/// or the per-recipient recipient computation. So the anti-leak guarantee (threat T3) is preserved whether or
+/// not the backplane is configured.
 ///
 /// It forwards only what it is given — one recipient-safe payload to one server-computed group — so it can
 /// never broaden the audience the resolver already authorized ("Events are never broadcast blindly",

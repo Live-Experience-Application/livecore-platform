@@ -26,6 +26,17 @@
          validation against the external OIDC provider. Patch-aligned to the other
          Microsoft.* packages here (10.0.9). -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
+    <!-- Official ASP.NET Core SignalR backplane over a Redis/Valkey-compatible server (CORE-OPS-007). It
+         makes the SignalR HubLifetimeManager that backs IHubContext<SessionHub> publish each group send over
+         Redis pub/sub, so a group delivery reaches the connections held by EVERY API instance, not just the
+         local one (docs/11_REALTIME_SYNC.md "Scale-out"; docs/02_ARCHITECTURE.md names a Valkey/Redis-compatible
+         backplane for realtime scale-out). A justified new dependency: it is the Microsoft-maintained backplane
+         the framework documents for SignalR scale-out, and reimplementing cross-instance hub fan-out (group
+         membership tracking + pub/sub) by hand would duplicate that subsystem. It is wired ONLY when a backplane
+         connection string is configured (Realtime:Backplane:ConnectionString); unconfigured the host stays on the
+         in-process default. The connection string is supplied at runtime via configuration only; none lives in
+         source (threat T7). Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). -->
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

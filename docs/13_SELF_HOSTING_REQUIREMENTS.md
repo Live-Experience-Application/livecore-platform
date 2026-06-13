@@ -351,3 +351,38 @@ Assets__Storage__SecretAccessKey=<secret-key>
 Assets__Storage__Bucket=livecore-assets
 Assets__Storage__ForcePathStyle=true
 ```
+
+## Realtime scale-out backplane (CORE-OPS-007)
+
+Realtime delivery uses SignalR (`docs/11_REALTIME_SYNC.md`). With a single API instance no backplane is
+needed. **When more than one API instance runs** (HA or horizontal scale) a **Valkey/Redis-compatible
+backplane is required**: SignalR tracks hub group membership per-process, so without a shared backplane an
+event computed on one instance reaches only the clients connected to **that** instance and is **silently
+dropped** for clients connected to the others.
+
+Core ships the official ASP.NET Core SignalR backplane (`Microsoft.AspNetCore.SignalR.StackExchangeRedis`),
+selected **conditionally** on the configuration below. With it configured, every hub group send is published
+over Redis pub/sub and reaches the connections held by every instance. Enabling it changes only the
+**transport**: the per-recipient recipient computation is unchanged, so the backplane still only transports an
+already-authorized, per-recipient delivery to one server-managed group and never widens the audience (threat
+T3). With it **unconfigured** the host stays on the in-memory backplane — correct for a **single instance
+only** (the documented single-instance constraint).
+
+Configure it under `Realtime:Backplane:*` (environment variables shown in double-underscore form). **No
+connection string lives in the repository** — it is runtime configuration only (threat T7):
+
+| Key                                     | Required | Default | Purpose                                                                              |
+| --------------------------------------- | -------- | ------- | ------------------------------------------------------------------------------------ |
+| `Realtime__Backplane__ConnectionString` | for multi-instance | — | The Redis/Valkey connection string (StackExchange.Redis format). Unset = single-instance in-process backplane. |
+| `Realtime__Backplane__ChannelPrefix`    | no       | —       | Namespaces this deployment's SignalR pub/sub channels, so one Redis/Valkey instance can be shared (e.g. backplane + cache) without collisions. |
+
+Example (the self-hosted Valkey in the local Compose stack):
+
+```bash
+Realtime__Backplane__ConnectionString=valkey:6379
+Realtime__Backplane__ChannelPrefix=livecore
+```
+
+A managed/secured server uses the full StackExchange.Redis connection-string form, e.g.
+`Realtime__Backplane__ConnectionString="redis.example.com:6380,password=<secret>,ssl=true"`. All API
+instances must point at the **same** server (and the same channel prefix) for cross-instance delivery to work.

@@ -60,23 +60,21 @@ builder.Services.AddLiveCoreCors(builder.Configuration);
 // the scheme (threat T7).
 builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 
-// Realtime SignalR services (CORE-RT-001, the Realtime Event Stream epic's first story). SignalR is
-// part of the ASP.NET Core shared framework (Microsoft.AspNetCore.App) — no new package dependency.
-// Registered unconditionally (the hub needs no database): the session hub it backs is authenticated and
-// carries no events yet (groups = CORE-RT-002; event delivery = CORE-RT-003+). docs/11_REALTIME_SYNC.md
-// mandates SignalR for realtime communication.
-builder.Services.AddSignalR();
-
-// Realtime scale-out seam (CORE-RT-006, the Realtime Event Stream epic's final story). The backplane is
-// the single transport boundary a computed event delivery crosses on its way to connected clients. The
-// default in-process implementation sends a recipient-safe payload to its server-managed group via
-// IHubContext<SessionHub> (this instance's connections only); a multi-instance deployment substitutes a
-// Valkey/Redis-compatible IRealtimeBackplane (docs/11_REALTIME_SYNC.md "Scale-out") so the SAME delivery
-// also reaches connections on other instances. It receives an ALREADY-AUTHORIZED delivery (one payload to
-// one group, computed by the per-recipient resolver), so swapping the transport cannot widen the audience
-// and realtime delivery never leaks a hidden event (threat T3). It needs only the shared-framework hub
-// context (no new dependency, no database), so it is registered unconditionally next to AddSignalR.
-builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
+// Realtime SignalR services and the scale-out backplane (CORE-RT-001 SignalR; CORE-RT-006 the
+// IRealtimeBackplane seam; CORE-OPS-007 the conditional Redis/Valkey backplane). SignalR is part of the
+// ASP.NET Core shared framework (docs/11_REALTIME_SYNC.md mandates it). The IRealtimeBackplane is the single
+// transport boundary a computed event delivery crosses on its way to connected clients: the in-process
+// implementation sends a recipient-safe payload to its server-managed group via IHubContext<SessionHub>.
+// CORE-OPS-007 makes that send cross multiple API instances CONDITIONALLY on the deployment's
+// Realtime:Backplane:* configuration: with a backplane connection string configured the SignalR
+// HubLifetimeManager becomes Redis/Valkey-backed (Microsoft.AspNetCore.SignalR.StackExchangeRedis), so the
+// same group send reaches connections on every instance (the epic acceptance criterion); with nothing
+// configured the host keeps the in-process default — correct for a single API instance, the documented
+// single-instance constraint. Enabling the backplane changes only the transport beneath IHubContext: the
+// per-recipient recipient computation and the one-payload-to-one-group send path are UNCHANGED, so the
+// backplane only ever transports an ALREADY-AUTHORIZED delivery and cannot widen the audience or leak a
+// hidden event (threat T3). No backplane connection string lives in source (threat T7).
+builder.Services.AddLiveCoreRealtime(builder.Configuration);
 
 // Asset storage adapter seam (CORE-AST-002, the storage adapter interface story of the "Asset Storage and
 // Authorization" epic). IAssetStorage is the single port between Core and the private, S3-compatible

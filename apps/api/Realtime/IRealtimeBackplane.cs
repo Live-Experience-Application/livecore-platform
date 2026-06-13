@@ -3,11 +3,13 @@ namespace LiveCore.Api.Realtime;
 /// <summary>
 /// The realtime scale-out seam (CORE-RT-006) — the single transport boundary a server-computed event
 /// delivery crosses on its way to the connected clients. docs/11_REALTIME_SYNC.md ("Scale-out") mandates a
-/// "Valkey/Redis-compatible backplane later when multiple API instances run"; this abstraction is the seam
-/// that backplane plugs into. The default <see cref="InProcessRealtimeBackplane"/> fans a delivery out to
-/// the connections held by THIS API instance (over the SignalR hub); a multi-instance deployment supplies a
-/// Valkey/Redis-backed implementation so the SAME delivery also reaches connections held by OTHER instances
-/// — without changing anything upstream of this seam.
+/// "Valkey/Redis-compatible backplane later when multiple API instances run"; this abstraction is that seam.
+/// The <see cref="InProcessRealtimeBackplane"/> fans a delivery out to the SignalR group over the hub
+/// (<c>IHubContext&lt;SessionHub&gt;</c>). On a single API instance that reaches only the connections held
+/// by THIS instance; a multi-instance deployment configures the SignalR Redis/Valkey HubLifetimeManager
+/// (CORE-OPS-007, <see cref="RealtimeServiceCollectionExtensions.AddLiveCoreRealtime"/>) so the SAME group
+/// send is published over Redis and ALSO reaches the connections held by OTHER instances — without changing
+/// this seam or anything upstream of it (only the transport beneath <c>IHubContext</c> changes).
 ///
 /// CRUCIALLY, the backplane receives an ALREADY-COMPUTED delivery: one recipient-safe payload addressed to
 /// exactly ONE server-managed group (<see cref="RealtimeGroups"/>), produced by the per-recipient
