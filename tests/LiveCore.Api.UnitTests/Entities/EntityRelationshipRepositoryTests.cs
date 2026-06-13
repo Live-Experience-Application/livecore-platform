@@ -669,6 +669,81 @@ public sealed class EntityRelationshipRepositoryTests : IDisposable
         Assert.Equal(survivor.Id, Assert.Single(remaining).Id);
     }
 
+    // --- Removal (CORE-LIFE-002: the edge can now be deleted) ------------------
+
+    [Fact]
+    public async Task RemoveAsync_deletes_the_edge_and_leaves_both_endpoints_intact()
+    {
+        // The headline CORE-LIFE-002 behavior: an edge that previously could only be added is now
+        // removable. Removing it deletes exactly the one edge row and touches neither endpoint entity
+        // (it is the inverse of the per-edge insert, NOT a cascade from an endpoint).
+        var (organization, workspace, source, target) = await SeedTwoEntitiesAsync();
+        var edge = await SeedRelationshipAsync(organization.Id, workspace.Id, source.Id, target.Id, "links-to");
+        // A second, unrelated edge in the same workspace must survive the removal of the first.
+        var survivor = await SeedRelationshipAsync(organization.Id, workspace.Id, target.Id, source.Id, "links-to");
+
+        await using (var context = CreateContext())
+        {
+            var repository = new EntityRelationshipRepository(context);
+            var loaded = await repository.FindByIdAsync(
+                organization.Id, workspace.Id, edge.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.RemoveAsync(loaded, CancellationToken.None);
+        }
+
+        await using var verifyContext = CreateContext();
+        var verifyRepository = new EntityRelationshipRepository(verifyContext);
+
+        // The removed edge is gone; the unrelated edge remains.
+        Assert.Null(await verifyRepository.FindByIdAsync(
+            organization.Id, workspace.Id, edge.Id, CancellationToken.None));
+        var remaining = await verifyRepository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, CancellationToken.None);
+        Assert.Equal(survivor.Id, Assert.Single(remaining).Id);
+
+        // Both endpoint entities are untouched by the edge removal.
+        var entityRepository = new EntityRepository(verifyContext);
+        Assert.NotNull(await entityRepository.FindByIdAsync(
+            organization.Id, workspace.Id, source.Id, CancellationToken.None));
+        Assert.NotNull(await entityRepository.FindByIdAsync(
+            organization.Id, workspace.Id, target.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RemoveAsync_removes_only_the_addressed_edge_between_the_same_pair()
+    {
+        // Two edges of DIFFERENT kinds connect the same pair. Removing one leaves the other untouched,
+        // proving removal targets exactly the loaded row, not the (source, target) pair.
+        var (organization, workspace, source, target) = await SeedTwoEntitiesAsync();
+        var linksTo = await SeedRelationshipAsync(organization.Id, workspace.Id, source.Id, target.Id, "links-to");
+        var relatesTo = await SeedRelationshipAsync(organization.Id, workspace.Id, source.Id, target.Id, "relates-to");
+
+        await using (var context = CreateContext())
+        {
+            var repository = new EntityRelationshipRepository(context);
+            var loaded = await repository.FindByIdAsync(
+                organization.Id, workspace.Id, linksTo.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            await repository.RemoveAsync(loaded, CancellationToken.None);
+        }
+
+        await using var verifyContext = CreateContext();
+        var verifyRepository = new EntityRelationshipRepository(verifyContext);
+        var remaining = await verifyRepository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, CancellationToken.None);
+        Assert.Equal(relatesTo.Id, Assert.Single(remaining).Id);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_rejects_a_null_relationship()
+    {
+        await using var context = CreateContext();
+        var repository = new EntityRelationshipRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => repository.RemoveAsync(null!, CancellationToken.None));
+    }
+
     // --- Same-workspace-endpoints boundary (mirrors Entity/entity_type_id) -----
 
     [Fact]

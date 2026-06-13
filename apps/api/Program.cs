@@ -834,6 +834,23 @@ app.MapSceneEndpoints();
 // (CORE-SCENE-005) are later stories and are deliberately not built here.
 app.MapContentBlockEndpoints();
 
+// Entity relationship removal endpoint (CORE-LIFE-002, the "Resource Lifecycle and Deletion" epic):
+// the Entities module's relationship REMOVAL route,
+// DELETE /api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId}. It lives in an
+// authenticated route group and fails closed (503) when persistence is not configured, exactly like
+// the scene/content-block endpoints. No new DI registration is required: the tenant context resolver,
+// the entity-relationship repository (extended with RemoveAsync) and the workspace member repository
+// it consumes are already registered above inside the persistence conditional. The edge model
+// previously only ever grew (an edge could be added but never removed); this adds the inverse. The
+// parent workspace is resolved FIRST (the route pins {workspaceId}, the tenant comes from the required
+// ?organizationSlug=), the caller is authorized by their role in that workspace (Owner/Admin/Host/CoHost),
+// and the edge is then loaded through the tenant- AND workspace-scoped FindByIdAsync — so an edge in
+// another workspace or tenant is never reachable to remove even when its id is known (the endpoint FKs
+// do not DB-enforce same-workspace). Every denial is hidden as 404 (an insufficient role as 403), and
+// removing a non-existent edge is a safe 404 (threats T1/T5). It adds no event and no audit record,
+// faithful to the CORE-ENT-003 add-edge precedent.
+app.MapEntityRelationshipEndpoints();
+
 // Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005
 // linking): the Assets module's HTTP routes, POST /api/v1/assets/upload-intent,
 // GET /api/v1/assets/{assetId}/download-url and POST /api/v1/assets/{assetId}/links. They live

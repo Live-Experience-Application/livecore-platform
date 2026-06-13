@@ -31,12 +31,15 @@ namespace LiveCore.Api.Entities;
 /// The aggregate is essentially immutable (its endpoints, kind, tenant and workspace never change),
 /// so there is deliberately NO UpdateAsync: a relationship is created or deleted, never mutated.
 ///
-/// This is the aggregate + persistence story. There are NO HTTP endpoints (csv/api_routes.csv
-/// defines no entity-relationship route), no template loading or schema-conformance validation
-/// (CORE-ENT-004) and no search / visibility filtering / graph traversal (CORE-ENT-005); those are
-/// later stories and are deliberately not built here. This contract takes explicit ids; resolving
-/// the "current" organization or workspace from a request is the tenant context resolver and later
-/// stories.
+/// CORE-ENT-003 was the aggregate + persistence story (no HTTP endpoint, no template loading or
+/// schema-conformance validation — CORE-ENT-004 — and no search / visibility filtering / graph
+/// traversal — CORE-ENT-005). CORE-LIFE-002 (the "Resource Lifecycle and Deletion" epic) later adds
+/// the relationship REMOVAL contract (<see cref="RemoveAsync"/>) consumed by
+/// <c>DELETE /api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId}</c>, so the edge
+/// model is now shrinkable; template loading and search/visibility/graph traversal remain later
+/// stories and are deliberately not built here. This contract takes explicit ids; resolving the
+/// "current" organization or workspace from a request is the tenant context resolver's job and the
+/// endpoint above does exactly that before calling in.
 /// </summary>
 public interface IEntityRelationshipRepository
 {
@@ -130,6 +133,20 @@ public interface IEntityRelationshipRepository
     /// surface as a <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
     /// </summary>
     Task<EntityRelationshipAddResult> AddAsync(
+        EntityRelationship relationship,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES the given relationship row, removing the directed edge from the graph
+    /// (CORE-LIFE-002). The edge model previously only ever grew — an edge could be added but never
+    /// removed — so this is the inverse of <see cref="AddAsync"/>: it makes the graph shrinkable.
+    /// The caller (the remove-relationship endpoint) is responsible for having loaded the
+    /// relationship through the tenant- AND workspace-scoped <see cref="FindByIdAsync"/> first, so a
+    /// foreign tenant's or foreign workspace's edge is never reachable to remove (threat T5/T1); this
+    /// method removes exactly the row it is handed. Removal touches only this one edge row; the two
+    /// endpoint entities are untouched (it is the reverse of the per-edge insert, not a cascade).
+    /// </summary>
+    Task RemoveAsync(
         EntityRelationship relationship,
         CancellationToken cancellationToken);
 }

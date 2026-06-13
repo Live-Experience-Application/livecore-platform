@@ -203,4 +203,19 @@ internal sealed class EntityRelationshipRepository : IEntityRelationshipReposito
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task RemoveAsync(
+        EntityRelationship relationship,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(relationship);
+
+        // The caller resolved this exact row through the tenant- and workspace-scoped FindByIdAsync,
+        // so removing the loaded entity deletes precisely that one edge. Only the relationship row is
+        // touched — the source and target entities are left intact (this is the inverse of the
+        // per-edge insert, not a cascade from an endpoint).
+        _dbContext.EntityRelationships.Remove(relationship);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

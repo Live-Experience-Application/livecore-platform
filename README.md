@@ -826,6 +826,37 @@ a later story), and `Data` a bounded, well-formed JSON document — each with it
 own explicit size limit. An invalid or oversize body is rejected with `400`
 before any persistence, and the rejected content is never echoed back.
 
+### Entity relationship removal
+
+The Entities module owns generic `EntityRelationship` edges — directed graph edges
+between two entities. Until now an edge could be **added but never removed** (the
+graph only grew); CORE-LIFE-002 (the "Resource Lifecycle and Deletion" epic) adds
+the inverse so a host can remove one:
+
+| Method   | Route                                                                    | Authorized callers                        |
+| -------- | ------------------------------------------------------------------------ | ----------------------------------------- |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+The route pins the `{workspaceId}` in its path and resolves the target organization
+from a required `?organizationSlug=` query parameter (the same token-claim-and-membership
+tenant check as the other workspace by-id routes). The **parent workspace is resolved
+first** and the edge is then loaded through the tenant- **and** workspace-scoped
+repository lookup, because a relationship's endpoint foreign keys do not DB-enforce that
+the edge and its endpoints share a workspace — so an edge that lives in another workspace,
+or in a workspace owned by another tenant, is never reachable to remove even when its id
+is known (threats T1/T5). On success the addressed edge is hard-deleted and the route
+returns `204 No Content`; only that one edge row is removed, leaving both endpoint
+entities intact.
+
+It is fail-closed at every step and hidden as `404` for a caller who cannot see the
+tenant, is not a member of the route's workspace, or names an edge that belongs to
+another workspace/tenant — and **removing a non-existent edge is a safe `404`** (it
+reveals nothing and changes nothing). A known workspace member who lacks the remove role
+is `403`; entity relationships are host-prepared content, so the remove role set is the
+host-capable `Owner`/`Admin`/`Host`/`CoHost` (the same set that creates scenes and content
+blocks), matched exactly (`MembershipRole` is non-linear). Faithful to the add-edge
+precedent (CORE-ENT-003), removal emits no event and writes no audit record.
+
 ### Realtime hub
 
 The Realtime module exposes an authenticated [SignalR](https://learn.microsoft.com/aspnet/core/signalr/introduction)

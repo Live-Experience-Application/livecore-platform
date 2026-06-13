@@ -19,6 +19,7 @@ GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection 
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
 GET,/api/v1/scenes/{sceneId},Scenes,workspace members,Projection by role
 POST,/api/v1/scenes/{sceneId}/content-blocks,Content,"Host,CoHost,Owner,Admin",Create content block
+DELETE,/api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId},Entities,"Host,CoHost,Owner,Admin",Remove directed entity relationship edge; workspace-scoped lookup; hidden-404
 GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant owner or Host,Participant-safe feed
 POST,/api/v1/assets/upload-intent,Assets,"Host,CoHost,Owner,Admin",Creates upload intent
 GET,/api/v1/assets/{assetId}/download-url,Assets,authorized viewers,Signed URL after permission check

@@ -310,6 +310,26 @@ internal static class TestData
     }
 
     /// <summary>
+    /// Creates and persists a directed entity relationship edge between two entities in the given
+    /// workspace, driving the real <see cref="EntityRelationship.Create"/> aggregate factory. Used to
+    /// arrange an edge the removal endpoint can delete. The kind is a generic, neutral slug (AGENTS.md).
+    /// </summary>
+    public static async Task<EntityRelationship> AddEntityRelationshipAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sourceEntityId,
+        Guid targetEntityId,
+        string kind = "links-to")
+    {
+        var relationship = EntityRelationship.Create(
+            organizationId, workspaceId, sourceEntityId, targetEntityId, kind, SeedTime);
+        context.EntityRelationships.Add(relationship);
+        await context.SaveChangesAsync();
+        return relationship;
+    }
+
+    /// <summary>
     /// Creates and persists an asset link attaching the given asset to the given target (a content block
     /// or entity) in the given workspace, driving the real <see cref="AssetLink.Create"/> aggregate
     /// factory. Used to arrange an asset's audience-visibility linkage for the download-authorization
