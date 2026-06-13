@@ -1494,16 +1494,49 @@ authorize server-side (role + tenant + workspace + visibility) and only then ask
 the adapter to mint a URL. The adapter is a dumb, secure signer; minting is the
 last step after the permission check has passed.
 
-The **concrete, provider-specific adapter** (its SDK and the object-storage
-endpoint/credentials) is supplied by the deployment, exactly as a Valkey/Redis
-backplane replaces the in-process realtime default (CORE-RT-006); Core carries no
-object-storage SDK dependency and no storage credentials in source
-(`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat T7). Until one is wired, the
-default registration is the **fail-closed** `UnconfiguredAssetStorage`: every
+A **concrete S3-compatible adapter** now ships in Core (CORE-OPS-006, below); the
+object-storage **endpoint and credentials** are still supplied by the deployment
+through configuration only — Core holds no storage credentials in source
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`; threat T7). The concrete adapter is
+selected **conditionally** on that configuration; when storage is unconfigured the
+default registration stays the **fail-closed** `UnconfiguredAssetStorage`: every
 operation throws `AssetStorageNotConfiguredException` rather than serving bytes
 some insecure way, so the private-by-default posture holds even when storage is
 not configured (mirroring how the host runs without a database connection string
-or OIDC authority and denies cleanly). There is no asset HTTP route yet.
+or OIDC authority and denies cleanly).
+
+### Concrete S3-compatible storage adapter
+
+CORE-OPS-006 implements the concrete `IAssetStorage` over the **AWS SDK for .NET**
+S3 client (`AWSSDK.S3`), so a deployment that configures object storage gets
+**real, SigV4 pre-signed** upload/download URLs against any S3-compatible backend —
+RustFS self-hosted or any S3-compatible provider hosted
+(`docs/02_ARCHITECTURE.md`; `docs/12_STORAGE_ASSETS.md`; ADR 0006). The pre-signed
+URL is computed **locally** by the SDK (no network round-trip); `DeleteObjectAsync`
+performs a real, server-side object delete with the deployment's own credentials
+(no URL is handed to any client). The adapter signs **only the given asset's own
+bucket + object key** and re-validates the result through `SignedAssetUrl`
+(absolute, lifetime ≤ one hour), so it cannot mint a public, long-lived or
+cross-object URL (threats T4/T5/T1).
+
+`S3CompatibleAssetStorage` is registered **conditionally** by
+`AddAssetStorage(configuration)` (used by **both** the API host and the worker's
+cleanup job, so the two never diverge): with `Assets:Storage:Endpoint`,
+`Assets:Storage:AccessKeyId` and `Assets:Storage:SecretAccessKey` all configured it
+wires the concrete adapter; with nothing (or a **partial**) configuration it keeps
+the fail-closed `UnconfiguredAssetStorage`, so unconfigured storage still denies
+cleanly (the consuming endpoints return `503`). Optional settings are
+`Assets:Storage:Region` (default `us-east-1`), `Assets:Storage:ForcePathStyle`
+(default `true`, what self-hosted backends need) and `Assets:Storage:UrlLifetime`
+(default 15 minutes, validated `> 0` and `≤ 1h`). `Assets:Storage:Bucket` /
+`:Provider` remain the per-asset naming (`AssetStorageLocation`). **No storage
+credential is read anywhere but configuration** (e.g. the environment variables
+`Assets__Storage__AccessKeyId` / `Assets__Storage__SecretAccessKey`); none live in
+the repository (threat T7).
+
+Adding `AWSSDK.S3` is a **justified new dependency**: minting S3 SigV4 pre-signed
+URLs is security-sensitive cryptography that should use the official, maintained
+SDK rather than a hand-rolled signer.
 
 ### Asset upload intent
 

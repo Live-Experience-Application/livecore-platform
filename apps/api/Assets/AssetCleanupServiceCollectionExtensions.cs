@@ -51,9 +51,12 @@ public static class AssetCleanupServiceCollectionExtensions
         // The system clock; the cleanup service compares an asset's age against the retention window.
         services.AddSingleton(TimeProvider.System);
 
-        // Fail-closed storage default: assets stay private by default and the cleanup job removes nothing
-        // until a real, deployment-supplied S3-compatible adapter overrides this (CORE-AST-002; threat T4).
-        services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
+        // Storage adapter, selected conditionally on Assets:Storage:* configuration (CORE-OPS-006): the
+        // concrete S3-compatible adapter when an endpoint and credentials are configured, so the cleanup job
+        // deletes real objects, otherwise the fail-closed UnconfiguredAssetStorage so the sweep removes
+        // nothing and never deletes a metadata row whose object it could not delete (CORE-AST-002; threat T4).
+        // The same wiring the API host uses, so the two hosts never diverge.
+        services.AddAssetStorage(configuration);
 
         // Deployment cleanup policy (retention/interval/batch size), read once from configuration with safe
         // defaults so the worker runs without any cleanup configuration.

@@ -13,6 +13,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- AWS SDK for .NET S3 client (CORE-OPS-006). The official, maintained SDK for the S3 protocol, used by
+         S3CompatibleAssetStorage to mint SigV4 pre-signed upload/download URLs (computed locally, no network
+         round-trip) and to delete objects against any S3-compatible backend - RustFS self-hosted or any
+         S3-compatible provider hosted (docs/02_ARCHITECTURE.md; docs/12_STORAGE_ASSETS.md; ADR 0006). A
+         justified new dependency: implementing S3 SigV4 pre-signing by hand would be security-sensitive
+         crypto we should not reimplement. Endpoint and credentials are supplied at runtime via configuration
+         only (Assets:Storage:*); none live in source (threat T7). -->
+    <PackageReference Include="AWSSDK.S3" Version="3.7.305.22" />
     <!-- Official Microsoft package that implements the documented OIDC-first
          request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
          validation against the external OIDC provider. Patch-aligned to the other

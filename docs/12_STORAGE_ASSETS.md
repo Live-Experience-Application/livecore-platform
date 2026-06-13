@@ -25,12 +25,42 @@ The port does not authorize the caller; the consuming upload-intent (CORE-AST-00
 and signed-download (CORE-AST-004) flows authorize server-side first and only then
 ask the adapter to mint a URL.
 
-The concrete, provider-specific implementation (its SDK and the object-storage
-endpoint/credentials) is supplied by the deployment (see
-`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006), so Core carries no
-object-storage SDK dependency and no credentials in source. Until one is wired, the
-default is a fail-closed adapter that denies every operation, so assets stay private
-by default even when storage is not configured.
+Core now ships a **concrete** S3-compatible implementation of this port
+(CORE-OPS-006, below); the object-storage endpoint and credentials are still
+supplied by the deployment through configuration only (see
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006), so no credentials live in
+source. The concrete adapter is selected conditionally on that configuration; until
+storage is configured the default stays a fail-closed adapter that denies every
+operation, so assets stay private by default even when storage is not configured.
+
+### Concrete S3-compatible adapter (CORE-OPS-006)
+
+`S3CompatibleAssetStorage` implements `IAssetStorage` over the **AWS SDK for .NET**
+S3 client (`AWSSDK.S3`), the official client for the S3 protocol, which speaks to
+any S3-compatible backend (RustFS self-hosted or any S3-compatible provider
+hosted). It mints **SigV4 pre-signed** `Upload` (PUT) and `Download` (GET) URLs —
+computed locally by the SDK, with no network round-trip — for the **given asset's
+own** bucket and object key, and re-validates each through `SignedAssetUrl`
+(absolute, lifetime ≤ one hour), so a public, long-lived or cross-object URL is
+impossible (threats T4/T5/T1). `DeleteObjectAsync` performs a real, server-side
+object delete with the deployment's own credentials (no URL is handed to any
+client; idempotent, so a never-uploaded pending object deletes cleanly).
+
+The adapter is registered **conditionally** by `AddAssetStorage(configuration)`,
+used by both the API host and the worker cleanup job:
+
+- **configured** — `Assets:Storage:Endpoint`, `Assets:Storage:AccessKeyId` and
+  `Assets:Storage:SecretAccessKey` all present → the concrete adapter, so the API
+  mints real pre-signed URLs and the worker deletes real objects;
+- **unconfigured or partial** → the fail-closed `UnconfiguredAssetStorage`, so
+  asset operations return `503` (private by default even when unconfigured).
+
+Optional settings: `Assets:Storage:Region` (default `us-east-1`),
+`Assets:Storage:ForcePathStyle` (default `true`) and `Assets:Storage:UrlLifetime`
+(default 15 minutes; validated `> 0` and `≤ 1h`). `Assets:Storage:Bucket` /
+`:Provider` remain the per-asset naming. No storage credential is read anywhere but
+configuration (threat T7). `AWSSDK.S3` is a justified dependency: S3 SigV4
+pre-signing is security-sensitive crypto best left to the official SDK.
 
 ### Upload intent flow (CORE-AST-003)
 

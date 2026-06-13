@@ -82,16 +82,18 @@ builder.Services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 // Authorization" epic). IAssetStorage is the single port between Core and the private, S3-compatible
 // object storage that holds an asset's binary content (docs/05_MODULE_CONTRACTS.md: the Assets module owns
 // the "storage adapter" and "signed URL creation"; docs/12_STORAGE_ASSETS.md; ADR 0006). The concrete,
-// provider-specific adapter (and its SDK + object-storage endpoint/credentials) is supplied by the
-// deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md), exactly as a Valkey/Redis backplane replaces the
-// in-process realtime default (CORE-RT-006). Until one is wired, the default is the FAIL-CLOSED
-// UnconfiguredAssetStorage: every asset operation throws AssetStorageNotConfiguredException rather than
-// serving bytes some insecure way, so assets stay private by default even when storage is not configured
-// (the epic acceptance criterion; threat T4 "Asset leak"). It is stateless and needs no database, so it is
-// registered unconditionally next to the realtime backplane. The upload-intent flow (CORE-AST-003) and the
-// signed download flow with authorization (CORE-AST-004) both consume this port to mint short-lived signed
+// concrete S3-compatible adapter (CORE-OPS-006) is selected CONDITIONALLY on the deployment's
+// Assets:Storage:* configuration: with an endpoint and credentials configured, the API mints real SigV4
+// pre-signed upload/download URLs against the S3-compatible backend (RustFS self-hosted or any S3-compatible
+// provider hosted; docs/12_STORAGE_ASSETS.md; ADR 0006); with nothing (or only a partial) configuration the
+// FAIL-CLOSED UnconfiguredAssetStorage stays in place, so every asset operation throws
+// AssetStorageNotConfiguredException rather than serving bytes some insecure way and assets stay private by
+// default even when storage is not configured (the epic acceptance criterion; threat T4 "Asset leak"). This
+// mirrors how the host runs without a database connection string or an OIDC authority. No storage credential
+// is read anywhere but configuration (threat T7). The upload-intent flow (CORE-AST-003) and the signed
+// download flow with authorization (CORE-AST-004) both consume this port to mint short-lived signed
 // upload/download URLs after their server-side permission checks.
-builder.Services.AddSingleton<IAssetStorage, UnconfiguredAssetStorage>();
+builder.Services.AddAssetStorage(builder.Configuration);
 
 // Purchase verification provider seam (CORE-STORE-001, the first story of the "Store Purchase Verification"
 // epic). IPurchaseVerificationProvider is the single port between Core and a store's own server APIs that

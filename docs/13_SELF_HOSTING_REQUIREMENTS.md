@@ -309,3 +309,45 @@ by the loop making progress, a hung sweep stops refreshing it and the file goes
   never crashes the worker (a transient error is logged and swallowed; a persistent
   failure just makes the file go stale, which is fail-safe). It carries only a
   timestamp — no identifiers, no secrets (threat T7).
+
+## Object storage (CORE-OPS-006)
+
+An asset's binary content lives in a **private**, S3-compatible bucket, never in
+PostgreSQL (`docs/12_STORAGE_ASSETS.md`; ADR 0006). Core ships a concrete
+S3-compatible storage adapter (`S3CompatibleAssetStorage`, over `AWSSDK.S3`) that
+mints SigV4 pre-signed upload/download URLs and deletes objects; it is selected
+**conditionally** on the configuration below (used by both the API host and the
+worker cleanup job). With it unconfigured — or only **partially** configured — the
+fail-closed default stays in place and every asset operation returns `503`, so
+assets stay private by default even when storage is not configured (threat T4).
+
+Configure it under `Assets:Storage:*` (environment variables shown in
+double-underscore form). **No credential lives in the repository** — endpoint and
+keys are runtime configuration only (threat T7):
+
+| Key                              | Required | Default     | Purpose                                                              |
+| -------------------------------- | -------- | ----------- | ------------------------------------------------------------------- |
+| `Assets__Storage__Endpoint`      | yes      | —           | The S3-compatible service endpoint URL.                             |
+| `Assets__Storage__AccessKeyId`   | yes      | —           | Access key id used to sign requests.                                |
+| `Assets__Storage__SecretAccessKey` | yes    | —           | Secret access key used to sign requests.                            |
+| `Assets__Storage__Region`        | no       | `us-east-1` | Region used in the SigV4 signature.                                 |
+| `Assets__Storage__ForcePathStyle` | no      | `true`      | Path-style addressing (`endpoint/bucket/key`); needed self-hosted.  |
+| `Assets__Storage__UrlLifetime`   | no       | `00:15:00`  | Signed-URL validity window; validated `> 0` and `≤ 1h`.             |
+| `Assets__Storage__Bucket`        | no       | `livecore-assets` | The private bucket new assets are stored in (per-asset naming). |
+| `Assets__Storage__Provider`      | no       | `s3`        | Provider identifier recorded on each asset row (per-asset naming).  |
+
+All three of `Endpoint`, `AccessKeyId` and `SecretAccessKey` must be present for the
+concrete adapter to be wired; any one missing keeps the fail-closed default. The
+bucket named here must exist on the endpoint and be **private** (no public access,
+no public listing). The same configuration drives the worker, so the background
+cleanup job can delete the objects of abandoned upload intents.
+
+Example (a self-hosted RustFS in the local Compose stack):
+
+```bash
+Assets__Storage__Endpoint=http://rustfs:9000
+Assets__Storage__AccessKeyId=<access-key>
+Assets__Storage__SecretAccessKey=<secret-key>
+Assets__Storage__Bucket=livecore-assets
+Assets__Storage__ForcePathStyle=true
+```
