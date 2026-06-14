@@ -6,6 +6,7 @@
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
+#   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   publish-dry-run      - verify image tags + dry-run build the publish path, no push (CORE-OPS-009)
@@ -123,6 +124,75 @@ jobs:
 
       - name: Run the backup/restore drill
         run: pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
+
+  backup-restore-postgres:
+    name: Real backup/restore round-trip on PostgreSQL (CORE-DR-002)
+    runs-on: ubuntu-latest
+    # CORE-DR-002: the backup-restore-drill job above proves the coverage and
+    # integrity LOGIC with an in-memory fixture, but the real backup-livecore.ps1 /
+    # restore-livecore.ps1 - the scripts that actually invoke pg_dump / pg_restore /
+    # psql and the to_jsonb content checksum - were never run against a real
+    # PostgreSQL, so a broken tool argument would ship green and the RTO/RPO claims
+    # would rest on an untested path. This job runs the REAL scripts end to end
+    # against the same Postgres service the migrations/integration-postgres jobs use:
+    # it seeds the systems-of-record tables, backs them up, restores into a FRESH
+    # database and asserts the full backup -> restore -> integrity round-trip
+    # (real pg_dump/pg_restore/psql + to_jsonb row-count/checksum) passes.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: livecore_backup_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # No credentials in the repository: these are throwaway CI databases whose
+      # password exists only for the ephemeral service container.
+      SOURCE_CONNECTION_STRING: "Host=localhost;Port=5432;Database=livecore_backup_ci;Username=postgres;Password=postgres"
+      RESTORE_CONNECTION_STRING: "Host=localhost;Port=5432;Database=livecore_restore_ci;Username=postgres;Password=postgres"
+      # Backups are encrypted at rest (CORE-DR-001), so the scripts refuse to run
+      # without a passphrase. This is a throwaway CI-only value, never a real secret.
+      Backup__Encryption__Passphrase: "ci-backup-restore-roundtrip-passphrase"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the PostgreSQL 17 client (matching pg_dump/pg_restore/psql)
+        # The runner's bundled client may be older than the postgres:17 service, and
+        # pg_dump refuses to dump a newer server. Install the matching major and put
+        # it first on PATH so the scripts' default pg_dump/pg_restore/psql resolve to
+        # version 17.
+        run: |
+          set -euo pipefail
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - name: Build migrations runner image
+        run: docker build --file apps/api/Migrations.Dockerfile --tag livecore-migrations:ci .
+
+      - name: Apply the real migrations to the source database
+        run: |
+          docker run --rm --network host \
+            --env ConnectionStrings__Database="$SOURCE_CONNECTION_STRING" \
+            livecore-migrations:ci
+
+      - name: Run the real backup -> restore -> integrity round-trip
+        run: |
+          pwsh -NoProfile -File scripts/test-backup-restore-postgres.ps1 \
+            -SourceConnectionString "$SOURCE_CONNECTION_STRING" \
+            -RestoreConnectionString "$RESTORE_CONNECTION_STRING"
 
   docker:
     name: Docker image builds and container smoke tests
@@ -349,6 +419,7 @@ jobs:
       - boundary-scan
       - spec-consistency
       - backup-restore-drill
+      - backup-restore-postgres
       - powershell-lint
       - docker
       - publish-dry-run

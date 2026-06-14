@@ -88,6 +88,7 @@ scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic and the a
 scripts/backup-livecore.ps1  backs up PostgreSQL + object storage, encrypts the dump and mirrored assets at rest, and writes a coverage manifest (fail-closed without an encryption passphrase)
 scripts/restore-livecore.ps1 decrypts, restores PostgreSQL + object storage and verifies the systems of record
 scripts/test-backup-restore-drill.ps1  runnable restore drill (round-trip + fail-closed checks, including the encryption sink)
+scripts/test-backup-restore-postgres.ps1  real backup/restore round-trip against a live Postgres (CORE-DR-002 CI gate)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -3179,6 +3180,16 @@ binaries. A documented, **tested** backup/restore procedure covers all of them.
   encryption sink (`scripts/LiveCoreBackup.psm1`) and proving a faithful restore is
   accepted while a lossy, tampered or wrong-key one is rejected. It needs no
   database or object store and runs as the `backup-restore-drill` CI gate.
+- `scripts/test-backup-restore-postgres.ps1` runs the **real** scripts against a
+  live PostgreSQL (CORE-DR-002): the drill above proves the _logic_ with a fixture,
+  but `pg_dump`/`pg_restore`/`psql` and the `to_jsonb` checksum were never run in CI,
+  so a broken tool argument would ship green. It seeds every system-of-record table,
+  runs the real `backup-livecore.ps1`, restores into a **fresh** database with the
+  real `restore-livecore.ps1`, and asserts the full backup → restore → integrity
+  round-trip (real `pg_dump`/`pg_restore` + `to_jsonb` row-count/checksum) passes —
+  and that a restore which lost an append-only audit row is rejected fail-closed. It
+  runs as the `backup-restore-postgres` CI gate against the same Postgres service the
+  migrations/integration jobs use.
 
 No credential is committed: the database password is read from the same
 `ConnectionStrings:Database` value the API uses and passed via `PGPASSWORD`, and
@@ -3197,18 +3208,19 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                    | What it runs                                                                                             |
-| ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `dotnet`               | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                    |
-| `typescript`           | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                   |
-| `boundary-scan`        | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)              |
-| `backup-restore-drill` | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)              |
-| `powershell-lint`      | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                           |
-| `docker`               | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)         |
-| `publish-dry-run`      | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)          |
-| `migrations`           | builds the migrations runner image and applies all migrations to an empty Postgres                       |
-| `integration-postgres` | model-vs-migration drift gate, then the integration suite against a real Postgres                        |
-| `publish`              | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass |
+| Job                       | What it runs                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `dotnet`                  | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                          |
+| `typescript`              | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                         |
+| `boundary-scan`           | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                    |
+| `backup-restore-drill`    | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                    |
+| `backup-restore-postgres` | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002) |
+| `powershell-lint`         | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                 |
+| `docker`                  | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                               |
+| `publish-dry-run`         | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                |
+| `migrations`              | builds the migrations runner image and applies all migrations to an empty Postgres                                             |
+| `integration-postgres`    | model-vs-migration drift gate, then the integration suite against a real Postgres                                              |
+| `publish`                 | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                       |
 
 The `publish` job runs **only on a release tag** and **only after every other job
 passes**; pull requests and branch pushes never reach it, so a registry push never

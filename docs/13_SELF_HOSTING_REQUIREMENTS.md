@@ -798,9 +798,17 @@ pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
 ```
 
 CI runs it on every push and pull request (the `backup-restore-drill` job), so the procedure cannot regress
-silently. For a stronger, end-to-end drill against real tooling, run `scripts/backup-livecore.ps1` followed by
-`scripts/restore-livecore.ps1` into a throwaway PostgreSQL database (the CI integration Postgres or a local
-container) and a scratch bucket; a successful `restore-livecore.ps1` run is the real-tool equivalent of the drill.
+silently. The fixture drill proves the coverage/integrity **logic**, but the real scripts invoke
+`pg_dump`/`pg_restore`/`psql` and the `to_jsonb` checksum, which a fixture never exercises — so a broken tool
+argument could ship green. The **`backup-restore-postgres`** CI job closes that gap (CORE-DR-002): on every push
+and pull request it runs the real `scripts/backup-livecore.ps1` and `scripts/restore-livecore.ps1` end to end
+against a live PostgreSQL (the same service container the migrations/integration jobs use, with the schema applied
+by the real migrations). It seeds every system-of-record table, backs them up, restores into a **fresh** database
+and asserts the full backup → restore → integrity round-trip (real `pg_dump`/`pg_restore` + `to_jsonb`
+row-count/checksum) passes — and that a restore which lost an append-only audit row is rejected fail-closed. You
+can run the same end-to-end round-trip locally against a throwaway PostgreSQL with
+`scripts/test-backup-restore-postgres.ps1` (or by running `scripts/backup-livecore.ps1` then
+`scripts/restore-livecore.ps1` by hand into a scratch database and bucket).
 
 ### Cadence, RPO/RTO and retention
 
