@@ -86,8 +86,21 @@ public sealed class TracingEndpointTests
         using var response = await client.GetAsync("/metrics");
         response.EnsureSuccessStatusCode();
 
-        // Give any span a moment to surface, then assert none was produced for the /metrics path.
-        await Task.Delay(50);
+        // Bounded poll instead of a fixed delay (CORE-TST-005): the former Task.Delay(50) merely hoped any
+        // rogue /metrics span would surface within an arbitrary window. After the /metrics request has fully
+        // completed, drive a request to a TRACED route and wait — using the same WaitForTraceAsync bounded-poll
+        // pattern — until a request span surfaces. Span completion is recorded synchronously in stop order, so
+        // once that barrier span is observed, any span the already-awaited /metrics request might have produced
+        // would already be captured. The barrier matches any request span OTHER than /metrics, so it is robust
+        // to the barrier route's exact template and to spans other tests capture in parallel.
+        using var barrier = await client.GetAsync("/api/v1/me");
+        var barrierSpans = await capture.WaitForTraceAsync(spans =>
+            spans.Any(s =>
+                s.OperationName == "http.server.request"
+                && TagValue(s, "http.route") is { } route
+                && route != "/metrics"));
+        Assert.NotEmpty(barrierSpans);
+
         Assert.DoesNotContain(
             capture.Snapshot(),
             s => s.OperationName == "http.server.request" && TagValue(s, "http.route") == "/metrics");

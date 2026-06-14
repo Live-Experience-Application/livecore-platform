@@ -104,6 +104,21 @@ public sealed class RecapSummaryComposerTests
     }
 
     [Fact]
+    public void A_zero_length_session_renders_an_equal_bounded_timeline()
+    {
+        // Edge case (CORE-TST-005): a session whose live timeline started and ended at the SAME instant — a
+        // zero-length session — still composes a valid, deterministic body whose timeline names that one instant
+        // for BOTH bounds, rather than throwing or producing a malformed range.
+        var summary = RecapSummaryComposer.Compose(
+            Session(_startUtc, _startUtc),
+            [Event(SessionEventTypes.SceneActivated)]);
+
+        Assert.Contains($"Live timeline ran from {Format(_startUtc)} to {Format(_startUtc)}.", summary);
+        Assert.Contains("1 scene activation", summary);
+        Assert.True(Recap.IsValidSummary(summary));
+    }
+
+    [Fact]
     public void Both_timestamps_null_still_produces_a_valid_body()
     {
         var summary = RecapSummaryComposer.Compose(Session(null, null), [Event(SessionEventTypes.SceneActivated)]);
