@@ -5,6 +5,7 @@
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
+#   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
@@ -109,6 +110,26 @@ jobs:
 
       - name: Run spec consistency check
         run: pwsh -NoProfile -File scripts/spec-consistency.ps1
+
+  migration-down-lint:
+    name: Migration Down() review (CORE-DR-004)
+    runs-on: ubuntu-latest
+    # CORE-DR-004: migrations are roll-forward-only - a Down() is never run in
+    # production because every one drops the table/column its Up() added. This
+    # lint flags any migration whose Down() drops a table or column so a new
+    # destructive Down() cannot merge without being reviewed and acknowledged in
+    # csv/migration_destructive_down_review.csv under the documented policy
+    # (docs/13_SELF_HOSTING_REQUIREMENTS.md, "Migration rollback policy"). Pure
+    # docs/scripts check, no build needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Test the destructive-Down lint logic
+        run: pwsh -NoProfile -File scripts/test-migration-down-lint.ps1
+
+      - name: Flag any unreviewed destructive migration Down()
+        run: pwsh -NoProfile -File scripts/lint-migration-downs.ps1
 
   backup-restore-drill:
     name: Backup/restore drill (CORE-OPS-010)
@@ -418,6 +439,7 @@ jobs:
       - typescript
       - boundary-scan
       - spec-consistency
+      - migration-down-lint
       - backup-restore-drill
       - backup-restore-postgres
       - powershell-lint

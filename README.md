@@ -89,6 +89,9 @@ scripts/backup-livecore.ps1  backs up PostgreSQL + object storage, encrypts the 
 scripts/restore-livecore.ps1 decrypts, restores PostgreSQL + object storage and verifies the systems of record
 scripts/test-backup-restore-drill.ps1  runnable restore drill (round-trip + fail-closed checks, including the encryption sink)
 scripts/test-backup-restore-postgres.ps1  real backup/restore round-trip against a live Postgres (CORE-DR-002 CI gate)
+scripts/LiveCoreMigrationLint.psm1  destructive migration Down() detection + acknowledgement-baseline reconciliation (CORE-DR-004)
+scripts/lint-migration-downs.ps1  CI lint that flags a Down() dropping a table/column for review (roll-forward-only policy, CORE-DR-004)
+scripts/test-migration-down-lint.ps1  tests for the destructive-Down lint logic (CORE-DR-004)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -582,6 +585,17 @@ as a model-vs-migration drift gate. The integration suite is provider-switchable
 through the `LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment
 variables; with them unset it stays on in-memory SQLite, so local runs need no
 database server.
+
+Migrations are **roll-forward-only** (CORE-DR-004): the runner applies `Up()`
+only and a `Down()` is never run in production, because every `Down()` is
+destructive (it drops the table/column its `Up()` added). The backward path for a
+bad deploy is to roll the **application image** back — made safe by the
+**expand/contract** discipline for schema changes — and to **restore from backup**
+only when data was actually lost. The full policy, runbook and expand/contract
+guidance are in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Migration rollback
+policy"). A CI lint (the `migration-down-lint` job, `scripts/lint-migration-downs.ps1`)
+flags any migration whose `Down()` drops a table or column so it cannot merge
+without being reviewed and acknowledged in `csv/migration_destructive_down_review.csv`.
 
 ### Optimistic concurrency
 

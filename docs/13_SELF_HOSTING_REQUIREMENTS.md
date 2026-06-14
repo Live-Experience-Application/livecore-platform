@@ -145,6 +145,79 @@ gates on every change:
   entity mapping without a matching migration fails CI instead of shipping a schema
   that the model and the migrations disagree on.
 
+### Migration rollback policy: roll-forward-only + restore-from-backup, and expand/contract (CORE-DR-004)
+
+**The chosen policy, stated plainly: this platform is roll-forward-only.** The migrations runner image
+(`apps/api/Migrations.Dockerfile`) applies migrations **forward only** — its `efbundle` entrypoint runs
+every pending migration's `Up()` and exits — and a deployment **never runs a migration's `Down()` in
+production**. The backward path for a bad deploy is therefore **not** "run the down migration"; it is, in order:
+
+1. **Roll the application image back, not the schema.** The first response to a bad deploy is to redeploy the
+   **previous** released API/worker image (`ghcr.io/<owner>/livecore-api:<previous-version>`, CORE-OPS-009).
+   Because every schema change follows the **expand/contract** discipline below, the previous application
+   version is still compatible with the new schema, so an application-only rollback is fast, safe and **loses
+   no data**. This — not a down migration — is the routine rollback.
+2. **Restore from backup only when data was actually lost or corrupted.** If the bad deploy destroyed or
+   corrupted data (rather than merely shipping bad code), recover with the **tested restore runbook** (see
+   "Backup and restore", CORE-OPS-010 / CORE-DR-001 / CORE-DR-002): restore the encrypted dump and the asset
+   mirror, verify every system of record against the backup manifest, apply any pending migrations to the
+   restored database, validate `/health/ready`, then cut over. Restoring is the only supported way to undo a
+   committed, data-losing change.
+
+**Why `Down()` is not the rollback mechanism.** Every checked-in `Down()` is **destructive**: it drops the
+table or column its `Up()` added (for example `AddWorkspaceStatus.Down()` drops the `workspaces.status`
+column; the table-creating migrations' `Down()` drops the whole table). Running one in production would
+discard committed tenant data and — worse — the **append-only systems of record** (the audit log, the
+session-event stream, the purchase ledger) whose loss is unrecoverable (see "Backup and restore"). The
+`Down()` methods are kept because EF Core generates them and they are useful for **local development and a
+throwaway database** (stepping a migration back on a scratch database, resetting a dev environment); they are
+**never** part of a production rollback.
+
+#### Expand/contract (parallel change), so destructive changes are never run blindly
+
+A migration must never, in a single step, drop or rename a column or table that the **currently-running**
+application still reads or writes — otherwise a rollback to the previous application version would require the
+schema to be rolled back too, which the roll-forward-only policy forbids. Split a destructive change across
+releases using the **expand/contract** (parallel-change) pattern:
+
+1. **Expand** — add the new shape in a **backward-compatible** migration: a new **nullable** column (or a
+   NOT NULL column with a safe default, as `AddWorkspaceStatus` does), a new table, or a new index. The
+   currently-running application keeps working unchanged against it. Deploy an application version that writes
+   **both** the old and the new shape and can read either.
+2. **Migrate** — backfill existing rows into the new shape and switch reads over to it, still tolerating the
+   old shape.
+3. **Contract** — only **after** the new application version is fully rolled out and proven, a **later,
+   separate** migration drops the now-unused old column/table. This contract migration is the one with a
+   destructive effect, and it is applied **forward** as its own deploy — never as a `Down()`. Until contract
+   ships, a rollback to the previous application version needs no schema change.
+
+The rule of thumb: **add in one release, remove in a later one.** A column that is added and dropped in the
+same release, or a `Down()` relied on to "undo" a deploy, is the anti-pattern this policy exists to prevent.
+Two examples already in the tree: `AddWorkspaceStatus` is a safe **expand** (a NOT NULL column with a
+back-filled default), and `AddOptimisticConcurrencyTokens` is a deliberate schema-level **no-op** (the `xmin`
+system column is mapped in the EF model only) — the safest kind of change, with nothing to roll back.
+
+#### Role separation makes the policy enforceable
+
+The forward migrations are applied by the **more-privileged migration-runner role** (which legitimately needs
+DDL and, for a tenant-teardown cascade, `DELETE`), while the runtime application connects as a **least-privilege
+role** that cannot `DROP`/`ALTER` schema and has `UPDATE`/`DELETE` **revoked on `audit_logs`** (see
+"Audit-log tamper-evidence", CORE-SEC-003). So even an application compromise cannot run a destructive `Down()`
+or rewrite history; a deliberate restore uses the migration-runner/owner role.
+
+#### CI lint: a destructive `Down()` is flagged for review
+
+So a new destructive `Down()` cannot merge without a conscious decision under this policy, CI runs a lint
+(`scripts/lint-migration-downs.ps1`, the `migration-down-lint` job) that scans every migration class's `Down()`
+body and flags any that **drops a table or a column** (the data-destroying operations; index/foreign-key drops
+lose no row data and are not flagged). The lint is **not** a prohibition — destructive `Down()`s are expected
+and are never run in production — it is an acknowledgement gate: each flagged migration is recorded in
+`csv/migration_destructive_down_review.csv` as reviewed under the roll-forward-only policy, and the build fails
+when a migration has a destructive `Down()` that is **not** acknowledged (or an acknowledged one's operations
+changed, or a baseline row went stale). A reviewer who has confirmed the change follows the expand/contract
+guidance acknowledges it with `scripts/lint-migration-downs.ps1 -UpdateBaseline`. The lint logic is covered by
+`scripts/test-migration-down-lint.ps1`.
+
 ### Audit-log tamper-evidence: REVOKE UPDATE/DELETE on `audit_logs` (CORE-SEC-003)
 
 The append-only `audit_logs` table is **tamper-evident** at the application level: every entry is sealed into a
