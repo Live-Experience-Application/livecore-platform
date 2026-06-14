@@ -100,6 +100,20 @@ builder.Services.AddLiveCoreCors(builder.Configuration);
 // the scheme (threat T7).
 builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 
+// In-process mobile API gateway (CORE-MON-009, the Monetization v1 epic). The store/entitlement routes are
+// documented in their mobile-facing shape under a bare /v1 prefix (csv/mobile_store_api_routes.csv; docs/21;
+// docs/22), but every Core endpoint is mounted under the /api/v1 prefix docs/08_API_CONTRACTS.md mandates, so
+// a mobile client following the documented /v1/... path literally would 404. MobileApiGateway registers an
+// IStartupFilter that rewrites a request matching one of the documented mobile routes from its /v1 path to the
+// corresponding /api/v1 path BEFORE routing, so it dispatches to the SAME already-implemented endpoint with
+// authentication, tenant/subject authorization and server-side resolution unchanged. It is registered ahead of
+// routing precisely because the original /v1 path is unmounted; a startup filter runs before the
+// WebApplication's automatically-added routing middleware without re-ordering the pipeline below. It is a pure,
+// scoped addressing alias (only the EXACT documented mobile routes are rewritten — any other /v1 path still
+// 404s, so the rest of the API is never exposed under a second prefix) and adds no endpoint, service, table or
+// migration; the rewrite never reads the token, the body or any tenant identifier (threats T1/T5/T7).
+builder.Services.AddLiveCoreMobileApiGateway();
+
 // Realtime SignalR services and the scale-out backplane (CORE-RT-001 SignalR; CORE-RT-006 the
 // IRealtimeBackplane seam; CORE-OPS-007 the conditional Redis/Valkey backplane). SignalR is part of the
 // ASP.NET Core shared framework (docs/11_REALTIME_SYNC.md mandates it). The IRealtimeBackplane is the single

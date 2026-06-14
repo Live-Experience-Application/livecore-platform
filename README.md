@@ -2662,6 +2662,39 @@ premium state is never returned through another's id. A missing/invalid token is
 and `/me/quota-status` reads); the route carries no tenant boundary, and fails closed with `503` when no database
 is configured.
 
+### Mobile API path shape (the `/v1` gateway)
+
+The store and entitlement routes are documented in their **mobile-facing path shape** under a bare `/v1`
+prefix (`csv/mobile_store_api_routes.csv`, e.g. `GET /v1/me/entitlements`,
+`POST /v1/purchases/apple/transactions`), but every Core endpoint is mounted under the `/api/v1` prefix
+`docs/08_API_CONTRACTS.md` mandates. CORE-MON-009 (the `Monetization v1` epic) makes a mobile client following
+the documented `/v1/...` path reach the implemented endpoint **in-process**, so it no longer `404`s and no
+external reverse-proxy rewrite is required.
+
+`MobileApiGateway` (`apps/api/Hosting/MobileApiGateway.cs`, registered with
+`builder.Services.AddLiveCoreMobileApiGateway()`) rewrites a request whose path matches one of the documented
+mobile routes from its `/v1` path to the corresponding `/api/v1` path **before routing**, so it dispatches to
+the **same** already-implemented endpoint. It is registered as an `IStartupFilter` precisely because the
+original `/v1` path is unmounted: a startup filter's middleware runs ahead of the WebApplication's
+automatically-added routing middleware, so the path is rewritten before the endpoint is selected without
+re-ordering the curated request pipeline.
+
+It is a pure, **scoped** addressing alias that adds **no endpoint, service, table or migration**:
+
+- only the **exact** documented mobile routes (the in-code mirror of `csv/mobile_store_api_routes.csv`) are
+  rewritten; any other `/v1/...` path is left untouched and still `404`s, so the rest of the Core API is never
+  exposed under a second prefix (threats T1/T5);
+- the target endpoint's authentication and server-side, tenant/subject authorization run **unchanged** — the
+  rewrite touches only the request path and never the principal, the tenant boundary or the response, so it
+  cannot widen authorization (an anonymous caller is still `401`, a service account still `403`, a foreign
+  tenant still hidden), and it never reads or logs the token, the body or any tenant identifier (threat T7);
+- the `{workspaceId}` segment of `/v1/workspaces/{workspaceId}/quota-status` matches any single path segment;
+  the target endpoint validates the surrogate id as before.
+
+Because it adds no `/api/v1` route, `csv/api_routes.csv`, the `docs/08` representative block and the
+spec-consistency check are unchanged; `csv/mobile_store_api_routes.csv` now describes a resolvable surface.
+See `docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md` "API surface" and `docs/24_SPEC_CONSISTENCY.md`.
+
 ### Purchase provider abstraction
 
 The Store module owns generic, server-side **store purchase verification** so that the client never becomes the

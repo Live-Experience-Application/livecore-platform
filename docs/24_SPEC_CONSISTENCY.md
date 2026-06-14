@@ -180,6 +180,24 @@ verifier ports and `purchase_transactions`/`purchase_events` model — so
 `csv/database_tables.csv`, the `csv/api_routes.csv` route list, the `docs/10` table
 list and the spec-consistency check are unchanged.
 
+**Mobile path-shape note (CORE-MON-009 made the mobile `/v1` shape resolve in-process).** The store and
+entitlement routes are documented in their **mobile-facing path shape** under a bare `/v1` prefix in
+`csv/mobile_store_api_routes.csv` (a mirror, per the sources-of-truth table above), while every Core endpoint
+is mounted under the `/api/v1` prefix `docs/08_API_CONTRACTS.md` mandates. Before CORE-MON-009 a mobile client
+following a documented `/v1/...` path literally would `404`, because no endpoint was mounted there and there
+was no in-repo rewrite. CORE-MON-009 closes that gap **in-process**: the mobile API gateway
+(`apps/api/Hosting/MobileApiGateway.cs`) rewrites a request whose path matches one of the documented mobile
+routes from its `/v1` path to the corresponding `/api/v1` path **before routing**, so the documented mobile
+path reaches the implemented endpoint (no `404`, no external proxy rewrite required) and
+`csv/mobile_store_api_routes.csv` now accurately describes a resolvable surface. It is a pure, **scoped**
+addressing alias — only the exact routes in `csv/mobile_store_api_routes.csv` are rewritten (any other
+`/v1/...` path still `404`s, so the rest of the API is never aliased under a second prefix), the target
+endpoint's authentication and server-side tenant/subject authorization run unchanged, and it **adds no
+`/api/v1` route, table, event or migration**. So `csv/api_routes.csv` (which lists the mounted `/api/v1`
+routes), the `docs/08` representative block, `csv/database_tables.csv`, the `docs/10` table list and the
+spec-consistency check are all unchanged, and the check stays green. The gateway's route table is the in-code
+mirror of `csv/mobile_store_api_routes.csv`, which stays the single source of truth for the mobile path shapes.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented

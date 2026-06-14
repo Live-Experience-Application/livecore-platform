@@ -137,6 +137,19 @@ POST /v1/store-notifications/google/rtdn
 
 Apple/Google names are allowed here as infrastructure provider names, not product vertical names.
 
+These are the **mobile-facing path shape** (`csv/mobile_store_api_routes.csv`). Every Core endpoint is mounted
+under the `/api/v1` prefix `docs/08_API_CONTRACTS.md` mandates, so each mobile `/v1/...` path above is served
+by the `/api/v1/...` endpoint of the same suffix. CORE-MON-009 makes that resolution work **in-process**: an
+in-process mobile API gateway (`apps/api/Hosting/MobileApiGateway.cs`) rewrites a request whose path matches
+one of the documented mobile routes above from its `/v1` path to the corresponding `/api/v1` path **before
+routing**, so a mobile client addressing the documented `/v1` path reaches the implemented endpoint with no
+`404` and **no external proxy rewrite required**. The rewrite is a pure, scoped addressing alias: only the
+exact documented mobile routes are rewritten (any other `/v1/...` path still `404`s, so the rest of the Core
+API is never exposed under a second prefix), authentication and the server-side, tenant/subject authorization
+of the target endpoint run unchanged (it never widens authorization), and it adds no endpoint, service, table
+or migration. The single source of truth for the route shapes is `csv/mobile_store_api_routes.csv` (the
+gateway's route table mirrors it); see `docs/24_SPEC_CONSISTENCY.md`.
+
 ## Purchase provider abstraction (CORE-STORE-001)
 
 The Store module isolates provider-specific verification behind a single port so that **Apple/Google provider

@@ -34,6 +34,12 @@ Store product display
 GET /v1/me/ad-eligibility
 ```
 
+This is the mobile-facing path shape; the endpoint is mounted at `GET /api/v1/me/ad-eligibility` and the
+mobile `/v1` path is served by the in-process mobile API gateway (CORE-MON-009), which rewrites the documented
+`/v1` route to its `/api/v1` endpoint before routing — so a mobile client addressing `/v1/me/ad-eligibility`
+reaches the endpoint with no `404` and no external proxy rewrite (see
+`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md` "API surface").
+
 Example response:
 
 ```json
