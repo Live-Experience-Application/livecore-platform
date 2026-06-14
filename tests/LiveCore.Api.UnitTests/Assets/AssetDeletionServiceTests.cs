@@ -80,7 +80,7 @@ public sealed class AssetDeletionServiceTests : IDisposable
     // transaction enrols each repository's SaveChanges.
     private static AssetDeletionService CreateService(LiveCoreDbContext context, IAssetStorage storage)
         => new(
-            context,
+            new TransactionalUnitOfWork(context),
             new AssetRepository(context),
             new AssetLinkRepository(context),
             storage,

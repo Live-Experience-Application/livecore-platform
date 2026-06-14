@@ -608,6 +608,36 @@ delivery failure can never roll back already-committed state (a reconnecting cli
 replays a missed push later). See `docs/10_DATABASE_SCHEMA.md` and
 `docs/11_REALTIME_SYNC.md`.
 
+### Database connection resilience (retry on transient failures)
+
+Every `LiveCoreDbContext` the platform builds uses a **retrying execution strategy**
+so a routine, **transient** PostgreSQL disruption is retried automatically by EF Core /
+Npgsql instead of surfacing as a user-facing `5xx` or a worker-job exception
+(CORE-CONC-003). In the documented topology (the API behind a proxy, PostgreSQL as a
+**separate** service, `docs/02_ARCHITECTURE.md` / `docs/13_SELF_HOSTING_REQUIREMENTS.md`)
+the disruptions the epic names — a failover/primary promotion, a database restart, a
+brief network partition, momentary pool exhaustion — are expected and short-lived; a
+retrying strategy re-runs the failed operation a few times with exponential back-off, so
+an operation that succeeds on a retry never reaches the caller as an error. A
+**non-transient** failure (a constraint violation, a query bug) is not retried and still
+fails immediately, so resilience never masks a real error.
+
+A single owner, `LiveCoreNpgsqlOptions.Configure`, turns retry on (`EnableRetryOnFailure`)
+in one place and is passed to **every** `UseNpgsql` call — the API host
+(`Program.cs`), each worker job context (asset cleanup, recap generation, export
+processing, store-notification reconciliation) and the design-time/migrations factory —
+so the API and every worker job share one resilience policy and migrations applied
+against a separate database tolerate a transient blip. It is applied wherever `UseNpgsql`
+is called, each of which is already **gated on a configured connection string**, so the
+host still runs without persistence (fail-closed) exactly as before, and it reads no
+configuration and holds no secret (threat T7).
+
+Enabling retry is **safe** because every multi-step write already runs inside the EF
+execution strategy's `ExecuteAsync` (the commit-then-publish unit of work above, plus the
+resource-deletion commands), never a bare user-initiated `BeginTransaction` — a retrying
+strategy rejects the latter because it could not re-run the work after a transient
+failure. See `docs/02_ARCHITECTURE.md`.
+
 ### Reverse-proxy edge: CORS, forwarded headers and HTTPS posture
 
 The API is meant to run **behind a TLS-terminating reverse proxy** (CORE-OPS-003).

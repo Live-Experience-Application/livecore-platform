@@ -46,7 +46,10 @@ public static class AssetCleanupServiceCollectionExtensions
             return false;
         }
 
-        services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(connectionString));
+        // Connection resilience (CORE-CONC-003): LiveCoreNpgsqlOptions.Configure turns on the retrying
+        // execution strategy so a transient PostgreSQL disruption is retried automatically instead of
+        // surfacing as a worker-job exception — the same policy the API host and the other worker jobs apply.
+        services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(connectionString, LiveCoreNpgsqlOptions.Configure));
 
         // The system clock; the cleanup service compares an asset's age against the retention window.
         services.AddSingleton(TimeProvider.System);

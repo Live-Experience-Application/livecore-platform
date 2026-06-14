@@ -71,25 +71,25 @@ namespace LiveCore.Api.Assets;
 /// </summary>
 internal sealed class AssetDeletionService
 {
-    private readonly LiveCoreDbContext _dbContext;
+    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly IAssetRepository _assets;
     private readonly IAssetLinkRepository _assetLinks;
     private readonly IAssetStorage _storage;
     private readonly IAuditLogRepository _audit;
 
     public AssetDeletionService(
-        LiveCoreDbContext dbContext,
+        TransactionalUnitOfWork unitOfWork,
         IAssetRepository assets,
         IAssetLinkRepository assetLinks,
         IAssetStorage storage,
         IAuditLogRepository audit)
     {
-        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(assets);
         ArgumentNullException.ThrowIfNull(assetLinks);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(audit);
-        _dbContext = dbContext;
+        _unitOfWork = unitOfWork;
         _assets = assets;
         _assetLinks = assetLinks;
         _storage = storage;
@@ -160,53 +160,55 @@ internal sealed class AssetDeletionService
             return AssetDeletionResult.NotFound;
         }
 
-        // ONE unit of work: the link removal, the storage object delete, the asset-row delete and the audit
-        // append commit together or roll back together, so a deletion is applied whole or not at all. Every
-        // injected repository writes through this same scoped DbContext, so each repository SaveChanges enrols
-        // in this transaction.
-        await using var transaction = await _dbContext.Database
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        // ONE unit of work (CORE-CONC-002): the link removal, the storage object delete, the asset-row delete
+        // and the audit append commit together or roll back together, so a deletion is applied whole or not at
+        // all. Every injected repository writes through the same scoped DbContext TransactionalUnitOfWork
+        // begins the transaction on, so each repository SaveChanges enrols in this transaction. The transaction
+        // is opened inside the EF execution strategy's ExecuteAsync, so it stays correct under the
+        // CORE-CONC-003 retrying strategy (a bare user-initiated BeginTransaction would be rejected by it).
+        return await _unitOfWork.ExecuteAsync(
+            async transactionCancellationToken =>
+            {
+                // 1) Remove the asset's links (the story's "its links are removed"). asset_links.asset_id is an
+                // ON DELETE CASCADE foreign key, so the row delete below would also remove these; removing them
+                // explicitly first makes the cascade deterministic and observable (ADR 0012 step 2). Only the
+                // link rows go — the linked content blocks / entities are untouched.
+                await _assetLinks
+                    .RemoveByAssetAsync(organizationId, workspaceId, assetId, transactionCancellationToken)
+                    .ConfigureAwait(false);
 
-        // 1) Remove the asset's links (the story's "its links are removed"). asset_links.asset_id is an
-        // ON DELETE CASCADE foreign key, so the row delete below would also remove these; removing them
-        // explicitly first makes the cascade deterministic and observable (ADR 0012 step 2). Only the link
-        // rows go — the linked content blocks / entities are untouched.
-        await _assetLinks
-            .RemoveByAssetAsync(organizationId, workspaceId, assetId, cancellationToken)
-            .ConfigureAwait(false);
+                // 2) Delete the underlying storage object BEFORE the metadata row (the story's ordering,
+                // mirroring the upload intent minting its URL before persisting the row). DeleteObjectAsync is
+                // idempotent — a pending asset whose client never uploaded has no object, and the adapter treats
+                // that as success. With no storage adapter configured the fail-closed UnconfiguredAssetStorage
+                // throws AssetStorageNotConfiguredException here, so the transaction rolls back having changed
+                // nothing (the link removal is undone, no row is deleted, no audit written) and the exception
+                // propagates to the endpoint, which maps it to 503 (threat T4). The object key is never logged.
+                await _storage.DeleteObjectAsync(asset, transactionCancellationToken).ConfigureAwait(false);
 
-        // 2) Delete the underlying storage object BEFORE the metadata row (the story's ordering, mirroring the
-        // upload intent minting its URL before persisting the row). DeleteObjectAsync is idempotent — a pending
-        // asset whose client never uploaded has no object, and the adapter treats that as success. With no
-        // storage adapter configured the fail-closed UnconfiguredAssetStorage throws
-        // AssetStorageNotConfiguredException here, so the `await using` transaction rolls back having changed
-        // nothing (the link removal is undone, no row is deleted, no audit written) and the exception
-        // propagates to the endpoint, which maps it to 503 (threat T4). The object key is never logged.
-        await _storage.DeleteObjectAsync(asset, cancellationToken).ConfigureAwait(false);
+                // 3) Delete the metadata row (its object is now gone, so the row never outlives its object). The
+                // asset_links FK would also cascade the (already-removed) links, so the explicit removal above
+                // leaves the cascade with nothing to do — defence in depth.
+                await _assets.DeleteAsync(asset, transactionCancellationToken).ConfigureAwait(false);
 
-        // 3) Delete the metadata row (its object is now gone, so the row never outlives its object). The
-        // asset_links FK would also cascade the (already-removed) links, so the explicit removal above leaves
-        // the cascade with nothing to do — defence in depth.
-        await _assets.DeleteAsync(asset, cancellationToken).ConfigureAwait(false);
+                // 4) AUDIT (the story's "authorized" deletion, the consistent application of ADR 0012: "audit
+                // the deletion"): a deletion is security-relevant, so append an append-only record capturing the
+                // actor (the host who deleted), the deleted asset and the tenant/workspace. The audit references
+                // are recorded facts, not foreign keys, so the row outlives the now-deleted asset (threats
+                // T1/T5/T7). The cascaded links and the removed storage object are consequences of this one
+                // action and are not separately audited. The storage coordinates are never recorded (only the
+                // asset id; threats T4/T7).
+                var entry = AuditLogEntry.ForAssetDeletion(
+                    organizationId,
+                    workspaceId,
+                    actorUserProfileId,
+                    nameof(Asset),
+                    assetId,
+                    now);
+                await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
 
-        // 4) AUDIT (the story's "authorized" deletion, the consistent application of ADR 0012: "audit the
-        // deletion"): a deletion is security-relevant, so append an append-only record capturing the actor
-        // (the host who deleted), the deleted asset and the tenant/workspace. The audit references are recorded
-        // facts, not foreign keys, so the row outlives the now-deleted asset (threats T1/T5/T7). The cascaded
-        // links and the removed storage object are consequences of this one action and are not separately
-        // audited. The storage coordinates are never recorded (only the asset id; threats T4/T7).
-        var entry = AuditLogEntry.ForAssetDeletion(
-            organizationId,
-            workspaceId,
-            actorUserProfileId,
-            nameof(Asset),
-            assetId,
-            now);
-        await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-
-        return AssetDeletionResult.Deleted;
+                return AssetDeletionResult.Deleted;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 }

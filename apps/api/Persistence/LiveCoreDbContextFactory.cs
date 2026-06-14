@@ -50,8 +50,13 @@ internal sealed class LiveCoreDbContextFactory : IDesignTimeDbContextFactory<Liv
 
     public LiveCoreDbContext CreateDbContext(string[] args)
     {
+        // Connection resilience (CORE-CONC-003): apply the same retrying execution strategy
+        // (LiveCoreNpgsqlOptions.Configure) the API host and the worker jobs use, so applying migrations
+        // against a separate PostgreSQL service (dotnet ef database update / the migrations bundle) tolerates a
+        // transient disruption rather than failing the deployment step. Offline scaffolding never opens a
+        // connection, so the policy is inert there.
         var options = new DbContextOptionsBuilder<LiveCoreDbContext>()
-            .UseNpgsql(ResolveConnectionString())
+            .UseNpgsql(ResolveConnectionString(), LiveCoreNpgsqlOptions.Configure)
             .Options;
 
         return new LiveCoreDbContext(options);

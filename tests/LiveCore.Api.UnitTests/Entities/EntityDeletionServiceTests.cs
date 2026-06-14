@@ -78,7 +78,7 @@ public sealed class EntityDeletionServiceTests : IDisposable
     // transaction enrols each repository's SaveChanges.
     private static EntityDeletionService CreateService(LiveCoreDbContext context)
         => new(
-            context,
+            new TransactionalUnitOfWork(context),
             new EntityRepository(context),
             new EntityRelationshipRepository(context),
             new VisibilityRuleRepository(context),

@@ -51,7 +51,10 @@ public static class ExportProcessingServiceCollectionExtensions
 
         // AddDbContext registers the context and its options with TryAdd semantics, so calling it here and in
         // the other worker job wirings (same connection string) is safe — the later calls are no-ops.
-        services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(connectionString));
+        // Connection resilience (CORE-CONC-003): LiveCoreNpgsqlOptions.Configure turns on the retrying
+        // execution strategy so a transient PostgreSQL disruption is retried automatically instead of
+        // surfacing as a worker-job exception — the same policy the API host and the other worker jobs apply.
+        services.AddDbContext<LiveCoreDbContext>(options => options.UseNpgsql(connectionString, LiveCoreNpgsqlOptions.Configure));
 
         // The system clock; the processing service stamps each transition and manifest from it. TryAdd so it
         // composes with the other jobs' TimeProvider registration (all are TimeProvider.System).

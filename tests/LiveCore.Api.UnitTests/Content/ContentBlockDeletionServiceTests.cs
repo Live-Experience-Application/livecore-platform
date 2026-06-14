@@ -81,7 +81,7 @@ public sealed class ContentBlockDeletionServiceTests : IDisposable
     // transaction enrols each repository's SaveChanges.
     private static ContentBlockDeletionService CreateService(LiveCoreDbContext context)
         => new(
-            context,
+            new TransactionalUnitOfWork(context),
             new ContentBlockRepository(context),
             new VisibilityRuleRepository(context),
             new AssetLinkRepository(context),

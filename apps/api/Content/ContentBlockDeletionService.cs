@@ -59,25 +59,25 @@ namespace LiveCore.Api.Content;
 /// </summary>
 internal sealed class ContentBlockDeletionService
 {
-    private readonly LiveCoreDbContext _dbContext;
+    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly IContentBlockRepository _contentBlocks;
     private readonly IVisibilityRuleRepository _visibilityRules;
     private readonly IAssetLinkRepository _assetLinks;
     private readonly IAuditLogRepository _audit;
 
     public ContentBlockDeletionService(
-        LiveCoreDbContext dbContext,
+        TransactionalUnitOfWork unitOfWork,
         IContentBlockRepository contentBlocks,
         IVisibilityRuleRepository visibilityRules,
         IAssetLinkRepository assetLinks,
         IAuditLogRepository audit)
     {
-        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(contentBlocks);
         ArgumentNullException.ThrowIfNull(visibilityRules);
         ArgumentNullException.ThrowIfNull(assetLinks);
         ArgumentNullException.ThrowIfNull(audit);
-        _dbContext = dbContext;
+        _unitOfWork = unitOfWork;
         _contentBlocks = contentBlocks;
         _visibilityRules = visibilityRules;
         _assetLinks = assetLinks;
@@ -153,42 +153,44 @@ internal sealed class ContentBlockDeletionService
             return ContentBlockDeletionResult.NotFound;
         }
 
-        // ONE unit of work: the dependent cascade, the content block delete and the audit append commit
-        // together or roll back together, so a deletion is applied whole or not at all. Every injected
-        // repository writes through this same scoped DbContext, so each repository SaveChanges enrols in
-        // this transaction.
-        await using var transaction = await _dbContext.Database
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        // ONE unit of work (CORE-CONC-002): the dependent cascade, the content block delete and the audit
+        // append commit together or roll back together, so a deletion is applied whole or not at all. Every
+        // injected repository writes through the same scoped DbContext TransactionalUnitOfWork begins the
+        // transaction on, so each repository SaveChanges enrols in this transaction. The transaction is opened
+        // inside the EF execution strategy's ExecuteAsync, so it stays correct under the CORE-CONC-003 retrying
+        // strategy (a bare user-initiated BeginTransaction would be rejected by it).
+        return await _unitOfWork.ExecuteAsync(
+            async transactionCancellationToken =>
+            {
+                // Polymorphic (non-FK) dependents the database can NOT cascade — remove them explicitly so no
+                // dangling rule/link is left behind (threats T2/T4/T5).
+                await _assetLinks
+                    .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.ContentBlock, contentBlockId, transactionCancellationToken)
+                    .ConfigureAwait(false);
+                await _visibilityRules
+                    .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.ContentBlock, contentBlockId, transactionCancellationToken)
+                    .ConfigureAwait(false);
 
-        // Polymorphic (non-FK) dependents the database can NOT cascade — remove them explicitly so no
-        // dangling rule/link is left behind (threats T2/T4/T5).
-        await _assetLinks
-            .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.ContentBlock, contentBlockId, cancellationToken)
-            .ConfigureAwait(false);
-        await _visibilityRules
-            .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.ContentBlock, contentBlockId, cancellationToken)
-            .ConfigureAwait(false);
+                // The content block itself (its dependents are already gone). Its revision history is the inline
+                // revision_number on this row, so removing the row removes the block together with its
+                // revisions.
+                await _contentBlocks.RemoveAsync(contentBlock, transactionCancellationToken).ConfigureAwait(false);
 
-        // The content block itself (its dependents are already gone). Its revision history is the inline
-        // revision_number on this row, so removing the row removes the block together with its revisions.
-        await _contentBlocks.RemoveAsync(contentBlock, cancellationToken).ConfigureAwait(false);
+                // AUDIT (the consistent application of ADR 0012: "audit the deletion"): a deletion is
+                // security-relevant, so append an append-only record capturing the actor (the host who deleted),
+                // the deleted content block and the tenant/workspace. The audit references are recorded facts,
+                // not foreign keys, so the row outlives the now-deleted content block (threats T1/T5/T7).
+                var entry = AuditLogEntry.ForContentBlockDeletion(
+                    organizationId,
+                    workspaceId,
+                    actorUserProfileId,
+                    nameof(ContentBlock),
+                    contentBlockId,
+                    now);
+                await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
 
-        // AUDIT (the consistent application of ADR 0012: "audit the deletion"): a deletion is
-        // security-relevant, so append an append-only record capturing the actor (the host who deleted), the
-        // deleted content block and the tenant/workspace. The audit references are recorded facts, not
-        // foreign keys, so the row outlives the now-deleted content block (threats T1/T5/T7).
-        var entry = AuditLogEntry.ForContentBlockDeletion(
-            organizationId,
-            workspaceId,
-            actorUserProfileId,
-            nameof(ContentBlock),
-            contentBlockId,
-            now);
-        await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-
-        return ContentBlockDeletionResult.Deleted;
+                return ContentBlockDeletionResult.Deleted;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 }

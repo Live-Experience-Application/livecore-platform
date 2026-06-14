@@ -68,7 +68,7 @@ namespace LiveCore.Api.Scenes;
 /// </summary>
 internal sealed class SceneDeletionService
 {
-    private readonly LiveCoreDbContext _dbContext;
+    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly ISceneRepository _scenes;
     private readonly IContentBlockRepository _contentBlocks;
     private readonly IVisibilityRuleRepository _visibilityRules;
@@ -76,20 +76,20 @@ internal sealed class SceneDeletionService
     private readonly IAuditLogRepository _audit;
 
     public SceneDeletionService(
-        LiveCoreDbContext dbContext,
+        TransactionalUnitOfWork unitOfWork,
         ISceneRepository scenes,
         IContentBlockRepository contentBlocks,
         IVisibilityRuleRepository visibilityRules,
         IAssetLinkRepository assetLinks,
         IAuditLogRepository audit)
     {
-        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(scenes);
         ArgumentNullException.ThrowIfNull(contentBlocks);
         ArgumentNullException.ThrowIfNull(visibilityRules);
         ArgumentNullException.ThrowIfNull(assetLinks);
         ArgumentNullException.ThrowIfNull(audit);
-        _dbContext = dbContext;
+        _unitOfWork = unitOfWork;
         _scenes = scenes;
         _contentBlocks = contentBlocks;
         _visibilityRules = visibilityRules;
@@ -158,80 +158,83 @@ internal sealed class SceneDeletionService
             return SceneDeletionResult.NotFound;
         }
 
-        // ONE unit of work: the dependent cascade, the scene delete, the order re-pack and the audit append
-        // commit together or roll back together, so a deletion is applied whole or not at all. Every injected
-        // repository writes through this same scoped DbContext, so each repository SaveChanges enrols in this
-        // transaction.
-        await using var transaction = await _dbContext.Database
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
-
-        // Cascade the scene's CHILD CONTENT BLOCKS (the story's "child content blocks are removed"). For each
-        // block, remove its OWN polymorphic dependents the database can NOT cascade (asset_links targeting it,
-        // then its visibility_rules) before removing the block row — exactly the per-block cleanup
-        // CORE-LIFE-004 performs, but here as a consequence of the one scene deletion (audited once, below).
-        // A block's revision history is inline on its row, so it goes with the row.
-        var contentBlocks = await _contentBlocks
-            .ListBySceneAsync(organizationId, workspaceId, sceneId, cancellationToken)
-            .ConfigureAwait(false);
-        foreach (var contentBlock in contentBlocks)
-        {
-            await _assetLinks
-                .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.ContentBlock, contentBlock.Id, cancellationToken)
-                .ConfigureAwait(false);
-            await _visibilityRules
-                .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.ContentBlock, contentBlock.Id, cancellationToken)
-                .ConfigureAwait(false);
-            await _contentBlocks.RemoveAsync(contentBlock, cancellationToken).ConfigureAwait(false);
-        }
-
-        // Cascade the SCENE'S OWN polymorphic visibility rules the database can NOT cascade — both the
-        // audience-wide rule and every selected-participant rule governing the scene (threats T2/T5). A scene
-        // is a visibility resource but never an asset-link target, so there are no scene asset_links to remove.
-        await _visibilityRules
-            .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.Scene, sceneId, cancellationToken)
-            .ConfigureAwait(false);
-
-        // The scene itself (its child content blocks and dependents are already gone). The database FK would
-        // also cascade the (already-removed) content blocks, so the explicit removal above leaves the cascade
-        // with nothing to do — defence in depth.
-        await _scenes.RemoveAsync(scene, cancellationToken).ConfigureAwait(false);
-
-        // RE-PACK the remaining scenes' ordering so the gap the deleted scene left is closed (the story's
-        // "remaining scenes re-pack their ordering without gaps"). The survivors are listed in the
-        // deterministic (scene_order, id) order — the SCENE-001 ordering — and each is moved, in that order,
-        // to its contiguous index position through Scene.Reorder (the SCENE-001 aggregate ordering method).
-        // Only the scenes whose position actually changed are persisted; the relative order is preserved.
-        var remaining = await _scenes
-            .ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken)
-            .ConfigureAwait(false);
-        for (var index = 0; index < remaining.Count; index++)
-        {
-            var sibling = remaining[index];
-            if (sibling.Order != index)
+        // ONE unit of work (CORE-CONC-002): the dependent cascade, the scene delete, the order re-pack and the
+        // audit append commit together or roll back together, so a deletion is applied whole or not at all.
+        // Every injected repository writes through the same scoped DbContext TransactionalUnitOfWork begins the
+        // transaction on, so each repository SaveChanges enrols in this transaction. The transaction is opened
+        // inside the EF execution strategy's ExecuteAsync, so it stays correct under the CORE-CONC-003 retrying
+        // strategy (a bare user-initiated BeginTransaction would be rejected by it).
+        return await _unitOfWork.ExecuteAsync(
+            async transactionCancellationToken =>
             {
-                sibling.Reorder(index, now);
-                await _scenes.UpdateAsync(sibling, cancellationToken).ConfigureAwait(false);
-            }
-        }
+                // Cascade the scene's CHILD CONTENT BLOCKS (the story's "child content blocks are removed"). For
+                // each block, remove its OWN polymorphic dependents the database can NOT cascade (asset_links
+                // targeting it, then its visibility_rules) before removing the block row — exactly the per-block
+                // cleanup CORE-LIFE-004 performs, but here as a consequence of the one scene deletion (audited
+                // once, below). A block's revision history is inline on its row, so it goes with the row.
+                var contentBlocks = await _contentBlocks
+                    .ListBySceneAsync(organizationId, workspaceId, sceneId, transactionCancellationToken)
+                    .ConfigureAwait(false);
+                foreach (var contentBlock in contentBlocks)
+                {
+                    await _assetLinks
+                        .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.ContentBlock, contentBlock.Id, transactionCancellationToken)
+                        .ConfigureAwait(false);
+                    await _visibilityRules
+                        .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.ContentBlock, contentBlock.Id, transactionCancellationToken)
+                        .ConfigureAwait(false);
+                    await _contentBlocks.RemoveAsync(contentBlock, transactionCancellationToken).ConfigureAwait(false);
+                }
 
-        // AUDIT (the story's "authorized" deletion, the consistent application of ADR 0012: "audit the
-        // deletion"): a deletion is security-relevant, so append an append-only record capturing the actor
-        // (the host who deleted), the deleted scene and the tenant/workspace. The audit references are
-        // recorded facts, not foreign keys, so the row outlives the now-deleted scene (threats T1/T5/T7). The
-        // cascaded content blocks/rules/links and the order re-pack are consequences of this one action and
-        // are not separately audited.
-        var entry = AuditLogEntry.ForSceneDeletion(
-            organizationId,
-            workspaceId,
-            actorUserProfileId,
-            nameof(Scene),
-            sceneId,
-            now);
-        await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+                // Cascade the SCENE'S OWN polymorphic visibility rules the database can NOT cascade — both the
+                // audience-wide rule and every selected-participant rule governing the scene (threats T2/T5). A
+                // scene is a visibility resource but never an asset-link target, so there are no scene
+                // asset_links to remove.
+                await _visibilityRules
+                    .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.Scene, sceneId, transactionCancellationToken)
+                    .ConfigureAwait(false);
 
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                // The scene itself (its child content blocks and dependents are already gone). The database FK
+                // would also cascade the (already-removed) content blocks, so the explicit removal above leaves
+                // the cascade with nothing to do — defence in depth.
+                await _scenes.RemoveAsync(scene, transactionCancellationToken).ConfigureAwait(false);
 
-        return SceneDeletionResult.Deleted;
+                // RE-PACK the remaining scenes' ordering so the gap the deleted scene left is closed (the
+                // story's "remaining scenes re-pack their ordering without gaps"). The survivors are listed in
+                // the deterministic (scene_order, id) order — the SCENE-001 ordering — and each is moved, in
+                // that order, to its contiguous index position through Scene.Reorder (the SCENE-001 aggregate
+                // ordering method). Only the scenes whose position actually changed are persisted; the relative
+                // order is preserved.
+                var remaining = await _scenes
+                    .ListByWorkspaceAsync(organizationId, workspaceId, transactionCancellationToken)
+                    .ConfigureAwait(false);
+                for (var index = 0; index < remaining.Count; index++)
+                {
+                    var sibling = remaining[index];
+                    if (sibling.Order != index)
+                    {
+                        sibling.Reorder(index, now);
+                        await _scenes.UpdateAsync(sibling, transactionCancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                // AUDIT (the story's "authorized" deletion, the consistent application of ADR 0012: "audit the
+                // deletion"): a deletion is security-relevant, so append an append-only record capturing the
+                // actor (the host who deleted), the deleted scene and the tenant/workspace. The audit references
+                // are recorded facts, not foreign keys, so the row outlives the now-deleted scene (threats
+                // T1/T5/T7). The cascaded content blocks/rules/links and the order re-pack are consequences of
+                // this one action and are not separately audited.
+                var entry = AuditLogEntry.ForSceneDeletion(
+                    organizationId,
+                    workspaceId,
+                    actorUserProfileId,
+                    nameof(Scene),
+                    sceneId,
+                    now);
+                await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
+
+                return SceneDeletionResult.Deleted;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 }

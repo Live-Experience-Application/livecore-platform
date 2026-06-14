@@ -68,7 +68,10 @@ public static class StoreNotificationReconciliationServiceCollectionExtensions
 
         // AddDbContext registers the context and its options with TryAdd semantics, so calling it here and in the
         // other worker job wirings (same connection string) is safe — the later calls are no-ops.
-        services.AddDbContext<LiveCoreDbContext>(dbContextOptions => dbContextOptions.UseNpgsql(connectionString));
+        // Connection resilience (CORE-CONC-003): LiveCoreNpgsqlOptions.Configure turns on the retrying execution
+        // strategy so a transient PostgreSQL disruption is retried automatically instead of surfacing as a
+        // worker-job exception — the same policy the API host and the other worker jobs apply.
+        services.AddDbContext<LiveCoreDbContext>(dbContextOptions => dbContextOptions.UseNpgsql(connectionString, LiveCoreNpgsqlOptions.Configure));
 
         // Deployment reconciliation policy (enablement/cadence/batch size), read once from configuration. No
         // TimeProvider is registered here: each convergence is stamped with the authoritative notification's own

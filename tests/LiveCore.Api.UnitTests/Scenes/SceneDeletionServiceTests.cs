@@ -83,7 +83,7 @@ public sealed class SceneDeletionServiceTests : IDisposable
     // transaction enrols each repository's SaveChanges.
     private static SceneDeletionService CreateService(LiveCoreDbContext context)
         => new(
-            context,
+            new TransactionalUnitOfWork(context),
             new SceneRepository(context),
             new ContentBlockRepository(context),
             new VisibilityRuleRepository(context),

@@ -201,8 +201,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // query paths, recording only a count — never the SQL or parameters (threat T7). Registered as a
     // singleton and attached to the DbContext below.
     builder.Services.AddSingleton<DatabaseFailureMetricsInterceptor>();
+    // Connection resilience (CORE-CONC-003): LiveCoreNpgsqlOptions.Configure turns on the retrying execution
+    // strategy (EnableRetryOnFailure) so a transient PostgreSQL disruption (failover, restart, brief network
+    // partition, pool exhaustion) is retried automatically instead of surfacing as a user-facing 5xx. The same
+    // configuration is applied identically in every worker job context and the migrations factory. It is safe
+    // because every multi-step write runs inside the execution strategy's ExecuteAsync (CORE-CONC-002,
+    // TransactionalUnitOfWork) rather than a bare user-initiated BeginTransaction, which a retrying strategy
+    // would reject.
     builder.Services.AddDbContext<LiveCoreDbContext>((serviceProvider, options) => options
-        .UseNpgsql(databaseConnectionString)
+        .UseNpgsql(databaseConnectionString, LiveCoreNpgsqlOptions.Configure)
         .AddInterceptors(serviceProvider.GetRequiredService<DatabaseFailureMetricsInterceptor>()));
 
     // Transactional unit of work (CORE-CONC-002): runs a multi-step command handler as ONE database

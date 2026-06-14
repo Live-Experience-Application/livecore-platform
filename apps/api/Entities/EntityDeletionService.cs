@@ -55,7 +55,7 @@ namespace LiveCore.Api.Entities;
 /// </summary>
 internal sealed class EntityDeletionService
 {
-    private readonly LiveCoreDbContext _dbContext;
+    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly IEntityRepository _entities;
     private readonly IEntityRelationshipRepository _relationships;
     private readonly IVisibilityRuleRepository _visibilityRules;
@@ -63,20 +63,20 @@ internal sealed class EntityDeletionService
     private readonly IAuditLogRepository _audit;
 
     public EntityDeletionService(
-        LiveCoreDbContext dbContext,
+        TransactionalUnitOfWork unitOfWork,
         IEntityRepository entities,
         IEntityRelationshipRepository relationships,
         IVisibilityRuleRepository visibilityRules,
         IAssetLinkRepository assetLinks,
         IAuditLogRepository audit)
     {
-        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(entities);
         ArgumentNullException.ThrowIfNull(relationships);
         ArgumentNullException.ThrowIfNull(visibilityRules);
         ArgumentNullException.ThrowIfNull(assetLinks);
         ArgumentNullException.ThrowIfNull(audit);
-        _dbContext = dbContext;
+        _unitOfWork = unitOfWork;
         _entities = entities;
         _relationships = relationships;
         _visibilityRules = visibilityRules;
@@ -146,47 +146,48 @@ internal sealed class EntityDeletionService
             return EntityDeletionResult.NotFound;
         }
 
-        // ONE unit of work: the dependent cascade, the entity delete and the audit append commit together
-        // or roll back together, so a deletion is applied whole or not at all. Every injected repository
-        // writes through this same scoped DbContext, so each repository SaveChanges enrols in this
-        // transaction.
-        await using var transaction = await _dbContext.Database
-            .BeginTransactionAsync(cancellationToken)
-            .ConfigureAwait(false);
+        // ONE unit of work (CORE-CONC-002): the dependent cascade, the entity delete and the audit append
+        // commit together or roll back together, so a deletion is applied whole or not at all. Every injected
+        // repository writes through the same scoped DbContext TransactionalUnitOfWork begins the transaction
+        // on, so each repository SaveChanges enrols in this transaction. The transaction is opened inside the
+        // EF execution strategy's ExecuteAsync, so it stays correct under the CORE-CONC-003 retrying strategy
+        // (a bare user-initiated BeginTransaction would be rejected by a retrying strategy).
+        return await _unitOfWork.ExecuteAsync(
+            async transactionCancellationToken =>
+            {
+                // Polymorphic (non-FK) dependents the database can NOT cascade — remove them explicitly so no
+                // dangling rule/link is left behind (threats T2/T4/T5).
+                await _assetLinks
+                    .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.Entity, entityId, transactionCancellationToken)
+                    .ConfigureAwait(false);
+                await _visibilityRules
+                    .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.Entity, entityId, transactionCancellationToken)
+                    .ConfigureAwait(false);
 
-        // Polymorphic (non-FK) dependents the database can NOT cascade — remove them explicitly so no
-        // dangling rule/link is left behind (threats T2/T4/T5).
-        await _assetLinks
-            .RemoveByTargetAsync(organizationId, workspaceId, AssetLinkTargetType.Entity, entityId, cancellationToken)
-            .ConfigureAwait(false);
-        await _visibilityRules
-            .RemoveByResourceAsync(organizationId, workspaceId, VisibilityResourceType.Entity, entityId, cancellationToken)
-            .ConfigureAwait(false);
+                // FK-backed dependents (the database would cascade these); remove them explicitly first so the
+                // cascade is deterministic and provider-independent and there is never a dangling edge.
+                await _relationships
+                    .RemoveByEntityAsync(organizationId, workspaceId, entityId, transactionCancellationToken)
+                    .ConfigureAwait(false);
 
-        // FK-backed dependents (the database would cascade these); remove them explicitly first so the
-        // cascade is deterministic and provider-independent and there is never a dangling edge.
-        await _relationships
-            .RemoveByEntityAsync(organizationId, workspaceId, entityId, cancellationToken)
-            .ConfigureAwait(false);
+                // The entity itself last (its dependents are already gone).
+                await _entities.RemoveAsync(entity, transactionCancellationToken).ConfigureAwait(false);
 
-        // The entity itself last (its dependents are already gone).
-        await _entities.RemoveAsync(entity, cancellationToken).ConfigureAwait(false);
+                // AUDIT (the story's "authorized and audited" criterion): a deletion is security-relevant, so
+                // append an append-only record capturing the actor (the host who deleted), the deleted entity
+                // and the tenant/workspace. The audit references are recorded facts, not foreign keys, so the
+                // row outlives the now-deleted entity (threats T1/T5/T7).
+                var entry = AuditLogEntry.ForEntityDeletion(
+                    organizationId,
+                    workspaceId,
+                    actorUserProfileId,
+                    nameof(Entity),
+                    entityId,
+                    now);
+                await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
 
-        // AUDIT (the story's "authorized and audited" criterion): a deletion is security-relevant, so
-        // append an append-only record capturing the actor (the host who deleted), the deleted entity and
-        // the tenant/workspace. The audit references are recorded facts, not foreign keys, so the row
-        // outlives the now-deleted entity (threats T1/T5/T7).
-        var entry = AuditLogEntry.ForEntityDeletion(
-            organizationId,
-            workspaceId,
-            actorUserProfileId,
-            nameof(Entity),
-            entityId,
-            now);
-        await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-
-        return EntityDeletionResult.Deleted;
+                return EntityDeletionResult.Deleted;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 }
