@@ -167,9 +167,15 @@ internal sealed class RealtimeConnectionResolver
         }
 
         return RealtimeConnectionAdmission.Admit(
-        [
-            RealtimeGroups.SessionParticipant(session.Id, participant.Id),
-        ]);
+            [
+                RealtimeGroups.SessionParticipant(session.Id, participant.Id),
+            ],
+            new RealtimeConnectionSubject(
+                context.OrganizationId,
+                session.WorkspaceId,
+                session.Id,
+                context.UserProfileId,
+                ParticipantId: participant.Id));
     }
 
     /// <summary>
@@ -191,25 +197,36 @@ internal sealed class RealtimeConnectionResolver
             return RealtimeConnectionAdmission.Deny(RealtimeConnectionDenialReason.NotAuthorizedForSession);
         }
 
+        // A host/observer member connection carries no participant id: a membership role change matches it,
+        // a participant removal does not (the subject's participant standing, if any, is separate).
+        var memberSubject = new RealtimeConnectionSubject(
+            context.OrganizationId,
+            session.WorkspaceId,
+            session.Id,
+            context.UserProfileId,
+            ParticipantId: null);
+
         // Host-capable roles (reusing the Visibility module's canonical host-content set, not a
         // re-listed copy) join the org + workspace-hosts + session-hosts groups.
         if (VisibilityRoles.ViewsHostOnlyContent(member.Role))
         {
             return RealtimeConnectionAdmission.Admit(
-            [
-                RealtimeGroups.Organization(context.OrganizationId),
-                RealtimeGroups.WorkspaceHosts(session.WorkspaceId),
-                RealtimeGroups.SessionHosts(session.Id),
-            ]);
+                [
+                    RealtimeGroups.Organization(context.OrganizationId),
+                    RealtimeGroups.WorkspaceHosts(session.WorkspaceId),
+                    RealtimeGroups.SessionHosts(session.Id),
+                ],
+                memberSubject);
         }
 
         // The Observer role joins only the session-observers group.
         if (member.HasRole(MembershipRole.Observer))
         {
             return RealtimeConnectionAdmission.Admit(
-            [
-                RealtimeGroups.SessionObservers(session.Id),
-            ]);
+                [
+                    RealtimeGroups.SessionObservers(session.Id),
+                ],
+                memberSubject);
         }
 
         // A Participant/Auditor workspace role (no participant record on this connection) or any other

@@ -70,11 +70,13 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
 
     private SessionParticipantLeaveService CreateService(
         LiveCoreDbContext context,
-        ISessionEventPublisher? eventPublisher = null)
+        ISessionEventPublisher? eventPublisher = null,
+        IRealtimeConnectionEvictor? connectionEvictor = null)
         => new(
             new SessionRepository(context),
             new ParticipantRepository(context),
             eventPublisher ?? new RecordingSessionEventPublisher(),
+            connectionEvictor ?? new RecordingConnectionEvictor(),
             _timeProvider);
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
@@ -137,9 +139,10 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Stage Left");
 
         var publisher = new RecordingSessionEventPublisher();
+        var evictor = new RecordingConnectionEvictor();
         await using (var context = CreateContext())
         {
-            var service = CreateService(context, publisher);
+            var service = CreateService(context, publisher, evictor);
             var result = await service.LeaveAsync(
                 organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
 
@@ -158,6 +161,12 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
 
         // Exactly one ParticipantLeft event, identifier-only, audience-wide, subjectless, System-emitted.
         AssertParticipantLeftEmitted(publisher, organization.Id, workspace.Id, session.Id, participant);
+
+        // CORE-RTC-002: the realtime layer is re-authorized — the removed participant's connections are evicted
+        // by exactly their tenant/workspace/session/participant tuple, so a still-open socket stops receiving
+        // events the instant they leave, not only on reconnect.
+        var eviction = Assert.Single(evictor.ParticipantEvictions);
+        Assert.Equal((organization.Id, workspace.Id, session.Id, participant.Id), eviction);
     }
 
     [Fact]
@@ -169,11 +178,12 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Stage Left");
 
         var publisher = new RecordingSessionEventPublisher();
+        var evictor = new RecordingConnectionEvictor();
 
         // First leave: a real departure (one event).
         await using (var context = CreateContext())
         {
-            var service = CreateService(context, publisher);
+            var service = CreateService(context, publisher, evictor);
             var first = await service.LeaveAsync(
                 organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
             Assert.Equal(ParticipantLeaveOutcome.Left, first.Outcome);
@@ -182,7 +192,7 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         // Second leave of the SAME participant: already removed -> no-op, NO second event.
         await using (var context = CreateContext())
         {
-            var service = CreateService(context, publisher);
+            var service = CreateService(context, publisher, evictor);
             var second = await service.LeaveAsync(
                 organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
             Assert.Equal(ParticipantLeaveOutcome.AlreadyLeft, second.Outcome);
@@ -193,6 +203,9 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
 
         // Across both calls, exactly ONE ParticipantLeft was ever emitted.
         Assert.Single(publisher.Published);
+        // And the realtime eviction is raised only on the ACTUAL departure (CORE-RTC-002): the idempotent
+        // no-op re-authorizes nothing, so exactly one eviction occurred across both calls.
+        Assert.Single(evictor.ParticipantEvictions);
     }
 
     // ---- NOT-FOUND (existence hiding) -------------------------------------------
@@ -315,8 +328,9 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         var participantInA = await SeedParticipantAsync(organizationA.Id, workspaceInA.Id, "Name");
 
         var publisher = new RecordingSessionEventPublisher();
+        var evictor = new RecordingConnectionEvictor();
         await using var context = CreateContext();
-        var service = CreateService(context, publisher);
+        var service = CreateService(context, publisher, evictor);
 
         // Presented under A: A's session lookup (B's session id under A) fails first -> SessionNotFound.
         var presentedUnderA = await service.LeaveAsync(
@@ -330,6 +344,9 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
 
         // No combination removed the participant or emitted any event.
         Assert.Empty(publisher.Published);
+        // And no combination evicted any connection: a fail-closed not-found re-authorizes nothing, so a
+        // cross-tenant probe can never tear down a connection (CORE-RTC-002; threats T1/T5).
+        Assert.Empty(evictor.ParticipantEvictions);
         var stored = await ReadParticipantAsync(organizationA.Id, workspaceInA.Id, participantInA.Id);
         Assert.NotNull(stored);
         Assert.Equal(ParticipantStatus.Active, stored.Status);
@@ -363,15 +380,18 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         var sessions = new SessionRepository(CreateContext());
         var participants = new ParticipantRepository(CreateContext());
         var publisher = new RecordingSessionEventPublisher();
+        var evictor = new RecordingConnectionEvictor();
 
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(null!, participants, publisher, _timeProvider));
+            () => new SessionParticipantLeaveService(null!, participants, publisher, evictor, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, null!, publisher, _timeProvider));
+            () => new SessionParticipantLeaveService(sessions, null!, publisher, evictor, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, participants, null!, _timeProvider));
+            () => new SessionParticipantLeaveService(sessions, participants, null!, evictor, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, participants, publisher, null!));
+            () => new SessionParticipantLeaveService(sessions, participants, publisher, null!, _timeProvider));
+        Assert.Throws<ArgumentNullException>(
+            () => new SessionParticipantLeaveService(sessions, participants, publisher, evictor, null!));
     }
 
     // ---- EMISSION HELPERS + TEST DOUBLES ----------------------------------------
@@ -435,6 +455,37 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
             => throw new NotSupportedException();
 
         public Task DeliverAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A recording <see cref="IRealtimeConnectionEvictor"/> that captures the eviction signals the leave flow
+    /// raised, without touching any real connection. The participant-removal path raises only
+    /// <see cref="IRealtimeConnectionEvictor.EvictParticipantAsync"/>; the member path fails fast if ever reached.
+    /// </summary>
+    private sealed class RecordingConnectionEvictor : IRealtimeConnectionEvictor
+    {
+        private readonly List<(Guid OrganizationId, Guid WorkspaceId, Guid SessionId, Guid ParticipantId)> _participantEvictions = [];
+
+        public IReadOnlyList<(Guid OrganizationId, Guid WorkspaceId, Guid SessionId, Guid ParticipantId)> ParticipantEvictions
+            => _participantEvictions;
+
+        public Task EvictParticipantAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            Guid participantId,
+            CancellationToken cancellationToken)
+        {
+            _participantEvictions.Add((organizationId, workspaceId, sessionId, participantId));
+            return Task.CompletedTask;
+        }
+
+        public Task EvictWorkspaceMemberAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid userProfileId,
+            CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }
 

@@ -41,11 +41,14 @@ internal sealed class SessionHub : Hub
     private const string _meteredConnectionKey = "livecore.realtime.metered";
 
     private readonly LiveCoreMetrics _metrics;
+    private readonly RealtimeConnectionRegistry _connections;
 
-    public SessionHub(LiveCoreMetrics metrics)
+    public SessionHub(LiveCoreMetrics metrics, RealtimeConnectionRegistry connections)
     {
         ArgumentNullException.ThrowIfNull(metrics);
+        ArgumentNullException.ThrowIfNull(connections);
         _metrics = metrics;
+        _connections = connections;
     }
 
     /// <summary>
@@ -93,6 +96,16 @@ internal sealed class SessionHub : Hub
             await Groups.AddToGroupAsync(Context.ConnectionId, group, Context.ConnectionAborted).ConfigureAwait(false);
         }
 
+        // Record the admitted connection so a later re-authorization (CORE-RTC-002) can find and evict it: a
+        // participant removal or a member role change aborts exactly the affected connections through the
+        // RealtimeConnectionRegistry, so a removed participant's still-open socket and a demoted host's
+        // host/observer deliveries stop WITHOUT waiting for a client-initiated reconnect (threat T3). The
+        // abort handle is this connection's own HubCallerContext.Abort; the subject is the resolver's
+        // server-computed authorized facts (never client input). Eviction only ever removes a connection, so
+        // it can never widen an audience.
+        var hubContext = Context;
+        _connections.Register(hubContext.ConnectionId, admission.Subject!.Value, hubContext.Abort);
+
         // Count the admitted connection on the live realtime-connection gauge (CORE-OBS-001, the docs/15
         // "realtime connections" signal). Only the success path reaches here — an aborted connection returned
         // above and is never counted — and the marker lets OnDisconnectedAsync decrement exactly this
@@ -111,6 +124,11 @@ internal sealed class SessionHub : Hub
     /// </summary>
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
+        // Forget the connection so the registry never accumulates dead entries. This runs whether the
+        // disconnect was client-initiated or the result of an eviction abort (CORE-RTC-002); removing an
+        // unknown id is a safe no-op, so a connection aborted by an eviction is cleared exactly once.
+        _connections.Unregister(Context.ConnectionId);
+
         if (Context.Items.ContainsKey(_meteredConnectionKey))
         {
             Context.Items.Remove(_meteredConnectionKey);

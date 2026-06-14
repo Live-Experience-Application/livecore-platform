@@ -29,30 +29,43 @@ namespace LiveCore.Api.Sessions;
 /// left is an idempotent no-op that emits nothing, so each real departure appends EXACTLY ONE event while a
 /// repeat appends none.
 ///
-/// This service decides only the leave transition and its event. The leave HTTP endpoint (mapping a not-found
-/// to a 404 and authorizing the caller's role) is a later story, exactly as the join HTTP endpoint is.
+/// On (and only on) an actual departure it also RE-AUTHORIZES the realtime layer (CORE-RTC-002): once the
+/// participant is removed it raises the <see cref="IRealtimeConnectionEvictor"/> seam to abort any still-open
+/// hub connection the participant holds in this session, so their existing socket stops receiving events the
+/// instant they leave rather than keeping its group membership until it reconnects (threat T3). The eviction
+/// reuses the Realtime evictor — it never widens an audience and never duplicates the authorization decision —
+/// and is best-effort, like the delivery, so the durable <c>ParticipantLeft</c> is the source of truth even if
+/// the transport eviction is a no-op (the connection was already gone, or is held by another instance).
+///
+/// This service decides only the leave transition, its event and the connection eviction. The leave HTTP
+/// endpoint (mapping a not-found to a 404 and authorizing the caller's role) is a later story, exactly as the
+/// join HTTP endpoint is.
 /// </summary>
 public sealed class SessionParticipantLeaveService
 {
     private readonly ISessionRepository _sessions;
     private readonly IParticipantRepository _participants;
     private readonly ISessionEventPublisher _eventPublisher;
+    private readonly IRealtimeConnectionEvictor _connectionEvictor;
     private readonly TimeProvider _timeProvider;
 
     public SessionParticipantLeaveService(
         ISessionRepository sessions,
         IParticipantRepository participants,
         ISessionEventPublisher eventPublisher,
+        IRealtimeConnectionEvictor connectionEvictor,
         TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(participants);
         ArgumentNullException.ThrowIfNull(eventPublisher);
+        ArgumentNullException.ThrowIfNull(connectionEvictor);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
         _sessions = sessions;
         _participants = participants;
         _eventPublisher = eventPublisher;
+        _connectionEvictor = connectionEvictor;
         _timeProvider = timeProvider;
     }
 
@@ -153,6 +166,17 @@ public sealed class SessionParticipantLeaveService
             createdBy: null,
             now);
         await _eventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+
+        // Re-authorize the realtime layer (CORE-RTC-002): the participant no longer has standing, so abort any
+        // still-open hub connection they hold in this session. Without this their existing socket would stay in
+        // its participant group and keep receiving any later targeted delivery until it reconnected; eviction
+        // stops it now, not only on reconnect (threat T3). It only ever removes a connection — never widens an
+        // audience — and reuses the Realtime evictor seam, not a parallel authorization. Best-effort, like the
+        // delivery above: the durable ParticipantLeft is already recorded, so a transport hiccup here changes
+        // no persisted state.
+        await _connectionEvictor
+            .EvictParticipantAsync(organizationId, workspaceId, sessionId, participantId, cancellationToken)
+            .ConfigureAwait(false);
 
         return SessionParticipantLeaveResult.Departed(organizationId, workspaceId, sessionId, participantId);
     }

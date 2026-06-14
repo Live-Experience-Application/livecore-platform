@@ -82,6 +82,17 @@ public static class RealtimeServiceCollectionExtensions
         // forward now reaches connections on other instances; without it, only this instance's connections.
         services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 
+        // Connection re-authorization / eviction (CORE-RTC-002). The registry is the singleton record of the
+        // live connections THIS instance holds: the SessionHub writes an admitted connection on connect and
+        // clears it on disconnect, and the IRealtimeConnectionEvictor it implements aborts exactly the
+        // connections a participant removal or a member role change affects (so their still-open sockets stop
+        // receiving events they are no longer authorized to see, not only on reconnect). It only ever removes
+        // a connection, so it can never widen an audience (threat T3). Registered UNCONDITIONALLY (no database
+        // dependency) so the evictor seam is available to the persistence-conditional Sessions command that
+        // raises it; the same singleton instance backs both registrations.
+        services.AddSingleton<RealtimeConnectionRegistry>();
+        services.AddSingleton<IRealtimeConnectionEvictor>(sp => sp.GetRequiredService<RealtimeConnectionRegistry>());
+
         return options.IsConfigured;
     }
 }

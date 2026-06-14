@@ -8,8 +8,12 @@
 
   <ItemGroup>
     <!-- Module-internal implementations (e.g. repositories) stay internal;
-         only the unit test project may see them. -->
+         only the test projects may see them. The integration suite additionally needs the internal
+         RealtimeConnectionRegistry to use its connection count as a deterministic barrier (the
+         CORE-RTC-002 eviction tests must wait until the server has finished admitting a live hub
+         connection before triggering its eviction). -->
     <InternalsVisibleTo Include="LiveCore.Api.UnitTests" />
+    <InternalsVisibleTo Include="LiveCore.Api.IntegrationTests" />
   </ItemGroup>
 
   <ItemGroup>

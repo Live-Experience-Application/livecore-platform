@@ -1704,6 +1704,32 @@ The `SessionStarted`/`SessionEnded` lifecycle events are wired over this deliver
 reconnect replay re-delivers them. Wiring the remaining catalog events over this delivery path is a later
 Realtime story (`docs/11_REALTIME_SYNC.md`).
 
+**Connection re-authorization / eviction (CORE-RTC-002).** A connection's server-managed groups are resolved
+**once**, at connect, so a caller whose standing changes **mid-session** would keep receiving events their old
+standing allowed until they reconnected: a removed participant's still-open socket stays in its participant
+group, and a demoted host keeps the host/observer group deliveries (the participant audience fan-out is
+re-gated per event by the recipient resolver — it enumerates only **active** participants — but group
+**membership** is not). The Realtime module now closes that gap with an **eviction** seam
+(`IRealtimeConnectionEvictor`, backed by a singleton `RealtimeConnectionRegistry`): the hub records each
+admitted connection's server-computed authorized facts + an abort handle on connect (and clears it on
+disconnect), and a removal/role-change command raises the seam to **abort** exactly the affected connections —
+the removed participant's (raised by the `SessionParticipantLeaveService` / `Participant.Remove` flow), or the
+demoted member's host/observer connections (raised by a workspace role-change command). Aborting the socket
+stops it receiving events **immediately**, not only on reconnect, and is matched by the full
+tenant/workspace/session (and participant or subject) tuple, so a connection in another session, workspace or
+tenant is never touched (threats T1/T5); a membership role change never aborts the subject's separate
+participant connection, and vice-versa.
+
+Eviction **only ever removes** a connection — it never adds one to a group and never sends an event — so it
+can never widen an audience (threat T3). The authoritative re-admission stays the **same** connection resolver:
+an evicted client that reconnects is authorized from scratch (a demoted host re-joins only its new role's
+groups; a removed participant is denied), so this reuses the single authorization path rather than duplicating
+it. The registry tracks the connections of the instance it runs on (the abort handle is an in-process
+`HubCallerContext.Abort`), so it evicts on **that** instance immediately; the always-on cross-instance backstop
+is the per-event recipient computation that already re-gates the participant audience fan-out, and propagating
+the host/observer eviction signal across instances is a documented follow-up — the same single-instance posture
+as the in-process backplane (`docs/11_REALTIME_SYNC.md`).
+
 ### Secret management and the configuration contract
 
 Core holds **no secret in source**: every connection string, identity setting and credential is supplied at

@@ -32,10 +32,11 @@ internal enum RealtimeConnectionDenialReason
 
 /// <summary>
 /// The outcome of admitting a connection to the session hub (CORE-RT-002): either an admission carrying
-/// the SERVER-COMPUTED groups the connection joins, or a typed, id-free denial. It is minted only
-/// through <see cref="Admit"/> / <see cref="Deny"/>, so an admission always carries a non-empty group
-/// list and a denial never carries any group or id (a denial leaks nothing about what exists; threats
-/// T1/T5). This mirrors the fail-closed result shape of <c>SessionJoinResult</c> (CORE-SES-003).
+/// the SERVER-COMPUTED groups the connection joins (and the authorized facts behind it), or a typed,
+/// id-free denial. It is minted only through <see cref="Admit"/> / <see cref="Deny"/>, so an admission
+/// always carries a non-empty group list and a <see cref="Subject"/>, and a denial never carries any group,
+/// subject or id (a denial leaks nothing about what exists; threats T1/T5). This mirrors the fail-closed
+/// result shape of <c>SessionJoinResult</c> (CORE-SES-003).
 /// </summary>
 internal sealed class RealtimeConnectionAdmission
 {
@@ -44,10 +45,12 @@ internal sealed class RealtimeConnectionAdmission
     private RealtimeConnectionAdmission(
         bool admitted,
         IReadOnlyList<string> groups,
+        RealtimeConnectionSubject? subject,
         RealtimeConnectionDenialReason reason)
     {
         Admitted = admitted;
         Groups = groups;
+        Subject = subject;
         Reason = reason;
     }
 
@@ -61,22 +64,33 @@ internal sealed class RealtimeConnectionAdmission
     /// </summary>
     public IReadOnlyList<string> Groups { get; }
 
+    /// <summary>
+    /// The authorized facts of the admitted connection (tenant/workspace/session, the subject behind it,
+    /// and the participant it owns for a participant connection); the hub records these so a later
+    /// re-authorization (CORE-RTC-002) can find and evict the connection. Non-null exactly when
+    /// <see cref="Admitted"/> is true.
+    /// </summary>
+    public RealtimeConnectionSubject? Subject { get; }
+
     /// <summary>The denial reason (<see cref="RealtimeConnectionDenialReason.None"/> when admitted).</summary>
     public RealtimeConnectionDenialReason Reason { get; }
 
-    /// <summary>Builds an admission for the given non-empty set of server-computed groups.</summary>
+    /// <summary>
+    /// Builds an admission for the given non-empty set of server-computed groups and the authorized facts
+    /// behind the connection.
+    /// </summary>
     /// <exception cref="ArgumentException">The group list is null or empty.</exception>
-    public static RealtimeConnectionAdmission Admit(IReadOnlyList<string> groups)
+    public static RealtimeConnectionAdmission Admit(IReadOnlyList<string> groups, RealtimeConnectionSubject subject)
     {
         if (groups is null || groups.Count == 0)
         {
             throw new ArgumentException("An admitted connection must join at least one group.", nameof(groups));
         }
 
-        return new RealtimeConnectionAdmission(admitted: true, groups, RealtimeConnectionDenialReason.None);
+        return new RealtimeConnectionAdmission(admitted: true, groups, subject, RealtimeConnectionDenialReason.None);
     }
 
-    /// <summary>Builds a fail-closed denial carrying no groups and no ids.</summary>
+    /// <summary>Builds a fail-closed denial carrying no groups, no subject and no ids.</summary>
     /// <exception cref="ArgumentException">The reason is <see cref="RealtimeConnectionDenialReason.None"/>.</exception>
     public static RealtimeConnectionAdmission Deny(RealtimeConnectionDenialReason reason)
     {
@@ -85,6 +99,6 @@ internal sealed class RealtimeConnectionAdmission
             throw new ArgumentException("A denial must carry a reason.", nameof(reason));
         }
 
-        return new RealtimeConnectionAdmission(admitted: false, _noGroups, reason);
+        return new RealtimeConnectionAdmission(admitted: false, _noGroups, subject: null, reason);
     }
 }
