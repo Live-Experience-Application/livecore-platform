@@ -1116,6 +1116,20 @@ app.MapMeEndpoints();
 // (threats T1/T5).
 app.MapOrganizationEndpoints();
 
+// Audit log read endpoint (CORE-SEC-002, the "Security Hardening" epic): the tenant-scoped, paged
+// view-audit-log read, GET /api/v1/audit-logs. The append-only audit log was write-only over HTTP — the
+// read-side AuditQueryPolicy (Owner/Admin/Auditor, fail-closed) and the safe AuditLogEntryView projection
+// existed and were unit-tested but no route was mapped, so the dedicated Auditor role could not read the
+// log. This wires the route ON TOP of those existing parts (no parallel audit engine). It lives in an
+// authenticated route group and fails closed (503) when persistence is not configured, exactly like the
+// organization endpoints. No new DI registration is required: the tenant context resolver and the audit log
+// repository it consumes are already registered above inside the persistence conditional. The tenant comes
+// from the required ?organizationSlug= (resolved by the same token-claim-and-membership tenant check the
+// other tenant-scoped routes use), so a service account / foreign tenant / non-member is hidden as 404 and a
+// known member without the Owner/Admin/Auditor grant is 403; the page is read tenant-scoped (threat T5),
+// bounded by ?limit=/?offset=, and projected PII/secret-free through AuditQueryPolicy (threat T7).
+app.MapAuditLogEndpoints();
+
 // Template deletion endpoint (CORE-LIFE-008, the "Resource Lifecycle and Deletion" epic):
 // DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}. The Templates module had a
 // template create + load (CORE-ENT-004) but no delete; this adds the inverse. It lives in an

@@ -1342,11 +1342,42 @@ names only — never content, threat T7) handed to an authorized reader, and
 `AuditQueryPolicy.Project` yields the empty set to any unauthorized role (fail-closed
 defence in depth). The policy sits on top of the existing tenant-scoped read
 (`IAuditLogRepository.ListByOrganizationAsync`, which filters by `organization_id` so one
-tenant's records are never returned through another tenant's id — threat T5), so a future
-audit query endpoint composes the trusted tenant resolution, this permission and the
-projection exactly as the export/recap projectors are the reusable core their later
-endpoints sit on. `csv/api_routes.csv` defines no audit route, so there is still no audit
-HTTP route.
+tenant's records are never returned through another tenant's id — threat T5), so the audit
+query endpoint composes the trusted tenant resolution, this permission and the projection
+exactly as the export/recap projectors are the reusable core their later endpoints sit on.
+
+#### Reading the audit log over HTTP
+
+CORE-SEC-002 (the `Security Hardening` epic) adds the missing **read** route, so the
+append-only log is no longer write-only over HTTP and the dedicated `Auditor` role can
+finally fulfil its sole purpose:
+
+| Method | Route                | Authorized callers                       |
+| ------ | -------------------- | ---------------------------------------- |
+| `GET`  | `/api/v1/audit-logs` | organization `Owner`, `Admin`, `Auditor` |
+
+The route is built **on top of** the existing `AuditQueryPolicy` and `AuditLogEntryView`
+(no parallel audit engine). The tenant is the required `?organizationSlug=` query
+parameter (the path carries no organization), resolved by the same
+`TenantContextResolver` (token organization claim **and** persisted membership) the other
+tenant-scoped routes use, so the read is **tenant-scoped** — entries are loaded only
+through `IAuditLogRepository.ListPageByOrganizationAsync` for the resolved tenant and one
+tenant's records are never returned through another's id (threat T5). It is **paged**: the
+optional `?limit=` (default 50, server-clamped to a max of 200) and zero-based `?offset=`
+bound each page, and a `hasMore` flag tells the client whether a further page exists, so
+an unbounded log is never returned whole.
+
+Authorization is server-side and fail-closed (`docs/06_AUTHORIZATION_MATRIX.md` "View
+audit log"): a service-account principal, a foreign/unclaimed/unknown tenant and a
+non-member are all hidden as `404` (indistinguishable from a missing resource), and a
+**known tenant member who lacks the `Owner`/`Admin`/`Auditor` grant is `403`** (the exact,
+non-linear set-membership check; `Host`'s matrix-`optional` grant fails closed and is
+denied). The paging parameters are validated only **after** authorization, so an
+unauthorized caller never receives request-shape feedback. The result is the
+`AuditQueryPolicy.Project` projection into `AuditLogEntryView` — identifiers, enums and
+generic state names only, never a display name, email, token, storage coordinate or
+resolved content (threat T7) — with the deny-by-default empty-set backstop kept in one
+place.
 
 ### Participant visible feed
 

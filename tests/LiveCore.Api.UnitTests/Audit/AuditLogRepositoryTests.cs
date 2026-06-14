@@ -219,4 +219,109 @@ public sealed class AuditLogRepositoryTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(
             () => repository.ListByOrganizationAsync(Guid.Empty, CancellationToken.None));
     }
+
+    // --- Paged read (CORE-SEC-002) -------------------------------------------
+
+    [Fact]
+    public async Task ListPageByOrganization_returns_the_requested_window_in_chronological_order()
+    {
+        // Five entries at distinct event times, so the time-ordered UUIDv7 ids order chronologically and the
+        // paging assertion is deterministic.
+        var organization = await SeedOrganizationAsync(_slugA);
+        var entries = Enumerable.Range(0, 5)
+            .Select(i => GenericEntry(organization.Id, AuditAction.SessionStarted, _now.AddSeconds(i)))
+            .ToArray();
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+            // Append out of order to prove the read order follows event time, not insertion order.
+            foreach (var entry in entries.Reverse())
+            {
+                await repository.AppendAsync(entry, CancellationToken.None);
+            }
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+
+            var firstPage = await repository.ListPageByOrganizationAsync(
+                organization.Id, skip: 0, take: 2, CancellationToken.None);
+            Assert.Collection(
+                firstPage,
+                e => Assert.Equal(entries[0].Id, e.Id),
+                e => Assert.Equal(entries[1].Id, e.Id));
+
+            var middlePage = await repository.ListPageByOrganizationAsync(
+                organization.Id, skip: 2, take: 2, CancellationToken.None);
+            Assert.Collection(
+                middlePage,
+                e => Assert.Equal(entries[2].Id, e.Id),
+                e => Assert.Equal(entries[3].Id, e.Id));
+
+            // A take beyond the end of the page returns only what remains.
+            var lastPage = await repository.ListPageByOrganizationAsync(
+                organization.Id, skip: 4, take: 10, CancellationToken.None);
+            Assert.Equal(entries[4].Id, Assert.Single(lastPage).Id);
+
+            // An offset past the end returns nothing.
+            var empty = await repository.ListPageByOrganizationAsync(
+                organization.Id, skip: 5, take: 2, CancellationToken.None);
+            Assert.Empty(empty);
+        }
+    }
+
+    [Fact]
+    public async Task ListPageByOrganization_never_returns_another_tenants_records()
+    {
+        // Mandatory negative tenant-isolation test (threat T5): the paged read is tenant-scoped exactly like
+        // the full read — tenant A's page never contains tenant B's entry even though both exist.
+        var organizationA = await SeedOrganizationAsync(_slugA);
+        var organizationB = await SeedOrganizationAsync(_slugB);
+        var inA = GenericEntry(organizationA.Id, AuditAction.SessionStarted);
+        var inB = GenericEntry(organizationB.Id, AuditAction.SessionEnded);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+            await repository.AppendAsync(inA, CancellationToken.None);
+            await repository.AppendAsync(inB, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+            var aPage = await repository.ListPageByOrganizationAsync(
+                organizationA.Id, skip: 0, take: 10, CancellationToken.None);
+
+            Assert.Equal(inA.Id, Assert.Single(aPage).Id);
+            Assert.DoesNotContain(aPage, e => e.Id == inB.Id);
+        }
+    }
+
+    [Fact]
+    public async Task ListPageByOrganization_rejects_an_empty_id()
+    {
+        await using var context = CreateContext();
+        var repository = new AuditLogRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListPageByOrganizationAsync(Guid.Empty, skip: 0, take: 1, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(-1, 1)]
+    [InlineData(0, 0)]
+    [InlineData(0, -5)]
+    public async Task ListPageByOrganization_rejects_an_out_of_range_window(int skip, int take)
+    {
+        var organization = await SeedOrganizationAsync(_slugA);
+
+        await using var context = CreateContext();
+        var repository = new AuditLogRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListPageByOrganizationAsync(organization.Id, skip, take, CancellationToken.None));
+    }
 }

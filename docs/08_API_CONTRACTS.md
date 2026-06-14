@@ -41,6 +41,7 @@ it is a row in `csv/api_routes.csv`):
 GET    /api/v1/me
 GET    /api/v1/organizations
 POST   /api/v1/organizations
+GET    /api/v1/audit-logs
 DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}
 GET    /api/v1/workspaces
 POST   /api/v1/workspaces

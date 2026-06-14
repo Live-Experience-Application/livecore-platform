@@ -52,4 +52,44 @@ internal sealed class AuditLogRepository : IAuditLogRepository
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<AuditLogEntry>> ListPageByOrganizationAsync(
+        Guid organizationId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored tenant's records, so the lookup fails fast instead of
+        // returning an arbitrary set of rows (mirrors ListByOrganizationAsync).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // Same tenant-scoped, chronologically ordered read as ListByOrganizationAsync — the predicate matches
+        // organization_id (the leading column of the critical index audit_logs(organization_id, created_at)),
+        // so a foreign tenant's records are never returned (threat T5) — but bounded by Skip/Take so an
+        // unbounded log is never materialized. Ordering by the time-ordered surrogate id (UUIDv7) is
+        // provider-independent (SQLite cannot ORDER BY a DateTimeOffset) and stable for an append-only log:
+        // a new entry appends at the end (a higher id) and never shifts an already-read page. Skip/Take
+        // translate to the provider's LIMIT/OFFSET.
+        return await _dbContext.AuditLogs
+            .Where(entry => entry.OrganizationId == organizationId)
+            .OrderBy(entry => entry.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

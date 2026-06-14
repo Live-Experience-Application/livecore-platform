@@ -3,6 +3,7 @@ GET,/api/v1/me,IdentityAccess,authenticated,Returns principal context only
 GET,/api/v1/organizations,Organizations,authenticated,Only organizations user belongs to
 POST,/api/v1/organizations,Organizations,authenticated,Creates organization and Owner membership
 DELETE,/api/v1/organizations/{organizationSlug}/members/{memberId},Organizations,"Owner,Admin",Remove organization member; revokes access; last Owner cannot be removed; audited; hidden-404
+GET,/api/v1/audit-logs,Audit,"Owner,Admin,Auditor",Read the tenant's append-only audit log; tenant via organizationSlug query; paged (limit default 50 max 200; offset); reuses AuditQueryPolicy+AuditLogEntryView; PII/secret-free projection; non-privileged role 403; foreign tenant/non-member hidden-404
 DELETE,/api/v1/organizations/{organizationSlug}/templates/{templateId},Templates,"Owner,Admin",Delete an org-scoped template; global templates not deletable by an org (org-scoped lookup never returns a global template); does not affect already-instantiated entity types; tenant-scoped lookup; hidden-404
 GET,/api/v1/workspaces,Workspaces,"Owner,Admin,Host,CoHost,Participant,Observer,Auditor",Filtered by membership
 POST,/api/v1/workspaces,Workspaces,"Owner,Admin",Creates generic workspace; enforces workspace.active.max quota

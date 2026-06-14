@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
@@ -428,6 +429,38 @@ internal static class TestData
         context.Templates.Add(template);
         await context.SaveChangesAsync();
         return template;
+    }
+
+    /// <summary>
+    /// Creates and persists a generic append-only audit log entry for the given tenant, driving the real
+    /// <see cref="AuditLogEntry.Create"/> factory so the seeded row has exactly the invariants production would
+    /// produce. Used to arrange a tenant's audit trail for the view-audit-log read tests (CORE-SEC-002). The
+    /// surrogate id is a UUIDv7 derived from <paramref name="createdAt"/>, so seeding entries with increasing
+    /// times yields a deterministic chronological read order. Every value is a generic identifier/enum/state
+    /// name — never PII or content (threat T7; AGENTS.md).
+    /// </summary>
+    public static async Task<AuditLogEntry> AddAuditLogEntryAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        AuditAction action = AuditAction.SessionStarted,
+        Guid? workspaceId = null,
+        Guid? actorUserProfileId = null,
+        DateTimeOffset? createdAt = null)
+    {
+        var entry = AuditLogEntry.Create(
+            organizationId,
+            workspaceId ?? Guid.CreateVersion7(),
+            action,
+            actorUserProfileId ?? Guid.CreateVersion7(),
+            resourceType: null,
+            resourceId: null,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt ?? SeedTime);
+        context.AuditLogs.Add(entry);
+        await context.SaveChangesAsync();
+        return entry;
     }
 
     /// <summary>

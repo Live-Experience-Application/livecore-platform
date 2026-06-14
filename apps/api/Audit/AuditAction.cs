@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace LiveCore.Api.Audit;
 
 /// <summary>
@@ -5,6 +7,13 @@ namespace LiveCore.Api.Audit;
 /// audit log. The Audit module owns the "security event records" (docs/05_MODULE_CONTRACTS.md), and this
 /// enum is the Core-level catalog of the generic actions those records capture. The names are the
 /// generic, product-neutral event names from docs/09_EVENT_CATALOG.md — never vertical terms.
+///
+/// Serialized over HTTP by its stable NAME (the view-audit-log read endpoint, CORE-SEC-002), exactly as the
+/// other Core enums surface as stable string names in their DTOs — the action is persisted by name too
+/// (<see cref="AuditLogConfiguration"/>) and carried by name in <see cref="AuditLogEntryView"/>. The
+/// converter is attached to the enum itself because this is the only enum surfaced directly (rather than
+/// pre-mapped to a string in its DTO), and it is not serialized anywhere else, so the attribute has no
+/// effect on any other endpoint. The numeric values stay storage discriminators only (see below).
 ///
 /// CORE-VIS-006 seeded this catalog with the one action that epic produced,
 /// <see cref="VisibilityRuleChanged"/> (the security-relevant visibility change of
@@ -21,6 +30,7 @@ namespace LiveCore.Api.Audit;
 /// <c>SessionStatus</c>, <c>ContentBlockType</c>), carry no ordering meaning and must not be compared
 /// with &gt;/&lt;.
 /// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum AuditAction
 {
     /// <summary>
