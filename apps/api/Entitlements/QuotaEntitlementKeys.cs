@@ -31,4 +31,17 @@ public static class QuotaEntitlementKeys
     /// surfaces, CORE-ENTL-003).
     /// </summary>
     public const string SessionActiveMax = "session.active.max";
+
+    /// <summary>
+    /// Caps a session's participant count (docs/21 generic key <c>session.participant.max</c>;
+    /// csv/mobile_entitlement_catalog.csv scope <c>session</c>, free value 4). Enforced on the participant-join
+    /// path (<c>SessionParticipantJoinService.JoinAsync</c>) for the <see cref="EntitlementSubjectType.Session"/>
+    /// subject the participant joins, and released when a participant leaves
+    /// (<c>SessionParticipantLeaveService.LeaveAsync</c>), so the count reflects the session's CURRENT participants
+    /// and a free session cannot admit more participants than its plan allows (CORE-MON-005). This is the headline
+    /// free-tier participant gate the docs say Core exists to enforce server-side rather than leave to the UI
+    /// (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). The atomic check-and-consume (CORE-CONC-004) makes
+    /// concurrent joins unable to exceed the cap.
+    /// </summary>
+    public const string SessionParticipantMax = "session.participant.max";
 }

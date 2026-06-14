@@ -1,4 +1,5 @@
 using System.Text.Json;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
@@ -101,7 +102,48 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
             new SessionRepository(context),
             new ParticipantRepository(context),
             eventPublisher ?? new RecordingSessionEventPublisher(),
+            CreateQuotaEnforcement(context),
             _timeProvider);
+
+    /// <summary>
+    /// Builds the real <see cref="QuotaEnforcementService"/> over fresh repositories on the given context, so the
+    /// participant-cap gate (CORE-MON-005) runs end-to-end through SQL exactly as in production. With no
+    /// <c>session.participant.max</c> quota seeded the join is ungoverned and proceeds, so the lifecycle/isolation
+    /// tests above need no quota fixture.
+    /// </summary>
+    private QuotaEnforcementService CreateQuotaEnforcement(LiveCoreDbContext context)
+        => new(
+            new QuotaDefinitionRepository(context),
+            new SubjectEntitlementResolver(new SubjectEntitlementRepository(context)),
+            new QuotaUsageRepository(context),
+            _timeProvider);
+
+    /// <summary>
+    /// Seeds the <c>session.participant.max</c> quota for the given session subject and grants it a limit (or an
+    /// unlimited/fair-use grant for a "paid plan"). Optionally records a starting usage so a test can drive the
+    /// session straight to its cap. Mirrors the QuotaEnforcementService test fixtures, but keyed on the
+    /// <see cref="EntitlementSubjectType.Session"/> subject this story introduces.
+    /// </summary>
+    private async Task SeedParticipantQuotaAsync(Guid sessionId, long? limit, long startingUsage = 0)
+    {
+        await using var context = CreateContext();
+        var entitlement = EntitlementDefinition.Define(
+            QuotaEntitlementKeys.SessionParticipantMax, EntitlementValueKind.Quota, "Quota", null, _createdAt);
+        context.EntitlementDefinitions.Add(entitlement);
+        var quota = QuotaDefinition.Define(entitlement, EntitlementSubjectType.Session, QuotaUnit.Count, _createdAt);
+        context.QuotaDefinitions.Add(quota);
+        context.SubjectEntitlements.Add(
+            SubjectEntitlement.GrantQuota(EntitlementSubjectType.Session, sessionId, entitlement, limit, null, _createdAt));
+
+        if (startingUsage != 0)
+        {
+            var usage = QuotaUsage.Start(EntitlementSubjectType.Session, sessionId, quota, _createdAt);
+            usage.Record(startingUsage, _createdAt);
+            context.QuotaUsage.Add(usage);
+        }
+
+        await context.SaveChangesAsync();
+    }
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
     {
@@ -503,6 +545,172 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
         AssertDenied(underW2, SessionJoinDenialReason.SessionNotFound);
     }
 
+    // ---- PARTICIPANT CAP (session.participant.max, CORE-MON-005) ----------------
+
+    [Fact]
+    public async Task Join_at_the_participant_limit_is_rejected_with_QuotaExceeded()
+    {
+        // The free-tier participant gate: with a limit of one the first active participant is admitted (consuming
+        // the only slot) and a second is rejected fail-closed with QuotaExceeded — the server-side cap, not the UI,
+        // blocks the join (docs/21: "Free limits cannot be bypassed by clients"). The denial emits NO event.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var first = await SeedParticipantAsync(organization.Id, workspace.Id, "First");
+        var second = await SeedParticipantAsync(organization.Id, workspace.Id, "Second");
+        await SeedParticipantQuotaAsync(session.Id, limit: 1);
+
+        var publisher = new RecordingSessionEventPublisher();
+        await using var context = CreateContext();
+        var service = CreateService(context, publisher);
+
+        // The first participant fills the only slot.
+        var admitted = await service.JoinAsync(
+            organization.Id, workspace.Id, session.Id, first.Id, CancellationToken.None);
+        AssertAdmitted(admitted, organization.Id, workspace.Id, session.Id, first.Id);
+        Assert.Single(publisher.Published);
+
+        // The session is now at its cap: the second participant is rejected, and the rejection emits nothing
+        // (the published count stays at the one the admission emitted).
+        var rejected = await service.JoinAsync(
+            organization.Id, workspace.Id, session.Id, second.Id, CancellationToken.None);
+        AssertDenied(rejected, SessionJoinDenialReason.QuotaExceeded);
+        Assert.Single(publisher.Published);
+    }
+
+    [Fact]
+    public async Task Join_already_at_the_seeded_limit_is_rejected_without_consuming()
+    {
+        // The session is seeded straight to its cap (limit 4, usage 4 — the free-tier value). The next join is
+        // rejected with QuotaExceeded and the atomic guard records nothing beyond the cap.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Latecomer");
+        await SeedParticipantQuotaAsync(session.Id, limit: 4, startingUsage: 4);
+
+        var publisher = new RecordingSessionEventPublisher();
+        await using var context = CreateContext();
+        var service = CreateService(context, publisher);
+        var result = await service.JoinAsync(
+            organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
+
+        AssertDenied(result, SessionJoinDenialReason.QuotaExceeded);
+        Assert.Empty(publisher.Published);
+    }
+
+    [Fact]
+    public async Task A_paid_plan_allows_more_participants_than_the_free_limit()
+    {
+        // The same three participants that a free limit of one would cap at one are ALL admitted under an
+        // unlimited (fair-use) "paid plan" grant — premium state comes from the server entitlement, and a higher
+        // plan raises the cap. Each admission emits its own ParticipantJoined.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var p1 = await SeedParticipantAsync(organization.Id, workspace.Id, "One");
+        var p2 = await SeedParticipantAsync(organization.Id, workspace.Id, "Two");
+        var p3 = await SeedParticipantAsync(organization.Id, workspace.Id, "Three");
+        // limit: null is the unlimited (fair-use) grant of the paid plans in csv/mobile_entitlement_catalog.csv.
+        await SeedParticipantQuotaAsync(session.Id, limit: null);
+
+        var publisher = new RecordingSessionEventPublisher();
+        await using var context = CreateContext();
+        var service = CreateService(context, publisher);
+
+        foreach (var participant in new[] { p1, p2, p3 })
+        {
+            var result = await service.JoinAsync(
+                organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
+            AssertAdmitted(result, organization.Id, workspace.Id, session.Id, participant.Id);
+        }
+
+        Assert.Equal(3, publisher.Published.Count);
+    }
+
+    [Fact]
+    public async Task A_paid_limit_admits_exactly_up_to_its_higher_cap()
+    {
+        // A "paid" cap of two admits the first two participants and rejects the third with QuotaExceeded: the gate
+        // enforces whatever limit the session is granted, so a larger plan simply admits more before the cap.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var p1 = await SeedParticipantAsync(organization.Id, workspace.Id, "One");
+        var p2 = await SeedParticipantAsync(organization.Id, workspace.Id, "Two");
+        var p3 = await SeedParticipantAsync(organization.Id, workspace.Id, "Three");
+        await SeedParticipantQuotaAsync(session.Id, limit: 2);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        AssertAdmitted(
+            await service.JoinAsync(organization.Id, workspace.Id, session.Id, p1.Id, CancellationToken.None),
+            organization.Id, workspace.Id, session.Id, p1.Id);
+        AssertAdmitted(
+            await service.JoinAsync(organization.Id, workspace.Id, session.Id, p2.Id, CancellationToken.None),
+            organization.Id, workspace.Id, session.Id, p2.Id);
+        AssertDenied(
+            await service.JoinAsync(organization.Id, workspace.Id, session.Id, p3.Id, CancellationToken.None),
+            SessionJoinDenialReason.QuotaExceeded);
+    }
+
+    [Fact]
+    public async Task An_ungoverned_session_admits_without_a_participant_quota()
+    {
+        // No session.participant.max quota is defined for the deployment, so there is nothing to enforce: Core
+        // enforces only quotas that EXIST, and the join proceeds unchanged. (This is the default the lifecycle and
+        // isolation tests above rely on.)
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Solo");
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+        var result = await service.JoinAsync(
+            organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
+
+        AssertAdmitted(result, organization.Id, workspace.Id, session.Id, participant.Id);
+    }
+
+    [Fact]
+    public async Task A_defined_participant_quota_the_session_is_not_entitled_to_denies_fail_closed()
+    {
+        // The quota is DEFINED for the deployment but the session holds NO entitlement granting a limit: fail-closed,
+        // the session has no allowance, so the join is denied with QuotaExceeded and emits nothing. This is the
+        // server-side default that stops a client unlocking a cap it was never granted.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Run");
+        var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Name");
+        await SeedParticipantQuotaDefinitionWithoutGrantAsync();
+
+        var publisher = new RecordingSessionEventPublisher();
+        await using var context = CreateContext();
+        var service = CreateService(context, publisher);
+        var result = await service.JoinAsync(
+            organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
+
+        AssertDenied(result, SessionJoinDenialReason.QuotaExceeded);
+        Assert.Empty(publisher.Published);
+    }
+
+    /// <summary>
+    /// Seeds only the <c>session.participant.max</c> quota DEFINITION (no subject grant), so the quota governs the
+    /// deployment but no session is entitled to a limit — the fail-closed "defined but not granted" case.
+    /// </summary>
+    private async Task SeedParticipantQuotaDefinitionWithoutGrantAsync()
+    {
+        await using var context = CreateContext();
+        var entitlement = EntitlementDefinition.Define(
+            QuotaEntitlementKeys.SessionParticipantMax, EntitlementValueKind.Quota, "Quota", null, _createdAt);
+        context.EntitlementDefinitions.Add(entitlement);
+        context.QuotaDefinitions.Add(
+            QuotaDefinition.Define(entitlement, EntitlementSubjectType.Session, QuotaUnit.Count, _createdAt));
+        await context.SaveChangesAsync();
+    }
+
     // ---- GUARDS -----------------------------------------------------------------
 
     [Fact]
@@ -531,15 +739,18 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
         var sessions = new SessionRepository(CreateContext());
         var participants = new ParticipantRepository(CreateContext());
         var publisher = new RecordingSessionEventPublisher();
+        var quota = CreateQuotaEnforcement(CreateContext());
 
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(null!, participants, publisher, _timeProvider));
+            () => new SessionParticipantJoinService(null!, participants, publisher, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(sessions, null!, publisher, _timeProvider));
+            () => new SessionParticipantJoinService(sessions, null!, publisher, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(sessions, participants, null!, _timeProvider));
+            () => new SessionParticipantJoinService(sessions, participants, null!, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantJoinService(sessions, participants, publisher, null!));
+            () => new SessionParticipantJoinService(sessions, participants, publisher, null!, _timeProvider));
+        Assert.Throws<ArgumentNullException>(
+            () => new SessionParticipantJoinService(sessions, participants, publisher, quota, null!));
     }
 
     // ---- EMISSION HELPERS + TEST DOUBLES ----------------------------------------

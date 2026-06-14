@@ -1,4 +1,5 @@
 using System.Text.Json;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
@@ -77,7 +78,52 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
             new ParticipantRepository(context),
             eventPublisher ?? new RecordingSessionEventPublisher(),
             connectionEvictor ?? new RecordingConnectionEvictor(),
+            CreateQuotaEnforcement(context),
             _timeProvider);
+
+    /// <summary>
+    /// Builds the real <see cref="QuotaEnforcementService"/> over fresh repositories on the given context, so the
+    /// participant-quota release on departure (CORE-MON-005) runs end-to-end through SQL exactly as in production.
+    /// </summary>
+    private QuotaEnforcementService CreateQuotaEnforcement(LiveCoreDbContext context)
+        => new(
+            new QuotaDefinitionRepository(context),
+            new SubjectEntitlementResolver(new SubjectEntitlementRepository(context)),
+            new QuotaUsageRepository(context),
+            _timeProvider);
+
+    /// <summary>
+    /// Seeds the <c>session.participant.max</c> quota for the given session subject, grants it the limit and
+    /// records a starting usage, then returns the quota-definition id so a test can read the usage back. Used to
+    /// prove a departing participant RELEASES a consumed participant slot (the symmetric counterpart of the join's
+    /// atomic consume).
+    /// </summary>
+    private async Task<Guid> SeedParticipantQuotaWithUsageAsync(Guid sessionId, long limit, long startingUsage)
+    {
+        await using var context = CreateContext();
+        var entitlement = EntitlementDefinition.Define(
+            QuotaEntitlementKeys.SessionParticipantMax, EntitlementValueKind.Quota, "Quota", null, _createdAt);
+        context.EntitlementDefinitions.Add(entitlement);
+        var quota = QuotaDefinition.Define(entitlement, EntitlementSubjectType.Session, QuotaUnit.Count, _createdAt);
+        context.QuotaDefinitions.Add(quota);
+        context.SubjectEntitlements.Add(
+            SubjectEntitlement.GrantQuota(EntitlementSubjectType.Session, sessionId, entitlement, limit, null, _createdAt));
+
+        var usage = QuotaUsage.Start(EntitlementSubjectType.Session, sessionId, quota, _createdAt);
+        usage.Record(startingUsage, _createdAt);
+        context.QuotaUsage.Add(usage);
+
+        await context.SaveChangesAsync();
+        return quota.Id;
+    }
+
+    private async Task<long> ReadParticipantUsageAsync(Guid sessionId, Guid quotaDefinitionId)
+    {
+        await using var context = CreateContext();
+        var usage = await new QuotaUsageRepository(context).FindBySubjectAndQuotaAsync(
+            EntitlementSubjectType.Session, sessionId, quotaDefinitionId, CancellationToken.None);
+        return usage?.UsedAmount ?? 0;
+    }
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
     {
@@ -381,17 +427,78 @@ public sealed class SessionParticipantLeaveServiceTests : IDisposable
         var participants = new ParticipantRepository(CreateContext());
         var publisher = new RecordingSessionEventPublisher();
         var evictor = new RecordingConnectionEvictor();
+        var quota = CreateQuotaEnforcement(CreateContext());
 
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(null!, participants, publisher, evictor, _timeProvider));
+            () => new SessionParticipantLeaveService(null!, participants, publisher, evictor, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, null!, publisher, evictor, _timeProvider));
+            () => new SessionParticipantLeaveService(sessions, null!, publisher, evictor, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, participants, null!, evictor, _timeProvider));
+            () => new SessionParticipantLeaveService(sessions, participants, null!, evictor, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, participants, publisher, null!, _timeProvider));
+            () => new SessionParticipantLeaveService(sessions, participants, publisher, null!, quota, _timeProvider));
         Assert.Throws<ArgumentNullException>(
-            () => new SessionParticipantLeaveService(sessions, participants, publisher, evictor, null!));
+            () => new SessionParticipantLeaveService(sessions, participants, publisher, evictor, null!, _timeProvider));
+        Assert.Throws<ArgumentNullException>(
+            () => new SessionParticipantLeaveService(sessions, participants, publisher, evictor, quota, null!));
+    }
+
+    // ---- PARTICIPANT-QUOTA RELEASE (session.participant.max, CORE-MON-005) -------
+
+    [Fact]
+    public async Task A_departing_participant_releases_a_participant_quota_slot()
+    {
+        // The session is at its cap (limit 4, usage 4). When a participant leaves, the session.participant.max slot
+        // is released so the recorded usage drops to three — the symmetric counterpart of the join's consume, so a
+        // freed slot can be taken by a new participant rather than the cap being a lifetime total.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedLiveSessionAsync(organization.Id, workspace.Id, "Run");
+        var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Leaver");
+        var quotaId = await SeedParticipantQuotaWithUsageAsync(session.Id, limit: 4, startingUsage: 4);
+
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context);
+            var result = await service.LeaveAsync(
+                organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None);
+            Assert.Equal(ParticipantLeaveOutcome.Left, result.Outcome);
+        }
+
+        Assert.Equal(3, await ReadParticipantUsageAsync(session.Id, quotaId));
+    }
+
+    [Fact]
+    public async Task An_idempotent_no_op_leave_releases_no_participant_quota_slot()
+    {
+        // A participant that has already left holds no presence: the second leave is a no-op (AlreadyLeft), so it
+        // must NOT release a second slot — the released count stays put. (The first leave released one: 4 -> 3.)
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedLiveSessionAsync(organization.Id, workspace.Id, "Run");
+        var participant = await SeedParticipantAsync(organization.Id, workspace.Id, "Leaver");
+        var quotaId = await SeedParticipantQuotaWithUsageAsync(session.Id, limit: 4, startingUsage: 4);
+
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context);
+            Assert.Equal(
+                ParticipantLeaveOutcome.Left,
+                (await service.LeaveAsync(
+                    organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None)).Outcome);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context);
+            Assert.Equal(
+                ParticipantLeaveOutcome.AlreadyLeft,
+                (await service.LeaveAsync(
+                    organization.Id, workspace.Id, session.Id, participant.Id, CancellationToken.None)).Outcome);
+        }
+
+        // Exactly one slot was released by the single real departure; the idempotent repeat released nothing.
+        Assert.Equal(3, await ReadParticipantUsageAsync(session.Id, quotaId));
     }
 
     // ---- EMISSION HELPERS + TEST DOUBLES ----------------------------------------

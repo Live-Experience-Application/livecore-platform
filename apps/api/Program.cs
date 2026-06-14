@@ -554,9 +554,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // additionally has it emit the durable ParticipantJoined session event on (and
     // only on) an admission, through the reused ISessionEventPublisher + TimeProvider
     // (registered in this same persistence conditional / unconditionally above), so
-    // the Realtime module stays the sole owner of delivery. The join HTTP endpoint and
-    // the persisted participant connection metadata remain later stories (the Realtime
-    // epic / Participants-owned work) and are deliberately not wired here.
+    // the Realtime module stays the sole owner of delivery. CORE-MON-005 adds the
+    // server-side free-tier participant gate: as its LAST check the service atomically
+    // check-and-consumes the session's session.participant.max quota through the reused
+    // QuotaEnforcementService (registered in this same conditional below), so a join is
+    // rejected (quota-exceeded) once the session is at its plan participant limit and
+    // concurrent joins can never overrun the cap (CORE-CONC-004) — the documented cap is
+    // enforced here, not UI-only. The join HTTP endpoint and the persisted participant
+    // connection metadata remain later stories (the Realtime epic / Participants-owned
+    // work) and are deliberately not wired here.
     builder.Services.AddScoped<SessionParticipantJoinService>();
 
     // Session participant leave service (CORE-EVT-002): the symmetric counterpart of the join service. It
@@ -565,7 +571,10 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // event through the same reused ISessionEventPublisher + TimeProvider. Like the join service it is
     // fail-closed and tenant-isolated (a session or participant outside the caller's tenant/workspace is hidden
     // as not-found and emits nothing, threats T1/T5) and idempotent (removing an already-removed participant is
-    // a no-op that emits no second event). The leave HTTP endpoint is a later story.
+    // a no-op that emits no second event). On (and only on) an actual departure it also RELEASES the session's
+    // session.participant.max slot through the reused QuotaEnforcementService (CORE-MON-005), the symmetric
+    // counterpart of the join's atomic consume, so the participant cap reflects the session's current participants.
+    // The leave HTTP endpoint is a later story.
     builder.Services.AddScoped<SessionParticipantLeaveService>();
 
     // Realtime connection resolver (CORE-RT-002): resolves which SERVER-MANAGED groups a SignalR hub

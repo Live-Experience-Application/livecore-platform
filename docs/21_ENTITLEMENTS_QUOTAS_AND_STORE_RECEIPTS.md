@@ -531,6 +531,62 @@ increments unconditionally; an ungoverned command (no active quota definition) c
 command that frees a counted resource (a session ending) releases the unit with a clamped decrement,
 so an "active" quota reflects the current count.
 
+## Server-side participant cap on the join path (CORE-MON-005)
+
+CORE-ENTL-004 enforced `workspace.active.max` (on workspace create) and
+`session.active.max` (on session start) but left `session.participant.max` — the
+headline free-tier participant cap (`csv/mobile_entitlement_catalog.csv` scope
+`session`, free value 4) — enforced **nowhere**: the participant-join decision
+(`SessionParticipantJoinService.JoinAsync`) performed no quota check, so the cap was
+UI-only and trivially bypassed by a client that simply did not render the paywall —
+the exact failure this document says Core exists to prevent ("Limits ... must be
+enforced server-side. Otherwise users can bypass mobile UI restrictions"). CORE-MON-005
+closes that: the participant cap is now enforced server-side on the join path, so a
+participant join is **rejected once the session is at its plan participant limit** (the
+story's acceptance criterion).
+
+- **A new quota subject — the session.** `session.participant.max` counts the
+  participants admitted to **one** session, so its usage must be measured per session,
+  not per workspace (a workspace runs many sessions, each with its own cap). The
+  `EntitlementSubjectType` therefore gains a third kind, **`Session`**, alongside
+  `User` and `Workspace`; the quota is keyed by (`Session`, sessionId), so each session
+  has an independent participant counter. The enum is persisted by its stable name, so
+  the new value needs **no schema change and no EF migration** (the
+  `subject_entitlements`/`quota_usage`/`quota_definitions` `subject_type` columns already
+  store the name). The generic key is unchanged — `session.participant.max` was already
+  in the "Generic entitlement keys" list and the catalog — so the catalog and that list
+  are not edited.
+- **Enforced via the existing quota services, atomically (CORE-CONC-004).** The join
+  service's **last** gate — after every existence / tenant-isolation / lifecycle check —
+  atomically check-and-consumes one unit of the session's participant quota through the
+  reused `QuotaEnforcementService.TryConsumeAsync`. Because that is a single
+  limit-guarded statement, **concurrent joins can never overrun the cap**: N joins
+  racing for the last slot yield exactly one admission and N-1 quota-exceeded (the
+  story's concurrency acceptance). A join denied for any earlier reason consumes
+  nothing, and a denied consume emits no `ParticipantJoined` event — an over-cap join is
+  never recorded or delivered (fail-closed, exactly like every other join denial).
+- **Fail-closed, and only enforces a quota that exists.** A free session admits up to
+  its small granted cap; a paid plan's larger or unlimited (fair-use) grant admits more
+  — premium state comes only from the server entitlement. When **no**
+  `session.participant.max` quota governs the deployment the join is ungoverned and
+  proceeds (Core enforces only quotas that exist); when the quota **is** defined but the
+  session holds no grant, the session has no allowance and the join is denied — the same
+  fail-closed contract as `session.active.max`. A deployment that wants the free cap
+  defines the quota and grants every session the free entitlement (the grant-chain /
+  presence wiring, CORE-MON / CORE-PRS).
+- **Symmetric release on leave.** A leaving participant
+  (`SessionParticipantLeaveService.LeaveAsync`) releases the consumed
+  `session.participant.max` slot, so the counter reflects the session's **current**
+  participants rather than a lifetime total — exactly as `session.active.max` is consumed
+  at start and released at end. The release is a clamped, idempotent decrement (a no-op
+  when nothing was recorded), so it is safe on the idempotent-no-op / not-found leave
+  paths and in an ungoverned deployment. **No new table and no EF migration** — the chain
+  reuses the existing `quota_usage` table.
+- **Where the join path runs.** `JoinAsync`/`LeaveAsync` are the reusable decisions; the
+  production caller that wires a real join/leave entry point so the cap applies end-to-end
+  is CORE-PRS-001. The check and its tests are added here against the service, per the
+  story note.
+
 ## Security requirements
 
 - Never trust client-side premium flags.

@@ -58,4 +58,20 @@ public enum SessionJoinDenialReason
     /// (CORE-SES-002).
     /// </summary>
     SessionNotJoinable = 4,
+
+    /// <summary>
+    /// The participant could otherwise join, but the session is already at its plan
+    /// participant limit — the server-enforced <c>session.participant.max</c> quota
+    /// (CORE-MON-005; the documented free-tier participant cap,
+    /// docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). Unlike the not-found
+    /// reasons this does NOT hide existence: the caller is authorized and the session
+    /// and participant are real and in scope, but admitting one more participant would
+    /// exceed the cap, so the join is refused fail-closed. The atomic check-and-consume
+    /// (CORE-CONC-004) makes this hold even under concurrent joins, so the cap can never
+    /// be overrun. A caller maps it to a quota-exceeded outcome (a 409 conflict, like the
+    /// session start/workspace create quota gate) rather than a 403/404 — the limit, not
+    /// the caller, is the reason. The decision carries only the generic quota key,
+    /// never another tenant's data (threat T7).
+    /// </summary>
+    QuotaExceeded = 5,
 }

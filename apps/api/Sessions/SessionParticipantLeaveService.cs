@@ -1,3 +1,4 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Realtime;
 
@@ -37,9 +38,17 @@ namespace LiveCore.Api.Sessions;
 /// and is best-effort, like the delivery, so the durable <c>ParticipantLeft</c> is the source of truth even if
 /// the transport eviction is a no-op (the connection was already gone, or is held by another instance).
 ///
-/// This service decides only the leave transition, its event and the connection eviction. The leave HTTP
-/// endpoint (mapping a not-found to a 404 and authorizing the caller's role) is a later story, exactly as the
-/// join HTTP endpoint is.
+/// On (and only on) an actual departure it also RELEASES the session's participant quota (CORE-MON-005): the
+/// <c>session.participant.max</c> slot the join consumed is freed through <see cref="QuotaEnforcementService"/>,
+/// so the cap reflects the session's CURRENT participants rather than a lifetime total — the symmetric counterpart
+/// of the join's atomic consume, exactly as <c>session.active.max</c> is consumed at start and released at end. The
+/// release is a clamped decrement and idempotent (a no-op when nothing was recorded, for example a participant
+/// removed without having consumed a slot, or a deployment with no participant quota defined), so it never drives
+/// the counter negative and is safe on the idempotent-no-op and not-found paths (which release nothing).
+///
+/// This service decides only the leave transition, its event, the connection eviction and the quota release. The
+/// leave HTTP endpoint (mapping a not-found to a 404 and authorizing the caller's role) is a later story, exactly
+/// as the join HTTP endpoint is.
 /// </summary>
 public sealed class SessionParticipantLeaveService
 {
@@ -47,6 +56,7 @@ public sealed class SessionParticipantLeaveService
     private readonly IParticipantRepository _participants;
     private readonly ISessionEventPublisher _eventPublisher;
     private readonly IRealtimeConnectionEvictor _connectionEvictor;
+    private readonly QuotaEnforcementService _quotaEnforcement;
     private readonly TimeProvider _timeProvider;
 
     public SessionParticipantLeaveService(
@@ -54,18 +64,21 @@ public sealed class SessionParticipantLeaveService
         IParticipantRepository participants,
         ISessionEventPublisher eventPublisher,
         IRealtimeConnectionEvictor connectionEvictor,
+        QuotaEnforcementService quotaEnforcement,
         TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(participants);
         ArgumentNullException.ThrowIfNull(eventPublisher);
         ArgumentNullException.ThrowIfNull(connectionEvictor);
+        ArgumentNullException.ThrowIfNull(quotaEnforcement);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
         _sessions = sessions;
         _participants = participants;
         _eventPublisher = eventPublisher;
         _connectionEvictor = connectionEvictor;
+        _quotaEnforcement = quotaEnforcement;
         _timeProvider = timeProvider;
     }
 
@@ -151,6 +164,21 @@ public sealed class SessionParticipantLeaveService
         var now = _timeProvider.GetUtcNow();
         participant.Remove(now);
         await _participants.UpdateAsync(participant, cancellationToken).ConfigureAwait(false);
+
+        // Release the session's participant-quota slot the join consumed (CORE-MON-005): the departing participant
+        // frees a session.participant.max unit, so the cap reflects the session's CURRENT participants rather than a
+        // lifetime total — the symmetric counterpart of the join's atomic consume, exactly as session.active.max is
+        // released when a live session ends. The release is a clamped decrement (never negative) and a no-op when
+        // nothing was recorded or no participant quota governs the deployment, so it is safe even though a join on a
+        // foreign instance or an ungoverned deployment may have consumed nothing.
+        await _quotaEnforcement
+            .ReleaseAsync(
+                EntitlementSubjectType.Session,
+                sessionId,
+                QuotaEntitlementKeys.SessionParticipantMax,
+                amount: 1,
+                cancellationToken)
+            .ConfigureAwait(false);
 
         // Emit the durable ParticipantLeft session event (CORE-EVT-002). It is a subjectless audience event
         // carrying the participant IDENTIFIER only — never a display name or any PII (threat T7) — and a

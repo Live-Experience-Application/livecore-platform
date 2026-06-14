@@ -96,7 +96,7 @@ csv/                     backlog stories and forbidden term list
 
 The Core includes product-neutral Entitlements, Quotas, Purchase Verification and Ad Eligibility contracts so that mobile apps cannot bypass limits or premium state client-side.
 Core does not render ads, own mobile screens, or contain App Store / Google Play marketing copy.
-Billing/monetization is in scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted, auditable and grants the buyer the mapped `SubjectEntitlement`, refunds/cancellations revoke or downgrade it, and free-tier quotas are enforced server-side. The verify-and-record foundation (CORE-STORE-001..005, CORE-ENTL-001..004, CORE-ADS-001) is implemented, and so is the purchase-to-entitlement grant chain: the `billing_account_links` buyer linkage (CORE-MON-002), the product-to-plan-to-entitlement grant (CORE-MON-003 — a verified, buyer-linked purchase grants the mapped `SubjectEntitlement` idempotently, reusing the existing plan/assignment model with no new table), and the **monotonic purchase status machine** (CORE-MON-004 — the revoked states `Refunded`/`Cancelled` are terminal/absorbing, so a refund/cancellation/chargeback revokes the granted entitlement and **stays revoked**: a later renewal cannot resurrect it on the webhook or through reconciliation, which re-derives status by a monotonic fold over the recorded notifications). The remaining Monetization v1 work (CORE-MON-005..010) is in progress; the epic reversed the earlier CORE-DOC-002 post-v1 deferral. The single source of truth for the v1 monetization scope and acceptance is `docs/24_SPEC_CONSISTENCY.md`.
+Billing/monetization is in scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted, auditable and grants the buyer the mapped `SubjectEntitlement`, refunds/cancellations revoke or downgrade it, and free-tier quotas are enforced server-side. The verify-and-record foundation (CORE-STORE-001..005, CORE-ENTL-001..004, CORE-ADS-001) is implemented, and so is the purchase-to-entitlement grant chain: the `billing_account_links` buyer linkage (CORE-MON-002), the product-to-plan-to-entitlement grant (CORE-MON-003 — a verified, buyer-linked purchase grants the mapped `SubjectEntitlement` idempotently, reusing the existing plan/assignment model with no new table), and the **monotonic purchase status machine** (CORE-MON-004 — the revoked states `Refunded`/`Cancelled` are terminal/absorbing, so a refund/cancellation/chargeback revokes the granted entitlement and **stays revoked**: a later renewal cannot resurrect it on the webhook or through reconciliation, which re-derives status by a monotonic fold over the recorded notifications). The free-tier participant cap is now enforced server-side too (CORE-MON-005 — `session.participant.max` is enforced on the participant-join path via the existing `QuotaEnforcementService`, keyed on a new `Session` quota subject so each session has its own atomic participant counter; a join is rejected once the session is at its plan limit, concurrent joins cannot overrun the cap (CORE-CONC-004), a paid plan admits more, and a leaving participant releases the slot — no new table, no migration). The remaining Monetization v1 work (CORE-MON-006..010) is in progress; the epic reversed the earlier CORE-DOC-002 post-v1 deferral. The single source of truth for the v1 monetization scope and acceptance is `docs/24_SPEC_CONSISTENCY.md`.
 
 ## Prerequisites
 
@@ -1036,12 +1036,18 @@ emission on the two participant-presence transitions:
 - **Join** — `SessionParticipantJoinService.JoinAsync` emits a `ParticipantJoined` event
   on (and only on) an **admission**. The pure decision is unchanged (a session/participant
   outside the caller's tenant/workspace, a removed participant or a non-joinable session is
-  a fail-closed denial); a denial emits nothing.
+  a fail-closed denial); a denial emits nothing. CORE-MON-005 adds a final gate — the
+  server-side **`session.participant.max`** participant cap (see "Server-side quota
+  enforcement" below): once a session is at its plan participant limit a further join is a
+  fail-closed `QuotaExceeded` denial that emits nothing, and the atomic check-and-consume
+  (CORE-CONC-004) keeps concurrent joins from overrunning the cap.
 - **Leave** — the symmetric `SessionParticipantLeaveService.LeaveAsync` removes a
   participant from a session's audience over the participant aggregate's soft-delete
   (`Participant.Remove`) and emits a `ParticipantLeft` event on (and only on) an **actual
   departure**. Removing an already-removed participant is an idempotent no-op that emits
   nothing, so each real departure appends **exactly one** event and a repeat appends none.
+  On an actual departure it also **releases** the `session.participant.max` slot the join
+  consumed (CORE-MON-005), so the cap reflects the session's current participants.
 
 Both events are emitted through the **reused** `ISessionEventPublisher` + recipient
 resolver (the Realtime module stays the sole owner of delivery — these flows do not
@@ -2447,8 +2453,10 @@ in the `subject_entitlements` table (`apps/api/Entitlements/`; module Entitlemen
 `csv/database_tables.csv`).
 
 A `SubjectEntitlement` records that one **generic subject** — an `EntitlementSubjectType.User`
-(the "current user" of `GET /v1/me/entitlements`) or an `EntitlementSubjectType.Workspace` (the subject of a
-workspace-scoped entitlement) — holds a granted `EntitlementDefinition` at a concrete value. Its value shape is
+(the "current user" of `GET /v1/me/entitlements`), an `EntitlementSubjectType.Workspace` (the subject of a
+workspace-scoped entitlement) or an `EntitlementSubjectType.Session` (the subject of the per-session
+`session.participant.max` participant cap, CORE-MON-005) — holds a granted `EntitlementDefinition` at a concrete
+value. Its value shape is
 fixed by the definition's `value_kind` exactly like a plan grant (a flag carries `flag_value`, a quota carries
 `quota_limit` — `null` meaning an unlimited/fair-use grant), so an assignment can never bind the wrong value
 shape. The row is **self-describing**: the stable, immutable `entitlement_key` is denormalized onto it as a
@@ -2551,11 +2559,13 @@ quota-status read uses, so a command's allow/deny can never diverge from what `G
 is **fail-closed**: a subject not entitled to a defined quota has no allowance, and the decision is computed
 entirely server-side from the catalog limit and recorded usage — a client supplies no part of it.
 
-| Command                            | Quota key (generic)    | Quota subject           | Behavior                                      |
-| ---------------------------------- | ---------------------- | ----------------------- | --------------------------------------------- |
-| `POST /api/v1/workspaces`          | `workspace.active.max` | the creating user       | increments on create                          |
-| `POST /api/v1/sessions/{id}/start` | `session.active.max`   | the session's workspace | increments on start                           |
-| `POST /api/v1/sessions/{id}/end`   | `session.active.max`   | the session's workspace | releases (decrements, clamped at zero) on end |
+| Command                              | Quota key (generic)       | Quota subject           | Behavior                                            |
+| ------------------------------------ | ------------------------- | ----------------------- | --------------------------------------------------- |
+| `POST /api/v1/workspaces`            | `workspace.active.max`    | the creating user       | increments on create                                |
+| `POST /api/v1/sessions/{id}/start`   | `session.active.max`      | the session's workspace | increments on start                                 |
+| `POST /api/v1/sessions/{id}/end`     | `session.active.max`      | the session's workspace | releases (decrements, clamped at zero) on end       |
+| participant **join** (CORE-MON-005)  | `session.participant.max` | the session             | atomically check-and-consumes on admission          |
+| participant **leave** (CORE-MON-005) | `session.participant.max` | the session             | releases (decrements, clamped at zero) on departure |
 
 The check runs **after** the command's existing role/tenant authorization (so quota state is never consulted for an
 unauthorized caller) and **after** the session state guard, so an unauthorized caller (`403`/`404`) or an

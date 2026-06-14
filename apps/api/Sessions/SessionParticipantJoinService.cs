@@ -1,3 +1,4 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Realtime;
 
@@ -43,8 +44,36 @@ namespace LiveCore.Api.Sessions;
 ///   <item>the session is joinable: its status is
 ///   <see cref="SessionStatus.Prepared"/> or <see cref="SessionStatus.Live"/>; an
 ///   ended session is denied with
-///   <see cref="SessionJoinDenialReason.SessionNotJoinable"/> (CORE-SES-002).</item>
+///   <see cref="SessionJoinDenialReason.SessionNotJoinable"/> (CORE-SES-002);</item>
+///   <item>the session is below its plan participant limit: admitting one more
+///   participant must not exceed the server-enforced <c>session.participant.max</c>
+///   quota; a session already at its cap is denied with
+///   <see cref="SessionJoinDenialReason.QuotaExceeded"/> (CORE-MON-005). This last
+///   gate is the only one that CONSUMES — it atomically check-and-consumes one unit of
+///   the session's participant quota through <see cref="QuotaEnforcementService"/>
+///   (CORE-CONC-004), so it runs only after every cheaper existence / isolation /
+///   lifecycle gate has passed and a unit is reserved only for a join that is admitted;
+///   a denial for any earlier reason consumes nothing.</item>
 /// </list>
+///
+/// THE FREE-TIER PARTICIPANT GATE (CORE-MON-005). The participant cap is enforced
+/// HERE, server-side, not in the UI: the join path itself rejects a participant once
+/// the session is at its <c>session.participant.max</c> limit, so the documented
+/// free-tier cap cannot be bypassed by a client that simply does not render the
+/// paywall (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md: "Free limits cannot be
+/// bypassed by clients"). The quota subject is the SESSION
+/// (<see cref="EntitlementSubjectType.Session"/>), so usage is counted per session,
+/// and the limit is whatever the session is granted — a free session's small cap or a
+/// paid plan's larger / unlimited (fair-use) grant. Core enforces only a quota that
+/// EXISTS: when no <c>session.participant.max</c> quota governs the deployment the join
+/// is ungoverned and proceeds (a deployment that wants the free cap defines the quota
+/// and grants every session the free entitlement, the grant-chain / presence wiring).
+/// Because the check-and-consume is a single atomic limit-guarded statement
+/// (CORE-CONC-004), concurrent joins can never overrun the cap: N joins racing for the
+/// last slot yield exactly one admission and N-1 quota-exceeded. The symmetric release
+/// (a leaving participant frees a slot) is <see cref="SessionParticipantLeaveService"/>,
+/// so the counter reflects the session's CURRENT participants rather than a lifetime
+/// total — exactly as <c>session.active.max</c> is consumed at start and released at end.
 ///
 /// This service computes the security decision AND, when (and only when) it admits a
 /// join, emits the durable <c>ParticipantJoined</c> session event (CORE-EVT-002). The
@@ -68,22 +97,26 @@ public sealed class SessionParticipantJoinService
     private readonly ISessionRepository _sessions;
     private readonly IParticipantRepository _participants;
     private readonly ISessionEventPublisher _eventPublisher;
+    private readonly QuotaEnforcementService _quotaEnforcement;
     private readonly TimeProvider _timeProvider;
 
     public SessionParticipantJoinService(
         ISessionRepository sessions,
         IParticipantRepository participants,
         ISessionEventPublisher eventPublisher,
+        QuotaEnforcementService quotaEnforcement,
         TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(participants);
         ArgumentNullException.ThrowIfNull(eventPublisher);
+        ArgumentNullException.ThrowIfNull(quotaEnforcement);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
         _sessions = sessions;
         _participants = participants;
         _eventPublisher = eventPublisher;
+        _quotaEnforcement = quotaEnforcement;
         _timeProvider = timeProvider;
     }
 
@@ -193,6 +226,29 @@ public sealed class SessionParticipantJoinService
         if (!IsJoinable(session.Status))
         {
             return SessionJoinResult.Denied(SessionJoinDenialReason.SessionNotJoinable);
+        }
+
+        // Participant-cap gate (CORE-MON-005): the session's server-enforced session.participant.max quota. This is
+        // the LAST gate and the only one that CONSUMES, so it runs only after every cheaper existence / isolation /
+        // lifecycle check has passed — a join denied for any earlier reason has reserved no slot. The check and the
+        // consume are a SINGLE atomic limit-guarded statement (CORE-CONC-004), so concurrent joins racing for the
+        // last slot can never both succeed: exactly one is admitted and the rest are quota-exceeded, and the cap is
+        // never overrun. It is computed entirely server-side and is fail-closed — the documented free-tier
+        // participant cap cannot be bypassed by a client (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md: "Free
+        // limits cannot be bypassed by clients"). When no session.participant.max quota governs the deployment the
+        // join is ungoverned and proceeds (Core enforces only quotas that exist). A denial here emits NOTHING — an
+        // over-cap join is never recorded or delivered, exactly like every other denial.
+        var quotaDecision = await _quotaEnforcement
+            .TryConsumeAsync(
+                EntitlementSubjectType.Session,
+                sessionId,
+                QuotaEntitlementKeys.SessionParticipantMax,
+                amount: 1,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!quotaDecision.IsAllowed)
+        {
+            return SessionJoinResult.Denied(SessionJoinDenialReason.QuotaExceeded);
         }
 
         // Every check passed: the participant joins. Emit the durable ParticipantJoined session event

@@ -38,4 +38,18 @@ public enum EntitlementSubjectType
     /// membership authorization are the later quota story, CORE-ENTL-003).
     /// </summary>
     Workspace = 2,
+
+    /// <summary>
+    /// A single SESSION (identified by its <c>sessions(id)</c> id). The subject of a session-scoped quota — the
+    /// <c>session.participant.max</c> participant cap (csv/mobile_entitlement_catalog.csv <c>scope</c> column
+    /// <c>session</c>), whose usage is the count of participants admitted to ONE session, so it must be measured
+    /// PER SESSION rather than per workspace. Enforced on the participant-join path
+    /// (<c>SessionParticipantJoinService.JoinAsync</c>) via <see cref="QuotaEnforcementService"/> (CORE-MON-005),
+    /// so the documented free-tier participant cap is a real server-side gate and not a UI-only restriction
+    /// (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). A session id is globally unique, so keying by
+    /// (<see cref="Session"/>, sessionId) is unambiguous and never crosses tenants; the caller resolves and
+    /// authorizes the session's tenant/workspace context (the join service's scoped repository lookups) before
+    /// consuming its participant quota.
+    /// </summary>
+    Session = 3,
 }
