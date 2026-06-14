@@ -588,6 +588,14 @@ public sealed class SessionParticipantJoinServiceTests : IDisposable
             _published.Add(sessionEvent);
             return Task.CompletedTask;
         }
+
+        // The join flow emits through the combined PublishAsync; the split append/deliver halves
+        // (CORE-CONC-002) are not exercised on this path, so they fail fast if ever reached.
+        public Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeliverAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     /// <summary>A <see cref="TimeProvider"/> that always returns a fixed instant, so emitted timestamps are deterministic.</summary>

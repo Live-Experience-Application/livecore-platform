@@ -25,6 +25,12 @@ namespace LiveCore.Api.Realtime;
 /// Delivery is best-effort: the append already committed the durable event, so a transient transport
 /// failure loses only the live push, not the recorded fact (a reconnecting client replays it later,
 /// CORE-RT-005).
+///
+/// The append and the delivery are exposed as separate steps (<see cref="AppendAsync"/> /
+/// <see cref="DeliverAsync"/>) as well as the combined <see cref="PublishAsync"/>, so a multi-step command
+/// can append the durable event INSIDE its unit-of-work transaction and deliver it AFTER the commit
+/// (commit-then-publish, CORE-CONC-002) — keeping the append atomic with the rest of the command while a
+/// delivery failure cannot roll back committed state.
 /// </summary>
 internal sealed class SessionEventPublisher : ISessionEventPublisher
 {
@@ -70,22 +76,47 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
     {
         ArgumentNullException.ThrowIfNull(sessionEvent);
 
+        // The combined append-then-deliver, for callers that do not separate the two across a transaction
+        // boundary (the participant join/leave services). The append is the source of truth and runs first,
+        // exactly as before; delivery is best-effort over the realtime transport.
+        await AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        await DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sessionEvent);
+
         // Trace the publish (CORE-OBS-003). The span is tagged with the stable event-type name only — never
         // the payload (threat T7) — and nests under the reveal/request span via Activity.Current. A no-op
         // when no source is injected or nothing is listening, so the best-effort delivery is unaffected.
         using var activity = _activitySource?.StartSessionEventPublish(sessionEvent.EventType);
 
-        // 1. Persist the durable event first (the source of truth for replay).
+        // Persist the durable event (the source of truth for replay). For the reveal/hide and session
+        // start/end/cancel commands this runs INSIDE the handler's unit-of-work transaction (CORE-CONC-002),
+        // so the event is committed ATOMICALLY with the rule/state change, audit and quota change it
+        // accompanies — a part-way failure rolls them all back together and the append-only stream can never
+        // diverge from persisted state.
         await _events.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
 
         // Enrich the per-request log context with the published event's id (CORE-OBS-002), so this request's
         // remaining log lines carry event_id. The id is an opaque surrogate, never the event payload (threat
         // T7 in docs/07_SECURITY_THREAT_MODEL.md).
         _requestLogContext?.SetEventId(sessionEvent.Id);
+    }
 
-        // 2. Compute the per-recipient deliveries (groups + projected envelopes) and forward each over the
-        //    scale-out backplane. The resolver omits any recipient that may not see the event's subject, so
-        //    the send never leaks a hidden event (threat T3); the backplane only forwards what it is given.
+    /// <inheritdoc />
+    public async Task DeliverAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sessionEvent);
+
+        // Compute the per-recipient deliveries (groups + projected envelopes) and forward each over the
+        // scale-out backplane. The resolver omits any recipient that may not see the event's subject, so the
+        // send never leaks a hidden event (threat T3); the backplane only forwards what it is given. For the
+        // transactional commands this runs AFTER the unit-of-work transaction commits (commit-then-publish,
+        // CORE-CONC-002), so a delivery failure can never roll back already-committed state — the durable
+        // event is the source of truth and a reconnecting client replays a missed push later (CORE-RT-005).
         var deliveries = await _recipients.ResolveAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         foreach (var delivery in deliveries)
         {

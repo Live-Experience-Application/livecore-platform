@@ -204,6 +204,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddDbContext<LiveCoreDbContext>((serviceProvider, options) => options
         .UseNpgsql(databaseConnectionString)
         .AddInterceptors(serviceProvider.GetRequiredService<DatabaseFailureMetricsInterceptor>()));
+
+    // Transactional unit of work (CORE-CONC-002): runs a multi-step command handler as ONE database
+    // transaction so its rule/state change, audit, event-append and quota change commit together or roll
+    // back together (the append-only event stream can never diverge from persisted state). Registered here,
+    // inside the persistence conditional, because it begins the transaction on the shared scoped
+    // LiveCoreDbContext every repository writes through; the reveal/hide and session start/end/cancel
+    // endpoints resolve it to wrap their writes and deliver realtime AFTER commit (commit-then-publish). The
+    // transaction is opened inside the EF execution strategy's ExecuteAsync, so it stays correct once
+    // CORE-CONC-003 enables retry-on-failure.
+    builder.Services.AddScoped<TransactionalUnitOfWork>();
     builder.Services.AddSingleton(TimeProvider.System);
     builder.Services.AddScoped<IUserProfileRepository, UserProfileRepository>();
     builder.Services.AddScoped<UserProfileReferenceService>();

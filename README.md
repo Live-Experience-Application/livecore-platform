@@ -580,6 +580,34 @@ in-memory SQLite test provider has no such column and is left untouched; the rea
 cross-context conflict is exercised by the integration suite's PostgreSQL job. See
 `docs/10_DATABASE_SCHEMA.md` and `docs/08_API_CONTRACTS.md`.
 
+### Transactional unit of work (commit-then-publish)
+
+A command that changes a rule/state row, appends an audit fact, appends a durable
+session event and changes a quota counter now commits all of those in **one database
+transaction** (CORE-CONC-002). Previously each repository call was its own
+`SaveChangesAsync`, so a crash between steps could leave visibility changed with no
+`ContentRevealed` event (replay would reconstruct a state the append-only stream never
+recorded) or, on a retry, a double audit/event. The reveal/hide and session
+start/end/cancel endpoints wrap their writes in `TransactionalUnitOfWork`, so a part-way
+failure rolls **everything** back and the append-only event stream can never diverge from
+persisted state — there is never an orphan audit record or a half-applied reveal.
+
+The transaction is opened **inside** the EF Core execution strategy
+(`Database.CreateExecutionStrategy().ExecuteAsync(async () => { BeginTransactionAsync …
+CommitAsync })`), never a bare user-initiated `BeginTransaction`. That is the form a
+retrying execution strategy requires (it must be able to re-run the whole unit of work
+after a transient failure), so the commands stay correct once CORE-CONC-003 enables
+`EnableRetryOnFailure`; it is equally correct under today's default non-retrying strategy.
+Every repository writes through the same scoped `LiveCoreDbContext`, so each
+`SaveChangesAsync` enrols in the one transaction.
+
+Realtime delivery is **commit-then-publish**: the durable event is _appended_ inside the
+transaction (`ISessionEventPublisher.AppendAsync`) but _delivered_ to its server-computed
+recipients only **after** the commit (`ISessionEventPublisher.DeliverAsync`), so a
+delivery failure can never roll back already-committed state (a reconnecting client
+replays a missed push later). See `docs/10_DATABASE_SCHEMA.md` and
+`docs/11_REALTIME_SYNC.md`.
+
 ### Reverse-proxy edge: CORS, forwarded headers and HTTPS posture
 
 The API is meant to run **behind a TLS-terminating reverse proxy** (CORE-OPS-003).

@@ -4,6 +4,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
@@ -240,16 +241,110 @@ internal static class RevealEndpoints
         var activitySource = httpContext.RequestServices.GetRequiredService<LiveCoreActivitySource>();
         using var revealActivity = activitySource.StartReveal(operation: "reveal");
 
-        var result = await deps.Reveal
-            .RevealAsync(
-                context.OrganizationId,
-                session.WorkspaceId,
-                resourceType,
-                request.ResourceId,
-                targetParticipantId,
-                context.UserProfileId,
-                idempotencyKey,
-                now,
+        // ONE unit of work (CORE-CONC-002): the reveal command's rule change, its append-only audit record
+        // and its idempotency-key write — PLUS the append of every durable event the change emits — commit
+        // together in a single database transaction. A part-way failure (for example a crash after the rule
+        // change but before the event append) rolls them ALL back, so the append-only event stream can
+        // never diverge from the persisted visibility state (no orphan audit, no half-applied reveal).
+        // Realtime DELIVERY is deliberately held until AFTER the commit (commit-then-publish, below), so a
+        // delivery failure cannot roll back committed state.
+        var committed = await deps.UnitOfWork
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    var result = await deps.Reveal
+                        .RevealAsync(
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            resourceType,
+                            request.ResourceId,
+                            targetParticipantId,
+                            context.UserProfileId,
+                            idempotencyKey,
+                            now,
+                            transactionCancellationToken)
+                        .ConfigureAwait(false);
+
+                    // The durable events to deliver after the commit, appended here IFF the reveal actually
+                    // changed visibility — the same change signal the audit uses (CORE-VIS-006), so a retry
+                    // or a no-op reveal of an already-visible resource appends and delivers nothing.
+                    var events = new List<SessionEvent>();
+                    if (result.VisibilityChanged)
+                    {
+                        var resourceTypeName = result.ResourceType.ToString();
+
+                        // CONTENT-REVEALED EVENT (CORE-RT-003): the central participant-facing event. It is
+                        // APPENDED to the session's append-only stream here (inside the transaction) and
+                        // delivered after the commit; a non-selected participant is not in the target group
+                        // and so cannot receive it (threat T3). The payload carries resource IDENTIFIERS
+                        // only, never resolved content (threat T7/T2). The revealed resource is recorded as
+                        // the event's VISIBILITY SUBJECT (CORE-RT-004) so the recipient resolver can project
+                        // per-recipient through the Visibility engine.
+                        var payload = JsonSerializer.Serialize(new RevealEventPayload(
+                            resourceTypeName,
+                            result.ResourceId));
+                        var contentRevealed = SessionEvent.Create(
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            sessionGuid,
+                            SessionEventTypes.ContentRevealed,
+                            context.UserProfileId,
+                            targetParticipantId,
+                            payload,
+                            schemaVersion: 1,
+                            now,
+                            visibilitySubjectType: resourceTypeName,
+                            visibilitySubjectId: result.ResourceId);
+                        await deps.EventPublisher.AppendAsync(contentRevealed, transactionCancellationToken).ConfigureAwait(false);
+                        events.Add(contentRevealed);
+
+                        // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Visible, so
+                        // append the durable VisibilityRuleChanged session event — the realtime counterpart
+                        // of the audit record (CORE-VIS-006), DISTINCT from it. It carries the changed
+                        // resource as its visibility subject so the recipient resolver gates it: the hosts
+                        // always receive it and the audience receives it only insofar as they may now see the
+                        // resource (threats T2/T3). The payload carries identifiers + the new state name only.
+                        events.Add(await AppendVisibilityRuleChangedAsync(
+                            deps.EventPublisher,
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            sessionGuid,
+                            context.UserProfileId,
+                            targetParticipantId,
+                            resourceTypeName,
+                            result.ResourceId,
+                            VisibilityState.Visible,
+                            now,
+                            transactionCancellationToken)
+                            .ConfigureAwait(false));
+
+                        // SCENE-ACTIVATED EVENT (CORE-EVT-003): revealing a Scene to the audience IS the
+                        // documented "scene switch" (there is no separate active-scene command), so a Scene
+                        // reveal additionally appends SceneActivated. Like the events above it carries the
+                        // activated scene as its visibility subject, so the resolver delivers it only to the
+                        // authorized session audience — no leakage of a scene a participant cannot see.
+                        if (result.ResourceType == VisibilityResourceType.Scene)
+                        {
+                            var sceneActivatedPayload = JsonSerializer.Serialize(new SceneActivatedEventPayload(result.ResourceId));
+                            var sceneActivated = SessionEvent.Create(
+                                context.OrganizationId,
+                                session.WorkspaceId,
+                                sessionGuid,
+                                SessionEventTypes.SceneActivated,
+                                context.UserProfileId,
+                                targetParticipantId,
+                                sceneActivatedPayload,
+                                schemaVersion: 1,
+                                now,
+                                visibilitySubjectType: resourceTypeName,
+                                visibilitySubjectId: result.ResourceId);
+                            await deps.EventPublisher.AppendAsync(sceneActivated, transactionCancellationToken).ConfigureAwait(false);
+                            events.Add(sceneActivated);
+                        }
+                    }
+
+                    return new RevealCommitResult(result, events);
+                },
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -257,96 +352,31 @@ internal static class RevealEndpoints
             Stopwatch.GetElapsedTime(revealStartTimestamp).TotalSeconds,
             operation: "reveal");
 
-        // REALTIME EVENT (CORE-RT-003): emit the durable ContentRevealed event IFF the reveal actually
-        // changed visibility — the same change signal the audit uses (CORE-VIS-006), so a retry or a
-        // no-op reveal of an already-visible resource emits nothing. The Realtime publisher appends the
-        // event to the session's append-only stream and delivers it to the server-computed recipients; a
-        // non-selected participant is not in the target group and so cannot receive it (threat T3). The
-        // payload carries resource IDENTIFIERS only, never resolved content (threat T7/T2).
-        //
-        // The revealed resource is also recorded as the event's VISIBILITY SUBJECT (CORE-RT-004): the
-        // (resource kind name, id) whose audience visibility gates who may receive the event, so the
-        // recipient resolver can project per-recipient through the Visibility engine (an audience-wide
-        // reveal is fanned out only to participants who may see the resource).
-        if (result.VisibilityChanged)
+        // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction has committed, so now deliver each appended
+        // event to its server-computed realtime recipients. Delivery runs OUTSIDE the transaction and is
+        // best-effort, so a delivery failure cannot roll back the committed reveal; a reconnecting client
+        // replays a missed push later (CORE-RT-005). The recipient resolver still gates every delivery
+        // through the central Visibility engine, so no recipient gets an event about a resource they may not
+        // see (threats T2/T3).
+        foreach (var sessionEvent in committed.Events)
         {
-            var resourceTypeName = result.ResourceType.ToString();
-            var payload = JsonSerializer.Serialize(new RevealEventPayload(
-                resourceTypeName,
-                result.ResourceId));
-
-            var sessionEvent = SessionEvent.Create(
-                context.OrganizationId,
-                session.WorkspaceId,
-                sessionGuid,
-                SessionEventTypes.ContentRevealed,
-                context.UserProfileId,
-                targetParticipantId,
-                payload,
-                schemaVersion: 1,
-                now,
-                visibilitySubjectType: resourceTypeName,
-                visibilitySubjectId: result.ResourceId);
-
-            await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
-
-            // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Visible, so emit the
-            // durable VisibilityRuleChanged session event — the realtime counterpart of the audit record
-            // (CORE-VIS-006), DISTINCT from it. It carries the changed resource as its visibility subject
-            // so the recipient resolver gates it: the hosts always receive it and the audience receives it
-            // only insofar as they may now see the resource (a non-selected participant who cannot see it
-            // never does; threats T2/T3). The payload carries identifiers + the new state name only (T7).
-            await PublishVisibilityRuleChangedAsync(
-                deps.EventPublisher,
-                context.OrganizationId,
-                session.WorkspaceId,
-                sessionGuid,
-                context.UserProfileId,
-                targetParticipantId,
-                resourceTypeName,
-                result.ResourceId,
-                VisibilityState.Visible,
-                now,
-                cancellationToken)
-                .ConfigureAwait(false);
-
-            // SCENE-ACTIVATED EVENT (CORE-EVT-003): revealing a Scene to the audience IS the documented
-            // "scene switch" (there is no separate active-scene command), so a Scene reveal additionally
-            // emits SceneActivated. Like the events above it carries the activated scene as its visibility
-            // subject, so the resolver delivers it only to the authorized session audience (the hosts plus
-            // every recipient who may see the scene) — no leakage of a scene a participant cannot see.
-            if (result.ResourceType == VisibilityResourceType.Scene)
-            {
-                var sceneActivatedPayload = JsonSerializer.Serialize(new SceneActivatedEventPayload(result.ResourceId));
-                var sceneActivated = SessionEvent.Create(
-                    context.OrganizationId,
-                    session.WorkspaceId,
-                    sessionGuid,
-                    SessionEventTypes.SceneActivated,
-                    context.UserProfileId,
-                    targetParticipantId,
-                    sceneActivatedPayload,
-                    schemaVersion: 1,
-                    now,
-                    visibilitySubjectType: resourceTypeName,
-                    visibilitySubjectId: result.ResourceId);
-
-                await deps.EventPublisher.PublishAsync(sceneActivated, cancellationToken).ConfigureAwait(false);
-            }
+            await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
 
-        return Results.Ok(RevealResponse.From(result));
+        return Results.Ok(RevealResponse.From(committed.Result));
     }
 
     /// <summary>
-    /// Appends and delivers the durable <c>VisibilityRuleChanged</c> session event (CORE-EVT-003) for a
-    /// reveal/hide that actually changed a rule. Shared by the reveal and hide endpoints (the hide endpoint
-    /// passes <see cref="VisibilityState.Hidden"/>) so the rule-change event is composed identically for
-    /// both directions. The event records the changed resource as its visibility SUBJECT (so the recipient
+    /// Composes the durable <c>VisibilityRuleChanged</c> session event (CORE-EVT-003) for a reveal/hide that
+    /// actually changed a rule and APPENDS it to the session's append-only stream, returning the appended
+    /// event so the caller delivers it AFTER its unit-of-work transaction commits (commit-then-publish,
+    /// CORE-CONC-002). Shared by the reveal and hide endpoints (the hide endpoint passes
+    /// <see cref="VisibilityState.Hidden"/>) so the rule-change event is composed identically for both
+    /// directions. The event records the changed resource as its visibility SUBJECT (so the recipient
     /// resolver gates it through the central Visibility engine) and the new visibility state in its
     /// identifier-only payload.
     /// </summary>
-    internal static async Task PublishVisibilityRuleChangedAsync(
+    internal static async Task<SessionEvent> AppendVisibilityRuleChangedAsync(
         ISessionEventPublisher publisher,
         Guid organizationId,
         Guid workspaceId,
@@ -377,8 +407,16 @@ internal static class RevealEndpoints
             visibilitySubjectType: resourceTypeName,
             visibilitySubjectId: resourceId);
 
-        await publisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        await publisher.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        return sessionEvent;
     }
+
+    /// <summary>
+    /// The outcome of the reveal unit of work: the command <see cref="RevealResult"/> the response is built
+    /// from, plus the durable events that were APPENDED inside the transaction and must be DELIVERED after
+    /// the commit (commit-then-publish, CORE-CONC-002). The list is empty when the reveal changed nothing.
+    /// </summary>
+    private readonly record struct RevealCommitResult(RevealResult Result, IReadOnlyList<SessionEvent> Events);
 
     /// <summary>
     /// The server-composed payload of a <c>ContentRevealed</c> event: the generic kind and id of the
@@ -452,20 +490,22 @@ internal static class RevealEndpoints
         var participants = services.GetService<IParticipantRepository>();
         var reveal = services.GetService<RevealService>();
         var eventPublisher = services.GetService<ISessionEventPublisher>();
+        var unitOfWork = services.GetService<TransactionalUnitOfWork>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
             || participants is null
             || reveal is null
-            || eventPublisher is null)
+            || eventPublisher is null
+            || unitOfWork is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new RevealEndpointDependencies(
-            resolver, sessions, workspaceMembers, participants, reveal, eventPublisher);
+            resolver, sessions, workspaceMembers, participants, reveal, eventPublisher, unitOfWork);
         return true;
     }
 
@@ -526,5 +566,6 @@ internal static class RevealEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         IParticipantRepository Participants,
         RevealService Reveal,
-        ISessionEventPublisher EventPublisher);
+        ISessionEventPublisher EventPublisher,
+        TransactionalUnitOfWork UnitOfWork);
 }

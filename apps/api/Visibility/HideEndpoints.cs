@@ -2,6 +2,7 @@ using System.Text.Json;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
@@ -220,70 +221,105 @@ internal static class HideEndpoints
 
         var now = timeProvider.GetUtcNow();
 
-        var result = await deps.Reveal
-            .HideAsync(
-                context.OrganizationId,
-                session.WorkspaceId,
-                resourceType,
-                request.ResourceId,
-                targetParticipantId,
-                context.UserProfileId,
-                idempotencyKey,
-                now,
+        // ONE unit of work (CORE-CONC-002): the hide command's rule change, its append-only audit record and
+        // its idempotency-key write — PLUS the append of both durable events the change emits — commit
+        // together in a single database transaction. A part-way failure rolls them ALL back, so the
+        // append-only event stream can never diverge from the persisted visibility state. Realtime DELIVERY
+        // is held until AFTER the commit (commit-then-publish, below), so a delivery failure cannot roll
+        // back committed state.
+        var committed = await deps.UnitOfWork
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    var result = await deps.Reveal
+                        .HideAsync(
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            resourceType,
+                            request.ResourceId,
+                            targetParticipantId,
+                            context.UserProfileId,
+                            idempotencyKey,
+                            now,
+                            transactionCancellationToken)
+                        .ConfigureAwait(false);
+
+                    // The durable events to deliver after the commit, appended here IFF the hide actually
+                    // changed visibility — the same change signal the audit uses, so a retry or a no-op hide
+                    // of an already-hidden resource appends and delivers nothing.
+                    var events = new List<SessionEvent>();
+                    if (result.VisibilityChanged)
+                    {
+                        var resourceTypeName = result.ResourceType.ToString();
+
+                        // CONTENT-HIDDEN EVENT: appended to the session's append-only stream here (inside the
+                        // transaction) and delivered after the commit. It carries NO visibility subject (see
+                        // the type summary): the resource is now hidden, so it is routed by its coarse target
+                        // instead — a selected-participant hide reaches only that participant (plus hosts), an
+                        // audience-wide hide reaches the observers and every active participant — so everyone
+                        // who could be showing the resource is told to remove it. The payload carries resource
+                        // IDENTIFIERS only, never resolved content (threats T2/T3/T7).
+                        var payload = JsonSerializer.Serialize(new HideEventPayload(
+                            resourceTypeName,
+                            result.ResourceId));
+                        var contentHidden = SessionEvent.Create(
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            sessionGuid,
+                            SessionEventTypes.ContentHidden,
+                            context.UserProfileId,
+                            targetParticipantId,
+                            payload,
+                            schemaVersion: 1,
+                            now);
+                        await deps.EventPublisher.AppendAsync(contentHidden, transactionCancellationToken).ConfigureAwait(false);
+                        events.Add(contentHidden);
+
+                        // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Hidden, so
+                        // append the durable VisibilityRuleChanged session event (the realtime counterpart of
+                        // the audit record, DISTINCT from it) reusing the SAME composer as the reveal
+                        // endpoint. Unlike ContentHidden it CARRIES the resource as its visibility subject:
+                        // the resource is now hidden, so the recipient resolver gates this event to the HOSTS
+                        // ONLY — and no participant ever receives a hidden-resource event (threats T2/T3).
+                        events.Add(await RevealEndpoints.AppendVisibilityRuleChangedAsync(
+                            deps.EventPublisher,
+                            context.OrganizationId,
+                            session.WorkspaceId,
+                            sessionGuid,
+                            context.UserProfileId,
+                            targetParticipantId,
+                            resourceTypeName,
+                            result.ResourceId,
+                            VisibilityState.Hidden,
+                            now,
+                            transactionCancellationToken)
+                            .ConfigureAwait(false));
+                    }
+
+                    return new HideCommitResult(result, events);
+                },
                 cancellationToken)
             .ConfigureAwait(false);
 
-        // REALTIME EVENT: emit the durable ContentHidden event IFF the hide actually changed visibility —
-        // the same change signal the audit uses, so a retry or a no-op hide of an already-hidden resource
-        // emits nothing. The event carries NO visibility subject (see the type summary): the resource is
-        // now hidden, so it is routed by its coarse target instead — a selected-participant hide reaches
-        // only that participant (plus hosts), an audience-wide hide reaches the observers and every active
-        // participant — so everyone who could be showing the resource is told to remove it. The payload
-        // carries resource IDENTIFIERS only, never resolved content (threats T2/T3/T7).
-        if (result.VisibilityChanged)
+        // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction has committed, so deliver each appended event
+        // to its server-computed realtime recipients OUTSIDE the transaction. Delivery is best-effort, so a
+        // delivery failure cannot roll back the committed hide; a reconnecting client replays a missed push
+        // later (CORE-RT-005). The recipient resolver still gates every delivery through the central
+        // Visibility engine (threats T2/T3).
+        foreach (var sessionEvent in committed.Events)
         {
-            var resourceTypeName = result.ResourceType.ToString();
-            var payload = JsonSerializer.Serialize(new HideEventPayload(
-                resourceTypeName,
-                result.ResourceId));
-
-            var sessionEvent = SessionEvent.Create(
-                context.OrganizationId,
-                session.WorkspaceId,
-                sessionGuid,
-                SessionEventTypes.ContentHidden,
-                context.UserProfileId,
-                targetParticipantId,
-                payload,
-                schemaVersion: 1,
-                now);
-
-            await deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
-
-            // VISIBILITY-RULE-CHANGED EVENT (CORE-EVT-003): the rule's new state is Hidden, so emit the
-            // durable VisibilityRuleChanged session event (the realtime counterpart of the audit record,
-            // DISTINCT from it) reusing the SAME composer as the reveal endpoint. Unlike ContentHidden it
-            // CARRIES the resource as its visibility subject: the resource is now hidden, so the recipient
-            // resolver gates this event to the HOSTS ONLY (a participant/observer cannot see the now-hidden
-            // resource), which is exactly the security-relevant, host-facing delivery the catalog documents
-            // — and no participant ever receives a hidden-resource event (threats T2/T3).
-            await RevealEndpoints.PublishVisibilityRuleChangedAsync(
-                deps.EventPublisher,
-                context.OrganizationId,
-                session.WorkspaceId,
-                sessionGuid,
-                context.UserProfileId,
-                targetParticipantId,
-                resourceTypeName,
-                result.ResourceId,
-                VisibilityState.Hidden,
-                now,
-                cancellationToken)
-                .ConfigureAwait(false);
+            await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
 
-        return Results.Ok(HideResponse.From(result));
+        return Results.Ok(HideResponse.From(committed.Result));
     }
+
+    /// <summary>
+    /// The outcome of the hide unit of work: the command <see cref="HideResult"/> the response is built
+    /// from, plus the durable events that were APPENDED inside the transaction and must be DELIVERED after
+    /// the commit (commit-then-publish, CORE-CONC-002). The list is empty when the hide changed nothing.
+    /// </summary>
+    private readonly record struct HideCommitResult(HideResult Result, IReadOnlyList<SessionEvent> Events);
 
     /// <summary>
     /// The server-composed payload of a <c>ContentHidden</c> event: the generic kind and id of the hidden
@@ -344,20 +380,22 @@ internal static class HideEndpoints
         var participants = services.GetService<IParticipantRepository>();
         var reveal = services.GetService<RevealService>();
         var eventPublisher = services.GetService<ISessionEventPublisher>();
+        var unitOfWork = services.GetService<TransactionalUnitOfWork>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
             || participants is null
             || reveal is null
-            || eventPublisher is null)
+            || eventPublisher is null
+            || unitOfWork is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new HideEndpointDependencies(
-            resolver, sessions, workspaceMembers, participants, reveal, eventPublisher);
+            resolver, sessions, workspaceMembers, participants, reveal, eventPublisher, unitOfWork);
         return true;
     }
 
@@ -418,5 +456,6 @@ internal static class HideEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         IParticipantRepository Participants,
         RevealService Reveal,
-        ISessionEventPublisher EventPublisher);
+        ISessionEventPublisher EventPublisher,
+        TransactionalUnitOfWork UnitOfWork);
 }

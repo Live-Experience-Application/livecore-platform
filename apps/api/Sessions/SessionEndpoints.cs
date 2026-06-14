@@ -4,6 +4,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
@@ -513,19 +514,12 @@ internal static class SessionEndpoints
             return Forbidden();
         }
 
-        // Apply the transition. The state machine is the authoritative behavior:
-        // CanStart/CanEnd/CanCancel guard the only legal predecessor state, so an
-        // out-of-state command is a 409 Conflict (not a no-op and not a 5xx). The
-        // injected TimeProvider stamps the transition timestamp, exactly like the
-        // workspace write handlers. Once a start/end transition is persisted the
-        // command emits its durable SessionStarted/SessionEnded session event through
-        // the Realtime publisher (the ENDPOINT publishes, matching the reveal command)
-        // and appends a matching append-only audit record (CORE-EVT-001); because the
-        // emit happens only after a successful, guarded transition, each start/end
-        // persists exactly one event and one audit fact, and a 409 emits neither. The
-        // cancel command (CORE-LIFE-010) instead appends only the audit record of the
-        // Prepared -> Cancelled transition (its event is not a documented catalog
-        // entry).
+        // Guard the transition (and, for start, the quota) BEFORE any transaction is opened — reads and the
+        // in-memory state-machine guard only. CanStart/CanEnd/CanCancel guard the only legal predecessor
+        // state, so an out-of-state command is a 409 Conflict (not a no-op and not a 5xx) that changes
+        // nothing. This 409-on-invalid-transition also makes a retried command at-most-once for its side
+        // effect. The injected TimeProvider stamps the transition timestamp, exactly like the workspace
+        // write handlers.
         //
         // Quota enforcement (CORE-ENTL-004): starting a session consumes one unit of the session's WORKSPACE's
         // session.active.max quota, and ending it releases that unit, so the quota reflects the workspace's CURRENT
@@ -533,7 +527,7 @@ internal static class SessionEndpoints
         // transition is persisted; it is computed entirely server-side and is fail-closed, so a free workspace
         // cannot run more concurrent sessions than its plan allows ("Free limits cannot be bypassed by clients";
         // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). When no quota governs the deployment the command
-        // proceeds unchanged.
+        // proceeds unchanged. A rejected guard or over-quota start returns here, before the transaction.
         var now = timeProvider.GetUtcNow();
         switch (command)
         {
@@ -556,43 +550,6 @@ internal static class SessionEndpoints
                     return QuotaExceeded(quotaDecision);
                 }
 
-                // Capture the previous status name BEFORE the transition for the audit record, so the audited
-                // "before" state is independent of the mutation below.
-                var startPreviousStatus = session.Status.ToString();
-
-                session.Start(now);
-                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
-
-                // Record the consumption only after the start is persisted, so a failed start never increments the
-                // count.
-                await deps.QuotaEnforcement
-                    .RecordConsumptionAsync(
-                        EntitlementSubjectType.Workspace,
-                        session.WorkspaceId,
-                        QuotaEntitlementKeys.SessionActiveMax,
-                        amount: 1,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-
-                // AUDIT + EVENT (CORE-EVT-001): the start is persisted, so record the Prepared -> Live transition
-                // as an append-only audit fact and emit the durable SessionStarted session event to the whole
-                // session audience.
-                await deps.AuditLog
-                    .AppendAsync(
-                        AuditLogEntry.ForSessionStart(
-                            context.OrganizationId,
-                            session.WorkspaceId,
-                            context.UserProfileId,
-                            nameof(Session),
-                            session.Id,
-                            startPreviousStatus,
-                            session.Status.ToString(),
-                            now),
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                await PublishSessionLifecycleEventAsync(
-                    deps, context, session, SessionEventTypes.SessionStarted, now, cancellationToken)
-                    .ConfigureAwait(false);
                 break;
 
             case SessionLifecycleCommand.End:
@@ -601,42 +558,6 @@ internal static class SessionEndpoints
                     return CannotEndConflict();
                 }
 
-                // Capture the previous status name BEFORE the transition for the audit record.
-                var endPreviousStatus = session.Status.ToString();
-
-                session.End(now);
-                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
-
-                // Ending a live session frees the workspace's active-session slot, so release the unit consumed at
-                // start (clamped at zero; a no-op when nothing was recorded).
-                await deps.QuotaEnforcement
-                    .ReleaseAsync(
-                        EntitlementSubjectType.Workspace,
-                        session.WorkspaceId,
-                        QuotaEntitlementKeys.SessionActiveMax,
-                        amount: 1,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-
-                // AUDIT + EVENT (CORE-EVT-001): the end is persisted, so record the Live -> Ended transition as an
-                // append-only audit fact and emit the durable SessionEnded session event to the whole session
-                // audience.
-                await deps.AuditLog
-                    .AppendAsync(
-                        AuditLogEntry.ForSessionEnd(
-                            context.OrganizationId,
-                            session.WorkspaceId,
-                            context.UserProfileId,
-                            nameof(Session),
-                            session.Id,
-                            endPreviousStatus,
-                            session.Status.ToString(),
-                            now),
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                await PublishSessionLifecycleEventAsync(
-                    deps, context, session, SessionEventTypes.SessionEnded, now, cancellationToken)
-                    .ConfigureAwait(false);
                 break;
 
             case SessionLifecycleCommand.Cancel:
@@ -649,54 +570,172 @@ internal static class SessionEndpoints
                     return CannotCancelConflict();
                 }
 
-                // No quota interaction: session.active.max counts a workspace's currently-LIVE sessions, and a
-                // Prepared session has consumed none (start consumes, end releases), so cancelling one releases
-                // nothing — unlike end, cancel never touches the quota.
-                //
-                // Capture the previous status name BEFORE the transition for the audit record, so the audited
-                // "before" state is independent of the mutation below.
-                var previousStatus = session.Status.ToString();
-
-                session.Cancel(now);
-                await deps.Sessions.UpdateAsync(session, cancellationToken).ConfigureAwait(false);
-
-                // AUDIT: a cancel is a security-relevant lifecycle change, so append an append-only audit record
-                // capturing the actor (the host who cancelled it), the cancelled session and the Prepared ->
-                // Cancelled status transition (threats T1/T5). Unlike a deletion, a cancel records the
-                // before/after status because the session SURVIVES (a soft transition, like the workspace
-                // archive); the session's append-only session_events and audit_logs are preserved, never deleted.
-                var entry = AuditLogEntry.ForSessionCancellation(
-                    context.OrganizationId,
-                    session.WorkspaceId,
-                    context.UserProfileId,
-                    nameof(Session),
-                    session.Id,
-                    previousStatus,
-                    session.Status.ToString(),
-                    now);
-                await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
                 break;
 
             default:
-                // Unreachable: the enum has exactly the two commands above. Fail
+                // Unreachable: the enum has exactly the three commands above. Fail
                 // closed rather than silently succeeding.
                 return ServiceUnavailable();
+        }
+
+        // ONE unit of work (CORE-CONC-002): the guarded status transition, its quota change, its append-only
+        // audit record and (for start/end) the append of its durable session event commit together in a
+        // single database transaction — so a part-way failure (for example a crash after the state change but
+        // before the event append) rolls them ALL back and the append-only event stream can never diverge
+        // from the persisted session state. Because the emit happens only inside the committed transition,
+        // each start/end persists exactly one event and one audit fact, and a 409 (rejected above) emits
+        // neither. The cancel command (CORE-LIFE-010) appends only the audit record of the Prepared ->
+        // Cancelled transition (its event is not a documented catalog entry). Realtime DELIVERY is held until
+        // AFTER the commit (commit-then-publish, below), so a delivery failure cannot roll back committed
+        // state.
+        var toDeliver = await deps.UnitOfWork
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    var events = new List<SessionEvent>();
+                    switch (command)
+                    {
+                        case SessionLifecycleCommand.Start:
+                            // Capture the previous status name BEFORE the transition for the audit record, so
+                            // the audited "before" state is independent of the mutation below.
+                            var startPreviousStatus = session.Status.ToString();
+
+                            session.Start(now);
+                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+
+                            // Record the consumption inside the same transaction as the transition, so a
+                            // rolled-back start never increments the count.
+                            await deps.QuotaEnforcement
+                                .RecordConsumptionAsync(
+                                    EntitlementSubjectType.Workspace,
+                                    session.WorkspaceId,
+                                    QuotaEntitlementKeys.SessionActiveMax,
+                                    amount: 1,
+                                    transactionCancellationToken)
+                                .ConfigureAwait(false);
+
+                            // AUDIT + EVENT (CORE-EVT-001): record the Prepared -> Live transition as an
+                            // append-only audit fact and APPEND the durable SessionStarted session event.
+                            await deps.AuditLog
+                                .AppendAsync(
+                                    AuditLogEntry.ForSessionStart(
+                                        context.OrganizationId,
+                                        session.WorkspaceId,
+                                        context.UserProfileId,
+                                        nameof(Session),
+                                        session.Id,
+                                        startPreviousStatus,
+                                        session.Status.ToString(),
+                                        now),
+                                    transactionCancellationToken)
+                                .ConfigureAwait(false);
+                            events.Add(await AppendSessionLifecycleEventAsync(
+                                deps, context, session, SessionEventTypes.SessionStarted, now, transactionCancellationToken)
+                                .ConfigureAwait(false));
+                            break;
+
+                        case SessionLifecycleCommand.End:
+                            // Capture the previous status name BEFORE the transition for the audit record.
+                            var endPreviousStatus = session.Status.ToString();
+
+                            session.End(now);
+                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+
+                            // Ending a live session frees the workspace's active-session slot, so release the
+                            // unit consumed at start (clamped at zero; a no-op when nothing was recorded).
+                            await deps.QuotaEnforcement
+                                .ReleaseAsync(
+                                    EntitlementSubjectType.Workspace,
+                                    session.WorkspaceId,
+                                    QuotaEntitlementKeys.SessionActiveMax,
+                                    amount: 1,
+                                    transactionCancellationToken)
+                                .ConfigureAwait(false);
+
+                            // AUDIT + EVENT (CORE-EVT-001): record the Live -> Ended transition as an
+                            // append-only audit fact and APPEND the durable SessionEnded session event.
+                            await deps.AuditLog
+                                .AppendAsync(
+                                    AuditLogEntry.ForSessionEnd(
+                                        context.OrganizationId,
+                                        session.WorkspaceId,
+                                        context.UserProfileId,
+                                        nameof(Session),
+                                        session.Id,
+                                        endPreviousStatus,
+                                        session.Status.ToString(),
+                                        now),
+                                    transactionCancellationToken)
+                                .ConfigureAwait(false);
+                            events.Add(await AppendSessionLifecycleEventAsync(
+                                deps, context, session, SessionEventTypes.SessionEnded, now, transactionCancellationToken)
+                                .ConfigureAwait(false));
+                            break;
+
+                        case SessionLifecycleCommand.Cancel:
+                            // No quota interaction: session.active.max counts a workspace's currently-LIVE
+                            // sessions, and a Prepared session has consumed none (start consumes, end
+                            // releases), so cancelling one releases nothing — unlike end, cancel never touches
+                            // the quota. Capture the previous status BEFORE the transition for the audit record.
+                            var previousStatus = session.Status.ToString();
+
+                            session.Cancel(now);
+                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+
+                            // AUDIT: a cancel is a security-relevant lifecycle change, so append an append-only
+                            // audit record capturing the actor (the host who cancelled it), the cancelled
+                            // session and the Prepared -> Cancelled status transition (threats T1/T5). Unlike a
+                            // deletion, a cancel records the before/after status because the session SURVIVES
+                            // (a soft transition, like the workspace archive); the session's append-only
+                            // session_events and audit_logs are preserved, never deleted. Cancel emits no
+                            // durable catalog event, so it appends nothing to deliver.
+                            var entry = AuditLogEntry.ForSessionCancellation(
+                                context.OrganizationId,
+                                session.WorkspaceId,
+                                context.UserProfileId,
+                                nameof(Session),
+                                session.Id,
+                                previousStatus,
+                                session.Status.ToString(),
+                                now);
+                            await deps.AuditLog.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
+                            break;
+
+                        default:
+                            // Unreachable: guarded by the pre-transaction switch above.
+                            throw new InvalidOperationException("Unsupported session lifecycle command.");
+                    }
+
+                    return events;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction has committed, so deliver each appended
+        // session event to the whole session audience OUTSIDE the transaction. Delivery is best-effort, so a
+        // delivery failure cannot roll back the committed transition; reconnect replay re-delivers later
+        // (CORE-RT-005). Cancel appended no event, so it delivers nothing.
+        foreach (var sessionEvent in toDeliver)
+        {
+            await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
 
         return Results.Ok(SessionResponse.From(session));
     }
 
     /// <summary>
-    /// Publishes the durable <c>SessionStarted</c>/<c>SessionEnded</c> session event for a just-persisted
-    /// lifecycle transition (CORE-EVT-001), matching the reveal command's "the ENDPOINT publishes" pattern.
-    /// The event is a SUBJECTLESS audience event — no visibility subject and no selected participant — so the
-    /// recipient resolver (reused, not duplicated) delivers it UNCONDITIONALLY to the whole session audience:
-    /// the session hosts, the observers and every active participant. The actor is the authenticated caller
-    /// (the host who ran the command), and the payload carries session IDENTIFIERS only — the session id and
-    /// the new lifecycle status name — never any content (threat T7). The append is the source of truth;
-    /// reconnect replay (CORE-RT-005) re-delivers the event to a reconnecting client.
+    /// Composes the durable <c>SessionStarted</c>/<c>SessionEnded</c> session event for a lifecycle
+    /// transition (CORE-EVT-001) and APPENDS it to the session's append-only stream INSIDE the command's
+    /// unit-of-work transaction, returning the appended event so the endpoint delivers it AFTER the commit
+    /// (commit-then-publish, CORE-CONC-002), matching the reveal command's pattern. The event is a SUBJECTLESS
+    /// audience event — no visibility subject and no selected participant — so the recipient resolver (reused,
+    /// not duplicated) delivers it UNCONDITIONALLY to the whole session audience: the session hosts, the
+    /// observers and every active participant. The actor is the authenticated caller (the host who ran the
+    /// command), and the payload carries session IDENTIFIERS only — the session id and the new lifecycle
+    /// status name — never any content (threat T7). The append is the source of truth; reconnect replay
+    /// (CORE-RT-005) re-delivers the event to a reconnecting client.
     /// </summary>
-    private static Task PublishSessionLifecycleEventAsync(
+    private static async Task<SessionEvent> AppendSessionLifecycleEventAsync(
         SessionEndpointDependencies deps,
         TenantContext context,
         Session session,
@@ -719,7 +758,8 @@ internal static class SessionEndpoints
             schemaVersion: 1,
             now);
 
-        return deps.EventPublisher.PublishAsync(sessionEvent, cancellationToken);
+        await deps.EventPublisher.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        return sessionEvent;
     }
 
     /// <summary>
@@ -752,6 +792,7 @@ internal static class SessionEndpoints
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
         var auditLog = services.GetService<IAuditLogRepository>();
         var eventPublisher = services.GetService<ISessionEventPublisher>();
+        var unitOfWork = services.GetService<TransactionalUnitOfWork>();
 
         if (resolver is null
             || sessions is null
@@ -759,14 +800,15 @@ internal static class SessionEndpoints
             || workspaceMembers is null
             || quotaEnforcement is null
             || auditLog is null
-            || eventPublisher is null)
+            || eventPublisher is null
+            || unitOfWork is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new SessionEndpointDependencies(
-            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement, auditLog, eventPublisher);
+            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement, auditLog, eventPublisher, unitOfWork);
         return true;
     }
 
@@ -884,5 +926,6 @@ internal static class SessionEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         QuotaEnforcementService QuotaEnforcement,
         IAuditLogRepository AuditLog,
-        ISessionEventPublisher EventPublisher);
+        ISessionEventPublisher EventPublisher,
+        TransactionalUnitOfWork UnitOfWork);
 }
