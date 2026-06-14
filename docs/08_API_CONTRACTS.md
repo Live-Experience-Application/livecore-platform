@@ -52,6 +52,8 @@ POST   /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/sessions/{sessionId}/start
 POST   /api/v1/sessions/{sessionId}/end
 POST   /api/v1/sessions/{sessionId}/cancel
+POST   /api/v1/sessions/{sessionId}/participants/{participantId}/join
+POST   /api/v1/sessions/{sessionId}/participants/{participantId}/leave
 GET    /api/v1/sessions/{sessionId}/events
 POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide

@@ -1129,6 +1129,21 @@ app.MapWorkspaceEndpoints();
 // csv/database_tables.csv assigns session_events to the Realtime module).
 app.MapSessionEndpoints();
 
+// Participant presence endpoints (CORE-PRS-001): the join/leave routes
+// POST /api/v1/sessions/{sessionId}/participants/{participantId}/join and .../leave. They are the real entry
+// point that finally makes the documented ParticipantJoined/ParticipantLeft presence events fire end-to-end:
+// CORE-EVT-002 built the SessionParticipantJoinService/SessionParticipantLeaveService that emit them but left
+// them with no production caller, and this story wires that caller by REUSING those services (no parallel
+// join/leave logic). They live in an authenticated route group and fail closed (503) when persistence is not
+// configured, exactly like the session lifecycle endpoints. No new DI registration is required: the tenant
+// context resolver, the session repository, the workspace member repository and the join/leave services they
+// consume are already registered above inside the persistence conditional. Authorization is host-driven —
+// managing presence is a session-control action, so the routes are authorized to the same Owner/Admin/Host/CoHost
+// roles (in the session's own workspace) the start/end/cancel commands use, fail-closed and hidden-404 for a
+// foreign tenant / non-member (threats T1/T5). The session.participant.max free-tier quota (CORE-MON-005) is now
+// enforced on this real join path, and the presence payloads stay identifier-only (no PII; threat T7).
+app.MapSessionParticipantPresenceEndpoints();
+
 // Participant-visible feed endpoint (CORE-SES-005): the Visibility module's first
 // route, GET /api/v1/participants/{participantId}/visible-feed. It lives in an
 // authenticated route group and fails closed (503) when persistence is not

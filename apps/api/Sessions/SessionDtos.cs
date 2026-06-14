@@ -118,3 +118,26 @@ public sealed record SessionResponse(
             session.UpdatedAt);
     }
 }
+
+/// <summary>
+/// Response projection of a participant presence command (CORE-PRS-001,
+/// <c>POST /api/v1/sessions/{sessionId}/participants/{participantId}/join</c> and
+/// <c>.../leave</c>). It is the body returned when a host admits a participant to a session or removes one
+/// from it, after the <see cref="SessionParticipantJoinService"/> / <see cref="SessionParticipantLeaveService"/>
+/// has applied the transition, persisted the durable presence event and delivered it to the session audience.
+///
+/// The DTO is IDENTIFIER-ONLY and product-neutral (docs/04_PRODUCT_BOUNDARIES.md; docs/08_API_CONTRACTS.md DTO
+/// design rules; threat T7 in docs/07_SECURITY_THREAT_MODEL.md): the session and participant surrogate ids and
+/// the generic outcome NAME only. It deliberately carries NO participant display name or any other PII (the
+/// whole point of the PII-free presence contract), NO internal authorization rationale, and NO hidden fields —
+/// exactly the same identifier-only envelope the persisted <c>ParticipantJoined</c>/<c>ParticipantLeft</c> event
+/// payload carries (<see cref="ParticipantPresenceEvent"/>).
+/// </summary>
+/// <param name="SessionId">Surrogate id of the session the presence change applied to.</param>
+/// <param name="ParticipantId">Surrogate id of the participant that joined or left.</param>
+/// <param name="Outcome">
+/// Generic presence outcome name: <c>Joined</c> (admitted), <c>Left</c> (removed and the
+/// <c>ParticipantLeft</c> event delivered) or <c>AlreadyLeft</c> (the idempotent no-op — the participant had
+/// already left, so nothing changed and no event was emitted).
+/// </param>
+public sealed record ParticipantPresenceResponse(Guid SessionId, Guid ParticipantId, string Outcome);

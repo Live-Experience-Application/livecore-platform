@@ -1068,8 +1068,37 @@ joining participant's linked **user** as its actor (or none, for an anonymous pa
 `ParticipantLeft` is **System**-emitted (no actor). No audit record is written (these are
 realtime presence events, not security-audited state transitions), and no schema migration
 is needed — the `session_events` table persists the new event-type names in its existing
-`event_type` string column. The join/leave HTTP endpoints and the persisted participant
-connection metadata remain later stories.
+`event_type` string column.
+
+CORE-PRS-001 wires the **real entry point** so presence works end-to-end: the two services
+above were DI-registered but had **no production caller**, so the catalog's
+`ParticipantJoined`/`ParticipantLeft` were dead code at go-live. The join/leave HTTP routes
+now drive them (reusing the services — no parallel join/leave logic):
+
+| Method | Route                                                             | Authorized callers                             |
+| ------ | ----------------------------------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/join`  | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/leave` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+Like the lifecycle routes the target organization is a required `organizationSlug` **query**
+parameter (the path carries no organization), turned into a trusted `TenantContext` by the
+`TenantContextResolver` (token claim **and** persisted membership, threat T5); the session is
+then loaded within that tenant, its workspace discovered from the loaded row, and the command
+authorized by the caller's role in the **session's own workspace**. Managing presence is a
+session-control action, so the authorized roles are exactly the `Owner`/`Admin`/`Host`/`CoHost`
+set the start/end/cancel commands use — a non-member is hidden as `404` (never learns the
+session exists), a known member without a control role is `403`, and a foreign-tenant session
+is hidden as `404` (threats T1/T5). Object-level participant decisions stay inside the reused
+services: a participant outside the session's tenant/workspace is a hidden `404`, a removed
+participant or an ended session is `409`, and a join that would exceed the
+`session.participant.max` cap is `409` (the limit, not the caller, is the reason) — so the
+free-tier participant cap (CORE-MON-005) is now enforced on this **real** join path. A leave is
+**idempotent** (an already-left participant is a `200` no-op that emits no second event). Every
+denied or rejected command emits **no** event, so it can never leak a presence event to the
+audience (fail-closed; threats T1/T3/T5), and the response is the identifier-only
+`ParticipantPresenceResponse` (the session id, the participant id and a generic outcome name) —
+never a participant display name or any PII (threat T7). No new DI registration, table or
+migration is required; the persisted participant connection metadata remains later work.
 
 ### Reveal command
 
