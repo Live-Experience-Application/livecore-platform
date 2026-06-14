@@ -24,9 +24,11 @@ namespace LiveCore.Api.Store;
 /// is the persistence analogue of how the reveal command keys on an <c>Idempotency-Key</c>.
 ///
 /// NOT TENANT CONTENT, NO BUYER COLUMN. The transaction records only the verified purchase identity and its
-/// state. The buyer/subject linkage — which user or workspace the purchase grants premium to — is the separate
-/// <c>billing_account_links</c> table of docs/21 (a later story), not a column here, exactly as the documented
-/// "Database additions" list <c>purchase_transactions</c> and <c>billing_account_links</c> as distinct tables.
+/// state. The buyer/subject linkage — which subject the purchase grants premium to — is the separate
+/// <c>billing_account_links</c> table (CORE-MON-002, <see cref="BillingAccountLink"/>), not a column here,
+/// exactly as the documented "Database additions" list <c>purchase_transactions</c> and
+/// <c>billing_account_links</c> as distinct tables: a purchase is named globally by its (provider, provider
+/// transaction id) pair, and the buyer link binds that one global purchase to exactly one subject.
 ///
 /// NO SECRETS. The stored identifiers (provider, the provider transaction id, the product reference) are stable
 /// identifiers, not secrets — only the raw verification proof is a secret, and the proof is NEVER persisted (it

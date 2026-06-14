@@ -59,7 +59,9 @@ Core v1.** Completing the monetization loop is built in v1, not deferred. What v
 must now deliver (previously deferred by CORE-DOC-002):
 
 - the `billing_account_links` table (store-account-to-subject link) that links a
-  verified purchase to the authenticated buyer (CORE-MON-002);
+  verified purchase to the authenticated buyer (CORE-MON-002, **implemented** — the
+  table exists in the schema, unique on `purchase_transaction_id` so a receipt maps
+  to exactly one subject);
 - the product → plan → entitlement mapping that turns a verified purchase into a
   plan grant (CORE-MON-003);
 - the trigger that wires purchase verification (CORE-STORE-003/004) and store
@@ -102,13 +104,13 @@ outside Core). The delivering stories are the Monetization v1 epic
 spec reversal) unblocks CORE-MON-002..010. Core stays product-neutral and still
 never processes payments, renders a paywall/store or displays ads.
 
-**Schema note (why the table CSV still says DEFERRED).** `billing_account_links`
-is in scope for v1 but **not yet in the implemented schema** — CORE-MON-002 adds
-it. Until it lands in `csv/database_tables.csv` it stays marked DEFERRED in
-`csv/entitlement_database_tables.csv` so the spec-consistency check (which
-requires every *non-deferred* entitlement table to exist in the schema) stays
-green. That marker now means "documented and planned for v1 but not yet built",
-not "deferred to post-v1".
+**Schema note (CORE-MON-002 landed `billing_account_links`).** `billing_account_links`
+is now **in the implemented schema**: CORE-MON-002 added the table (the
+verified-purchase-to-buyer-subject link, unique on `purchase_transaction_id`), so it
+appears in `csv/database_tables.csv` and the `docs/10` table list, and its
+`csv/entitlement_database_tables.csv` row is **no longer marked DEFERRED**. The
+spec-consistency check (which requires every *non-deferred* entitlement table to exist
+in the schema) stays green because the table now exists in both places.
 
 ## Genuinely deferred items
 
@@ -119,14 +121,6 @@ in-scope-for-v1 items not yet built (noted per item).
 - **`purchase_providers`** — provider handling is in-code (the purchase-provider
   abstraction, CORE-STORE-001), not a database table. Marked DEFERRED in
   `csv/entitlement_database_tables.csv`.
-- **`billing_account_links`** — the store-account-to-subject link table. It is
-  **in scope for Core v1** (`docs/01_PRODUCT_VISION_AND_SCOPE.md`) but **not yet
-  in the implemented schema**: CORE-MON-002 adds it (CORE-MON-001 reversed the
-  CORE-DOC-002 post-v1 deferral — see "Decision recorded (CORE-MON-001)" above).
-  It stays marked DEFERRED in `csv/entitlement_database_tables.csv` only because
-  it is not yet built, so the spec-consistency check skips it until CORE-MON-002
-  lands it in `csv/database_tables.csv` — a not-yet-implemented marker, not a
-  scope deferral.
 - **Planned-but-unemitted session events** — `SessionCreated`, `SceneCreated`,
   `ContentBlockCreated`, `PrivateMessageSent`, `AssetRevealed`,
   `SessionNoteCreated` and `RecapGenerated` are in the catalog but not yet

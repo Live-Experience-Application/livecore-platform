@@ -1,4 +1,6 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LiveCore.Api.Store;
@@ -27,9 +29,16 @@ namespace LiveCore.Api.Store;
 /// <see cref="PurchaseTransaction"/> (reusing the CORE-STORE-002 <see cref="PurchaseTransactionService"/>). A
 /// rejected (forged / replayed / unverifiable) proof records NOTHING and grants nothing — Core never trusts a
 /// client's premium claim ("Never trust client-side premium flags"; "Never unlock limits before server
-/// verification succeeds", docs/21). Granting the resulting <c>SubjectEntitlement</c> from the recorded purchase
-/// (the product → plan → entitlement mapping) and linking the buyer (<c>billing_account_links</c>) are later
-/// stories; this story establishes the verify-and-record gate they sit behind.
+/// verification succeeds", docs/21).
+///
+/// BUYER LINKAGE (CORE-MON-002). A verified purchase is now durably LINKED to the authenticated buyer in the SAME
+/// transaction as the recording (reusing the CORE-CONC-002 unit of work): the buyer's user subject is resolved
+/// server-side (their <c>users(id)</c> profile, provisioned on first sight exactly as <c>/me/entitlements</c>
+/// resolves it) and a <c>billing_account_links</c> row binds the purchase to that subject. The same buyer
+/// re-submitting their own receipt is idempotent; a DIFFERENT subject submitting the same external receipt is
+/// denied 409 and granted nothing — "the same external receipt cannot be claimed by two different subjects"
+/// (CORE-MON-002; threat T5). Granting the resulting <c>SubjectEntitlement</c> from the linked buyer (the product
+/// → plan → entitlement mapping) is the next story (CORE-MON-003), which this buyer linkage unblocks.
 ///
 /// Authorization model (server-side; docs/06_AUTHORIZATION_MATRIX.md; threats T1/T5):
 /// <list type="bullet">
@@ -39,12 +48,15 @@ namespace LiveCore.Api.Store;
 ///   (service-account) principal is denied 403 — it has no personal purchase to submit (the same rule as the
 ///   <c>/me</c> quota-status read). The transaction is named globally by its (provider, provider transaction id)
 ///   pair and carries no tenant, so there is no organization/workspace boundary to resolve here (CORE-STORE-002:
-///   <c>purchase_transactions</c> has no <c>organization_id</c>).</item>
+///   <c>purchase_transactions</c> has no <c>organization_id</c>); the isolation that matters is per-SUBJECT — one
+///   buyer's purchase can never be claimed through another subject's identity (the buyer linkage's uniqueness
+///   rule).</item>
 ///   <item>Only AFTER authorization is the request validated, so an unauthorized caller never receives
 ///   request-shape feedback: a missing body or a missing/blank/oversize transaction proof is 400.</item>
-///   <item>A genuine purchase is recorded and returned 200; a rejected proof is 422 (a semantically invalid
-///   command — the submitted transaction is not a grantable purchase) carrying only the generic, log-safe
-///   rejection reason, with nothing recorded.</item>
+///   <item>A genuine purchase is recorded, linked to the buyer and returned 200; a rejected proof is 422 (a
+///   semantically invalid command — the submitted transaction is not a grantable purchase) carrying only the
+///   generic, log-safe rejection reason, with nothing recorded; a genuine purchase already claimed by a different
+///   subject is 409, granting this caller nothing.</item>
 /// </list>
 ///
 /// Persistence dependency: like the asset/quota endpoints, this uses the <see cref="PurchaseTransactionService"/>
@@ -146,15 +158,41 @@ internal static class ApplePurchaseEndpoints
             return VerificationRejected(result.RejectionReason);
         }
 
-        // Verified. Persist the verified purchase as the recorded source of truth (idempotently — a retry or a
-        // replayed-but-genuine proof records no second row and no duplicate audit event; CORE-STORE-002). The
-        // current persisted status is returned to the caller as confirmation.
+        // Verified. Resolve the authenticated BUYER's user profile — the subject the purchase grants premium to —
+        // exactly as /me/entitlements resolves the current user (idempotent on first sight). WHO is buying is the
+        // authenticated caller, never anything the client asserts (CORE-MON-002).
         var now = deps.TimeProvider.GetUtcNow();
-        var recording = await deps.Transactions
-            .RecordVerifiedPurchaseAsync(result.Purchase!, now, cancellationToken)
+        var profile = await deps.UserProfiles.EnsureUserProfileAsync(principal, cancellationToken).ConfigureAwait(false);
+
+        // Persist the verified purchase as the recorded source of truth (idempotently — a retry or a
+        // replayed-but-genuine proof records no second row and no duplicate audit event; CORE-STORE-002) AND
+        // durably link it to the buyer, atomically in ONE transaction (CORE-MON-002, reusing the CORE-CONC-002
+        // unit of work), so a verified purchase is never recorded without recording WHICH subject it belongs to.
+        var outcome = await deps.UnitOfWork
+            .ExecuteAsync(
+                async unitToken =>
+                {
+                    var recording = await deps.Transactions
+                        .RecordVerifiedPurchaseAsync(result.Purchase!, now, unitToken)
+                        .ConfigureAwait(false);
+                    var link = await deps.BillingLinks
+                        .LinkBuyerAsync(recording.Transaction.Id, EntitlementSubjectType.User, profile.Id, now, unitToken)
+                        .ConfigureAwait(false);
+                    return (recording, link);
+                },
+                cancellationToken)
             .ConfigureAwait(false);
 
-        return Results.Ok(PurchaseVerificationResponse.From(recording.Transaction));
+        // Fail-closed: the same external receipt cannot be claimed by two different subjects. If this verified
+        // purchase is already linked to a DIFFERENT buyer, the buyer linkage is denied (409) and nothing is granted
+        // to this caller — user B can never bind user A's receipt (CORE-MON-002; threat T5).
+        if (outcome.link.Outcome == BillingAccountLinkOutcome.ConflictDifferentSubject)
+        {
+            return PurchaseAlreadyClaimed();
+        }
+
+        // The current persisted status is returned to the caller as confirmation.
+        return Results.Ok(PurchaseVerificationResponse.From(outcome.recording.Transaction));
     }
 
     /// <summary>
@@ -167,17 +205,29 @@ internal static class ApplePurchaseEndpoints
         var services = httpContext.RequestServices;
         var resolver = services.GetService<PurchaseVerificationProviderResolver>();
         var transactions = services.GetService<PurchaseTransactionService>();
+        var billingLinks = services.GetService<BillingAccountLinkService>();
+        var userProfiles = services.GetService<UserProfileReferenceService>();
+        var unitOfWork = services.GetService<TransactionalUnitOfWork>();
         var timeProvider = services.GetService<TimeProvider>();
 
         if (resolver is null
             || transactions is null
+            || billingLinks is null
+            || userProfiles is null
+            || unitOfWork is null
             || timeProvider is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new ApplePurchaseEndpointDependencies(resolver, transactions, timeProvider);
+        dependencies = new ApplePurchaseEndpointDependencies(
+            resolver,
+            transactions,
+            billingLinks,
+            userProfiles,
+            unitOfWork,
+            timeProvider);
         return true;
     }
 
@@ -233,8 +283,20 @@ internal static class ApplePurchaseEndpoints
             title: "Unprocessable Entity",
             detail: string.IsNullOrWhiteSpace(reason) ? "The transaction could not be verified." : reason);
 
+    // A genuine purchase whose receipt is already linked to a DIFFERENT buyer (CORE-MON-002): the buyer linkage is
+    // a conflicting claim, so it is denied 409 and nothing is granted to this caller. The detail is generic and
+    // reveals nothing about the owning subject (threats T5/T7).
+    private static IResult PurchaseAlreadyClaimed()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "This purchase is already linked to a different account.");
+
     private readonly record struct ApplePurchaseEndpointDependencies(
         PurchaseVerificationProviderResolver Resolver,
         PurchaseTransactionService Transactions,
+        BillingAccountLinkService BillingLinks,
+        UserProfileReferenceService UserProfiles,
+        TransactionalUnitOfWork UnitOfWork,
         TimeProvider TimeProvider);
 }

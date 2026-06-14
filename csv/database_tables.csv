@@ -32,4 +32,5 @@ quota_usage,Entitlements,subject,Per-subject recorded quota usage
 purchase_transactions,Store,global,Verified store purchase (idempotent on provider+provider_transaction_id)
 purchase_events,Store,purchase,Append-only purchase state-change audit trail
 store_notification_events,Store,global,Append-only handled store notification ledger (idempotent on provider+provider_notification_id)
+billing_account_links,Store,global,Verified-purchase-to-buyer-subject link (one subject per receipt; unique on purchase_transaction_id)
 idempotency_keys,System,scope,Retry safety

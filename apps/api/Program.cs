@@ -844,6 +844,25 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IStoreNotificationEventRepository, StoreNotificationEventRepository>();
     builder.Services.AddScoped<StoreNotificationService>();
 
+    // Buyer linkage for verified purchases (CORE-MON-002, the buyer-linkage story of the "Monetization v1" epic):
+    // the Store module owns the billing_account_links table that durably links a verified purchase to the
+    // authenticated buyer (a subject) — docs/24_SPEC_CONSISTENCY.md; csv/database_tables.csv: module Store.
+    // Registered here, inside the persistence conditional, like the purchase repositories above, because the
+    // repository depends on the DbContext. CORE-STORE-002 deliberately gave purchase_transactions NO buyer column
+    // (a purchase is named globally by its provider + provider_transaction_id pair, so the authenticated buyer was
+    // verified then discarded); this is the missing link. The BillingAccountLinkService links a recorded purchase
+    // to the server-resolved buyer subject and enforces the one-subject-per-receipt rule (the unique
+    // billing_account_links(purchase_transaction_id) index): the same buyer re-submitting is idempotent, a
+    // DIFFERENT subject claiming the same receipt is denied fail-closed, so "the same external receipt cannot be
+    // claimed by two different subjects" (the story acceptance criterion; threat T5). The Apple (CORE-STORE-003)
+    // and Google (CORE-STORE-004) verification endpoints record-then-link in one transaction (reusing the
+    // CORE-CONC-002 TransactionalUnitOfWork), so the buyer linkage is durably atomic with the recording. Granting
+    // the SubjectEntitlement from the linked buyer (the product -> plan -> entitlement mapping) is the next story
+    // (CORE-MON-003); this story records WHICH subject a verified purchase belongs to, the prerequisite that grant
+    // chain sits on.
+    builder.Services.AddScoped<IBillingAccountLinkRepository, BillingAccountLinkRepository>();
+    builder.Services.AddScoped<BillingAccountLinkService>();
+
     // Gate readiness on database connectivity. The health response stays
     // status-only (see HealthEndpoints), so a failing check never leaks
     // connection details to the unauthenticated readiness endpoint.
@@ -1225,8 +1244,10 @@ app.MapMeEntitlementsEndpoints();
 // verifier and verifies the submitted proof, and ONLY a verified result is recorded as a PurchaseTransaction
 // (verify-then-record): a rejected proof is 422 and records nothing, and an unconfigured verifier is 503, so
 // "Apple transaction data is verified before entitlements are granted" (the story acceptance criterion;
-// docs/21). Granting the SubjectEntitlement from the recorded purchase and the buyer linkage
-// (billing_account_links) are later stories; the Google endpoint is CORE-STORE-004.
+// docs/21). CORE-MON-002 additionally LINKS the verified purchase to the authenticated buyer's subject in the
+// same transaction (billing_account_links), so a different subject submitting the same external receipt is 409
+// and granted nothing; granting the SubjectEntitlement from the linked buyer is the next story (CORE-MON-003).
+// The Google endpoint is CORE-STORE-004.
 app.MapApplePurchaseEndpoints();
 
 // Google purchase token verification endpoint (CORE-STORE-004): the Store module's second HTTP route, the
@@ -1239,9 +1260,11 @@ app.MapApplePurchaseEndpoints();
 // CORE-STORE-002), resolves the deployment-supplied Google verifier and verifies the submitted purchase token,
 // and ONLY a verified result is recorded as a PurchaseTransaction (verify-then-record): a rejected token is 422
 // and records nothing, and an unconfigured verifier is 503, so "Google purchase tokens are verified before
-// entitlements are granted" (the story acceptance criterion; docs/21). Granting the SubjectEntitlement from the
-// recorded purchase and the buyer linkage (billing_account_links) are later stories; idempotent store
-// notifications are CORE-STORE-005.
+// entitlements are granted" (the story acceptance criterion; docs/21). CORE-MON-002 additionally LINKS the
+// verified purchase to the authenticated buyer's subject in the same transaction (billing_account_links), so a
+// different subject submitting the same external receipt is 409 and granted nothing; granting the
+// SubjectEntitlement from the linked buyer is the next story (CORE-MON-003). Idempotent store notifications are
+// CORE-STORE-005.
 app.MapGooglePurchaseEndpoints();
 
 // Store notification endpoints (CORE-STORE-005): the Store module's notification-handling routes,

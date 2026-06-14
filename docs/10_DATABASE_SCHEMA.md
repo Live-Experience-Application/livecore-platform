@@ -21,10 +21,10 @@ per table, with its owning module, scope and notes). The list below mirrors
 that file and the implemented EF Core model; keep all three in step (see
 `docs/24_SPEC_CONSISTENCY.md`). Tables documented elsewhere but not present in
 this list are not in the implemented schema (for example `purchase_providers`,
-whose provider handling is in-code rather than a table, and
-`billing_account_links`, which is **in scope for Core v1 but not yet built** —
-CORE-MON-002 adds it after CORE-MON-001 reversed the CORE-DOC-002 post-v1
-deferral; see `csv/entitlement_database_tables.csv` and
+whose provider handling is in-code rather than a table; the
+`billing_account_links` buyer-linkage table is now implemented by CORE-MON-002 —
+after CORE-MON-001 reversed the CORE-DOC-002 post-v1 deferral — and so appears in
+the list below; see `csv/entitlement_database_tables.csv` and
 `docs/24_SPEC_CONSISTENCY.md`).
 
 Current Core tables:
@@ -63,6 +63,7 @@ quota_usage
 purchase_transactions
 purchase_events
 store_notification_events
+billing_account_links
 idempotency_keys
 ```
 
@@ -101,6 +102,7 @@ plan_definitions(key) unique
 plan_entitlements(plan_definition_id, entitlement_definition_id) unique
 purchase_transactions(provider, provider_transaction_id) unique
 purchase_events(purchase_transaction_id, created_at)
+billing_account_links(purchase_transaction_id) unique
 idempotency_keys(scope, key)
 ```
 
@@ -191,6 +193,31 @@ rather than colliding), so the sequence stays gap-free and strictly monotonic ev
 increment runs in the command's unit-of-work transaction (CORE-CONC-002) together with the event insert, a
 rollback reclaims the number — there is no gap. The unique `(session_id, sequence)` index is the integrity
 backstop that guarantees no two events of a session ever share a sequence.
+
+## Buyer linkage for verified purchases (CORE-MON-002)
+
+`purchase_transactions` carries **no buyer column** on purpose (CORE-STORE-002): a purchase is named
+**globally** by its `(provider, provider_transaction_id)` pair, so two users who submit the same external
+receipt collapse to one row, and the authenticated buyer was verified then discarded. `billing_account_links`
+is the missing link that records **which subject** a verified purchase belongs to, so a verified purchase can
+later grant that subject the mapped entitlement (CORE-MON-003).
+
+A row binds one `purchase_transaction_id` (a `purchase_transactions(id)` foreign key, **CASCADE** on delete —
+the link is part of the purchase's lifecycle, like `purchase_events`) to one buyer subject
+(`subject_type`, `subject_id`). The subject pair is the **same shape** `subject_entitlements` uses: a store
+purchase is made by a person, so the buyer is a `User` subject whose id is the buyer's `users(id)` profile id,
+and `subject_id` is a **polymorphic** reference with no database foreign key (mirrors
+`subject_entitlements.subject_id`), so isolation is purely by the subject pair. `subject_type` is persisted by
+its stable enum **name** (a real string column, never JSON — core authorization state).
+
+The **one-subject-per-receipt** guarantee is the **unique** index
+`billing_account_links(purchase_transaction_id)`: a verified purchase can be linked to only one subject, so
+once user A's receipt is linked to A, user B can never bind the same receipt to B — the second claim is
+rejected at the database and denied fail-closed. The link is **immutable** (which subject a purchase belongs to
+never changes; re-binding to a different subject is exactly what the uniqueness rule forbids), so like the
+append-only tables it carries no optimistic-concurrency token. The Apple and Google verification endpoints
+record the purchase and link the buyer in **one transaction** (CORE-CONC-002), so the buyer linkage is durably
+atomic with the recording.
 
 ## JSONB use
 

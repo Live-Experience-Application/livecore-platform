@@ -41,7 +41,7 @@ namespace LiveCore.Api.Persistence;
 /// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c>,
 /// <c>plan_entitlements</c>, <c>subject_entitlements</c>, <c>quota_definitions</c>
 /// and <c>quota_usage</c> tables and the Store <c>purchase_transactions</c>,
-/// <c>purchase_events</c> and <c>store_notification_events</c> tables)
+/// <c>purchase_events</c>, <c>store_notification_events</c> and <c>billing_account_links</c> tables)
 /// and other modules never query foreign tables directly (docs/02_ARCHITECTURE.md:
 /// module boundaries). Schema
 /// changes ship as checked-in migrations under
@@ -161,6 +161,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Append-only handled store notification ledger owned by the Store module.</summary>
     public DbSet<StoreNotificationEvent> StoreNotificationEvents => Set<StoreNotificationEvent>();
 
+    /// <summary>Verified-purchase-to-buyer-subject links owned by the Store module.</summary>
+    public DbSet<BillingAccountLink> BillingAccountLinks => Set<BillingAccountLink>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
@@ -197,6 +200,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new PurchaseTransactionConfiguration());
         modelBuilder.ApplyConfiguration(new PurchaseEventConfiguration());
         modelBuilder.ApplyConfiguration(new StoreNotificationEventConfiguration());
+        modelBuilder.ApplyConfiguration(new BillingAccountLinkConfiguration());
 
         ConfigureOptimisticConcurrency(modelBuilder);
     }

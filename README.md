@@ -2750,10 +2750,11 @@ is `401` and a non-user **service-account** principal is `403` (the same rule as
 transaction is named **globally** by its `(provider, provider_transaction_id)` pair and carries **no tenant**
 (CORE-STORE-002: `purchase_transactions` has no `organization_id`), so there is no organization/workspace boundary
 on this route; the body is validated only **after** authorization, so an unauthorized caller never receives
-request-shape feedback. Granting the resulting `SubjectEntitlement` from the recorded purchase (the product → plan
-→ entitlement mapping) and linking the buyer (`billing_account_links`) are later stories; the Google
-purchase-token endpoint is CORE-STORE-004 and idempotent store notifications are CORE-STORE-005. This story adds
-no new table and no EF migration (it reuses `purchase_transactions` and `purchase_events`).
+request-shape feedback. CORE-MON-002 now **links the verified purchase to the authenticated buyer's subject** in
+the same transaction (see "Buyer linkage for verified purchases" below), so a different subject submitting the same
+external receipt is `409` and granted nothing; granting the resulting `SubjectEntitlement` from the linked buyer
+(the product → plan → entitlement mapping) is the next story (CORE-MON-003). The Google purchase-token endpoint is
+CORE-STORE-004 and idempotent store notifications are CORE-STORE-005.
 
 ### Google purchase token verification endpoint
 
@@ -2781,10 +2782,40 @@ is `401` and a non-user **service-account** principal is `403` (the same rule as
 quota-status read). The transaction is named **globally** by its `(provider, provider_transaction_id)` pair and
 carries **no tenant** (CORE-STORE-002: `purchase_transactions` has no `organization_id`), so there is no
 organization/workspace boundary on this route; the body is validated only **after** authorization, so an
-unauthorized caller never receives request-shape feedback. Granting the resulting `SubjectEntitlement` from the
-recorded purchase and linking the buyer (`billing_account_links`) are later stories; idempotent store
-notifications are CORE-STORE-005. This story adds no new table and no EF migration (it reuses
-`purchase_transactions` and `purchase_events`).
+unauthorized caller never receives request-shape feedback. CORE-MON-002 now **links the verified purchase to the
+authenticated buyer's subject** in the same transaction (see "Buyer linkage for verified purchases" below), so a
+different subject submitting the same external receipt is `409` and granted nothing; granting the resulting
+`SubjectEntitlement` from the linked buyer is the next story (CORE-MON-003), and idempotent store notifications are
+CORE-STORE-005.
+
+### Buyer linkage for verified purchases
+
+CORE-MON-002 (the buyer-linkage story of the **Monetization v1** epic) adds the missing link between a verified
+purchase and **who bought it**, so a verified purchase can later grant **that subject** the mapped entitlement
+(CORE-MON-003). `purchase_transactions` deliberately has **no buyer column** (CORE-STORE-002): a purchase is named
+**globally** by its `(provider, provider_transaction_id)` pair, so two users submitting the same external receipt
+collapse to one row and the authenticated buyer was verified then discarded. The new Store-owned
+`billing_account_links` table records **which subject** a verified purchase belongs to.
+
+Both verification endpoints (Apple CORE-STORE-003, Google CORE-STORE-004) now **record-then-link in one
+transaction** (reusing the CORE-CONC-002 `TransactionalUnitOfWork`), so the buyer linkage is durably **atomic**
+with the recording. The buyer is the **authenticated caller**, resolved server-side to their `users(id)` profile
+(provisioned on first sight, exactly as `/me/entitlements` resolves the current user) and recorded as a generic
+`User` subject — the **same subject shape** `subject_entitlements` uses, so the buyer-to-entitlement grant chain
+reads it directly. The body carries no subject identity and no premium claim: **who** is buying is the token, not
+anything the client asserts.
+
+The acceptance criterion — "the same external receipt cannot be claimed by two different subjects" — is the
+**unique `billing_account_links(purchase_transaction_id)` index**: a verified purchase is linkable to **only one**
+subject. The same buyer re-submitting their own receipt is **idempotent** (no second row); a **different** subject
+submitting the same receipt is denied **`409 Conflict`** and granted nothing (fail-closed — **user B can never
+bind user A's receipt**), with a generic detail that reveals nothing about the owning subject (threats T5/T7).
+There is **no tenant** on this route (a purchase is global), so the isolation that matters is **per-subject**: one
+buyer's purchase is never claimable through another subject's identity, and a near-identity (the same subject id
+under a different OIDC **issuer**) is a different user and is denied just the same. The link is **immutable** (which
+subject a purchase belongs to never changes), is removed only when its purchase row is (the
+`purchase_transaction_id` foreign key **cascades**), and stores only identifiers — never the verification proof or
+any receipt content. This story adds the `billing_account_links` table and one EF migration.
 
 ### Store notifications
 

@@ -12,8 +12,8 @@ namespace LiveCore.Api.Store;
 ///
 /// NOT TENANT-SCOPED. The table carries NO <c>organization_id</c> and NO buyer column: a purchase is named
 /// globally by its (<c>provider</c>, <c>provider_transaction_id</c>) pair, and the buyer/subject linkage is the
-/// separate <c>billing_account_links</c> table (a later story), exactly as docs/21 lists the two as distinct
-/// "Database additions".
+/// separate <c>billing_account_links</c> table (CORE-MON-002, <see cref="BillingAccountLinkConfiguration"/>),
+/// exactly as docs/21 lists the two as distinct "Database additions".
 ///
 /// THE IDEMPOTENCY GUARANTEE. The single documented critical index is the UNIQUE composite index on
 /// (<c>provider</c>, <c>provider_transaction_id</c>): a provider transaction id is unique within its provider,
