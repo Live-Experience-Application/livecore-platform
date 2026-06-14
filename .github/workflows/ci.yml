@@ -10,6 +10,7 @@
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
+#   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   publish-dry-run      - verify image tags + dry-run build the publish path, no push (CORE-OPS-009)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002)
@@ -258,6 +259,98 @@ jobs:
         if: always()
         run: docker rm --force livecore-api-smoke livecore-worker-smoke || true
 
+  compose-smoke:
+    name: Deployment manifest smoke (CORE-DEP-001)
+    runs-on: ubuntu-latest
+    # CORE-DEP-001: the in-repo deployment manifest (deploy/compose/docker-compose.yml)
+    # must let an operator deploy from this repo alone. The two easy-to-get-wrong
+    # pieces - the migrate-before-API ordering (depends_on:
+    # service_completed_successfully) and the heartbeat liveness probe - used to
+    # exist only as prose. This job proves both:
+    #   1. RENDERS/VALIDATES: a no-Docker static check (scripts/test-compose-deploy.ps1)
+    #      that the manifest wires the migrate gate, the postgres healthcheck, all
+    #      four services and the documented probes, plus `docker compose config`.
+    #   2. STARTS + GATE: brings the stack up against Docker and asserts the
+    #      migrations runner exits 0, the API and worker start ONLY AFTER it
+    #      completes (the gate), and the documented health/readiness/liveness
+    #      endpoints answer 200.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate the compose manifest (gate + probes, no Docker)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-compose-deploy.ps1
+
+      - name: Render the compose manifest
+        run: docker compose -f deploy/compose/docker-compose.yml config
+
+      - name: Start the stack (postgres -> migrate gate -> api + worker)
+        working-directory: deploy/compose
+        run: docker compose up -d --build
+
+      - name: The migrations runner ran to completion (exit 0)
+        working-directory: deploy/compose
+        run: |
+          set -euo pipefail
+          migrate_cid="$(docker compose ps -aq migrate)"
+          exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$migrate_cid")"
+          echo "migrate exit code: $exit_code"
+          if [ "$exit_code" != "0" ]; then
+            docker compose logs migrate
+            echo "Migrations runner did not exit 0."
+            exit 1
+          fi
+
+      - name: The migrate gate blocked API/worker start until migrations completed
+        working-directory: deploy/compose
+        run: |
+          set -euo pipefail
+          migrate_cid="$(docker compose ps -aq migrate)"
+          api_cid="$(docker compose ps -aq api)"
+          worker_cid="$(docker compose ps -aq worker)"
+          migrate_finished="$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$migrate_cid")" +%s%N)"
+          api_started="$(date -d "$(docker inspect -f '{{.State.StartedAt}}' "$api_cid")" +%s%N)"
+          worker_started="$(date -d "$(docker inspect -f '{{.State.StartedAt}}' "$worker_cid")" +%s%N)"
+          echo "migrate finished (ns): $migrate_finished"
+          echo "api started (ns):      $api_started"
+          echo "worker started (ns):   $worker_started"
+          if [ "$api_started" -lt "$migrate_finished" ] || [ "$worker_started" -lt "$migrate_finished" ]; then
+            echo "GATE VIOLATION: API or worker started before migrations completed."
+            exit 1
+          fi
+          echo "Gate held: API and worker started only after the migrations runner completed."
+
+      - name: The documented health/readiness/liveness probes answer 200
+        run: |
+          set -euo pipefail
+          probe() {
+            local url="$1"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --output /dev/null "$url"; then
+                echo "OK: $url answered after $attempt attempt(s)."
+                return 0
+              fi
+              sleep 1
+            done
+            echo "FAILED: $url did not answer 200 in time."
+            return 1
+          }
+          probe http://localhost:8080/health/live    # API liveness
+          probe http://localhost:8080/health/ready    # API readiness
+          probe http://localhost:9464/health/live     # worker per-loop heartbeat liveness
+          probe http://localhost:9464/metrics         # worker Prometheus scrape
+
+      - name: Dump container logs on failure
+        if: failure()
+        working-directory: deploy/compose
+        run: docker compose logs
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: deploy/compose
+        run: docker compose down -v --remove-orphans || true
+
   publish-dry-run:
     name: Publish dry-run (tags verified, images built, never pushed)
     runs-on: ubuntu-latest
@@ -444,6 +537,7 @@ jobs:
       - backup-restore-postgres
       - powershell-lint
       - docker
+      - compose-smoke
       - publish-dry-run
       - migrations
       - integration-postgres

@@ -92,6 +92,9 @@ scripts/test-backup-restore-postgres.ps1  real backup/restore round-trip against
 scripts/LiveCoreMigrationLint.psm1  destructive migration Down() detection + acknowledgement-baseline reconciliation (CORE-DR-004)
 scripts/lint-migration-downs.ps1  CI lint that flags a Down() dropping a table/column for review (roll-forward-only policy, CORE-DR-004)
 scripts/test-migration-down-lint.ps1  tests for the destructive-Down lint logic (CORE-DR-004)
+scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001)
+scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001)
+deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -360,6 +363,28 @@ reconciliation job" below):
 ```bash
 dotnet run --project apps/worker
 ```
+
+### Deploy the whole stack with Docker Compose
+
+The repository ships a runnable deployment stack at
+[`deploy/compose/docker-compose.yml`](deploy/compose/docker-compose.yml)
+(CORE-DEP-001), so an operator can deploy **PostgreSQL + the migrations runner +
+the API + the worker** from this repository alone. From `deploy/compose`:
+
+```bash
+docker compose up -d --build
+```
+
+Compose builds the images from the in-repo Dockerfiles and starts the services in
+order: `postgres` becomes healthy, the one-shot `migrate` runner applies the schema
+and exits, and only then do `api` and `worker` start — the **migrate-before-API
+gate**, expressed as `depends_on: { migrate: { condition:
+service_completed_successfully } }`. It reuses the documented env contract
+(`.env.example`), comes up green for local use with no extra setup, and documents
+production hardening in [`deploy/compose/README.md`](deploy/compose/README.md). The
+migrate gate and the documented health/readiness/liveness probes are tested by
+`scripts/test-compose-deploy.ps1` and the `compose-smoke` CI job. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo deployment manifest").
 
 ### Health endpoints
 

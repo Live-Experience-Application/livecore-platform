@@ -15,9 +15,12 @@ The Core must be self-hostable from the beginning.
 
 ## Local development
 
-Local dev should run with Docker Compose through `livecore-deploy`.
-
-Services:
+The repository ships a runnable Docker Compose stack at
+[`deploy/compose/docker-compose.yml`](../deploy/compose/docker-compose.yml)
+(CORE-DEP-001), so the Core is self-hostable **from this repository alone** — no
+separate `livecore-deploy` checkout is required for the minimal stack. See
+"In-repo deployment manifest" below. A larger local stack with the full set of
+supporting services can still be composed in `livecore-deploy`:
 
 ```text
 api
@@ -28,6 +31,60 @@ valkey
 rustfs
 web or test client where applicable
 ```
+
+### In-repo deployment manifest (CORE-DEP-001)
+
+[`deploy/compose/docker-compose.yml`](../deploy/compose/docker-compose.yml) wires
+the three Core runtime components an operator must run together —
+**PostgreSQL + the migrations runner + the API + the worker** — and is the runnable
+form of the "single VPS with Docker Compose" / "local and small self-hosting"
+options above. Bring it up from `deploy/compose`:
+
+```bash
+docker compose up -d --build
+```
+
+It reuses the documented configuration contract (see "Secret management and the
+configuration contract" below): every setting is an environment variable, none is
+baked into an image, and Compose reads optional overrides from a `.env` file in
+that directory (`deploy/compose/.env.example` lists them). The bundled stack
+defaults to `ASPNETCORE_ENVIRONMENT=Development` so it comes up green with no
+identity provider or object storage configured; `deploy/compose/README.md`
+documents hardening it for production (set `Production`, fill the OIDC/storage/CORS
+values, run published images, terminate TLS at a proxy).
+
+**The migrate-before-API gate.** The API never migrates on startup (above). The
+manifest expresses the run-before ordering with a one-shot `migrate` service (the
+`apps/api/Migrations.Dockerfile` runner) that `api` and `worker` depend on:
+
+```yaml
+depends_on:
+  migrate:
+    condition: service_completed_successfully
+```
+
+so Compose starts the API and worker **only after** the migrations runner exits
+`0` — the Compose equivalent of the Kubernetes pre-install `Job` / init container.
+Both also wait for `postgres` to pass its `pg_isready` healthcheck first.
+
+**The documented health/readiness/liveness probes.** The probe endpoints are
+published on the host so an orchestrator / reverse proxy probes them over HTTP
+(the API/worker images deliberately ship no in-container HTTP client, so probing
+is external):
+
+| Service | Endpoint        | Role                                                    |
+| ------- | --------------- | ------------------------------------------------------- |
+| api     | `/health/live`  | Liveness — restart on failure.                          |
+| api     | `/health/ready` | Readiness — route traffic only while passing (CORE-OPS-005). |
+| worker  | `/health/live`  | Per-loop heartbeat liveness (CORE-DR-003).              |
+| worker  | `/metrics`      | Prometheus scrape.                                       |
+
+**Tested.** `scripts/test-compose-deploy.ps1` statically validates that the
+manifest wires the migrate gate, the postgres healthcheck, all four services and
+the documented probes (no Docker needed), and the `compose-smoke` CI job
+(`.github/workflows/ci.yml`) renders the manifest, brings the stack up and asserts
+the migrations runner exits `0`, the API and worker start **only after** it
+completes, and every probe endpoint answers `200`.
 
 ## Production options
 
@@ -94,7 +151,9 @@ mechanism for a one-shot, run-before primitive:
   succeeds.
 - **Docker Compose** — add a `migrate` service that runs the migrations image to
   completion and make `api` depend on it with
-  `depends_on: { migrate: { condition: service_completed_successfully } }`.
+  `depends_on: { migrate: { condition: service_completed_successfully } }`. The
+  shipped [`deploy/compose/docker-compose.yml`](../deploy/compose/docker-compose.yml)
+  does exactly this (CORE-DEP-001; see "In-repo deployment manifest" above).
 - **Railway** — run the migrations image as the service's pre-deploy command so a
   new release applies migrations before the new API instances accept traffic.
 
@@ -638,12 +697,16 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Backup:Encryption:Passphrase`      | `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`) | yes | for any backup/restore | backup scripts | Backup/restore refuse to run; nothing is written as plaintext (CORE-DR-001) |
 
 The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`),
-`Realtime:Backplane:ChannelPrefix` and the background-job batch sizes (`Assets:Cleanup:BatchSize`,
-`Recaps:Generation:BatchSize`, both default 50–100) are optional tuning with safe defaults (see CORE-OPS-006 /
-CORE-OPS-007 above). The **store** purchase-verification and notification credentials (Apple/Google server keys, signing
-keys) are consumed by the deployment-supplied verification/notification **adapter**, not read from a fixed Core
-key; supply them to that adapter through your secret store, and with no adapter configured store verification
-and notifications fail closed (`503`).
+`Realtime:Backplane:ChannelPrefix`, `Worker:Heartbeat:StaleAfter` and the background-job cadences/batch sizes
+(`Assets:Cleanup:PendingRetention`/`SweepInterval`/`BatchSize`, `Recaps:Generation:SweepInterval`/`BatchSize`,
+`Exports:Processing:SweepInterval`/`BatchSize`) are optional tuning with safe defaults (see CORE-OPS-006 /
+CORE-OPS-007 / CORE-DR-003 above). The billing-gated store-notification reconciliation loop is **off by default**
+and fail-closed: it runs only when a deployment sets `Store:Reconciliation:Enabled=true`
+(`Store__Reconciliation__Enabled`, with optional `:SweepInterval`/`:BatchSize`), per CORE-JOB-003. The repository-root
+[`.env.example`](../.env.example) lists every one of these names. The **store** purchase-verification and notification
+credentials (Apple/Google server keys, signing keys) are consumed by the deployment-supplied
+verification/notification **adapter**, not read from a fixed Core key; supply them to that adapter through your
+secret store, and with no adapter configured store verification and notifications fail closed (`503`).
 
 ### Injecting from a secret store
 

@@ -90,8 +90,10 @@ $camelSplitRegex = New-Object System.Text.RegularExpressions.Regex('([a-z0-9])([
 $acronymSplitRegex = New-Object System.Text.RegularExpressions.Regex('([A-Z]+)([A-Z][a-z])')
 
 # Core source locations. docs/ and csv/ are documentation and intentionally
-# excluded: forbidden terms may appear there only to explain the boundary.
-$sourceDirNames = @('apps', 'packages', 'tests', 'scripts', '.github')
+# excluded: forbidden terms may appear there only to explain the boundary. The
+# deploy/ manifests (CORE-DEP-001) are Core source-adjacent and must stay
+# product-neutral too, so they are scanned.
+$sourceDirNames = @('apps', 'packages', 'tests', 'scripts', '.github', 'deploy')
 $sourceDirs = @(
     $sourceDirNames |
         ForEach-Object { Join-Path $RepoRoot $_ } |

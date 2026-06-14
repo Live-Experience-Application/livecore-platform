@@ -1,0 +1,159 @@
+# LiveCore self-hosting stack — Docker Compose (CORE-DEP-001).
+#
+# A runnable, in-repo deployment manifest that wires the three Core runtime
+# components together so an operator can deploy from THIS repository alone,
+# without the separate livecore-deploy repo:
+#
+#   postgres  — the primary database (the single Core database).
+#   migrate   — the one-shot EF Core migrations runner (apps/api/Migrations.Dockerfile).
+#               Applies every pending migration and exits 0 (idempotent). This is
+#               the deterministic schema step a rollout depends on; the API host
+#               itself never migrates on startup (docs/13_SELF_HOSTING_REQUIREMENTS.md,
+#               "Database migrations").
+#   api       — the ASP.NET Core API host (apps/api/Dockerfile).
+#   worker    — the background worker host (apps/worker/Dockerfile): asset cleanup,
+#               recap generation, export processing and the billing-gated
+#               store-notification reconciliation loops.
+#
+# THE MIGRATE-BEFORE-API GATE (the piece this manifest exists to make real).
+# `api` and `worker` declare `depends_on: { migrate: { condition:
+# service_completed_successfully } }`, so Compose starts them ONLY after the
+# migrations runner has run to completion and exited 0. A fresh `up` therefore
+# applies the schema deterministically before the API or worker serve/process
+# anything — exactly the ordering docs/13 prescribes for a Compose deployment.
+# Both also wait for `postgres` to pass its healthcheck first.
+#
+# THE DOCUMENTED HEALTH / READINESS / LIVENESS PROBES.
+# The probe endpoints are unauthenticated by convention and an orchestrator /
+# reverse proxy probes them over HTTP (docs/13, README "Health endpoints"):
+#   API    — GET /health/live  (liveness: restart-on-failure)
+#            GET /health/ready  (readiness: route-traffic-when-passing)
+#   worker — GET /health/live  (the per-loop heartbeat liveness; healthy only
+#            when every active job loop is beating, CORE-DR-003)
+#            GET /metrics       (Prometheus scrape)
+# The API/worker runtime images deliberately ship NO HTTP client tooling and
+# define no in-container HEALTHCHECK (apps/api/Dockerfile, apps/worker/Dockerfile):
+# probing is done from outside the container over HTTP, the way a kubelet/proxy
+# does it. The ports are published below so an operator (and the CI smoke,
+# scripts/test-compose-deploy.ps1 + the compose-smoke job) probe them on the host.
+#
+# CONFIGURATION reuses the documented env contract (CORE-OPS-008): every value is
+# an environment variable, none is baked into an image, and the names match
+# .env.example at the repository root. Compose reads optional overrides from a
+# `.env` file in this directory (see .env.example here); unset values fall back to
+# the safe local defaults below, so the stack comes up with `docker compose up`
+# and no extra setup. Harden it for production by following deploy/compose/README.md.
+name: livecore
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livecore}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-livecore}
+      POSTGRES_DB: ${POSTGRES_DB:-livecore}
+    volumes:
+      - livecore-postgres-data:/var/lib/postgresql/data
+    # The dependency gate below is built on this healthcheck: `migrate` (and
+    # therefore `api`/`worker`) only start once PostgreSQL accepts connections.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-livecore} -d ${POSTGRES_DB:-livecore}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: apps/api/Migrations.Dockerfile
+    image: livecore-migrations:local
+    environment:
+      # The migrations runner reads the SAME connection-string key the API and
+      # worker read (no credentials in the image; supplied at run time).
+      ConnectionStrings__Database: ${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # A run-to-completion job: it applies the migrations and exits 0. It must not
+    # be restarted (a restart would re-run it pointlessly); its exit code is the
+    # success signal the api/worker gate waits on.
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    image: livecore-api:local
+    environment:
+      # Development by default so the bundled stack (no OIDC/storage configured)
+      # comes up green and BOTH /health/live and /health/ready report Healthy.
+      # For a real deployment set ASPNETCORE_ENVIRONMENT=Production and fill the
+      # [prod-required] OIDC/storage/CORS values (see deploy/compose/README.md),
+      # after which the production readiness gate enforces them (CORE-OPS-005).
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__Database: ${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore}
+      # [prod-required] OIDC — unset here (fail-closed: authenticated routes 401).
+      Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-}
+      Authentication__Oidc__Audience: ${Authentication__Oidc__Audience:-}
+      Authentication__Oidc__RequireHttpsMetadata: ${Authentication__Oidc__RequireHttpsMetadata:-}
+      # Edge posture (CORE-OPS-003): the deployment runs behind a TLS-terminating
+      # reverse proxy. Trust the Compose network as a forwarding proxy and set the
+      # public host(s)/CORS origins for a browser front-end.
+      AllowedHosts: ${AllowedHosts:-localhost;127.0.0.1}
+      ForwardedHeaders__KnownNetworks__0: ${ForwardedHeaders__KnownNetworks__0:-}
+      Cors__AllowedOrigins__0: ${Cors__AllowedOrigins__0:-}
+      # Object storage (CORE-OPS-006) and the realtime backplane (CORE-OPS-007)
+      # are unset here, so asset ops fail closed (503) and a single API instance
+      # uses the in-process backplane. Fill these to enable media / scale out.
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-}
+      Assets__Storage__AccessKeyId: ${Assets__Storage__AccessKeyId:-}
+      Assets__Storage__SecretAccessKey: ${Assets__Storage__SecretAccessKey:-}
+      Realtime__Backplane__ConnectionString: ${Realtime__Backplane__ConnectionString:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # THE GATE: do not start the API until the migrations runner exits 0.
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Liveness: GET /health/live, Readiness: GET /health/ready, Metrics: /metrics.
+      - "${LIVECORE_API_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+    image: livecore-worker:local
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ConnectionStrings__Database: ${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore}
+      # The worker's metrics/health surface (CORE-DR-003) binds this URL inside
+      # the container; the port is published below for the host-side liveness probe.
+      Worker__Metrics__Url: ${Worker__Metrics__Url:-http://0.0.0.0:9464}
+      # Object storage is shared with the API so the asset-cleanup loop can delete
+      # the objects of abandoned upload intents (unset = the loop no-ops, 503).
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-}
+      Assets__Storage__AccessKeyId: ${Assets__Storage__AccessKeyId:-}
+      Assets__Storage__SecretAccessKey: ${Assets__Storage__SecretAccessKey:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # THE GATE: the worker queries the schema, so it also waits for migrations.
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Per-loop heartbeat liveness: GET /health/live; Prometheus scrape: GET /metrics.
+      - "${LIVECORE_WORKER_METRICS_PORT:-9464}:9464"
+    restart: unless-stopped
+
+volumes:
+  # Named volume so the database survives `docker compose down` (use
+  # `docker compose down -v` to discard it).
+  livecore-postgres-data:
