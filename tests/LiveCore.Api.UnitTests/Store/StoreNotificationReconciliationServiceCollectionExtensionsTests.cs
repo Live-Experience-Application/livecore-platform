@@ -78,6 +78,9 @@ public class StoreNotificationReconciliationServiceCollectionExtensionsTests
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IReconcilablePurchaseReader));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(StoreNotificationService));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(StoreNotificationReconciliationOptions));
+        // The revocation graph (CORE-MON-004) is wired too, so the sweep can revoke a granted entitlement when it
+        // converges a purchase to a revoked state (a missed refund only the reconciliation job can apply).
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(PurchaseEntitlementRevocationService));
     }
 
     [Fact]

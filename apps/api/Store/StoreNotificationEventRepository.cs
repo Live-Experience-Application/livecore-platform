@@ -44,7 +44,7 @@ internal sealed class StoreNotificationEventRepository : IStoreNotificationEvent
     }
 
     /// <inheritdoc />
-    public async Task<StoreNotificationEvent?> FindLatestByProviderTransactionAsync(
+    public async Task<IReadOnlyList<StoreNotificationEvent>> ListByProviderTransactionAsync(
         PurchaseProvider provider,
         string providerTransactionId,
         CancellationToken cancellationToken)
@@ -58,23 +58,17 @@ internal sealed class StoreNotificationEventRepository : IStoreNotificationEvent
 
         var normalized = providerTransactionId.Trim();
 
-        // Read the purchase's notifications (filtered in SQL by the (provider, provider_transaction_id) index) and
-        // pick the latest in memory. A purchase has only a handful of lifecycle notifications, so materializing them
-        // is cheap — and ordering happens client-side because the SQLite provider used in the test harness cannot
-        // ORDER BY a DateTimeOffset column (a provider limitation, not a Postgres one). Latest is by the store's
-        // reported event time, ties broken by the time-ordered (UUID v7) row id so the result is deterministic when
-        // two notifications report the same occurred_at.
-        var notifications = await _dbContext.StoreNotificationEvents
+        // Read the purchase's notifications (filtered in SQL by the (provider, provider_transaction_id) index). A
+        // purchase has only a handful of lifecycle notifications, so materializing them is cheap; the caller folds
+        // the monotonic state machine over them in memory (event-time ordering happens client-side because the
+        // SQLite provider used in the test harness cannot ORDER BY a DateTimeOffset column — a provider limitation,
+        // not a Postgres one).
+        return await _dbContext.StoreNotificationEvents
             .AsNoTracking()
             .Where(notification => notification.Provider == provider
                 && notification.ProviderTransactionId == normalized)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
-
-        return notifications
-            .OrderByDescending(notification => notification.OccurredAt)
-            .ThenByDescending(notification => notification.Id)
-            .FirstOrDefault();
     }
 
     /// <inheritdoc />

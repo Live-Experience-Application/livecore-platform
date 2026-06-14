@@ -24,15 +24,15 @@ public interface IStoreNotificationEventRepository
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Finds the most recent handled notification for a purchase — the recorded notification for the given
-    /// (provider, provider transaction id) pair with the latest <see cref="StoreNotificationEvent.OccurredAt"/>
-    /// (ties broken by the time-ordered row id, so the lookup is deterministic) — or <see langword="null"/> when
-    /// the purchase has no recorded notifications. This is the reconciliation re-derivation lookup (CORE-JOB-003):
-    /// the latest-by-event-time notification's <see cref="StoreNotificationEvent.AppliedStatus"/> is the purchase's
-    /// converged status, regardless of the order the notifications were delivered or applied in.
+    /// Lists every recorded notification for a purchase — all rows for the given (provider, provider transaction id)
+    /// pair — or an empty list when the purchase has no recorded notifications. This is the reconciliation
+    /// re-derivation lookup (CORE-JOB-003 / CORE-MON-004): the purchase's converged status is the MONOTONIC FOLD of
+    /// these notifications' <see cref="StoreNotificationEvent.AppliedStatus"/> values in event-time order
+    /// (<see cref="PurchaseTransactionStatusMachine.Converge"/>), regardless of the order the notifications were
+    /// delivered or applied — so a refund stays revoked even if a later renewal was recorded after it.
     /// </summary>
     /// <exception cref="System.ArgumentException">The provider transaction id is blank.</exception>
-    Task<StoreNotificationEvent?> FindLatestByProviderTransactionAsync(
+    Task<IReadOnlyList<StoreNotificationEvent>> ListByProviderTransactionAsync(
         PurchaseProvider provider,
         string providerTransactionId,
         CancellationToken cancellationToken);

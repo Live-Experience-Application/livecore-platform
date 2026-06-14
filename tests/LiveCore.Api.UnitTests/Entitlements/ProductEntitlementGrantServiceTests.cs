@@ -67,6 +67,19 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
         return await service.GrantForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
     }
 
+    private async Task<ProductEntitlementRevocationResult> RevokeForProductAsync(
+        EntitlementSubjectType subjectType, Guid subjectId, string productReference, DateTimeOffset at)
+    {
+        await using var context = CreateContext();
+        var service = new ProductEntitlementGrantService(
+            new PlanDefinitionRepository(context),
+            new SubjectEntitlementAssignmentService(
+                new SubjectEntitlementRepository(context),
+                new PlanDefinitionRepository(context),
+                new EntitlementDefinitionRepository(context)));
+        return await service.RevokeForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
+    }
+
     private async Task<EffectiveEntitlements> ResolveAsync(EntitlementSubjectType subjectType, Guid subjectId)
     {
         await using var context = CreateContext();
@@ -235,6 +248,100 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
         Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
     }
 
+    // --- Revoke: the inverse of the grant (CORE-MON-004) ------------------------
+
+    [Fact]
+    public async Task Revoking_a_mapped_product_revokes_the_plans_entitlements_from_the_buyer()
+    {
+        var plan = await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+        Assert.Equal(2, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+
+        var result = await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(1));
+
+        Assert.Equal(ProductEntitlementRevocationOutcome.Revoked, result.Outcome);
+        Assert.Equal(plan.Id, result.PlanDefinitionId);
+        Assert.Equal(2, result.RevokedCount);
+
+        // The revoked entitlements no longer resolve (the assignment rows are retained but inactive).
+        Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+        // The records are retained, not deleted, so the grant/revoke trail stays.
+        Assert.Equal(2, await SubjectEntitlementCountAsync(EntitlementSubjectType.User, subjectId));
+    }
+
+    [Fact]
+    public async Task Revoking_is_idempotent_and_a_never_held_entitlement_revokes_nothing()
+    {
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        // The subject was never granted this product, so there is nothing to revoke — a safe no-op (count 0).
+        var first = await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+        Assert.Equal(ProductEntitlementRevocationOutcome.Revoked, first.Outcome);
+        Assert.Equal(0, first.RevokedCount);
+
+        // Grant then revoke twice: the second revoke still reports the outcome but the assignments are already revoked.
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(1));
+        Assert.Equal(2, (await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(2))).RevokedCount);
+        Assert.Equal(2, (await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(3))).RevokedCount);
+        Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+    }
+
+    [Fact]
+    public async Task Revoking_an_unmapped_product_revokes_nothing()
+    {
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        var result = await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, "product.unmapped", _at);
+
+        Assert.Equal(ProductEntitlementRevocationOutcome.ProductNotMapped, result.Outcome);
+        Assert.Null(result.PlanDefinitionId);
+        Assert.Equal(0, result.RevokedCount);
+    }
+
+    [Fact]
+    public async Task Revoking_resolves_a_retired_plan_so_a_refund_still_revokes()
+    {
+        // A buyer was granted while the plan was active; the plan is later retired; a refund must still revoke the
+        // previously-granted entitlement (revoke does not require an active plan, unlike grant).
+        var adFree = await SeedDefinitionAsync(FlagDefinition(_adsDisabledKey));
+        var plan = PlanDefinition.Define(_productReference, "Premium", null, _at);
+        plan.GrantFlag(adFree, true);
+        await SeedPlanAsync(plan);
+        var subjectId = Guid.CreateVersion7();
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+        Assert.True((await ResolveAsync(EntitlementSubjectType.User, subjectId)).IsFlagEnabled(_adsDisabledKey));
+
+        // Retire the plan, then refund.
+        await using (var context = CreateContext())
+        {
+            var stored = await new PlanDefinitionRepository(context).FindByKeyAsync(_productReference, CancellationToken.None);
+            stored!.Deactivate(_at.AddHours(1));
+            await context.SaveChangesAsync();
+        }
+
+        var result = await RevokeForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(2));
+
+        Assert.Equal(ProductEntitlementRevocationOutcome.Revoked, result.Outcome);
+        Assert.Equal(1, result.RevokedCount);
+        Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("Not A Valid Key!")]
+    public async Task Revoking_a_blank_or_invalid_product_reference_revokes_nothing(string productReference)
+    {
+        await SeedProductPlanAsync();
+
+        var result = await RevokeForProductAsync(EntitlementSubjectType.User, Guid.CreateVersion7(), productReference, _at);
+
+        Assert.Equal(ProductEntitlementRevocationOutcome.ProductNotMapped, result.Outcome);
+    }
+
     // --- Guards -----------------------------------------------------------------
 
     [Fact]
@@ -242,5 +349,12 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
     {
         await Assert.ThrowsAsync<ArgumentException>(() =>
             GrantForProductAsync(EntitlementSubjectType.User, Guid.Empty, _productReference, _at));
+    }
+
+    [Fact]
+    public async Task An_empty_subject_id_is_rejected_on_revoke()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            RevokeForProductAsync(EntitlementSubjectType.User, Guid.Empty, _productReference, _at));
     }
 }

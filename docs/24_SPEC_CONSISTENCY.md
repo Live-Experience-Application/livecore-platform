@@ -121,8 +121,31 @@ existing `plan_definitions`/`plan_entitlements`/`subject_entitlements` model,
 mapping a purchase's `product_reference` to a generic plan by the plan's stable key
 and reusing `SubjectEntitlementAssignmentService.AssignFromPlanAsync` — so
 `csv/database_tables.csv`, the `docs/10` table list and the spec-consistency check
-are unchanged. The remaining v1 acceptance bullets (refund/cancellation revocation
-staying revoked) are CORE-MON-004.
+are unchanged. The remaining v1 acceptance bullet (refund/cancellation revocation
+staying revoked) is CORE-MON-004, below.
+
+**Revoke note (CORE-MON-004 made the purchase status machine monotonic).** The
+second v1 monetization acceptance bullet above — "a refund, cancellation or
+chargeback revokes or downgrades the granted entitlement and **stays revoked** (a
+revoked state is terminal — a later renewal cannot resurrect it)" — is now
+**implemented**. The purchase status machine is **monotonic**: the revoked states
+(`Refunded`, `Cancelled`) are **absorbing** (`PurchaseTransaction.ChangeStatus` /
+`PurchaseTransactionStatusMachine`), so a later-occurring renewal can never flip a
+refunded purchase back to `Active`, neither on the synchronous webhook nor through
+reconciliation — reconciliation re-derives a purchase's status by a **monotonic
+fold** over all its recorded notifications in event-time order, not just the
+latest one. When a notification drives a purchase into a revoked state the granted
+`SubjectEntitlement` is **revoked** (`PurchaseEntitlementRevocationService`, the
+inverse of the CORE-MON-003 grant chain, reusing
+`SubjectEntitlementAssignmentService.RevokeAsync`), so premium disappears from the
+effective-entitlements read and stays gone. CORE-MON-004 **adds no new table** —
+it composes the existing `purchase_transactions`/`purchase_events`,
+`billing_account_links` and `subject_entitlements` model — so
+`csv/database_tables.csv`, the `docs/10` table list and the spec-consistency check
+are unchanged. It also hardens the store-notification `OccurredAt` (rejecting a
+defaulted/absurd-past or implausible-future event time), since that timestamp is
+the ordering key reconciliation derives a purchase's converged status from. With
+CORE-MON-004 the v1 monetization acceptance is complete.
 
 ## Genuinely deferred items
 

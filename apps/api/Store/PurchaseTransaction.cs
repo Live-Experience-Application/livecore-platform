@@ -150,20 +150,31 @@ public sealed class PurchaseTransaction
     }
 
     /// <summary>
-    /// Changes the purchase's lifecycle state and reports whether it actually changed. Returns
-    /// <see langword="true"/> when the status moved (the caller records a <see cref="PurchaseEvent"/> for the
-    /// change), or <see langword="false"/> when the new status equals the current one — an IDEMPOTENT no-op that
-    /// changes nothing and writes no audit event, so a repeated or replayed state change (a duplicate store
-    /// notification) is safe ("Store notifications must be idempotent", docs/21).
+    /// Changes the purchase's lifecycle state through the MONOTONIC state machine and reports whether it actually
+    /// changed. Returns <see langword="true"/> when the status moved (the caller records a
+    /// <see cref="PurchaseEvent"/> for the change), or <see langword="false"/> when nothing changed — either because
+    /// the new status equals the current one (an IDEMPOTENT no-op, so a repeated or replayed state change is safe,
+    /// "Store notifications must be idempotent", docs/21) OR because the move is FORBIDDEN by the state machine.
     ///
-    /// This is the generic, validated state-change primitive: it does not encode which transitions a particular
-    /// store notification implies, nor the entitlement effect of a refund or cancellation — that lives in the
-    /// later store-notification handler (CORE-STORE-005). It only mutates the persisted state and surfaces the
-    /// before/after for the audit trail.
+    /// MONOTONIC, ABSORBING REVOKED STATES (CORE-MON-004). A revoked state
+    /// (<see cref="PurchaseTransactionStatus.Refunded"/>, which a refund/chargeback drives, and
+    /// <see cref="PurchaseTransactionStatus.Cancelled"/>) is TERMINAL: once the purchase is in it, no later
+    /// notification — a renewal back to <see cref="PurchaseTransactionStatus.Active"/>, a grace period, or even the
+    /// other revoked kind — can move it (<see cref="PurchaseTransactionStatusMachine.CanTransitionTo"/>). So a
+    /// later-occurring renewal can never flip a refunded purchase back to active and silently re-grant premium
+    /// ("Refunds and chargebacks must revoke or downgrade entitlements"; "a revoked state is terminal", docs/21 /
+    /// docs/24). A forbidden move is a no-op (no state change, no advanced timestamp, no audit event), exactly like
+    /// a move to the same status — the late notification is simply ignored. The non-revoked states still transition
+    /// freely (an <c>Active</c> ↔ <c>InGracePeriod</c> recovery is unaffected).
+    ///
+    /// This is the generic, validated state-change primitive: it does not encode which store notification implies
+    /// which transition, nor the entitlement effect of a refund or cancellation — the notification mapping lives in
+    /// the store-notification handler (CORE-STORE-005) and the entitlement revocation in CORE-MON-004's revocation
+    /// service. It only mutates the persisted state monotonically and surfaces the before/after for the audit trail.
     /// </summary>
     /// <param name="newStatus">The status to move to.</param>
     /// <param name="occurredAt">When the change occurred.</param>
-    /// <returns><see langword="true"/> if the status changed; <see langword="false"/> if it was already this status.</returns>
+    /// <returns><see langword="true"/> if the status changed; <see langword="false"/> if it was a no-op or a forbidden move.</returns>
     /// <exception cref="ArgumentOutOfRangeException">The status is not a defined value.</exception>
     public bool ChangeStatus(PurchaseTransactionStatus newStatus, DateTimeOffset occurredAt)
     {
@@ -173,6 +184,14 @@ public sealed class PurchaseTransaction
         }
 
         if (newStatus == Status)
+        {
+            return false;
+        }
+
+        // Enforce the monotonic machine: a revoked (Refunded/Cancelled) state is absorbing, so a move out of it (a
+        // renewal/grace-period/other-revocation notification arriving later) is rejected and the purchase stays
+        // revoked. The move is treated as a no-op so a late, legitimately-delivered notification never errors.
+        if (!PurchaseTransactionStatusMachine.CanTransitionTo(Status, newStatus))
         {
             return false;
         }

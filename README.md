@@ -96,7 +96,7 @@ csv/                     backlog stories and forbidden term list
 
 The Core includes product-neutral Entitlements, Quotas, Purchase Verification and Ad Eligibility contracts so that mobile apps cannot bypass limits or premium state client-side.
 Core does not render ads, own mobile screens, or contain App Store / Google Play marketing copy.
-Billing/monetization is in scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted, auditable and grants the buyer the mapped `SubjectEntitlement`, refunds/cancellations revoke or downgrade it, and free-tier quotas are enforced server-side. The verify-and-record foundation (CORE-STORE-001..005, CORE-ENTL-001..004, CORE-ADS-001) is implemented, and so is the purchase-to-entitlement grant chain: the `billing_account_links` buyer linkage (CORE-MON-002) and the product-to-plan-to-entitlement grant (CORE-MON-003 — a verified, buyer-linked purchase grants the mapped `SubjectEntitlement` idempotently, reusing the existing plan/assignment model with no new table). The remaining Monetization v1 work (CORE-MON-004..010, e.g. the refund/cancellation revocation staying revoked) is in progress; the epic reversed the earlier CORE-DOC-002 post-v1 deferral. The single source of truth for the v1 monetization scope and acceptance is `docs/24_SPEC_CONSISTENCY.md`.
+Billing/monetization is in scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted, auditable and grants the buyer the mapped `SubjectEntitlement`, refunds/cancellations revoke or downgrade it, and free-tier quotas are enforced server-side. The verify-and-record foundation (CORE-STORE-001..005, CORE-ENTL-001..004, CORE-ADS-001) is implemented, and so is the purchase-to-entitlement grant chain: the `billing_account_links` buyer linkage (CORE-MON-002), the product-to-plan-to-entitlement grant (CORE-MON-003 — a verified, buyer-linked purchase grants the mapped `SubjectEntitlement` idempotently, reusing the existing plan/assignment model with no new table), and the **monotonic purchase status machine** (CORE-MON-004 — the revoked states `Refunded`/`Cancelled` are terminal/absorbing, so a refund/cancellation/chargeback revokes the granted entitlement and **stays revoked**: a later renewal cannot resurrect it on the webhook or through reconciliation, which re-derives status by a monotonic fold over the recorded notifications). The remaining Monetization v1 work (CORE-MON-005..010) is in progress; the epic reversed the earlier CORE-DOC-002 post-v1 deferral. The single source of truth for the v1 monetization scope and acceptance is `docs/24_SPEC_CONSISTENCY.md`.
 
 ## Prerequisites
 
@@ -2096,14 +2096,15 @@ are reconciled so entitlement state converges; idempotent"** (the acceptance cri
 
 It **re-derives entitlement state from `store_notification_events`** (extended this story with the store's
 reported `occurred_at` event time) **and `purchase_events`** (the current purchase status is the head of that
-append-only trail): the converged status is the applied status of the notification with the **latest
-`occurred_at`**, regardless of the order notifications were delivered or applied. It **reuses
+append-only trail): the converged status is the **monotonic fold** of all the purchase's recorded notifications
+in `occurred_at` order (CORE-MON-004 — a revoked state is absorbing, so a refund stays revoked even when a later
+renewal was recorded after it), regardless of the order notifications were delivered or applied. It **reuses
 `StoreNotificationService`** — the new `ReconcileTransactionAsync` converges a purchase by reusing the same
 audited, idempotent `PurchaseTransactionService.ChangeStatusAsync` the webhook uses (stamped with the
 authoritative notification's event time), so no parallel pipeline is built and every convergence is audited on
 the `purchase_events` trail exactly as a webhook-driven change is. Drifted purchases come from
-`IReconcilablePurchaseReader`; a reconciled purchase matches its latest notification and drops out, so a bounded
-sweep makes progress.
+`IReconcilablePurchaseReader`; a reconciled purchase matches its converged status and drops out (and a purchase
+already in a revoked/terminal state is never a candidate), so a bounded sweep makes progress.
 
 It is **idempotent** and **fail-closed**. Reconciliation re-derives from immutable ledger facts and converges
 to the same state every time (a consistent purchase is a no-op, no status change and no audit event), so a
@@ -2121,10 +2122,10 @@ register no adapter until a deployment supplies one. The reconciliation logic li
 (`StoreNotificationReconciliationService`, reusing `StoreNotificationService`); the worker only schedules it
 (`StoreNotificationReconciliationBackgroundService`, every `Store:Reconciliation:SweepInterval`, in bounded
 `Store:Reconciliation:BatchSize` batches). The sweep is per-purchase **resilient**: a purchase whose
-convergence fails is logged and counted and left for the next sweep, without aborting the run. Granting/revoking
-the linked `SubjectEntitlement` from the converged purchase status (which needs the buyer linkage,
-`billing_account_links`) remains a follow-up, as does a SQL window-function candidate query for high-volume
-deployments.
+convergence fails is logged and counted and left for the next sweep, without aborting the run. When the converged
+status is a revoked state the sweep **revokes** the buyer-linked `SubjectEntitlement` too (CORE-MON-004, the
+inverse of the grant chain — the missed-refund revoke path only reconciliation can apply); a SQL window-function
+candidate query for high-volume deployments remains a follow-up.
 
 ### Worker liveness heartbeat
 

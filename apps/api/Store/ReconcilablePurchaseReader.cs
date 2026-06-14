@@ -4,12 +4,14 @@ using Microsoft.EntityFrameworkCore;
 namespace LiveCore.Api.Store;
 
 /// <summary>
-/// EF Core implementation of <see cref="IReconcilablePurchaseReader"/> (CORE-JOB-003). It returns the persisted
-/// purchases whose current <see cref="PurchaseTransaction.Status"/> differs from the
-/// <see cref="StoreNotificationEvent.AppliedStatus"/> of their latest-by-event-time recorded notification — the
-/// drift a missed or out-of-order store delivery leaves behind. The "latest notification" is the recorded
-/// notification with the greatest <see cref="StoreNotificationEvent.OccurredAt"/> (ties broken by the time-ordered
-/// row id). A purchase with no notifications is excluded (nothing to reconcile against).
+/// EF Core implementation of <see cref="IReconcilablePurchaseReader"/> (CORE-JOB-003 / CORE-MON-004). It returns
+/// the persisted purchases whose current <see cref="PurchaseTransaction.Status"/> differs from the status the
+/// MONOTONIC FOLD of their recorded notifications implies (<see cref="PurchaseTransactionStatusMachine.Converge"/>)
+/// — the drift a missed or out-of-order store delivery leaves behind. A purchase ALREADY in a revoked (terminal)
+/// state is never reconcilable: a revoked state is absorbing, so it can neither drift nor be reconciled away — and
+/// using the same monotonic fold the convergence uses keeps the candidate set and the convergence in agreement, so
+/// a later renewal recorded after a refund never re-flags the refunded purchase as drifted (which would otherwise
+/// spin the bounded sweep forever). A purchase with no notifications is excluded (nothing to reconcile against).
 ///
 /// <para>
 /// LATEST-BY-EVENT-TIME IS COMPUTED CLIENT-SIDE. Determining the latest notification cannot be expressed in SQL
@@ -49,14 +51,14 @@ internal sealed class ReconcilablePurchaseReader : IReconcilablePurchaseReader
             throw new ArgumentOutOfRangeException(nameof(batchSize), batchSize, "The batch size must be positive.");
         }
 
-        // A purchase needs reconciliation when its LATEST recorded notification (by the store's reported event
-        // time) implies a status that differs from the purchase's current status — the drift a missed or
-        // out-of-order delivery leaves behind. Determining "latest by event time" cannot be pushed into SQL here:
-        // the SQLite provider used in the test harness cannot ORDER BY or aggregate a DateTimeOffset column, and a
-        // triply-correlated "no later notification" subquery does not translate either. So the latest-per-purchase
-        // is computed client-side from two translatable single-level queries. Store receipts/billing are out of
-        // scope for Core v1 and this job is off by default (gated on Store:Reconciliation:Enabled), so the ledger
-        // is low-volume; a SQL window-function form for high-volume deployments is a documented follow-up.
+        // A purchase needs reconciliation when the MONOTONIC FOLD of its recorded notifications (in event-time
+        // order) implies a status that differs from the purchase's current status — the drift a missed or
+        // out-of-order delivery leaves behind. The fold cannot be pushed into SQL here: the SQLite provider used in
+        // the test harness cannot ORDER BY or aggregate a DateTimeOffset column, and the monotonic fold is a
+        // sequential reduction, not a single aggregate. So the converged-per-purchase status is computed client-side
+        // from two translatable single-level queries. Store receipts/billing are out of scope for Core v1 and this
+        // job is off by default (gated on Store:Reconciliation:Enabled), so the ledger is low-volume; a SQL form for
+        // high-volume deployments is a documented follow-up.
 
         // Purchases that have at least one recorded notification, with their current status (single-level EXISTS).
         var purchases = await _dbContext.PurchaseTransactions
@@ -96,26 +98,26 @@ internal sealed class ReconcilablePurchaseReader : IReconcilablePurchaseReader
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        // Latest notification per purchase, by the store's reported event time, ties broken by the time-ordered
-        // (UUID v7) row id so the result is deterministic.
-        var latestAppliedStatusByPurchase = notifications
+        // Converged status per purchase: the monotonic fold of its notifications in event-time order (the same fold
+        // the reconciliation convergence uses), so a revoked state is absorbing and a later renewal recorded after a
+        // refund does not change the converged status.
+        var convergedStatusByPurchase = notifications
             .GroupBy(notification => (notification.Provider, notification.ProviderTransactionId))
             .ToDictionary(
                 group => group.Key,
-                group => group
-                    .OrderByDescending(notification => notification.OccurredAt)
-                    .ThenByDescending(notification => notification.Id)
-                    .First()
-                    .AppliedStatus);
+                group => PurchaseTransactionStatusMachine.Converge(
+                    group.Select(notification => (notification.AppliedStatus, notification.OccurredAt, notification.Id))).Status);
 
-        // Keep only the drifted purchases — the latest notification's applied status differs from the current
-        // status. A reconciled purchase will then match and drop out, so a bounded sweep makes progress. Ordered
-        // deterministically by the (provider, provider transaction id) idempotency key.
+        // Keep only the drifted purchases — the converged status differs from the current status — and EXCLUDE any
+        // purchase already in a revoked (terminal/absorbing) state: it can neither drift nor be reconciled away, so
+        // flagging it would spin the bounded sweep forever. A reconciled purchase then matches and drops out, so a
+        // bounded sweep makes progress. Ordered deterministically by the (provider, provider transaction id) key.
         return purchases
             .Where(purchase =>
-                latestAppliedStatusByPurchase.TryGetValue(
-                    (purchase.Provider, purchase.ProviderTransactionId), out var latestAppliedStatus)
-                && latestAppliedStatus != purchase.Status)
+                !PurchaseTransactionStatusMachine.IsRevoked(purchase.Status)
+                && convergedStatusByPurchase.TryGetValue(
+                    (purchase.Provider, purchase.ProviderTransactionId), out var convergedStatus)
+                && convergedStatus != purchase.Status)
             .OrderBy(purchase => purchase.Provider)
             .ThenBy(purchase => purchase.ProviderTransactionId, StringComparer.Ordinal)
             .Take(batchSize)

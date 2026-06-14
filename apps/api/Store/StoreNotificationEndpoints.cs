@@ -112,8 +112,20 @@ internal static class StoreNotificationEndpoints
 
             case StoreNotificationParseStatus.Parsed:
                 var now = deps.TimeProvider.GetUtcNow();
+                var notification = parseResult.Notification!;
+
+                // Reject an implausible-future event time (CORE-MON-004), recording nothing. OccurredAt is the
+                // ordering key reconciliation derives a purchase's converged status from; a value far ahead of our
+                // clock (a store/adapter bug or a manipulated value) would dominate that ordering, so it is
+                // fail-closed rejected with the clock-skew tolerance. The early/defaulted floor is enforced upstream
+                // in StoreNotification.Create.
+                if (notification.OccurredAt > now + StoreNotification.MaxFutureClockSkew)
+                {
+                    return NotificationRejected("The store notification event time is implausibly far in the future.");
+                }
+
                 var result = await deps.Notifications
-                    .HandleAsync(parseResult.Notification!, now, cancellationToken)
+                    .HandleAsync(notification, now, cancellationToken)
                     .ConfigureAwait(false);
                 return Results.Ok(StoreNotificationAck.From(result.Outcome));
 

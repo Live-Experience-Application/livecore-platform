@@ -50,6 +50,32 @@ public sealed class StoreNotificationTests
             StoreNotification.Create((PurchaseProvider)999, "ntf-1", StoreNotificationType.Refunded, "txn-1", _at));
 
     [Fact]
+    public void Create_rejects_a_defaulted_event_time()
+        // A defaulted/zero OccurredAt (CORE-MON-004) would corrupt the event-time ordering reconciliation re-derives
+        // a purchase's converged status from, so it is rejected fail-closed rather than normalized into the ledger.
+        => Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StoreNotification.Create(PurchaseProvider.Apple, "ntf-1", StoreNotificationType.Refunded, "txn-1", default));
+
+    [Fact]
+    public void Create_rejects_an_absurdly_early_event_time()
+        => Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StoreNotification.Create(
+                PurchaseProvider.Apple,
+                "ntf-1",
+                StoreNotificationType.Refunded,
+                "txn-1",
+                StoreNotification.MinOccurredAt.AddSeconds(-1)));
+
+    [Fact]
+    public void Create_accepts_an_event_time_on_the_minimum_bound()
+    {
+        var notification = StoreNotification.Create(
+            PurchaseProvider.Apple, "ntf-1", StoreNotificationType.Refunded, "txn-1", StoreNotification.MinOccurredAt);
+
+        Assert.Equal(StoreNotification.MinOccurredAt, notification.OccurredAt);
+    }
+
+    [Fact]
     public void Notification_to_string_carries_identifiers_but_no_payload()
     {
         var text = StoreNotification.Create(

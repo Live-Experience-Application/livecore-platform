@@ -456,6 +456,63 @@ verified, buyer-linked purchase now grants the buyer the mapped
   **revocation** side of the chain, and the monotonic (absorbing-revoked) purchase
   state machine, are CORE-MON-004.
 
+## Monotonic purchase status and refund revocation — implemented (CORE-MON-004)
+
+CORE-MON-003 implemented the **grant** side of the chain and pointed the
+refund/cancellation **revocation** side, plus the monotonic purchase state machine,
+to here. CORE-MON-004 implements them — the second v1 monetization acceptance
+bullet (`docs/24_SPEC_CONSISTENCY.md`): a refund/cancellation/chargeback revokes the
+granted entitlement and **stays revoked** ("Refunds and chargebacks must revoke or
+downgrade entitlements", the Security requirements below; "a revoked state is
+terminal").
+
+- **Monotonic, absorbing revoked states.** The purchase status machine
+  (`PurchaseTransaction.ChangeStatus`, backed by the product-neutral
+  `PurchaseTransactionStatusMachine`) is now **monotonic**: the revoked states
+  `Refunded` (which a refund/chargeback drives) and `Cancelled` are **terminal /
+  absorbing**. Once a purchase is in one, no later notification — a renewal back to
+  `Active`, a grace period, or even the other revoked kind — can move it. Previously
+  `ChangeStatus` allowed **any** transition, so a legitimate `DID_RENEW` with a later
+  event time than a refund flipped `Refunded → Active` and silently re-granted
+  premium; the absorbing rule closes that. The non-revoked states (`Active`,
+  `InGracePeriod`) still transition freely, so a grace-period → renewal recovery is
+  unaffected. A forbidden move is a no-op (no state change, no audit event), so a
+  late but legitimate notification is simply ignored.
+- **Reconciliation cannot resurrect a refund.** The reconciliation re-derivation
+  (`StoreNotificationService.ReconcileTransactionAsync` and the
+  `ReconcilablePurchaseReader` candidate scan) now computes a purchase's converged
+  status as a **monotonic fold** over *all* its recorded notifications in event-time
+  order (`PurchaseTransactionStatusMachine.Converge`), not the single latest-by-event-
+  time notification. So a refund stays revoked even when a later renewal was recorded
+  after it, and a purchase already in a revoked state is never a reconciliation
+  candidate (it can neither drift nor be reconciled away).
+- **On entering a revoked state, the granted entitlement is revoked.** When a
+  notification (or its reconciliation) drives a purchase into a revoked state, the
+  granted `SubjectEntitlement` is revoked through
+  `PurchaseEntitlementRevocationService` — the **inverse of the CORE-MON-003 grant
+  chain**: it resolves the buyer from the `billing_account_links` link and revokes
+  the entitlements the purchase's product maps to (reusing
+  `ProductEntitlementGrantService.RevokeForProductAsync` over the existing
+  `SubjectEntitlementAssignmentService.RevokeAsync`). The revoke runs **before** the
+  status change is committed, so a revoke failure leaves the work unfinished and the
+  store's re-delivery (or the next reconciliation sweep) retries it; it is idempotent
+  (revoking an already-revoked or never-held entitlement is a safe no-op), and
+  fail-closed (an unrecorded/unlinked purchase or an unmapped product revokes
+  nothing). The revoked premium disappears from the effective-entitlements read
+  (`GET /api/v1/me/entitlements`) and stays gone.
+- **Hardened event time.** `StoreNotification.OccurredAt` — the authoritative
+  ordering key reconciliation derives the converged status from — is validated: a
+  defaulted/absurdly-early time is rejected by `StoreNotification.Create`, and an
+  implausibly-far-future time is rejected at the ingestion endpoint against the
+  host clock (a 24h skew tolerance). This is defence in depth on the ordering key;
+  the monotonic machine already prevents a manipulated time from resurrecting a
+  refund.
+- **No new table.** The chain composes the existing
+  `purchase_transactions`/`purchase_events`, `billing_account_links` and
+  `subject_entitlements` model; no schema change and no EF migration. With
+  CORE-MON-004 the v1 monetization loop (grant on verified purchase, revoke and
+  stay revoked on refund) is complete.
+
 ## Atomic quota check-and-consume (CORE-CONC-004)
 
 Server-side quota enforcement (CORE-ENTL-004) is the gate that makes "Free limits cannot be bypassed

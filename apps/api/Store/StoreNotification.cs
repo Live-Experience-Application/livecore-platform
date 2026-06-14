@@ -34,6 +34,25 @@ public sealed class StoreNotification
     /// <summary>The maximum length of a <see cref="ProviderNotificationId"/> or a <see cref="ProviderTransactionId"/>.</summary>
     public const int MaxIdentifierLength = 256;
 
+    /// <summary>
+    /// The earliest plausible event time for a store notification (CORE-MON-004). A real mobile-store purchase
+    /// lifecycle event cannot predate the modern app stores, so an <see cref="OccurredAt"/> before this is rejected
+    /// — this catches a defaulted/zero timestamp (<c>default(DateTimeOffset)</c> is year 1) or any absurd-past
+    /// garbage that, left unchecked, would pollute the event-time ordering reconciliation derives a purchase's
+    /// converged status from. The bound is generous and absolute so it needs no clock.
+    /// </summary>
+    public static readonly DateTimeOffset MinOccurredAt = new(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    /// <summary>
+    /// The maximum a store notification's <see cref="OccurredAt"/> may lead the time it is received before it is
+    /// rejected as implausible (CORE-MON-004) — a clock-skew tolerance the ingestion endpoint applies against its
+    /// own clock. An absurd-future event time (whether a store/adapter bug or a manipulated value) would otherwise
+    /// always sort as the "latest" event and dominate reconciliation's event-time ordering, so it is fail-closed
+    /// rejected. The monotonic state machine already prevents such a value from resurrecting a revoked purchase;
+    /// this is defence in depth on the ordering key (threat T7 / docs/24).
+    /// </summary>
+    public static readonly TimeSpan MaxFutureClockSkew = TimeSpan.FromHours(24);
+
     private StoreNotification(
         PurchaseProvider provider,
         string providerNotificationId,
@@ -81,8 +100,8 @@ public sealed class StoreNotification
     /// <param name="providerNotificationId">The store's unique notification id (the dedup key).</param>
     /// <param name="type">The actionable notification kind.</param>
     /// <param name="providerTransactionId">The provider transaction id of the affected purchase.</param>
-    /// <param name="occurredAt">When the store reported the event occurred.</param>
-    /// <exception cref="ArgumentOutOfRangeException">The provider or the type is not a defined value.</exception>
+    /// <param name="occurredAt">When the store reported the event occurred (must be on or after <see cref="MinOccurredAt"/>).</param>
+    /// <exception cref="ArgumentOutOfRangeException">The provider or the type is not a defined value, or the event time is implausibly early/defaulted.</exception>
     /// <exception cref="ArgumentException">A required identifier is blank or too long.</exception>
     public static StoreNotification Create(
         PurchaseProvider provider,
@@ -99,6 +118,18 @@ public sealed class StoreNotification
         if (!Enum.IsDefined(type))
         {
             throw new ArgumentOutOfRangeException(nameof(type), type, "Type is not a defined store notification type.");
+        }
+
+        // Reject a defaulted/zero or absurdly-early event time (CORE-MON-004). OccurredAt is the authoritative
+        // ordering key reconciliation re-derives a purchase's converged status from, so a garbage value must never
+        // be normalized into the ledger. The absurd-FUTURE bound is clock-relative and applied at the ingestion
+        // endpoint (MaxFutureClockSkew); this absolute floor needs no clock.
+        if (occurredAt.ToUniversalTime() < MinOccurredAt)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(occurredAt),
+                occurredAt,
+                $"A store notification event time must be on or after {MinOccurredAt:O}.");
         }
 
         var normalizedNotificationId = NormalizeIdentifier(providerNotificationId, nameof(providerNotificationId));

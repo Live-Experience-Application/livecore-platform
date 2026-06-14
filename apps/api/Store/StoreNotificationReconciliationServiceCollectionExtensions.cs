@@ -1,3 +1,4 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -85,6 +86,21 @@ public static class StoreNotificationReconciliationServiceCollectionExtensions
         services.AddScoped<IPurchaseEventRepository, PurchaseEventRepository>();
         services.AddScoped<IReconcilablePurchaseReader, ReconcilablePurchaseReader>();
         services.AddScoped<PurchaseTransactionService>();
+
+        // Purchase-entitlement revocation graph (CORE-MON-004): when reconciliation converges a purchase to a
+        // revoked state (a missed refund the webhook could not apply), it must revoke the granted entitlement — the
+        // same inverse-of-grant path the webhook uses. So the worker wires the same revocation collaborators the API
+        // host does: the Store buyer linkage and the Entitlements plan catalog + assignment service, composed by
+        // ProductEntitlementGrantService.RevokeForProductAsync and the PurchaseEntitlementRevocationService the
+        // StoreNotificationService picks up by constructor injection. No new table — these reuse the existing model.
+        services.AddScoped<IBillingAccountLinkRepository, BillingAccountLinkRepository>();
+        services.AddScoped<IPlanDefinitionRepository, PlanDefinitionRepository>();
+        services.AddScoped<IEntitlementDefinitionRepository, EntitlementDefinitionRepository>();
+        services.AddScoped<ISubjectEntitlementRepository, SubjectEntitlementRepository>();
+        services.AddScoped<SubjectEntitlementAssignmentService>();
+        services.AddScoped<ProductEntitlementGrantService>();
+        services.AddScoped<PurchaseEntitlementRevocationService>();
+
         services.AddScoped<StoreNotificationService>();
         services.AddScoped<StoreNotificationReconciliationService>();
 

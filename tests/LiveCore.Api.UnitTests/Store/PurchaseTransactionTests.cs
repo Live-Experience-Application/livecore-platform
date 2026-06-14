@@ -62,6 +62,54 @@ public class PurchaseTransactionTests
         Assert.Equal(_recordedAt, transaction.UpdatedAt); // unchanged: a no-op never advances the timestamp
     }
 
+    [Theory]
+    [InlineData(PurchaseTransactionStatus.Active)]
+    [InlineData(PurchaseTransactionStatus.InGracePeriod)]
+    [InlineData(PurchaseTransactionStatus.Cancelled)]
+    public void ChangeStatus_out_of_a_refunded_purchase_is_a_no_op_revoked_stays_revoked(
+        PurchaseTransactionStatus attemptedStatus)
+    {
+        // A refund is terminal (CORE-MON-004): once Refunded, no later notification — a renewal back to Active, a
+        // grace period, or even a cancellation — can move the purchase. The attempt is a no-op (no state change, no
+        // advanced timestamp), so a later DID_RENEW can never resurrect a refunded purchase and re-grant premium.
+        var transaction = PurchaseTransaction.Record(Purchase(), _recordedAt);
+        Assert.True(transaction.ChangeStatus(PurchaseTransactionStatus.Refunded, _recordedAt.AddHours(1)));
+
+        var changed = transaction.ChangeStatus(attemptedStatus, _recordedAt.AddHours(2));
+
+        Assert.False(changed);
+        Assert.Equal(PurchaseTransactionStatus.Refunded, transaction.Status);
+        Assert.Equal(_recordedAt.AddHours(1), transaction.UpdatedAt); // the blocked move never advances the timestamp
+    }
+
+    [Fact]
+    public void ChangeStatus_out_of_a_cancelled_purchase_is_a_no_op()
+    {
+        // Cancelled is likewise terminal.
+        var transaction = PurchaseTransaction.Record(Purchase(), _recordedAt);
+        Assert.True(transaction.ChangeStatus(PurchaseTransactionStatus.Cancelled, _recordedAt.AddHours(1)));
+
+        var changed = transaction.ChangeStatus(PurchaseTransactionStatus.Active, _recordedAt.AddHours(2));
+
+        Assert.False(changed);
+        Assert.Equal(PurchaseTransactionStatus.Cancelled, transaction.Status);
+    }
+
+    [Fact]
+    public void ChangeStatus_still_allows_a_grace_period_to_renew_back_to_active()
+    {
+        // The absorbing rule applies ONLY to revoked states; a legitimate grace-period -> renewal recovery is
+        // unaffected.
+        var transaction = PurchaseTransaction.Record(Purchase(), _recordedAt);
+        Assert.True(transaction.ChangeStatus(PurchaseTransactionStatus.InGracePeriod, _recordedAt.AddHours(1)));
+
+        var changed = transaction.ChangeStatus(PurchaseTransactionStatus.Active, _recordedAt.AddHours(2));
+
+        Assert.True(changed);
+        Assert.Equal(PurchaseTransactionStatus.Active, transaction.Status);
+        Assert.Equal(_recordedAt.AddHours(2), transaction.UpdatedAt);
+    }
+
     [Fact]
     public void ChangeStatus_rejects_an_undefined_status()
     {

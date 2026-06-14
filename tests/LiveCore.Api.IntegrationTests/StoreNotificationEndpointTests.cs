@@ -128,6 +128,23 @@ public sealed class StoreNotificationEndpointTests
     }
 
     [Fact]
+    public async Task A_notification_with_an_implausibly_future_event_time_is_400_and_records_nothing()
+    {
+        // CORE-MON-004: the store's reported event time (OccurredAt) is the ordering key reconciliation derives a
+        // purchase's converged status from, so an implausibly-far-future value (a store/adapter bug or a manipulated
+        // value) is rejected fail-closed by the endpoint and changes nothing.
+        await using var factory = new FakeParserApiFactory();
+        await SeedActivePurchaseAsync(factory, PurchaseProvider.Apple, "txn-1");
+        using var client = factory.CreateAnonymousClient();
+
+        var response = await PostAsync(client, _appleRoute, FakeStoreNotificationParser.FuturePayload);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, await NotificationCountAsync(factory));
+        Assert.Equal(PurchaseTransactionStatus.Active, await StatusAsync(factory, PurchaseProvider.Apple, "txn-1"));
+    }
+
+    [Fact]
     public async Task An_ignored_notification_is_acknowledged_and_records_nothing()
     {
         await using var factory = new FakeParserApiFactory();
@@ -251,8 +268,13 @@ public sealed class StoreNotificationEndpointTests
     {
         public const string ForgedPayload = "forged";
         public const string IgnorePayload = "ignore";
+        public const string FuturePayload = "future";
 
         private static readonly DateTimeOffset _occurredAt = new(2026, 6, 12, 10, 0, 0, TimeSpan.Zero);
+
+        // An authentic-but-implausibly-future event time, used to exercise the endpoint's OccurredAt skew guard
+        // (CORE-MON-004). Far enough ahead that it is rejected regardless of the host clock.
+        private static readonly DateTimeOffset _futureOccurredAt = new(9999, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
         public FakeStoreNotificationParser(PurchaseProvider provider) => Provider = provider;
 
@@ -274,6 +296,15 @@ public sealed class StoreNotificationEndpointTests
             if (string.Equals(payload, IgnorePayload, StringComparison.Ordinal))
             {
                 return Task.FromResult(StoreNotificationParseResult.Ignored());
+            }
+
+            if (string.Equals(payload, FuturePayload, StringComparison.Ordinal))
+            {
+                // A validated notification whose reported event time is implausibly far in the future; the endpoint
+                // must reject it before handling.
+                var future = StoreNotification.Create(
+                    Provider, "ntf-future", StoreNotificationType.Refunded, "txn-1", _futureOccurredAt);
+                return Task.FromResult(StoreNotificationParseResult.Parsed(future));
             }
 
             var parts = payload.Split('|');

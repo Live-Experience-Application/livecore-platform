@@ -858,6 +858,18 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IStoreNotificationEventRepository, StoreNotificationEventRepository>();
     builder.Services.AddScoped<StoreNotificationService>();
 
+    // Purchase-entitlement REVOCATION (CORE-MON-004, the monotonic-purchase-status story of the "Monetization v1"
+    // epic): the inverse of the CORE-MON-003 grant chain. When a store notification (or its reconciliation) drives a
+    // purchase into a revoked state (Refunded/Cancelled — a refund/cancellation/chargeback), the
+    // StoreNotificationService revokes the granted SubjectEntitlement through this service, so "Refunds and
+    // chargebacks must revoke or downgrade entitlements" and a revoked state "stays revoked" (docs/21 / docs/24).
+    // Registered here, inside the persistence conditional, because it composes the Store buyer linkage
+    // (IBillingAccountLinkRepository) and purchase repository above plus the CORE-MON-003
+    // ProductEntitlementGrantService.RevokeForProductAsync — it adds no new table and no parallel revoke path. The
+    // monotonic state machine itself (PurchaseTransaction.ChangeStatus) is always on regardless; this wires the
+    // entitlement side-effect, so the StoreNotificationService picks it up by constructor injection.
+    builder.Services.AddScoped<PurchaseEntitlementRevocationService>();
+
     // Buyer linkage for verified purchases (CORE-MON-002, the buyer-linkage story of the "Monetization v1" epic):
     // the Store module owns the billing_account_links table that durably links a verified purchase to the
     // authenticated buyer (a subject) — docs/24_SPEC_CONSISTENCY.md; csv/database_tables.csv: module Store.

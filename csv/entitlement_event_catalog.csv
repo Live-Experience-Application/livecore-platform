@@ -1,6 +1,6 @@
 event_name,emitter,recipients,persisted,audit,notes
 EntitlementGranted,Core system,authorized admins/subject,true,true,Granted by the implemented purchase->entitlement grant chain (CORE-MON-003) on a verified buyer-linked purchase via the product->plan->entitlement mapping; the dedicated AuditAction backing is CORE-SPEC-002
-EntitlementRevoked,Core system,authorized admins/subject,true,true,Refunds/cancellations/downgrades revoke entitlements
+EntitlementRevoked,Core system,authorized admins/subject,true,true,Revoked by the monotonic purchase-status revocation (CORE-MON-004) when a refund/cancellation/chargeback drives a buyer-linked purchase to a terminal revoked state (reusing the CORE-MON-003 product->plan->entitlement mapping in reverse); the dedicated AuditAction backing is CORE-SPEC-002
 QuotaExceeded,Core API,requesting subject,true,true,Command rejected because quota limit was exceeded
 PurchaseVerificationSubmitted,API client,system,true,true,Client submitted Apple/Google purchase proof
 PurchaseVerificationSucceeded,Core system,subject,true,true,Backend verification succeeded

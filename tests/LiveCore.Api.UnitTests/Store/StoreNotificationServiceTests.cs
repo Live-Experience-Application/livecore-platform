@@ -239,6 +239,31 @@ public sealed class StoreNotificationServiceTests : IDisposable
         Assert.Equal(PurchaseTransactionStatus.Active, transaction.Status);
     }
 
+    // --- Monotonic: a refund is terminal; a later renewal cannot resurrect it ----
+
+    [Fact]
+    public async Task A_renewal_after_a_refund_keeps_the_purchase_refunded()
+    {
+        // CORE-MON-004: once a purchase is Refunded the state is absorbing, so a renewal notification delivered
+        // afterwards (a legitimate DID_RENEW with a later event time) is recorded but cannot flip it back to Active.
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+        await HandleAsync(Notification(notificationId: "ntf-refund", type: StoreNotificationType.Refunded, transactionId: "txn-1"));
+
+        var renew = await HandleAsync(StoreNotification.Create(
+            PurchaseProvider.Apple, "ntf-renew", StoreNotificationType.Renewed, "txn-1", _occurredAt.AddHours(1)));
+
+        // The renewal is a recorded no-op: the purchase stays Refunded (revoked stays revoked).
+        Assert.Equal(StoreNotificationProcessingOutcome.Unchanged, renew.Outcome);
+        var transaction = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
+        Assert.NotNull(transaction);
+        Assert.Equal(PurchaseTransactionStatus.Refunded, transaction.Status);
+
+        // No second purchase-side transition was audited (recording + the one refund only); the renewal is recorded
+        // on the notification ledger but applied nothing.
+        Assert.Equal(2, await PurchaseEventCountAsync());
+        Assert.Equal(2, await NotificationCountAsync());
+    }
+
     // --- Fail-closed: an unknown purchase is never fabricated -------------------
 
     [Fact]

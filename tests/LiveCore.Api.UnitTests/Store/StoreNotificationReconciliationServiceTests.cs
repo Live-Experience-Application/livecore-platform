@@ -129,19 +129,20 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
     [Fact]
     public async Task An_out_of_order_delivery_is_reconciled_to_the_latest_event()
     {
-        // The refund OCCURRED later (11:00) than the renewal (10:00), but the store delivered the refund first and
-        // the renewal second, so the synchronous webhook applied refund -> renewal and left the purchase ACTIVE —
-        // wrong, because the refund is the latest event.
+        // The grace period OCCURRED later (11:00) than the renewal (10:00), but the store delivered the grace period
+        // first and the renewal second, so the synchronous webhook applied grace -> renewal and left the purchase
+        // ACTIVE — wrong, because the grace period is the latest event. (Both are non-revoked states, which still
+        // transition freely; a revoked state would instead be absorbing and never drift — see the monotonic tests.)
         await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
-        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-refund", StoreNotificationType.Refunded, "txn-1", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-grace", StoreNotificationType.GracePeriodStarted, "txn-1", _laterEvent));
         await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-renew", StoreNotificationType.Renewed, "txn-1", _earlierEvent));
 
         var beforeReconcile = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
         Assert.NotNull(beforeReconcile);
         Assert.Equal(PurchaseTransactionStatus.Active, beforeReconcile.Status); // drifted (wrong) state
 
-        // The reconciliation sweep re-derives the converged status from the latest-by-event-time notification (the
-        // refund) and converges the purchase to Refunded.
+        // The reconciliation sweep re-derives the converged status by folding the monotonic machine over the recorded
+        // notifications in event-time order (the grace period is the latest event) and converges to InGracePeriod.
         var result = await ReconcileSweepAsync();
         Assert.Equal(1, result.Examined);
         Assert.Equal(1, result.Reconciled);
@@ -149,7 +150,7 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
 
         var afterReconcile = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
         Assert.NotNull(afterReconcile);
-        Assert.Equal(PurchaseTransactionStatus.Refunded, afterReconcile.Status);
+        Assert.Equal(PurchaseTransactionStatus.InGracePeriod, afterReconcile.Status);
         // The convergence is stamped with the authoritative notification's event time, not the sweep time.
         Assert.Equal(_laterEvent.ToUniversalTime(), afterReconcile.UpdatedAt);
     }
@@ -158,7 +159,7 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
     public async Task Reconciliation_is_idempotent_a_second_sweep_changes_nothing()
     {
         await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
-        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-refund", StoreNotificationType.Refunded, "txn-1", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-grace", StoreNotificationType.GracePeriodStarted, "txn-1", _laterEvent));
         await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-renew", StoreNotificationType.Renewed, "txn-1", _earlierEvent));
 
         var first = await ReconcileSweepAsync();
@@ -169,6 +170,31 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
         var second = await ReconcileSweepAsync();
         Assert.Equal(0, second.Examined);
         Assert.Equal(0, second.Reconciled);
+
+        var transaction = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
+        Assert.NotNull(transaction);
+        Assert.Equal(PurchaseTransactionStatus.InGracePeriod, transaction.Status);
+    }
+
+    // --- Monotonic: a refund stays revoked; reconciliation cannot resurrect it ----
+
+    [Fact]
+    public async Task A_refund_followed_by_a_later_renewal_is_not_reconciled_back_to_active()
+    {
+        // CORE-MON-004: the refund OCCURRED at 10:00 and a legitimate renewal OCCURRED later at 11:00, both for an
+        // already-refunded purchase. The webhook already keeps it Refunded (the renewal is a no-op against the
+        // absorbing state), so there is NO drift to reconcile — reconciliation cannot resurrect a refund.
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-refund", StoreNotificationType.Refunded, "txn-1", _earlierEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "ntf-renew", StoreNotificationType.Renewed, "txn-1", _laterEvent));
+
+        Assert.Equal(PurchaseTransactionStatus.Refunded, (await FindTransactionAsync(PurchaseProvider.Apple, "txn-1"))!.Status);
+
+        // The refunded purchase is terminal, so it is never a reconciliation candidate and the sweep is a no-op.
+        Assert.Empty(await CandidatesAsync());
+        var result = await ReconcileSweepAsync();
+        Assert.Equal(0, result.Examined);
+        Assert.Equal(0, result.Reconciled);
 
         var transaction = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
         Assert.NotNull(transaction);
@@ -307,12 +333,12 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
     [Fact]
     public async Task A_sweep_reconciles_only_drifted_purchases_and_leaves_consistent_ones()
     {
-        // Drifted purchase A (out-of-order refund/renewal leaves it Active, should be Refunded).
+        // Drifted purchase A (out-of-order grace/renewal leaves it Active, should be InGracePeriod).
         await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-a");
-        await HandleAsync(Notification(PurchaseProvider.Apple, "a-refund", StoreNotificationType.Refunded, "txn-a", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "a-grace", StoreNotificationType.GracePeriodStarted, "txn-a", _laterEvent));
         await HandleAsync(Notification(PurchaseProvider.Apple, "a-renew", StoreNotificationType.Renewed, "txn-a", _earlierEvent));
 
-        // Consistent purchase B (webhook converged it to Cancelled in order).
+        // Consistent purchase B (webhook converged it to Cancelled in order; a revoked state is terminal, never drifted).
         await RecordPurchaseAsync(PurchaseProvider.Google, "txn-b");
         await HandleAsync(Notification(PurchaseProvider.Google, "b-cancel", StoreNotificationType.Cancelled, "txn-b", _laterEvent));
 
@@ -324,7 +350,7 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
 
         var a = await FindTransactionAsync(PurchaseProvider.Apple, "txn-a");
         Assert.NotNull(a);
-        Assert.Equal(PurchaseTransactionStatus.Refunded, a.Status);
+        Assert.Equal(PurchaseTransactionStatus.InGracePeriod, a.Status);
 
         var b = await FindTransactionAsync(PurchaseProvider.Google, "txn-b");
         Assert.NotNull(b);

@@ -44,27 +44,42 @@ namespace LiveCore.Api.Store;
 /// payload's signature/source BEFORE this service is invoked; this service performs the dedup, the purchase status
 /// change and the audit only, and is only ever handed an already-validated, normalized notification.
 ///
-/// RECONCILIATION (CORE-JOB-003). Because <see cref="HandleAsync"/> applies notifications in delivery order, a
-/// store's at-least-once, possibly-reordered delivery can leave the persisted purchase status drifted from the
-/// status the latest-by-event-time notification implies. <see cref="ReconcileTransactionAsync"/> re-derives the
-/// converged status from the ledger this service already wrote (the latest <see cref="StoreNotificationEvent"/> by
-/// <see cref="StoreNotificationEvent.OccurredAt"/>) and converges the purchase by REUSING the same idempotent,
-/// audited <see cref="PurchaseTransactionService.ChangeStatusAsync"/> — so the reconciliation job reuses this
-/// service rather than building a parallel pipeline.
+/// MONOTONIC, REVOKED-STAYS-REVOKED (CORE-MON-004). The purchase status change goes through the monotonic state
+/// machine (<see cref="PurchaseTransaction.ChangeStatus"/> / <see cref="PurchaseTransactionStatusMachine"/>): a
+/// revoked state (<see cref="PurchaseTransactionStatus.Refunded"/> / <see cref="PurchaseTransactionStatus.Cancelled"/>)
+/// is absorbing, so a renewal arriving AFTER a refund can never flip the purchase back to
+/// <see cref="PurchaseTransactionStatus.Active"/>. When a notification drives the purchase INTO a revoked state, the
+/// granted entitlement is revoked through the optional <see cref="PurchaseEntitlementRevocationService"/> (the
+/// inverse of the CORE-MON-003 grant chain) BEFORE the status change is committed, so a failed revocation leaves
+/// the work unfinished and a re-delivery/sweep retries it ("Refunds and chargebacks must revoke or downgrade
+/// entitlements", docs/21). The revocation collaborator is wired by the API and worker hosts; it is null only in
+/// focused unit tests of the status machine, where the always-on domain guard still holds.
+///
+/// RECONCILIATION (CORE-JOB-003 / CORE-MON-004). Because <see cref="HandleAsync"/> applies notifications in delivery
+/// order, a store's at-least-once, possibly-reordered delivery can leave the persisted purchase status drifted from
+/// the status the recorded notifications imply. <see cref="ReconcileTransactionAsync"/> re-derives the converged
+/// status by FOLDING the monotonic state machine over ALL of the purchase's recorded notifications in event-time
+/// order (<see cref="PurchaseTransactionStatusMachine.Converge"/>) — not just the single latest one — so a later
+/// renewal recorded after a refund cannot resurrect the purchase through reconciliation either. It converges the
+/// purchase by REUSING the same idempotent, audited <see cref="PurchaseTransactionService.ChangeStatusAsync"/> and
+/// the same revocation path, so the reconciliation job reuses this service rather than building a parallel pipeline.
 /// </summary>
 public sealed class StoreNotificationService
 {
     private readonly IStoreNotificationEventRepository _notifications;
     private readonly PurchaseTransactionService _transactions;
+    private readonly PurchaseEntitlementRevocationService? _revocation;
 
     public StoreNotificationService(
         IStoreNotificationEventRepository notifications,
-        PurchaseTransactionService transactions)
+        PurchaseTransactionService transactions,
+        PurchaseEntitlementRevocationService? revocation = null)
     {
         ArgumentNullException.ThrowIfNull(notifications);
         ArgumentNullException.ThrowIfNull(transactions);
         _notifications = notifications;
         _transactions = transactions;
+        _revocation = revocation;
     }
 
     /// <summary>
@@ -95,9 +110,27 @@ public sealed class StoreNotificationService
         }
 
         // Drive the affected purchase's lifecycle. The notification's type maps to exactly one target status; the
-        // change is audited and idempotent (CORE-STORE-002). The store's reported event time backs the purchase
-        // event, while the ledger row records when we received the notification.
+        // change is audited and idempotent (CORE-STORE-002), and goes through the monotonic state machine so a
+        // renewal after a refund is a no-op (the purchase stays revoked). The store's reported event time backs the
+        // purchase event, while the ledger row records when we received the notification.
         var targetStatus = notification.Type.ToTransactionStatus();
+
+        // On a revoking notification (refund/cancellation/chargeback) revoke the granted entitlement BEFORE the
+        // status change (CORE-MON-004; "on entering a revoked state revoke the granted entitlement"). Revoking first
+        // means a revoke failure throws before the ledger row is written, so the store's re-delivery retries the
+        // whole effect; the revoke is idempotent, so the retry converges. An unrecorded/unlinked purchase or an
+        // unmapped product revokes nothing (fail-closed).
+        if (PurchaseTransactionStatusMachine.IsRevoked(targetStatus) && _revocation is not null)
+        {
+            await _revocation
+                .RevokeForPurchaseAsync(
+                    notification.Provider,
+                    notification.ProviderTransactionId,
+                    notification.OccurredAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var changeOutcome = await _transactions
             .ChangeStatusAsync(
                 notification.Provider,
@@ -139,21 +172,31 @@ public sealed class StoreNotificationService
     /// so entitlement state converges" (the story's acceptance criterion).
     ///
     /// <para>
-    /// RE-DERIVES FROM THE LEDGER, NOT DELIVERY ORDER. The converged status is the
-    /// <see cref="StoreNotificationEvent.AppliedStatus"/> of the recorded notification with the latest
-    /// <see cref="StoreNotificationEvent.OccurredAt"/> (the store's reported event time;
-    /// <see cref="IStoreNotificationEventRepository.FindLatestByProviderTransactionAsync"/>) — regardless of the
-    /// order the notifications were delivered or applied. So an out-of-order delivery (an older notification
-    /// applied after a newer one) and a missed delivery (a notification that arrived before the purchase existed,
-    /// recorded but never applied, and whose effect is the latest) both converge to the same correct status.
+    /// RE-DERIVES FROM THE LEDGER BY A MONOTONIC FOLD, NOT DELIVERY ORDER. The converged status is the MONOTONIC
+    /// FOLD of ALL the purchase's recorded notifications in event-time order
+    /// (<see cref="PurchaseTransactionStatusMachine.Converge"/> over
+    /// <see cref="IStoreNotificationEventRepository.ListByProviderTransactionAsync"/>) — not merely the single
+    /// latest-by-event-time notification. So an out-of-order delivery (an older notification applied after a newer
+    /// one) and a missed delivery (a notification recorded before the purchase existed, never applied) both converge
+    /// to the same correct status, AND a refund stays revoked even when a later renewal was recorded after it — a
+    /// later renewal can never resurrect a refund through reconciliation (CORE-MON-004; "reconciliation cannot
+    /// resurrect it"). A purchase already in a revoked state is therefore never moved.
+    /// </para>
+    ///
+    /// <para>
+    /// REVOKES ON CONVERGING TO A REVOKED STATE. When the converged status is a revoked state, the granted
+    /// entitlement is revoked (the optional <see cref="PurchaseEntitlementRevocationService"/>) BEFORE the status
+    /// change is committed — so a revoke failure leaves the purchase still drifted and the next sweep retries it
+    /// (the revoke is idempotent, so the retry converges). This is the same revocation path the webhook uses for a
+    /// missed refund that only the reconciliation job can apply.
     /// </para>
     ///
     /// <para>
     /// IDEMPOTENT AND REUSES THE WEBHOOK PATH. The status change REUSES
-    /// <see cref="PurchaseTransactionService.ChangeStatusAsync"/> — the exact same audited, idempotent status
-    /// change the webhook uses — stamped with the authoritative notification's event time. A purchase already at
-    /// the converged status is an idempotent no-op (no status change, no audit event), so re-running the sweep
-    /// changes nothing.
+    /// <see cref="PurchaseTransactionService.ChangeStatusAsync"/> — the exact same audited, idempotent, monotonic
+    /// status change the webhook uses — stamped with the event time of the notification that determined the
+    /// converged status. A purchase already at the converged status is an idempotent no-op (no status change, no
+    /// audit event), so re-running the sweep changes nothing.
     /// </para>
     ///
     /// <para>
@@ -173,20 +216,37 @@ public sealed class StoreNotificationService
         string providerTransactionId,
         CancellationToken cancellationToken)
     {
-        var latest = await _notifications
-            .FindLatestByProviderTransactionAsync(provider, providerTransactionId, cancellationToken)
+        var recorded = await _notifications
+            .ListByProviderTransactionAsync(provider, providerTransactionId, cancellationToken)
             .ConfigureAwait(false);
-        if (latest is null)
+        if (recorded.Count == 0)
         {
             // No recorded notifications for this purchase: nothing to reconcile against.
             return StoreNotificationReconciliationOutcome.NoNotifications;
         }
 
-        // The authoritative status is the one the latest-by-event-time notification drove the purchase to. Stamp
-        // the convergence with that notification's event time so the persisted UpdatedAt and the purchase event
-        // reflect when the authoritative event actually occurred, not when reconciliation ran.
+        // Re-derive the converged status by folding the monotonic state machine over every recorded notification in
+        // event-time order. This respects "a revoked state is terminal" regardless of delivery/record order, so a
+        // refund stays revoked even when a later renewal was recorded after it.
+        var (convergedStatus, determinedAt) = PurchaseTransactionStatusMachine.Converge(
+            recorded.Select(notification => (notification.AppliedStatus, notification.OccurredAt, notification.Id)));
+
+        // Stamp the convergence with the event time of the notification that determined the converged status (the
+        // authoritative event), not the sweep time. If no notification moved the purchase from Active (all no-ops),
+        // fall back to the latest recorded event time; the change is then a no-op anyway.
+        var occurredAt = determinedAt ?? recorded.Max(notification => notification.OccurredAt);
+
+        // Revoke the granted entitlement BEFORE converging the status when the converged status is revoked, so a
+        // revoke failure leaves the purchase drifted for the next sweep to retry (the revoke is idempotent).
+        if (PurchaseTransactionStatusMachine.IsRevoked(convergedStatus) && _revocation is not null)
+        {
+            await _revocation
+                .RevokeForPurchaseAsync(provider, providerTransactionId, occurredAt, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var changeOutcome = await _transactions
-            .ChangeStatusAsync(provider, providerTransactionId, latest.AppliedStatus, latest.OccurredAt, cancellationToken)
+            .ChangeStatusAsync(provider, providerTransactionId, convergedStatus, occurredAt, cancellationToken)
             .ConfigureAwait(false);
 
         return changeOutcome switch
