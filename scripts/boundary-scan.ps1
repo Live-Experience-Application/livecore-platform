@@ -4,15 +4,27 @@
     Boundary scan for the LiveCore Core Platform.
 
 .DESCRIPTION
-    Scans Core source directories (apps, packages, tests, scripts, .github)
-    for forbidden vertical terms defined in csv/forbidden_core_terms.csv.
+    Scans every TRACKED Core source file for the forbidden vertical and
+    brand/platform terms defined in csv/forbidden_core_terms.csv.
 
-    The Core Platform must stay product-neutral; vertical domain language
-    may appear only in documentation that explains the boundary (docs/, csv/,
-    root README), never in Core source.
+    The Core Platform must stay product-neutral: vertical domain language and the
+    brand/platform names (the product, platform and tabletop vertical names the
+    terms file lists) may appear only in the documentation that explains the
+    boundary - the docs/ and csv/ trees and the root documentation files
+    (README.md, AGENTS.md, LICENSE, CHANGELOG.md) - never in Core source.
 
-    Exits with code 0 when the tree is clean, 1 when violations are found,
-    and 2 on configuration errors.
+    Files are enumerated with `git ls-files`, so only TRACKED source is scanned.
+    Gitignored local tooling (for example scripts/story-loop.ps1, whose prompt
+    template legitimately names the verticals) is never seen, and a stray
+    working-tree file can neither widen nor narrow the scan. The scan covers
+    every tracked text source - including Dockerfiles (apps/*/Dockerfile and
+    *.Dockerfile such as apps/api/Migrations.Dockerfile) - and excludes only the
+    documentation above and machine-generated dependency manifests.
+
+    Exits with code 0 when the tree is clean, 1 when violations are found, and 2
+    on configuration errors (terms file missing/empty, or no git work tree to
+    enumerate tracked source). The git enumeration is fail-closed: if the tracked
+    file set cannot be determined the scan errors out rather than passing.
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
@@ -43,7 +55,10 @@ $RepoRoot = (Resolve-Path -Path $RepoRoot).Path
 
 $termsCsvPath = Join-Path $RepoRoot 'csv/forbidden_core_terms.csv'
 if (-not (Test-Path -Path $termsCsvPath)) {
-    Write-Error "Forbidden terms file not found: $termsCsvPath"
+    # -ErrorAction Continue so the diagnostic does not raise a terminating error
+    # under $ErrorActionPreference='Stop' (which would exit 1); these are the
+    # documented fail-closed configuration errors and must exit 2.
+    Write-Error "Forbidden terms file not found: $termsCsvPath" -ErrorAction Continue
     exit 2
 }
 
@@ -55,7 +70,7 @@ $terms = @(
 )
 
 if ($terms.Count -eq 0) {
-    Write-Error "No forbidden terms loaded from $termsCsvPath"
+    Write-Error "No forbidden terms loaded from $termsCsvPath" -ErrorAction Continue
     exit 2
 }
 
@@ -89,101 +104,129 @@ $camelSplitRegex = New-Object System.Text.RegularExpressions.Regex('([a-z0-9])([
 # (e.g. 'APIClient' -> 'API Client', 'XMLHttpRequest' -> 'XML Http Request').
 $acronymSplitRegex = New-Object System.Text.RegularExpressions.Regex('([A-Z]+)([A-Z][a-z])')
 
-# Core source locations. docs/ and csv/ are documentation and intentionally
-# excluded: forbidden terms may appear there only to explain the boundary. The
-# deploy/ manifests (CORE-DEP-001) are Core source-adjacent and must stay
-# product-neutral too, so they are scanned.
-$sourceDirNames = @('apps', 'packages', 'tests', 'scripts', '.github', 'deploy')
-$sourceDirs = @(
-    $sourceDirNames |
-        ForEach-Object { Join-Path $RepoRoot $_ } |
-        Where-Object { Test-Path -Path $_ }
-)
-
-if ($sourceDirs.Count -eq 0) {
-    Write-Error "None of the Core source directories ($($sourceDirNames -join ', ')) exist under $RepoRoot"
+# Enumerate TRACKED files only, via `git ls-files`. This is the whole point of
+# the boundary scan's coverage guarantee: gitignored local tooling (such as
+# scripts/story-loop.ps1, whose prompt template legitimately names the
+# verticals) is excluded because git never tracks it, and the scan can only ever
+# see committed/staged Core source. It is fail-closed: if git is unavailable or
+# the directory is not a work tree, the scan errors out (exit 2) rather than
+# silently passing on an unscanned tree.
+$trackedFiles = $null
+try {
+    $trackedFiles = @(& git -C $RepoRoot ls-files)
+}
+catch {
+    Write-Error "Unable to enumerate tracked files via 'git ls-files' in ${RepoRoot}: $($_.Exception.Message)" -ErrorAction Continue
+    exit 2
+}
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "git ls-files exited with code $LASTEXITCODE in $RepoRoot; the boundary scan needs a git work tree." -ErrorAction Continue
     exit 2
 }
 
-# Generated/vendor output that must not be scanned.
-$excludedDirPattern = '[\\/](bin|obj|node_modules|dist|coverage|TestResults|\.git)([\\/]|$)'
+$trackedFiles = @(
+    $trackedFiles |
+        Where-Object { $_ -and $_.Trim() -ne '' } |
+        ForEach-Object { $_.Trim() }
+)
+if ($trackedFiles.Count -eq 0) {
+    Write-Error "git ls-files returned no tracked files under $RepoRoot" -ErrorAction Continue
+    exit 2
+}
+
+# Generated/vendor output that must not be scanned. git ls-files does not return
+# gitignored build output, so this is defensive: a force-tracked artifact under
+# one of these directories is still skipped.
+$excludedDirPattern = '(^|[\\/])(bin|obj|node_modules|dist|coverage|TestResults|\.git)([\\/]|$)'
 
 # Generated dependency manifests: machine-written, not authored Core source.
-# NuGet lock files (packages.lock.json, CORE-DEP-003) carry base64 content
-# hashes whose incidental two-letter uppercase runs can look like a forbidden
-# acronym after the CamelCase/acronym splitting below, so they are excluded like
-# the other generated output above.
-$excludedFileNames = @('packages.lock.json')
+# Their base64 content hashes carry incidental two-letter uppercase runs that can
+# look like a forbidden acronym after the CamelCase/acronym splitting below, so
+# they are excluded like the generated output above (NuGet packages.lock.json
+# from CORE-DEP-003, and the pnpm lock file).
+$excludedFileNames = @('packages.lock.json', 'pnpm-lock.yaml')
 
-# Text files considered Core source. Extensionless files are scanned too.
+# Documentation that is ALLOWED to name the forbidden terms in order to explain
+# the boundary: the docs/ and csv/ trees, and the four root documentation files
+# that set out or narrate the rule (AGENTS.md and README.md state it; LICENSE
+# and CHANGELOG.md are narrative). git ls-files paths are repo-relative with
+# forward slashes.
+$excludedDocPathPattern = '^(?:docs|csv)/'
+$excludedDocRootFiles = @('README.md', 'AGENTS.md', 'LICENSE', 'CHANGELOG.md')
+
+# Text files considered Core source. Extensionless files (for example a plain
+# Dockerfile) are scanned too, and *.Dockerfile (the migrations runner image,
+# apps/api/Migrations.Dockerfile) is in scope.
 $sourceExtensions = @(
     '.cs', '.csproj', '.sln', '.slnx', '.props', '.targets', '.razor', '.cshtml',
     '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
     '.json', '.yml', '.yaml', '.xml', '.config', '.resx',
     '.css', '.scss', '.html', '.svg',
-    '.ps1', '.psm1', '.sh', '.sql', '.http', '.md', '.txt', '.env'
+    '.ps1', '.psm1', '.sh', '.sql', '.http', '.md', '.txt', '.env', '.dockerfile'
 )
 
 $violations = New-Object System.Collections.Generic.List[object]
 $scannedFileCount = 0
 
-foreach ($dir in $sourceDirs) {
-    # -Force keeps Windows and Linux consistent: on Linux, pwsh treats
-    # dot-prefixed files as hidden and would silently skip them otherwise.
-    $files = Get-ChildItem -Path $dir -Recurse -File -Force | Where-Object {
-        $_.FullName -notmatch $excludedDirPattern -and
-        $excludedFileNames -notcontains $_.Name -and
-        (
-            $_.Extension -eq '' -or
-            $sourceExtensions -contains $_.Extension.ToLowerInvariant()
-        )
+foreach ($relativePath in $trackedFiles) {
+    if ($relativePath -match $excludedDirPattern) { continue }
+    if ($relativePath -match $excludedDocPathPattern) { continue }
+    if ($excludedDocRootFiles -contains $relativePath) { continue }
+
+    $fileName = [System.IO.Path]::GetFileName($relativePath)
+    if ($excludedFileNames -contains $fileName) { continue }
+
+    $extension = [System.IO.Path]::GetExtension($fileName)
+    if (-not ($extension -eq '' -or $sourceExtensions -contains $extension.ToLowerInvariant())) {
+        continue
     }
 
-    foreach ($file in $files) {
-        $scannedFileCount++
-        $relativePath = $file.FullName.Substring($RepoRoot.Length).TrimStart('\', '/')
-        $lines = @(Get-Content -Path $file.FullName)
-        for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
-            $line = $lines[$lineIndex]
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    $fullPath = Join-Path $RepoRoot $relativePath
+    # A tracked path can be absent on disk (e.g. mid-rename); skip rather than throw.
+    if (-not (Test-Path -LiteralPath $fullPath)) { continue }
 
-            # Match the raw line plus normalized variants so compound
-            # identifiers cannot hide a forbidden term:
-            # - CamelCase split alone keeps acronym plurals intact,
-            # - acronym split before CamelCase split exposes terms hidden in
-            #   leading uppercase runs (e.g. 'APIClient' -> 'API Client'),
-            # - snake_case split exposes terms hidden between underscores
-            #   (e.g. 'prefix_term_suffix'): '_' is a word character, so the
-            #   word-bounded pattern cannot match a term flanked by underscores
-            #   until the underscores are turned into spaces. The acronym +
-            #   CamelCase split is also applied to the snake-split variant so
-            #   mixed snake_case + CamelCase identifiers are caught too
-            #   (e.g. 'prefix_termSuffix').
-            $camelOnly = $camelSplitRegex.Replace($line, '$1 $2')
-            $acronymThenCamel = $camelSplitRegex.Replace(
-                $acronymSplitRegex.Replace($line, '$1 $2'), '$1 $2')
-            $snakeSplit = $line -replace '_', ' '
-            $snakeThenCamel = $camelSplitRegex.Replace(
-                $acronymSplitRegex.Replace($snakeSplit, '$1 $2'), '$1 $2')
-            $lineVariants = @(
-                $line, $camelOnly, $acronymThenCamel, $snakeSplit, $snakeThenCamel) |
-                Select-Object -Unique
+    $scannedFileCount++
+    $lines = @(Get-Content -LiteralPath $fullPath)
+    for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+        $line = $lines[$lineIndex]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
 
-            # Report each forbidden term at most once per line, even when
-            # several variants surface the same occurrence.
-            $reportedTerms = @{}
-            foreach ($variant in $lineVariants) {
-                foreach ($match in $combinedRegex.Matches($variant)) {
-                    $termKey = $match.Value.ToLowerInvariant()
-                    if ($reportedTerms.ContainsKey($termKey)) { continue }
-                    $reportedTerms[$termKey] = $true
-                    $violations.Add([pscustomobject]@{
+        # Match the raw line plus normalized variants so compound
+        # identifiers cannot hide a forbidden term:
+        # - CamelCase split alone keeps acronym plurals intact,
+        # - acronym split before CamelCase split exposes terms hidden in
+        #   leading uppercase runs (e.g. 'APIClient' -> 'API Client'),
+        # - snake_case split exposes terms hidden between underscores
+        #   (e.g. 'prefix_term_suffix'): '_' is a word character, so the
+        #   word-bounded pattern cannot match a term flanked by underscores
+        #   until the underscores are turned into spaces. The acronym +
+        #   CamelCase split is also applied to the snake-split variant so
+        #   mixed snake_case + CamelCase identifiers are caught too
+        #   (e.g. 'prefix_termSuffix').
+        $camelOnly = $camelSplitRegex.Replace($line, '$1 $2')
+        $acronymThenCamel = $camelSplitRegex.Replace(
+            $acronymSplitRegex.Replace($line, '$1 $2'), '$1 $2')
+        $snakeSplit = $line -replace '_', ' '
+        $snakeThenCamel = $camelSplitRegex.Replace(
+            $acronymSplitRegex.Replace($snakeSplit, '$1 $2'), '$1 $2')
+        $lineVariants = @(
+            $line, $camelOnly, $acronymThenCamel, $snakeSplit, $snakeThenCamel) |
+            Select-Object -Unique
+
+        # Report each forbidden term at most once per line, even when
+        # several variants surface the same occurrence.
+        $reportedTerms = @{}
+        foreach ($variant in $lineVariants) {
+            foreach ($match in $combinedRegex.Matches($variant)) {
+                $termKey = $match.Value.ToLowerInvariant()
+                if ($reportedTerms.ContainsKey($termKey)) { continue }
+                $reportedTerms[$termKey] = $true
+                $violations.Add([pscustomobject]@{
                         File = $relativePath
                         Line = $lineIndex + 1
                         Term = $match.Value
                         Text = $line.Trim()
                     })
-                }
             }
         }
     }

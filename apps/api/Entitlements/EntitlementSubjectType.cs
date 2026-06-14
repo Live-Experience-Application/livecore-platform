@@ -10,7 +10,7 @@ namespace LiveCore.Api.Entitlements;
 ///
 /// GENERIC, NOT VERTICAL. The kinds are product-neutral Core vocabulary only (AGENTS.md,
 /// csv/forbidden_core_terms.csv); a vertical never sees these names — it consumes the resolved effective
-/// entitlements and maps them to its own paywall copy in its UI (docs/21 "ArcanOS may display these as ...").
+/// entitlements and maps them to its own paywall copy in its UI (docs/21 "a vertical may display these as ...").
 /// The two kinds mirror the two subject surfaces the generic monetization API exposes
 /// (csv/mobile_store_api_routes.csv): the current <see cref="User"/> (<c>GET /v1/me/entitlements</c>) and a
 /// <see cref="Workspace"/> (<c>GET /v1/workspaces/{workspaceId}/quota-status</c>).

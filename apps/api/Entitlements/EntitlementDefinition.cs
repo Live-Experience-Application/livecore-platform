@@ -18,7 +18,7 @@ namespace LiveCore.Api.Entitlements;
 /// <c>workspace.active.max</c> or <c>ads.disabled</c> — docs/21 "Generic entitlement keys"), and carries no
 /// vertical product language anywhere: the key, the display name and the description are generic Core
 /// vocabulary only (AGENTS.md, csv/forbidden_core_terms.csv). A vertical maps a key to its own paywall copy in
-/// its UI (docs/21 "ArcanOS may display these as ..."), but Core stores only the generic definition, so the
+/// its UI (docs/21 "a vertical may display these as ..."), but Core stores only the generic definition, so the
 /// model can be populated entirely without vertical terminology.
 ///
 /// VALUE KIND. <see cref="ValueKind"/> classifies the entitlement as a boolean <see cref="EntitlementValueKind.Flag"/>

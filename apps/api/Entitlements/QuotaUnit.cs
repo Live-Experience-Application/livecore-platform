@@ -9,7 +9,7 @@ namespace LiveCore.Api.Entitlements;
 /// active session count, participant count, storage ... must be enforced server-side").
 ///
 /// GENERIC, NOT VERTICAL. The units are product-neutral Core vocabulary only (AGENTS.md,
-/// csv/forbidden_core_terms.csv); a vertical maps a quota to its own paywall copy in its UI (docs/21 "ArcanOS may
+/// csv/forbidden_core_terms.csv); a vertical maps a quota to its own paywall copy in its UI (docs/21 "a vertical may
 /// display these as ..."), while Core stores only the generic definition and computes the generic status. The
 /// unit is purely descriptive of the count's meaning and never an authorization input.
 ///

@@ -358,8 +358,14 @@ from the package version cannot ship. See `docs/23_PACKAGE_VERSIONING.md`.
 ### Boundary scan
 
 Run the boundary scan (fails with a non-zero exit code if any forbidden
-vertical term from `csv/forbidden_core_terms.csv` appears in Core source under
-`apps/`, `packages/`, `tests/`, `scripts/` or `.github/`):
+vertical or brand/platform term from `csv/forbidden_core_terms.csv` appears in
+Core source). It enumerates **tracked** files only (`git ls-files`), so
+gitignored local tooling is never scanned; it covers every tracked text source
+including Dockerfiles (`apps/*/Dockerfile`, `*.Dockerfile`); and it excludes only
+the documentation that legitimately lists the terms — the `docs/` and `csv/`
+trees and the root files `README.md`, `AGENTS.md`, `LICENSE` and `CHANGELOG.md`.
+It is fail-closed: with no git work tree to enumerate it exits with code `2`
+rather than passing.
 
 ```powershell
 # Windows (Windows PowerShell 5.1 or pwsh)
@@ -370,6 +376,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/boundary-scan.ps1
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/boundary-scan.ps1
 ```
+
+Its logic is unit-tested over a throwaway git work tree by
+`scripts/test-boundary-scan.ps1` (run in CI before the scan itself).
 
 ### Spec consistency check
 

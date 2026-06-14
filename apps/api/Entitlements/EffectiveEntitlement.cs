@@ -11,7 +11,7 @@ namespace LiveCore.Api.Entitlements;
 /// carries only what the server recorded: the generic entitlement <see cref="Key"/>, its
 /// <see cref="ValueKind"/> and the granted value (<see cref="FlagValue"/> for a flag, <see cref="QuotaLimit"/>
 /// for a quota — null meaning an unlimited/fair-use grant). A vertical maps the key to its own paywall copy in
-/// its UI (docs/21 "ArcanOS may display these as ..."); Core hands out only the generic key and value. It
+/// its UI (docs/21 "a vertical may display these as ..."); Core hands out only the generic key and value. It
 /// carries NO subject id, NO internal surrogate ids, NO source-plan provenance and NO authorization rationale —
 /// only the generic, client-safe premium fact.
 /// </summary>

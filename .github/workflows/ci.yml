@@ -163,9 +163,18 @@ jobs:
   boundary-scan:
     name: Boundary scan (forbidden vertical terms)
     runs-on: ubuntu-latest
+    # CORE-BND-001: the scanner enumerates TRACKED source only (git ls-files), so
+    # gitignored tooling is excluded, *.Dockerfile is in scope, and the docs/ and
+    # csv/ trees plus the root documentation files are excluded. The test step
+    # proves that coverage over a throwaway git work tree (a seeded brand term in
+    # a tracked .cs/Dockerfile is flagged, gitignored and documentation files are
+    # not, and a non-git tree fails closed), then guards the real tree.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Test the boundary scan logic
+        run: pwsh -NoProfile -File scripts/test-boundary-scan.ps1
 
       - name: Run boundary scan
         run: pwsh -NoProfile -File scripts/boundary-scan.ps1

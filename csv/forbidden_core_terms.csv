@@ -20,3 +20,8 @@ training,docs explaining boundaries only,use generic Core language
 incident,docs explaining boundaries only,use generic Core language
 debrief,docs explaining boundaries only,use generic Core language
 department,docs explaining boundaries only,use generic Core language
+arcanos,docs/ csv/ README.md AGENTS.md only,use product-neutral Core language
+scenarioos,docs/ csv/ README.md AGENTS.md only,use product-neutral Core language
+enterprise,docs/ csv/ README.md AGENTS.md only,use product-neutral Core language
+dnd,docs/ csv/ README.md AGENTS.md only,use product-neutral Core language
+pen_and_paper,docs/ csv/ README.md AGENTS.md only,use product-neutral Core language
