@@ -16,6 +16,14 @@ export interface CreateUploadIntentRequest {
   workspaceId: Uuid;
   /** The MIME content type of the object that will be uploaded. */
   contentType: string;
+  /**
+   * The declared size in bytes of the object that will be uploaded. It is
+   * reserved against the workspace's `asset.storage.bytes.max` storage quota at
+   * upload-intent, so an upload that would take the workspace over its plan
+   * storage limit is rejected server-side (409) before any URL is minted. Must
+   * be a positive integer.
+   */
+  sizeBytes: number;
 }
 
 /** Response body of the upload-intent command. */

@@ -652,16 +652,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // service consumes it.
     builder.Services.AddSingleton(AssetStorageLocation.FromConfiguration(builder.Configuration));
 
-    // Asset upload-intent command (CORE-AST-003): registers a new PENDING asset with server-minted storage
-    // coordinates (reusing the CORE-AST-001 Asset aggregate) and mints the short-lived signed upload URL via
+    // Asset upload-intent command (CORE-AST-003 + the CORE-MON-006 storage-quota gate): registers a new
+    // PENDING asset with server-minted storage coordinates (reusing the CORE-AST-001 Asset aggregate),
+    // atomically consumes the client-declared object size against the workspace's asset.storage.bytes.max
+    // quota (the reused QuotaEnforcementService, CORE-CONC-004) and mints the short-lived signed upload URL via
     // the CORE-AST-002 IAssetStorage adapter port. Registered here because it depends on the asset repository,
-    // the storage location and the storage adapter above. The asset is private by default and the signed URL
-    // is minted before the row is persisted, so an unconfigured storage backend fails closed
-    // (AssetStorageNotConfiguredException) leaving no orphan pending asset (the epic acceptance criterion;
-    // threat T4 "Asset leak"). The endpoint authorizes the caller (role + tenant + workspace) BEFORE invoking
-    // it. The signed download URL flow (CORE-AST-004) needs no extra service: its endpoint reuses the asset
-    // repository, the tenant context resolver, the workspace member repository and the IAssetStorage adapter
-    // above. Linking (CORE-AST-005) and cleanup (CORE-AST-006) are later stories.
+    // the storage location and the storage adapter above plus the quota enforcement service and the shared
+    // TransactionalUnitOfWork. The consume, URL mint and row persist run in ONE transaction, so an unconfigured
+    // storage backend fails closed (AssetStorageNotConfiguredException) leaving no orphan pending asset AND no
+    // leaked quota (the epic acceptance criterion; threat T4 "Asset leak"); an upload over the workspace's
+    // storage limit is rejected (409) having consumed and persisted nothing ("Free limits cannot be bypassed by
+    // clients"). The endpoint authorizes the caller (role + tenant + workspace) BEFORE invoking it. The signed
+    // download URL flow (CORE-AST-004) needs no extra service: its endpoint reuses the asset repository, the
+    // tenant context resolver, the workspace member repository and the IAssetStorage adapter above. Linking
+    // (CORE-AST-005) and cleanup (CORE-AST-006) are later stories.
     builder.Services.AddScoped<AssetUploadIntentService>();
 
     // Asset linking persistence + commands (CORE-AST-005, the asset-linking story of the "Asset Storage and
@@ -698,10 +702,12 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // is never reachable; threats T1/T5), then REMOVES its asset_links (the FK-backed link rows, removed
     // explicitly so the cascade is deterministic — ADR 0012 step 2), DELETES the underlying storage object via
     // IAssetStorage BEFORE the metadata row (so a storage failure leaves no dangling row — mirrors the
-    // upload-intent ordering), deletes the row and appends an AssetDeleted audit record, all atomically
-    // (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md). With no storage configured
-    // the fail-closed UnconfiguredAssetStorage makes the whole transaction roll back having changed nothing and
-    // the endpoint returns 503 (private-by-default holds even unconfigured; threat T4). Consumed by
+    // upload-intent ordering), deletes the row, appends an AssetDeleted audit record and RELEASES the asset's
+    // reserved asset.storage.bytes.max storage bytes back to the workspace (the reused QuotaEnforcementService,
+    // CORE-MON-006: freeing an asset restores headroom), all atomically (cascade, not block;
+    // docs/adr/0012-resource-deletion-cascades-dependents.md). With no storage configured the fail-closed
+    // UnconfiguredAssetStorage makes the whole transaction roll back having changed nothing and the endpoint
+    // returns 503 (private-by-default holds even unconfigured; threat T4). Consumed by
     // DELETE /api/v1/assets/{assetId} (wired by MapAssetEndpoints).
     builder.Services.AddScoped<AssetDeletionService>();
 
@@ -828,8 +834,10 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // command's allow/deny can never diverge from the reported status; it is FAIL-CLOSED (a subject not entitled to a
     // defined quota has no allowance) and computed entirely server-side, so "Free limits cannot be bypassed by
     // clients" (the epic acceptance criterion; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). It is consumed by
-    // the workspace-create command (workspace.active.max, the creating user subject) and the session start/end
-    // commands (session.active.max, the session's workspace subject); no new HTTP route is added.
+    // the workspace-create command (workspace.active.max, the creating user subject), the session start/end
+    // commands (session.active.max, the session's workspace subject), the participant-join/leave path
+    // (session.participant.max, the session subject; CORE-MON-005) and the asset upload-intent/delete path
+    // (asset.storage.bytes.max, the asset's workspace subject; CORE-MON-006); no new HTTP route is added.
     builder.Services.AddScoped<QuotaEnforcementService>();
 
     // Purchase transaction persistence and audit trail (CORE-STORE-002, the second story of the "Store Purchase

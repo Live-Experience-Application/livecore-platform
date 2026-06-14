@@ -44,4 +44,22 @@ public static class QuotaEntitlementKeys
     /// concurrent joins unable to exceed the cap.
     /// </summary>
     public const string SessionParticipantMax = "session.participant.max";
+
+    /// <summary>
+    /// Caps a workspace's total stored asset size in BYTES (docs/21 generic key <c>asset.storage.bytes.max</c>;
+    /// csv/mobile_entitlement_catalog.csv, a <see cref="QuotaUnit.Bytes"/> quota). Enforced on the asset
+    /// upload-intent path (<c>AssetUploadIntentService.CreateAsync</c>) for the
+    /// <see cref="EntitlementSubjectType.Workspace"/> subject the asset belongs to: the client-declared object
+    /// size is atomically check-and-consumed against the workspace's granted storage quota, so an upload is
+    /// rejected once the workspace would exceed its plan storage limit (CORE-MON-006). The consumed bytes are
+    /// released when the asset is deleted (<c>AssetDeletionService.DeleteAsync</c>), so the recorded usage reflects
+    /// the workspace's CURRENT stored bytes rather than a lifetime total — the storage analogue of how
+    /// <see cref="SessionActiveMax"/> is consumed at start and released at end. The atomic check-and-consume
+    /// (CORE-CONC-004) makes concurrent uploads unable to exceed the cap, so the documented free-tier storage cap
+    /// is a real server-side gate and not a UI-only restriction
+    /// (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md: "Free limits cannot be bypassed by clients"). The
+    /// workspace is the subject the workspace quota-status route already surfaces (CORE-ENTL-003), exactly like
+    /// <see cref="SessionActiveMax"/>.
+    /// </summary>
+    public const string AssetStorageBytesMax = "asset.storage.bytes.max";
 }

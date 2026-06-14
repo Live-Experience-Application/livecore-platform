@@ -587,6 +587,51 @@ story's acceptance criterion).
   is CORE-PRS-001. The check and its tests are added here against the service, per the
   story note.
 
+## Server-side storage cap on the upload path (CORE-MON-006)
+
+CORE-ENTL-004 enforced `workspace.active.max` and `session.active.max`, and CORE-MON-005 added
+`session.participant.max`, but `asset.storage.bytes.max` — the free-tier storage cap
+(`csv/mobile_entitlement_catalog.csv`, a `Bytes` quota) — was enforced **nowhere**: no key
+existed in `QuotaEntitlementKeys`, and the upload-intent command
+(`AssetUploadIntentService.CreateAsync` / `AssetEndpoints.CreateUploadIntentAsync`) performed no
+quota check, so a free workspace had **unbounded** storage — the exact bypass this document says
+Core exists to prevent ("Limits such as ... storage ... must be enforced server-side. Otherwise
+users can bypass mobile UI restrictions"). CORE-MON-006 closes that: an asset upload is **rejected
+when the workspace would exceed its plan storage quota**, enforced server-side at upload-intent,
+and freeing an asset restores headroom (the story's acceptance criterion).
+
+- **The workspace is the storage-quota subject.** Asset bytes accumulate per **workspace** (an
+  asset is workspace-scoped, `csv/database_tables.csv`), so `asset.storage.bytes.max` is keyed by
+  (`Workspace`, workspaceId) — the same subject the workspace quota-status route already surfaces
+  (CORE-ENTL-003), exactly like `session.active.max`. No new `EntitlementSubjectType` is needed
+  (`Workspace` already exists), the generic key was already in the "Generic entitlement keys" list
+  and the catalog, and the unit is the existing `QuotaUnit.Bytes` — so there is **no new table and
+  no EF migration**, and the catalog and that key list are not edited.
+- **Enforced via the existing quota services, atomically (CORE-CONC-004).** The client declares the
+  object's size at upload-intent (a new `sizeBytes` request field); after every authorization /
+  tenant / workspace / role check the command atomically check-and-consumes those bytes against the
+  workspace's storage quota through the reused `QuotaEnforcementService.TryConsumeAsync`. Because
+  that is a single limit-guarded statement, **concurrent uploads can never overrun the cap**: N
+  uploads racing for the last bytes yield exactly the admissions that fit and the rest are
+  quota-exceeded. The consume, the signed-URL mint and the asset-row persist run in **one**
+  `TransactionalUnitOfWork`, so an over-quota upload (409) and a fail-closed storage error (503,
+  `AssetStorageNotConfiguredException` thrown inside the transaction) both roll back having consumed
+  **nothing** and persisted **nothing** — no orphan pending asset and no leaked quota.
+- **Fail-closed, and only enforces a quota that exists.** A free workspace's small storage cap is
+  enforced; a paid plan's larger or unlimited (fair-use) grant admits more — premium state comes
+  only from the server entitlement. When **no** `asset.storage.bytes.max` quota governs the
+  deployment the upload is ungoverned and proceeds (Core enforces only quotas that exist); when the
+  quota **is** defined but the workspace holds no grant, the workspace has no allowance and the
+  upload is denied — the same fail-closed contract as `session.active.max`.
+- **Freeing assets restores headroom.** The reserved bytes are recorded on the asset
+  (`Asset.SizeBytes`), so the host-initiated deletion (`AssetDeletionService.DeleteAsync`,
+  CORE-LIFE-006) **releases** exactly those bytes back to the workspace's storage usage inside its
+  deletion transaction — a clamped, idempotent decrement (a no-op for an asset with no recorded
+  size). So the recorded usage reflects the workspace's **current** stored bytes rather than a
+  lifetime total, exactly as `session.active.max` is consumed at start and released at end. (A
+  follow-up: the background cleanup of **abandoned** never-confirmed pending intents, CORE-AST-006,
+  does not yet release their reserved bytes; the host-delete path does.)
+
 ## Security requirements
 
 - Never trust client-side premium flags.

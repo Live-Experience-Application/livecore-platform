@@ -20,10 +20,17 @@ namespace LiveCore.Api.Assets;
 /// The MIME content type of the object that will be uploaded (for example <c>image/png</c>). Validated as
 /// a well-formed content-type token; an invalid or oversize value is a 400.
 /// </param>
+/// <param name="SizeBytes">
+/// The DECLARED size in bytes of the object that will be uploaded. It is reserved against the workspace's
+/// <c>asset.storage.bytes.max</c> storage quota at upload-intent (CORE-MON-006), so an upload that would take
+/// the workspace over its plan storage limit is rejected server-side before any URL is minted. A non-positive
+/// value is a 400.
+/// </param>
 public sealed record CreateUploadIntentRequest(
     string? OrganizationSlug,
     Guid WorkspaceId,
-    string? ContentType);
+    string? ContentType,
+    long SizeBytes);
 
 /// <summary>
 /// Response body of the upload-intent command (CORE-AST-003). It returns the registered asset's id and

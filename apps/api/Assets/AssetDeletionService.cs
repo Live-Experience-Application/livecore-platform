@@ -1,4 +1,5 @@
 using LiveCore.Api.Audit;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Persistence;
 
 namespace LiveCore.Api.Assets;
@@ -62,12 +63,23 @@ namespace LiveCore.Api.Assets;
 /// calling in; this service is the authorized command's effect and performs no authorization itself (exactly
 /// like <see cref="AssetUploadIntentService"/>).
 ///
-/// ATOMICITY. The link removal, the storage object delete, the asset-row delete and the audit append run inside
-/// a single explicit <see cref="Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction"/> over the shared
-/// <see cref="LiveCoreDbContext"/> (the same scoped context every injected repository writes through), so either
-/// the whole deletion commits together or a failure rolls the lot back leaving everything intact and no audit
-/// record written. Auditing is inside the transaction on purpose: a deletion is recorded as a fact or it does
-/// not happen.
+/// STORAGE QUOTA RELEASE (CORE-MON-006). The upload-intent reserved the asset's declared size against the
+/// workspace's <c>asset.storage.bytes.max</c> quota (recorded as <see cref="Asset.SizeBytes"/>); deleting the
+/// asset RELEASES those bytes through the reused <see cref="QuotaEnforcementService.ReleaseAsync"/>, so the
+/// workspace's recorded storage usage reflects its CURRENT stored bytes and freeing an asset restores its
+/// headroom (the story's "freeing assets restores headroom"). The release is a clamped, idempotent decrement
+/// of the workspace subject's usage, so an asset with no recorded size (created before storage enforcement, or
+/// in an ungoverned deployment) releases nothing. It runs INSIDE the deletion transaction, so the headroom is
+/// restored atomically with the row removal — exactly as <c>SessionParticipantLeaveService</c> releases a
+/// participant slot.
+///
+/// ATOMICITY. The link removal, the storage object delete, the asset-row delete, the audit append and the
+/// storage-quota release run inside a single explicit
+/// <see cref="Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction"/> over the shared
+/// <see cref="LiveCoreDbContext"/> (the same scoped context every injected repository and the quota service
+/// write through), so either the whole deletion commits together or a failure rolls the lot back leaving
+/// everything intact and no audit record written. Auditing is inside the transaction on purpose: a deletion is
+/// recorded as a fact or it does not happen.
 /// </summary>
 internal sealed class AssetDeletionService
 {
@@ -76,24 +88,28 @@ internal sealed class AssetDeletionService
     private readonly IAssetLinkRepository _assetLinks;
     private readonly IAssetStorage _storage;
     private readonly IAuditLogRepository _audit;
+    private readonly QuotaEnforcementService _quotaEnforcement;
 
     public AssetDeletionService(
         TransactionalUnitOfWork unitOfWork,
         IAssetRepository assets,
         IAssetLinkRepository assetLinks,
         IAssetStorage storage,
-        IAuditLogRepository audit)
+        IAuditLogRepository audit,
+        QuotaEnforcementService quotaEnforcement)
     {
         ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(assets);
         ArgumentNullException.ThrowIfNull(assetLinks);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(audit);
+        ArgumentNullException.ThrowIfNull(quotaEnforcement);
         _unitOfWork = unitOfWork;
         _assets = assets;
         _assetLinks = assetLinks;
         _storage = storage;
         _audit = audit;
+        _quotaEnforcement = quotaEnforcement;
     }
 
     /// <summary>
@@ -206,6 +222,25 @@ internal sealed class AssetDeletionService
                     assetId,
                     now);
                 await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
+
+                // 5) RELEASE the storage bytes this asset reserved at upload-intent (CORE-MON-006), so freeing
+                // an asset restores the workspace's storage headroom. The reserved amount is the asset's
+                // recorded SizeBytes; the release is a clamped, idempotent decrement of the workspace subject's
+                // asset.storage.bytes.max usage, committed inside this transaction so the headroom is restored
+                // atomically with the row removal. An asset with no recorded size (created before storage
+                // enforcement, or in an ungoverned deployment) releases nothing — ReleaseAsync requires a
+                // strictly positive amount, so only a real reservation is returned to the pool.
+                if (asset.SizeBytes is { } reservedBytes && reservedBytes > 0)
+                {
+                    await _quotaEnforcement
+                        .ReleaseAsync(
+                            EntitlementSubjectType.Workspace,
+                            workspaceId,
+                            QuotaEntitlementKeys.AssetStorageBytesMax,
+                            reservedBytes,
+                            transactionCancellationToken)
+                        .ConfigureAwait(false);
+                }
 
                 return AssetDeletionResult.Deleted;
             },

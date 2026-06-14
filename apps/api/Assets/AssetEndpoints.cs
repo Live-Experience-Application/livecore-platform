@@ -1,3 +1,4 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Visibility;
@@ -209,17 +210,26 @@ internal static class AssetEndpoints
             return ValidationError("A valid content type is required.");
         }
 
+        // The declared object size must be strictly positive: it is reserved against the workspace's storage
+        // quota (CORE-MON-006), so a missing/non-positive size can never name a real upload. Validated after
+        // the content type so an authorized caller still gets ordered request-shape feedback.
+        if (request.SizeBytes <= 0)
+        {
+            return ValidationError("A positive 'sizeBytes' value is required.");
+        }
+
         var now = timeProvider.GetUtcNow();
 
-        AssetUploadIntent intent;
+        AssetUploadIntentResult result;
         try
         {
-            intent = await deps.UploadIntents
+            result = await deps.UploadIntents
                 .CreateAsync(
                     context.OrganizationId,
                     request.WorkspaceId,
                     context.UserProfileId,
                     request.ContentType!.Trim(),
+                    request.SizeBytes,
                     now,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -232,8 +242,18 @@ internal static class AssetEndpoints
             return StorageUnavailable();
         }
 
+        // The upload would take the workspace over its asset.storage.bytes.max storage quota (CORE-MON-006):
+        // 409, nothing consumed and nothing persisted. The caller is authorized by role; the limit, not the
+        // caller, is the reason, so this is a 409 rather than a 403 — the same mapping the workspace-create and
+        // session-start quota gates use.
+        if (result.Outcome == AssetUploadIntentOutcome.QuotaExceeded)
+        {
+            return QuotaExceeded(result.QuotaDenial!);
+        }
+
         // The created resource is reached through its signed download route; point the Location there
         // (csv/api_routes.csv GET /api/v1/assets/{assetId}/download-url, CORE-AST-004).
+        var intent = result.Intent!;
         var response = UploadIntentResponse.From(intent.Asset, intent.UploadUrl);
         return Results.Created($"/api/v1/assets/{intent.Asset.Id}/download-url", response);
     }
@@ -813,6 +833,18 @@ internal static class AssetEndpoints
             statusCode: StatusCodes.Status400BadRequest,
             title: "Bad Request",
             detail: detail);
+
+    // An upload-intent was refused because it would exceed the workspace's server-enforced
+    // asset.storage.bytes.max storage quota (CORE-MON-006; docs/08: 409 conflict). The detail names only the
+    // generic quota key (the same key the workspace quota-status read returns, so a vertical can map it to
+    // paywall copy) and never leaks an internal id or rationale (threat T7). The caller is authorized by role;
+    // the limit, not the caller, is the reason, so this is a 409 rather than a 403 — the same mapping as the
+    // workspace-create and session-start quota gates.
+    private static IResult QuotaExceeded(QuotaEnforcementDecision decision)
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
     // Workspace existence is hidden: an empty/malformed workspace id, a workspace in a foreign or
     // non-entitled tenant, and a workspace the caller does not belong to are ALL reported as 404, never

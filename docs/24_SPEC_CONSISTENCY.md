@@ -147,6 +147,20 @@ defaulted/absurd-past or implausible-future event time), since that timestamp is
 the ordering key reconciliation derives a purchase's converged status from. With
 CORE-MON-004 the v1 monetization acceptance is complete.
 
+**Quota note (CORE-MON-005/006 enforce the remaining free-tier caps).** The third
+v1 acceptance bullet above — free-tier quotas "are enforced server-side and cannot
+be bypassed by clients" — is now realized for every listed key: CORE-ENTL-004
+enforced `workspace.active.max` (workspace create) and `session.active.max`
+(session start/end), CORE-MON-005 added `session.participant.max` on the
+participant-join/leave path (the `Session` quota subject), and CORE-MON-006 added
+`asset.storage.bytes.max` on the asset upload-intent/delete path (the asset's
+`Workspace` quota subject). Each reuses the atomic `QuotaEnforcementService`
+(CORE-CONC-004) and is fail-closed; none adds a new key, table, route or migration
+(the keys were already in the "Generic entitlement keys" list and
+`csv/mobile_entitlement_catalog.csv`, and usage is tracked in the existing
+`quota_usage` table), so `csv/database_tables.csv`, the `docs/10` table list and
+the spec-consistency check are unchanged.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented

@@ -259,10 +259,13 @@ public sealed class Asset
     public string ContentType { get; }
 
     /// <summary>
-    /// The size of the stored object in bytes (docs/12_STORAGE_ASSETS.md <c>size_bytes</c>), or
-    /// <see langword="null"/> while the asset is still <see cref="AssetStatus.Pending"/> (the upload is
-    /// not yet confirmed, so the size is unknown). Recorded by <see cref="MarkAvailable"/>. Never
-    /// negative.
+    /// The size of the stored object in bytes (docs/12_STORAGE_ASSETS.md <c>size_bytes</c>). It is the
+    /// client-DECLARED object size recorded at upload-intent when the deployment enforces the
+    /// <c>asset.storage.bytes.max</c> storage quota (CORE-MON-006) — the bytes reserved against the
+    /// workspace's storage allowance, which the host-initiated deletion releases — and otherwise
+    /// <see langword="null"/> while the asset is still <see cref="AssetStatus.Pending"/> (no size was declared
+    /// and the upload is not yet confirmed). It is stamped (or refined to the confirmed size) by
+    /// <see cref="MarkAvailable"/>. Never negative.
     /// </summary>
     public long? SizeBytes { get; private set; }
 
@@ -303,10 +306,13 @@ public sealed class Asset
     /// <summary>
     /// Registers a new PENDING asset in the given workspace (owned by the given organization), created by
     /// the given authenticated user. The asset starts <see cref="AssetStatus.Pending"/> with no confirmed
-    /// upload yet: <see cref="SizeBytes"/> and <see cref="Checksum"/> are both <see langword="null"/> (the
-    /// state behind docs/12_STORAGE_ASSETS.md's "Create upload intent"). The asset is PRIVATE — nothing
-    /// here makes it publicly reachable; access is only ever through an authorized signed URL
-    /// (CORE-AST-004). The caller (a later upload-intent endpoint, CORE-AST-003) supplies the
+    /// upload yet (the state behind docs/12_STORAGE_ASSETS.md's "Create upload intent"); the
+    /// <see cref="Checksum"/> is <see langword="null"/> until the upload is confirmed
+    /// (<see cref="MarkAvailable"/>). The optional <paramref name="sizeBytes"/> is the client-DECLARED object
+    /// size the upload-intent reserves against the workspace's <c>asset.storage.bytes.max</c> storage quota
+    /// (CORE-MON-006); omit it (the default <see langword="null"/>) when no size is declared. The asset is
+    /// PRIVATE — nothing here makes it publicly reachable; access is only ever through an authorized signed
+    /// URL (CORE-AST-004). The caller (the upload-intent endpoint, CORE-AST-003) supplies the
     /// already-resolved tenant, workspace and creator and the server-assigned storage coordinates and the
     /// client-declared content type.
     /// </summary>
@@ -314,6 +320,7 @@ public sealed class Asset
     /// The organization id, workspace id or creator id is empty, or a storage coordinate or the content
     /// type violates an invariant.
     /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The declared size is negative.</exception>
     public static Asset Create(
         Guid organizationId,
         Guid workspaceId,
@@ -322,7 +329,8 @@ public sealed class Asset
         string bucket,
         string objectKey,
         string contentType,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        long? sizeBytes = null)
     {
         if (createdByUserProfileId == Guid.Empty)
         {
@@ -342,7 +350,7 @@ public sealed class Asset
             // path separators; it is trimmed of surrounding whitespace only.
             objectKey?.Trim() ?? string.Empty,
             contentType?.Trim() ?? string.Empty,
-            sizeBytes: null,
+            sizeBytes,
             checksum: null,
             AssetStatus.Pending,
             createdAt,

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Assets;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using Microsoft.AspNetCore.Hosting;
@@ -30,8 +31,10 @@ namespace LiveCore.Api.IntegrationTests;
 ///   <item>AUTHORIZATION + ISOLATION: 401 unauthenticated; the non-upload roles
 ///   {Participant, Observer, Auditor} -&gt; 403 with NO asset; a non-member of the target workspace and a
 ///   workspace in another tenant hidden as 404 with NO asset.</item>
-///   <item>VALIDATION: a missing organizationSlug and an invalid content type are 400; an empty workspace
-///   id is hidden as 404.</item>
+///   <item>VALIDATION: a missing organizationSlug, an invalid content type and a non-positive sizeBytes are
+///   400; an empty workspace id is hidden as 404.</item>
+///   <item>STORAGE QUOTA (CORE-MON-006): an upload that would take the workspace over its
+///   asset.storage.bytes.max grant is 409 with NO asset; one that fits is 201 and records the declared size.</item>
 ///   <item>FAIL-CLOSED STORAGE: with no storage adapter configured (the production default), an authorized
 ///   request is 503 and NO asset is persisted (private-by-default holds even unconfigured; threat T4).</item>
 /// </list>
@@ -102,7 +105,10 @@ public sealed class AssetUploadIntentEndpointTests
         Assert.Equal(seed.OrganizationId, asset.OrganizationId);
         Assert.Equal(seed.WorkspaceId, asset.WorkspaceId);
         Assert.Equal(await SingleUserProfileIdAsync(factory), asset.CreatedByUserProfileId);
-        Assert.Null(asset.SizeBytes);
+        // The declared object size is recorded as the asset's reserved storage size (CORE-MON-006); the upload
+        // is still unconfirmed, so the checksum is null. This workspace has no storage quota, so the upload is
+        // ungoverned and proceeds.
+        Assert.Equal(_defaultSizeBytes, asset.SizeBytes);
         Assert.Null(asset.Checksum);
         // The object key is tenant- and workspace-scoped (threats T5/T1).
         Assert.StartsWith($"assets/{seed.OrganizationId}/{seed.WorkspaceId}/", asset.ObjectKey, StringComparison.Ordinal);
@@ -244,7 +250,60 @@ public sealed class AssetUploadIntentEndpointTests
         var response = await PostAsync(client, Body(_orgA, seed.WorkspaceId, "image/png"));
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        // Fail-closed leaves no orphan pending asset: the URL is minted before the row is persisted.
+        // Fail-closed leaves no orphan pending asset: the upload runs in one transaction that rolls back.
+        Assert.Empty(await AssetsAsync(factory, seed.OrganizationId, seed.WorkspaceId));
+    }
+
+    [Fact]
+    public async Task Upload_intent_over_storage_quota_is_409_and_creates_no_asset()
+    {
+        // The workspace's asset.storage.bytes.max grant is 1,000,000 bytes with 900,000 already used; a
+        // 250,000-byte upload would overrun it -> 409, with no asset persisted (CORE-MON-006, the story's
+        // "Upload over quota rejected"). The free-tier storage cap is enforced server-side, not in the UI.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedWorkspaceWithStorageQuotaAsync(
+            factory, subject, MembershipRole.Host, limit: 1_000_000, startingUsage: 900_000);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostAsync(client, Body(_orgA, seed.WorkspaceId, "image/png", sizeBytes: 250_000));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Empty(await AssetsAsync(factory, seed.OrganizationId, seed.WorkspaceId));
+    }
+
+    [Fact]
+    public async Task Upload_intent_under_storage_quota_is_201_and_records_the_declared_size()
+    {
+        // The workspace has ample storage headroom (1,000,000 cap, 100,000 used); a 250,000-byte upload fits
+        // -> 201, and the registered asset records the declared size (CORE-MON-006, the story's "under quota
+        // succeeds").
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedWorkspaceWithStorageQuotaAsync(
+            factory, subject, MembershipRole.Host, limit: 1_000_000, startingUsage: 100_000);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostAsync(client, Body(_orgA, seed.WorkspaceId, "image/png", sizeBytes: 250_000));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var asset = Assert.Single(await AssetsAsync(factory, seed.OrganizationId, seed.WorkspaceId));
+        Assert.Equal(250_000, asset.SizeBytes);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-5)]
+    public async Task Upload_intent_is_400_for_a_non_positive_size_and_creates_no_asset(long sizeBytes)
+    {
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedWorkspaceAsync(factory, subject, MembershipRole.Host);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostAsync(client, Body(_orgA, seed.WorkspaceId, "image/png", sizeBytes: sizeBytes));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Empty(await AssetsAsync(factory, seed.OrganizationId, seed.WorkspaceId));
     }
 
@@ -252,8 +311,14 @@ public sealed class AssetUploadIntentEndpointTests
     // Helpers.
     // =====================================================================
 
-    private static object Body(string? organizationSlug, Guid workspaceId, string? contentType)
-        => new { organizationSlug, workspaceId, contentType };
+    private const long _defaultSizeBytes = 1024;
+
+    private static object Body(
+        string? organizationSlug,
+        Guid workspaceId,
+        string? contentType,
+        long sizeBytes = _defaultSizeBytes)
+        => new { organizationSlug, workspaceId, contentType, sizeBytes };
 
     private static async Task<HttpResponseMessage> PostAsync(HttpClient client, object body)
         => await client.PostAsync("/api/v1/assets/upload-intent", JsonContent.Create(body, options: _json));
@@ -272,6 +337,41 @@ public sealed class AssetUploadIntentEndpointTests
             await db.AddOrganizationMemberAsync(org.Id, user.Id, role);
             var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
             await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
+            seed = new SeedResult(org.Id, workspace.Id);
+        });
+        return seed;
+    }
+
+    /// <summary>
+    /// Seeds an org + a caller with the given role (in org A), and grants the workspace an
+    /// <c>asset.storage.bytes.max</c> quota (Workspace subject, Bytes unit) at <paramref name="limit"/> bytes
+    /// with <paramref name="startingUsage"/> bytes already recorded — the arrangement the storage-cap tests
+    /// enforce against.
+    /// </summary>
+    private static async Task<SeedResult> SeedWorkspaceWithStorageQuotaAsync(
+        WorkspaceApiFactory factory,
+        string subject,
+        MembershipRole role,
+        long limit,
+        long startingUsage)
+    {
+        SeedResult seed = default;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, role);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, role);
+
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync(QuotaEntitlementKeys.AssetStorageBytesMax);
+            var quota = await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.Workspace, QuotaUnit.Bytes);
+            await db.AddSubjectQuotaEntitlementAsync(EntitlementSubjectType.Workspace, workspace.Id, entitlement, limit);
+            if (startingUsage != 0)
+            {
+                await db.AddQuotaUsageAsync(EntitlementSubjectType.Workspace, workspace.Id, quota, startingUsage);
+            }
+
             seed = new SeedResult(org.Id, workspace.Id);
         });
         return seed;

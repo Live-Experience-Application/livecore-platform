@@ -1,5 +1,6 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.Audit;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
@@ -49,6 +50,7 @@ public sealed class AssetDeletionServiceTests : IDisposable
 
     private static readonly DateTimeOffset _seedTime = new(2026, 6, 13, 8, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _deleteTime = new(2026, 6, 13, 9, 30, 0, TimeSpan.Zero);
+    private static readonly TimeProvider _time = new FixedTimeProvider(_deleteTime);
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
@@ -76,15 +78,20 @@ public sealed class AssetDeletionServiceTests : IDisposable
         return context;
     }
 
-    // The service and every repository it composes MUST share one context instance so the explicit
-    // transaction enrols each repository's SaveChanges.
+    // The service and every repository (and the quota service) it composes MUST share one context instance so
+    // the explicit transaction enrols each repository's SaveChanges and the storage-quota release.
     private static AssetDeletionService CreateService(LiveCoreDbContext context, IAssetStorage storage)
         => new(
             new TransactionalUnitOfWork(context),
             new AssetRepository(context),
             new AssetLinkRepository(context),
             storage,
-            new AuditLogRepository(context));
+            new AuditLogRepository(context),
+            new QuotaEnforcementService(
+                new QuotaDefinitionRepository(context),
+                new SubjectEntitlementResolver(new SubjectEntitlementRepository(context)),
+                new QuotaUsageRepository(context),
+                _time));
 
     [Fact]
     public async Task Delete_removes_the_asset_and_its_links_and_storage_object_while_unrelated_survive()
@@ -287,6 +294,121 @@ public sealed class AssetDeletionServiceTests : IDisposable
             actor ? Guid.Empty : Guid.CreateVersion7(),
             _deleteTime,
             CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Delete_releases_the_assets_reserved_storage_bytes_back_to_the_workspace()
+    {
+        // The asset reserved 4,096 bytes of the workspace's storage quota at upload-intent (recorded as its
+        // SizeBytes). The workspace's recorded storage usage is 10,000; deleting the asset releases the 4,096
+        // bytes, so the usage drops to 5,904 and the headroom is restored (the story's "deleting an asset
+        // restores available bytes").
+        var seeded = await SeedAssetWithReservedStorageAsync(reservedBytes: 4096, startingUsage: 10_000);
+
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context, new RecordingAssetStorage());
+            var result = await service.DeleteAsync(
+                seeded.OrganizationId, seeded.WorkspaceId, seeded.AssetId, seeded.Actor, _deleteTime, CancellationToken.None);
+            Assert.Equal(AssetDeletionResult.Deleted, result);
+        }
+
+        Assert.Equal(10_000 - 4096, await ReadStorageUsageAsync(seeded.WorkspaceId, seeded.QuotaId));
+    }
+
+    [Fact]
+    public async Task Delete_releases_nothing_for_an_asset_with_no_recorded_size()
+    {
+        // An asset created before storage enforcement (SizeBytes null) reserved no bytes; deleting it leaves
+        // the recorded usage untouched (the release is a clamped, idempotent no-op).
+        var seeded = await SeedAssetWithReservedStorageAsync(reservedBytes: null, startingUsage: 10_000);
+
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context, new RecordingAssetStorage());
+            await service.DeleteAsync(
+                seeded.OrganizationId, seeded.WorkspaceId, seeded.AssetId, seeded.Actor, _deleteTime, CancellationToken.None);
+        }
+
+        Assert.Equal(10_000, await ReadStorageUsageAsync(seeded.WorkspaceId, seeded.QuotaId));
+    }
+
+    /// <summary>
+    /// Seeds one organization + workspace + actor, a workspace-subject <c>asset.storage.bytes.max</c> quota
+    /// granted a generous byte limit with <paramref name="startingUsage"/> bytes already recorded, and one
+    /// asset whose declared <paramref name="reservedBytes"/> (or none) is recorded as its
+    /// <see cref="Asset.SizeBytes"/>. Returns the ids and the quota definition id.
+    /// </summary>
+    private async Task<SeededStorageAsset> SeedAssetWithReservedStorageAsync(long? reservedBytes, long startingUsage)
+    {
+        await using var context = CreateContext();
+
+        var actor = UserProfile.CreateFromPrincipal(new OidcPrincipal(PrincipalType.User, _issuer, "host-a"), _seedTime);
+        context.UserProfiles.Add(actor);
+        var org = Organization.Create(_orgSlugA, _orgSlugA, _seedTime);
+        context.Organizations.Add(org);
+        await context.SaveChangesAsync();
+
+        var workspace = Workspace.Create(org.Id, "summer-show", "Summer Show", _seedTime);
+        context.Workspaces.Add(workspace);
+        await context.SaveChangesAsync();
+
+        var entitlement = EntitlementDefinition.Define(
+            QuotaEntitlementKeys.AssetStorageBytesMax, EntitlementValueKind.Quota, "Storage quota", null, _seedTime);
+        context.EntitlementDefinitions.Add(entitlement);
+        var quota = QuotaDefinition.Define(entitlement, EntitlementSubjectType.Workspace, QuotaUnit.Bytes, _seedTime);
+        context.QuotaDefinitions.Add(quota);
+        context.SubjectEntitlements.Add(
+            SubjectEntitlement.GrantQuota(EntitlementSubjectType.Workspace, workspace.Id, entitlement, 1_000_000, null, _seedTime));
+        var usage = QuotaUsage.Start(EntitlementSubjectType.Workspace, workspace.Id, quota, _seedTime);
+        usage.Record(startingUsage, _seedTime);
+        context.QuotaUsage.Add(usage);
+
+        var asset = Asset.Create(
+            org.Id,
+            workspace.Id,
+            actor.Id,
+            "s3",
+            "livecore-private-assets",
+            $"assets/{org.Id}/{workspace.Id}/{Guid.CreateVersion7()}",
+            "image/png",
+            _seedTime,
+            reservedBytes);
+        context.Assets.Add(asset);
+        await context.SaveChangesAsync();
+
+        return new SeededStorageAsset
+        {
+            OrganizationId = org.Id,
+            WorkspaceId = workspace.Id,
+            Actor = actor.Id,
+            AssetId = asset.Id,
+            QuotaId = quota.Id,
+        };
+    }
+
+    private async Task<long> ReadStorageUsageAsync(Guid workspaceId, Guid quotaDefinitionId)
+    {
+        await using var context = CreateContext();
+        var usage = await new QuotaUsageRepository(context).FindBySubjectAndQuotaAsync(
+            EntitlementSubjectType.Workspace, workspaceId, quotaDefinitionId, CancellationToken.None);
+        return usage?.UsedAmount ?? 0;
+    }
+
+    private sealed class SeededStorageAsset
+    {
+        public Guid OrganizationId { get; init; }
+        public Guid WorkspaceId { get; init; }
+        public Guid Actor { get; init; }
+        public Guid AssetId { get; init; }
+        public Guid QuotaId { get; init; }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private readonly DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
     }
 
     /// <summary>
