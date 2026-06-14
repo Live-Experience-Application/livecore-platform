@@ -412,6 +412,50 @@ free-tier quotas are enforced server-side and cannot be bypassed by clients; and
 user-visible premium state comes only from server entitlements (an
 unverified/failed purchase grants nothing — fail-closed).
 
+## Purchase-to-entitlement grant chain — implemented (CORE-MON-003)
+
+CORE-MON-001 declared the grant chain in scope for v1 and CORE-MON-002 landed the
+buyer linkage; CORE-MON-003 implements the **grant** itself — step 5 of the
+"Receipt verification" flow above ("Backend grants `SubjectEntitlement`") — so a
+verified, buyer-linked purchase now grants the buyer the mapped
+`SubjectEntitlement` (the v1 monetization acceptance in `docs/24_SPEC_CONSISTENCY.md`).
+
+- **It wires, it does not duplicate.** The plan → entitlement bundle already
+  exists (`PlanDefinition.Entitlements`, CORE-ENTL-001) and the server-side
+  assignment already exists (`SubjectEntitlementAssignmentService.AssignFromPlanAsync`,
+  CORE-ENTL-002). The new `ProductEntitlementGrantService` (`apps/api/Entitlements/`)
+  supplies only the remaining **product → plan** step and reuses both. **No new
+  table is introduced** — the chain composes the existing
+  `plan_definitions`/`plan_entitlements`/`subject_entitlements` model, so the
+  documented "Database additions" list is unchanged.
+- **The product → plan mapping is by plan key.** A verified purchase's
+  `product_reference` (the vertical's opaque store product identifier) is mapped to
+  a generic plan by the plan's stable `PlanDefinition.Key` (reusing
+  `IPlanDefinitionRepository.FindByKeyAsync`). Core provides only the generic
+  mechanism; the vertical supplies the plan-definition **seed data** whose keys
+  correspond to the store products it sells (the concrete commercial plans are
+  vertical seed data, never hardcoded in Core — see `PlanDefinition` above and
+  `docs/04_PRODUCT_BOUNDARIES.md`).
+- **Idempotent on (purchase, entitlement).** A verified purchase maps to exactly
+  one subject (the unique `billing_account_links(purchase_transaction_id)` link,
+  CORE-MON-002) and deterministically to one plan (by product reference), and the
+  assignment is idempotent per (subject, entitlement) (the unique per-subject index,
+  upsert-in-place — CORE-ENTL-002). So a duplicate webhook / retry / replayed-but-
+  genuine proof converges rather than double-granting, and the grant shows up in the
+  effective-entitlements read (`GET /api/v1/me/entitlements`).
+- **One transaction, fail-closed.** The Apple (CORE-STORE-003) and Google
+  (CORE-STORE-004) verification endpoints perform the record + buyer link + grant in
+  **one** transaction (reusing the CORE-CONC-002 unit of work). The grant runs only
+  when the purchase belongs to the resolved buyer (a fresh link or this buyer's
+  idempotent re-link): a conflicting cross-subject claim grants nothing (the 409
+  path), an unverified/failed purchase never reaches the grant (the 422 path), and a
+  product reference that maps to no active plan grants nothing.
+- **Audit.** The grant produces the catalog's `EntitlementGranted` domain event
+  (`csv/entitlement_event_catalog.csv`); backing the entitlement/store event catalog
+  with a dedicated `AuditAction` is CORE-SPEC-002. The refund/cancellation
+  **revocation** side of the chain, and the monotonic (absorbing-revoked) purchase
+  state machine, are CORE-MON-004.
+
 ## Atomic quota check-and-consume (CORE-CONC-004)
 
 Server-side quota enforcement (CORE-ENTL-004) is the gate that makes "Free limits cannot be bypassed

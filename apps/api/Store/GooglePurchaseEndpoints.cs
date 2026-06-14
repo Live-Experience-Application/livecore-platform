@@ -39,8 +39,14 @@ namespace LiveCore.Api.Store;
 /// <c>billing_account_links</c> row binds the purchase to that subject. The same buyer re-submitting their own
 /// receipt is idempotent; a DIFFERENT subject submitting the same external receipt is denied 409 and granted
 /// nothing — "the same external receipt cannot be claimed by two different subjects" (CORE-MON-002; threat T5).
-/// Granting the resulting <c>SubjectEntitlement</c> from the linked buyer (the product → plan → entitlement
-/// mapping) is the next story (CORE-MON-003), which this buyer linkage unblocks.
+///
+/// ENTITLEMENT GRANT (CORE-MON-003). The verified, buyer-linked purchase now GRANTS the buyer the mapped
+/// <see cref="SubjectEntitlement"/> in the SAME transaction as the record + link, through the product → plan →
+/// entitlement mapping (<see cref="ProductEntitlementGrantService"/>), exactly as the Apple endpoint does. The
+/// grant is idempotent on (purchase, entitlement) and shows up in the effective-entitlements read
+/// (<c>GET /api/v1/me/entitlements</c>). It is performed ONLY when the purchase belongs to THIS buyer: a
+/// conflicting cross-subject claim grants nothing, and a product reference that maps to no active plan grants
+/// nothing (both fail-closed).
 ///
 /// Authorization model (server-side; docs/06_AUTHORIZATION_MATRIX.md; threats T1/T5):
 /// <list type="bullet">
@@ -183,6 +189,23 @@ internal static class GooglePurchaseEndpoints
                     var link = await deps.BillingLinks
                         .LinkBuyerAsync(recording.Transaction.Id, EntitlementSubjectType.User, profile.Id, now, unitToken)
                         .ConfigureAwait(false);
+
+                    // Grant the buyer the mapped entitlement (CORE-MON-003) — the product → plan → entitlement
+                    // mapping, idempotent on (purchase, entitlement) — but ONLY when the purchase belongs to THIS
+                    // buyer. A conflicting cross-subject claim grants nothing; an unmapped product grants nothing
+                    // (both fail-closed). The grant runs in the SAME transaction as the record + link.
+                    if (link.Outcome != BillingAccountLinkOutcome.ConflictDifferentSubject)
+                    {
+                        await deps.Grants
+                            .GrantForProductAsync(
+                                EntitlementSubjectType.User,
+                                profile.Id,
+                                recording.Transaction.ProductReference,
+                                now,
+                                unitToken)
+                            .ConfigureAwait(false);
+                    }
+
                     return (recording, link);
                 },
                 cancellationToken)
@@ -211,6 +234,7 @@ internal static class GooglePurchaseEndpoints
         var resolver = services.GetService<PurchaseVerificationProviderResolver>();
         var transactions = services.GetService<PurchaseTransactionService>();
         var billingLinks = services.GetService<BillingAccountLinkService>();
+        var grants = services.GetService<ProductEntitlementGrantService>();
         var userProfiles = services.GetService<UserProfileReferenceService>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
         var timeProvider = services.GetService<TimeProvider>();
@@ -218,6 +242,7 @@ internal static class GooglePurchaseEndpoints
         if (resolver is null
             || transactions is null
             || billingLinks is null
+            || grants is null
             || userProfiles is null
             || unitOfWork is null
             || timeProvider is null)
@@ -230,6 +255,7 @@ internal static class GooglePurchaseEndpoints
             resolver,
             transactions,
             billingLinks,
+            grants,
             userProfiles,
             unitOfWork,
             timeProvider);
@@ -301,6 +327,7 @@ internal static class GooglePurchaseEndpoints
         PurchaseVerificationProviderResolver Resolver,
         PurchaseTransactionService Transactions,
         BillingAccountLinkService BillingLinks,
+        ProductEntitlementGrantService Grants,
         UserProfileReferenceService UserProfiles,
         TransactionalUnitOfWork UnitOfWork,
         TimeProvider TimeProvider);

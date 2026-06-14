@@ -112,6 +112,18 @@ appears in `csv/database_tables.csv` and the `docs/10` table list, and its
 spec-consistency check (which requires every *non-deferred* entitlement table to exist
 in the schema) stays green because the table now exists in both places.
 
+**Grant note (CORE-MON-003 implemented the grant chain).** The product → plan →
+entitlement grant chain is now **implemented**: a verified, buyer-linked purchase
+grants the buyer the mapped `SubjectEntitlement` (the first v1 monetization
+acceptance bullet above), idempotently, and the grant shows up in the
+effective-entitlements read. CORE-MON-003 **adds no new table** — it composes the
+existing `plan_definitions`/`plan_entitlements`/`subject_entitlements` model,
+mapping a purchase's `product_reference` to a generic plan by the plan's stable key
+and reusing `SubjectEntitlementAssignmentService.AssignFromPlanAsync` — so
+`csv/database_tables.csv`, the `docs/10` table list and the spec-consistency check
+are unchanged. The remaining v1 acceptance bullets (refund/cancellation revocation
+staying revoked) are CORE-MON-004.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented

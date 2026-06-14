@@ -1,5 +1,5 @@
 event_name,emitter,recipients,persisted,audit,notes
-EntitlementGranted,Core system,authorized admins/subject,true,true,Granted after verified purchase or admin action
+EntitlementGranted,Core system,authorized admins/subject,true,true,Granted by the implemented purchase->entitlement grant chain (CORE-MON-003) on a verified buyer-linked purchase via the product->plan->entitlement mapping; the dedicated AuditAction backing is CORE-SPEC-002
 EntitlementRevoked,Core system,authorized admins/subject,true,true,Refunds/cancellations/downgrades revoke entitlements
 QuotaExceeded,Core API,requesting subject,true,true,Command rejected because quota limit was exceeded
 PurchaseVerificationSubmitted,API client,system,true,true,Client submitted Apple/Google purchase proof

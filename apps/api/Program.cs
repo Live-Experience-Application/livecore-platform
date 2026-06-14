@@ -768,6 +768,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<SubjectEntitlementResolver>();
     builder.Services.AddScoped<SubjectEntitlementAssignmentService>();
 
+    // Purchase-to-entitlement grant chain (CORE-MON-003, the grant-chain story of the "Monetization v1" epic):
+    // the missing link that turns a verified, buyer-linked purchase into a granted SubjectEntitlement through the
+    // documented product -> plan -> entitlement mapping (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md;
+    // docs/24_SPEC_CONSISTENCY.md v1 monetization acceptance). Registered here, inside the persistence conditional,
+    // because it composes the CORE-ENTL-001 plan catalog (IPlanDefinitionRepository) and the CORE-ENTL-002
+    // SubjectEntitlementAssignmentService above — it adds no new table and no parallel assignment path. It maps the
+    // verified purchase's product reference to a generic plan by the plan's stable key and REUSES AssignFromPlanAsync,
+    // so the grant is idempotent on (purchase, entitlement) (a retry / replayed proof / duplicate notification
+    // converges rather than double-granting) and FAIL-CLOSED (a product reference that maps to no active plan grants
+    // nothing). The Apple (CORE-STORE-003) and Google (CORE-STORE-004) verification endpoints invoke it in the SAME
+    // transaction as the record + buyer link (reusing the CORE-CONC-002 TransactionalUnitOfWork), and only when the
+    // purchase belongs to the resolved buyer, so the grant shows up in the GET /api/v1/me/entitlements read.
+    builder.Services.AddScoped<ProductEntitlementGrantService>();
+
     // Ad eligibility decision (CORE-ADS-001, the Ad Eligibility epic): the entitlement-driven service behind
     // GET /api/v1/me/ad-eligibility. Registered here, inside the persistence conditional, because it composes the
     // CORE-ENTL-002 SubjectEntitlementResolver above; the AdEligibilityPolicy it applies is a pure static function
