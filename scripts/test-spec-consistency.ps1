@@ -168,6 +168,35 @@ $inconsistent = @(Test-LiveCoreEntitlementEventCatalog -Row $inconsistentCatalog
 AssertTrue (Test-AnyFinding -Finding $inconsistent -Pattern 'ENTL-EVENT:.*audited but not persisted') `
     'an entitlement-catalog event marked audited but not persisted fails the check'
 
+# CORE-SPEC-002: the catalog is BOUND to the real AuditAction enum. An audit=true event with no backing
+# AuditAction member fails (the catalog is aspirational).
+$auditActionsFixture = @('EntitlementGranted', 'QuotaExceeded')
+$unbackedCatalog = @(Get-EntlEventFixture -Name 'PhantomAudited' -Emitter 'Core system' -Recipients 'subject' -Persisted 'true' -Audit 'true')
+$unbacked = @(Test-LiveCoreEntitlementEventCatalog -Row $unbackedCatalog -AuditAction $auditActionsFixture)
+AssertTrue (Test-AnyFinding -Finding $unbacked -Pattern "ENTL-EVENT:.*PhantomAudited.*no AuditAction") `
+    'an audit=true catalog event with no backing AuditAction fails the check (CORE-SPEC-002)'
+
+# An AuditAction member exists but its catalog event is still audit=false fails (a backed event must be audited).
+$unmarkedCatalog = @(Get-EntlEventFixture -Name 'EntitlementGranted' -Emitter 'Core system' -Recipients 'subject' -Persisted 'false' -Audit 'false')
+$unmarked = @(Test-LiveCoreEntitlementEventCatalog -Row $unmarkedCatalog -AuditAction $auditActionsFixture)
+AssertTrue (Test-AnyFinding -Finding $unmarked -Pattern "ENTL-EVENT:.*AuditAction.EntitlementGranted exists but.*audit=false") `
+    'an AuditAction whose catalog event is marked audit=false fails the binding (CORE-SPEC-002)'
+
+# A catalog whose audit flags agree with the AuditAction set passes the binding (audit=true IFF a member exists).
+$boundGood = @(
+    Get-EntlEventFixture -Name 'EntitlementGranted' -Emitter 'Core system' -Recipients 'subject' -Persisted 'true' -Audit 'true'
+    Get-EntlEventFixture -Name 'AdEligibilityEvaluated' -Emitter 'Core API' -Recipients 'subject' -Persisted 'false' -Audit 'false'
+)
+$boundGoodFindings = @(Test-LiveCoreEntitlementEventCatalog -Row $boundGood -AuditAction @('EntitlementGranted'))
+AssertTrue ($boundGoodFindings.Count -eq 0) `
+    'a catalog whose audit flags match the AuditAction set passes the binding (CORE-SPEC-002)'
+
+# The real AuditAction enum carries the CORE-SPEC-002 entitlement/store actions.
+$realAuditActionsCheck = @(Get-LiveCoreAuditAction -RepoRoot $repoRoot)
+AssertTrue (($realAuditActionsCheck -contains 'EntitlementGranted') -and ($realAuditActionsCheck -contains 'QuotaExceeded') `
+        -and ($realAuditActionsCheck -contains 'StoreNotificationProcessed')) `
+    'the AuditAction enum carries the entitlement/store actions (CORE-SPEC-002)'
+
 # === Check 9: mobile store CSV ===
 
 $mobileDoc = @(
@@ -224,8 +253,9 @@ AssertTrue (Test-AnyFinding -Finding $indexDrift -Pattern 'INDEX:.*purchase_tran
 # === The real repository tree passes every check ===
 
 $realEntitlementEvents = @(Get-LiveCoreEntitlementEvent -RepoRoot $repoRoot)
-$realCatalog = @(Test-LiveCoreEntitlementEventCatalog -Row $realEntitlementEvents)
-AssertTrue ($realCatalog.Count -eq 0) 'the real csv/entitlement_event_catalog.csv passes the catalog check'
+$realAuditActions = @(Get-LiveCoreAuditAction -RepoRoot $repoRoot)
+$realCatalog = @(Test-LiveCoreEntitlementEventCatalog -Row $realEntitlementEvents -AuditAction $realAuditActions)
+AssertTrue ($realCatalog.Count -eq 0) 'the real csv/entitlement_event_catalog.csv passes the catalog check and the AuditAction binding (CORE-SPEC-002)'
 
 $result = Invoke-LiveCoreSpecConsistency -RepoRoot $repoRoot
 AssertTrue ($result.CheckCount -eq 10) 'the orchestrator runs all ten checks'

@@ -1,8 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using LiveCore.Api.Audit;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Workspaces;
+using Microsoft.EntityFrameworkCore;
 
 namespace LiveCore.Api.IntegrationTests;
 
@@ -189,6 +192,75 @@ public sealed class WorkspaceEndpointsTests
             new CreateWorkspaceRequest(_orgA, "summer-show", "Summer Show"));
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    // ---- CORE-SPEC-002: a quota denial writes the documented audit record ----
+
+    [Fact]
+    public async Task Create_over_quota_is_409_and_writes_a_QuotaExceeded_audit_fact()
+    {
+        // A workspace.active.max quota EXISTS for the User subject but the authorized Owner holds NO entitlement,
+        // so the atomic consume is fail-closed denied (zero allowance) and the create is 409. CORE-SPEC-002 records
+        // that denial as a real, tenant-scoped AuditAction.QuotaExceeded fact.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "owner-a";
+        var orgId = Guid.Empty;
+        var userId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Owner);
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync("workspace.active.max");
+            await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User, QuotaUnit.Count);
+            orgId = org.Id;
+            userId = user.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/workspaces",
+            new CreateWorkspaceRequest(_orgA, "summer-show", "Summer Show"));
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+
+        await factory.SeedAsync(async db =>
+        {
+            var entry = Assert.Single(await db.AuditLogs.AsNoTracking().ToListAsync());
+            Assert.Equal(AuditAction.QuotaExceeded, entry.Action);
+            Assert.Equal(orgId, entry.OrganizationId);
+            Assert.Equal(userId, entry.ActorUserProfileId);
+            Assert.Equal(nameof(EntitlementSubjectType.User), entry.ResourceType);
+            Assert.Equal(userId, entry.ResourceId);
+        });
+    }
+
+    [Fact]
+    public async Task Create_by_an_unauthorized_role_writes_no_quota_audit_fact()
+    {
+        // NEGATIVE authorization (threat T1): a non-Owner/Admin org member is denied 403 BEFORE the quota check, so
+        // an unauthorized caller never produces a QuotaExceeded audit fact — the audit is fail-closed, recorded only
+        // for an authorized-but-over-quota caller.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync("workspace.active.max");
+            await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User, QuotaUnit.Count);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/workspaces",
+            new CreateWorkspaceRequest(_orgA, "summer-show", "Summer Show"));
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        await factory.SeedAsync(async db =>
+            Assert.Empty(await db.AuditLogs.AsNoTracking().ToListAsync()));
     }
 
     [Fact]

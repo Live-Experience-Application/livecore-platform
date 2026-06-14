@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Persistence;
@@ -151,6 +152,24 @@ internal static class GooglePurchaseEndpoints
             return ValidationError("The purchase token or product reference is invalid.");
         }
 
+        // Resolve the authenticated BUYER's user profile — the subject the purchase grants premium to, and the
+        // actor of the verification audit facts (CORE-SPEC-002) — exactly as /me/entitlements resolves the current
+        // user (idempotent on first sight). WHO is buying is the authenticated caller, never anything the client
+        // asserts (CORE-MON-002). Resolved before verification so the submission/failure facts carry the buyer.
+        var now = deps.TimeProvider.GetUtcNow();
+        var profile = await deps.UserProfiles.EnsureUserProfileAsync(principal, cancellationToken).ConfigureAwait(false);
+
+        // Record the submission as a real audit fact (CORE-SPEC-002: AuditAction.PurchaseVerificationSubmitted, the
+        // catalog's PurchaseVerificationSubmitted event). A PLATFORM-level fact (a purchase is deployment-spanning,
+        // not tenant-scoped — docs/21): the buyer is the actor, no purchase exists yet, and the token itself is
+        // never recorded (threat T7).
+        await deps.AuditLog
+            .AppendAsync(
+                AuditLogEntry.ForPurchaseVerification(
+                    AuditAction.PurchaseVerificationSubmitted, profile.Id, purchaseTransactionId: null, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+
         // Resolve the deployment-supplied Google verifier. Fail-closed: when no adapter is configured the resolver
         // throws PurchaseProviderNotConfiguredException and the request is 503 — Core never trusts the unverified
         // token and grants nothing (the verification analogue of the unconfigured asset storage; threat T4/T7).
@@ -172,7 +191,14 @@ internal static class GooglePurchaseEndpoints
         if (!result.IsVerified)
         {
             // Not a grantable purchase: record nothing, grant nothing. The generic, client-safe rejection reason
-            // never echoes the token or any receipt content (threat T7).
+            // never echoes the token or any receipt content (threat T7). Record the failure as a real audit fact
+            // (CORE-SPEC-002: AuditAction.PurchaseVerificationFailed) — the rejection detail is never recorded.
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForPurchaseVerification(
+                        AuditAction.PurchaseVerificationFailed, profile.Id, purchaseTransactionId: null, now),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return VerificationRejected(result.RejectionReason);
         }
 
@@ -182,14 +208,15 @@ internal static class GooglePurchaseEndpoints
         // receipt is not honored in production" (docs/21). The decision happens BEFORE any persistence or grant.
         if (!deps.EnvironmentPolicy.IsHonored(result.Purchase!.Environment))
         {
+            // A genuine-but-unhonored purchase is also a verification failure for this deployment (CORE-SPEC-002).
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForPurchaseVerification(
+                        AuditAction.PurchaseVerificationFailed, profile.Id, purchaseTransactionId: null, now),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return EnvironmentNotHonored();
         }
-
-        // Verified. Resolve the authenticated BUYER's user profile — the subject the purchase grants premium to —
-        // exactly as /me/entitlements resolves the current user (idempotent on first sight). WHO is buying is the
-        // authenticated caller, never anything the client asserts (CORE-MON-002).
-        var now = deps.TimeProvider.GetUtcNow();
-        var profile = await deps.UserProfiles.EnsureUserProfileAsync(principal, cancellationToken).ConfigureAwait(false);
 
         // Persist the verified purchase as the recorded source of truth (idempotently — a retry or a
         // replayed-but-genuine token records no second row and no duplicate audit event; CORE-STORE-002) AND
@@ -218,6 +245,17 @@ internal static class GooglePurchaseEndpoints
                                 profile.Id,
                                 recording.Transaction.ProductReference,
                                 now,
+                                unitToken)
+                            .ConfigureAwait(false);
+
+                        // Record the verified, recorded purchase as a real audit fact (CORE-SPEC-002:
+                        // AuditAction.PurchaseVerificationSucceeded), in the SAME transaction as the record + grant
+                        // so it commits or rolls back with them. The recorded purchase is the governed resource, so
+                        // the audit names WHICH purchase was verified; no token or receipt content is recorded.
+                        await deps.AuditLog
+                            .AppendAsync(
+                                AuditLogEntry.ForPurchaseVerification(
+                                    AuditAction.PurchaseVerificationSucceeded, profile.Id, recording.Transaction.Id, now),
                                 unitToken)
                             .ConfigureAwait(false);
                     }
@@ -255,6 +293,7 @@ internal static class GooglePurchaseEndpoints
         var userProfiles = services.GetService<UserProfileReferenceService>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
         var timeProvider = services.GetService<TimeProvider>();
+        var auditLog = services.GetService<IAuditLogRepository>();
 
         if (resolver is null
             || environmentPolicy is null
@@ -263,7 +302,8 @@ internal static class GooglePurchaseEndpoints
             || grants is null
             || userProfiles is null
             || unitOfWork is null
-            || timeProvider is null)
+            || timeProvider is null
+            || auditLog is null)
         {
             dependencies = default;
             return false;
@@ -277,7 +317,8 @@ internal static class GooglePurchaseEndpoints
             grants,
             userProfiles,
             unitOfWork,
-            timeProvider);
+            timeProvider,
+            auditLog);
         return true;
     }
 
@@ -360,5 +401,6 @@ internal static class GooglePurchaseEndpoints
         ProductEntitlementGrantService Grants,
         UserProfileReferenceService UserProfiles,
         TransactionalUnitOfWork UnitOfWork,
-        TimeProvider TimeProvider);
+        TimeProvider TimeProvider,
+        IAuditLogRepository AuditLog);
 }

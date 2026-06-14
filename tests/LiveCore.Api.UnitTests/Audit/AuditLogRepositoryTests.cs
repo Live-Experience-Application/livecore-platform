@@ -134,6 +134,58 @@ public sealed class AuditLogRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_platform_level_fact_is_appended_unsequenced_and_outside_the_tenant_chain()
+    {
+        // CORE-SPEC-002: a platform-level (null-organization) fact is appended without a tenant FK and OUTSIDE the
+        // per-tenant tamper-evident hash chain (its spine is the per-tenant append sequence), so it carries no
+        // sequence (0) and no chain hashes. No organization need exist for it.
+        var entry = AuditLogEntry.ForEntitlementGranted("User", Guid.NewGuid(), _now);
+
+        await using (var context = CreateContext())
+        {
+            await new AuditLogRepository(context).AppendAsync(entry, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var stored = Assert.Single(await context.AuditLogs.AsNoTracking().ToListAsync());
+            Assert.Null(stored.OrganizationId);
+            Assert.Equal(AuditAction.EntitlementGranted, stored.Action);
+            Assert.Equal(0, stored.Sequence);
+            Assert.Null(stored.PreviousHash);
+            Assert.Null(stored.EntryHash);
+        }
+    }
+
+    [Fact]
+    public async Task ListByOrganization_never_returns_platform_level_facts()
+    {
+        // A platform fact (null organization) is never returned through any tenant's id (threat T5): the
+        // tenant-scoped read filters by a concrete organization_id, so a tenant sees only its own chained facts.
+        var organization = await SeedOrganizationAsync(_slugA);
+        var tenantFact = GenericEntry(organization.Id, AuditAction.SessionStarted);
+        var platformFact = AuditLogEntry.ForStoreNotificationProcessed("Applied", _now);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+            await repository.AppendAsync(tenantFact, CancellationToken.None);
+            await repository.AppendAsync(platformFact, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var loaded = await new AuditLogRepository(context)
+                .ListByOrganizationAsync(organization.Id, CancellationToken.None);
+
+            // Only the tenant fact is returned; the platform fact is invisible to the tenant read.
+            var stored = Assert.Single(loaded);
+            Assert.Equal(tenantFact.Id, stored.Id);
+            Assert.Equal(2, await context.AuditLogs.AsNoTracking().CountAsync()); // both rows persisted
+        }
+    }
+
+    [Fact]
     public async Task ListByOrganization_never_returns_another_tenants_records()
     {
         // Mandatory negative tenant-isolation test (threat T5): an audit entry written for tenant A is

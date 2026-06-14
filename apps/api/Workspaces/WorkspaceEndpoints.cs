@@ -233,6 +233,20 @@ internal static class WorkspaceEndpoints
             .ConfigureAwait(false);
         if (!quotaDecision.IsAllowed)
         {
+            // Record the denial as a real audit fact (CORE-SPEC-002: AuditAction.QuotaExceeded, the catalog's
+            // QuotaExceeded event). It is a tenant-scoped fact: the caller (the audited actor) is denied for their
+            // own User quota subject; the workspace does not exist yet, so there is no workspace scope.
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForQuotaExceeded(
+                        context.OrganizationId,
+                        workspaceId: null,
+                        context.UserProfileId,
+                        nameof(EntitlementSubjectType.User),
+                        context.UserProfileId,
+                        timeProvider.GetUtcNow()),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return QuotaExceeded(quotaDecision);
         }
 

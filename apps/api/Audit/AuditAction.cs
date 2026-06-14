@@ -6,7 +6,8 @@ namespace LiveCore.Api.Audit;
 /// The kind of security-relevant action recorded by an <see cref="AuditLogEntry"/> in the append-only
 /// audit log. The Audit module owns the "security event records" (docs/05_MODULE_CONTRACTS.md), and this
 /// enum is the Core-level catalog of the generic actions those records capture. The names are the
-/// generic, product-neutral event names from docs/09_EVENT_CATALOG.md — never vertical terms.
+/// generic, product-neutral event names from docs/09_EVENT_CATALOG.md (and, for the entitlement/store
+/// actions added by CORE-SPEC-002, csv/entitlement_event_catalog.csv) — never vertical terms.
 ///
 /// Serialized over HTTP by its stable NAME (the view-audit-log read endpoint, CORE-SEC-002), exactly as the
 /// other Core enums surface as stable string names in their DTOs — the action is persisted by name too
@@ -184,4 +185,104 @@ public enum AuditAction
     /// workspace-scoped audit fact (<see cref="AuditLogEntry.ForSessionCancellation"/>).
     /// </summary>
     SessionCancelled = 11,
+
+    // --- Entitlement / store / purchase actions (CORE-SPEC-002) -----------------
+    //
+    // The actions below back the entitlement/store domain events that csv/entitlement_event_catalog.csv marks
+    // audit=true, so that catalog is a CONTRACT, not aspirational (CORE-SPEC-002). Each is emitted as a real
+    // audit fact on the action it names, and scripts/spec-consistency.ps1 now binds every audit=true catalog
+    // event to a member here (both directions), so a catalog claim with no backing action — or a backing action
+    // with no catalog row — fails CI.
+    //
+    // PLATFORM-SCOPED vs TENANT-SCOPED. A purchase and the entitlement it grants are DEPLOYMENT-SPANNING, not
+    // tenant-scoped: a user's premium state follows the user's purchase, not an organization, and a purchase is
+    // named globally by its (provider, provider transaction id) pair with no organization_id
+    // (EntitlementSubjectType.User; the store endpoints; docs/21). So the grant/revoke, the purchase
+    // verification and the store-notification actions are recorded as PLATFORM-LEVEL audit facts (a null
+    // organization, AuditLogEntry.OrganizationId), distinct from the tenant-scoped facts above. QuotaExceeded is
+    // the exception: a quota is denied inside an already tenant-scoped, authenticated command, so it is a normal
+    // tenant fact carrying its organization and actor.
+
+    /// <summary>
+    /// A verified, buyer-linked purchase granted the buyer the mapped <c>SubjectEntitlement</c> — the
+    /// purchase → plan → entitlement grant chain (CORE-MON-003, emitted by
+    /// <see cref="LiveCore.Api.Entitlements.ProductEntitlementGrantService"/>). The catalog's
+    /// <c>EntitlementGranted</c> event (csv/entitlement_event_catalog.csv). A PLATFORM-level audit fact: the
+    /// grant is deployment-spanning (a user subject is not tenant-scoped), so it carries a null organization and,
+    /// being system-initiated by a verified purchase, no actor; its resource is the granted subject (the generic
+    /// subject-kind name and id) — <see cref="AuditLogEntry.ForEntitlementGranted"/>. No receipt, proof or
+    /// content is ever recorded (threat T7).
+    /// </summary>
+    EntitlementGranted = 12,
+
+    /// <summary>
+    /// A refund, cancellation or chargeback revoked the entitlement a purchase had granted — the inverse of the
+    /// grant chain (CORE-MON-004, emitted by
+    /// <see cref="LiveCore.Api.Entitlements.ProductEntitlementGrantService"/> through the store-notification
+    /// revocation path). The catalog's <c>EntitlementRevoked</c> event. Like
+    /// <see cref="EntitlementGranted"/> a PLATFORM-level, system-initiated audit fact (null organization, no
+    /// actor) whose resource is the affected subject (<see cref="AuditLogEntry.ForEntitlementRevoked"/>).
+    /// </summary>
+    EntitlementRevoked = 13,
+
+    /// <summary>
+    /// A protected, server-enforced command was REFUSED because it would exceed the subject's quota limit
+    /// (CORE-ENTL-004/CORE-MON-005/006, emitted at the quota-denial sites:
+    /// <c>QuotaEnforcementService</c> callers — workspace create, session start, participant join and asset
+    /// upload-intent). The catalog's <c>QuotaExceeded</c> event. Unlike the other entitlement/store actions a
+    /// quota is denied INSIDE an already authenticated, tenant-scoped command, so this is a normal TENANT-scoped
+    /// audit fact carrying its organization, the denied caller as the actor and the quota subject as the resource
+    /// (<see cref="AuditLogEntry.ForQuotaExceeded"/>). It records only the generic quota key and the subject —
+    /// never any caller-supplied content (threat T7).
+    /// </summary>
+    QuotaExceeded = 14,
+
+    /// <summary>
+    /// A client submitted an Apple/Google purchase proof for server-side verification — the catalog's
+    /// <c>PurchaseVerificationSubmitted</c> event, emitted by the Apple/Google verification endpoints once the
+    /// caller is authorized and the request validated, before the proof is verified. A PLATFORM-level audit fact
+    /// (null organization) whose actor is the authenticated buyer; it records the provider only, NEVER the proof
+    /// or receipt content (threat T7). <see cref="AuditLogEntry.ForPurchaseVerification"/>.
+    /// </summary>
+    PurchaseVerificationSubmitted = 15,
+
+    /// <summary>
+    /// A submitted purchase proof was verified server-side as a genuine purchase and recorded — the catalog's
+    /// <c>PurchaseVerificationSucceeded</c> event, emitted by the Apple/Google verification endpoints after the
+    /// adapter verifies the proof, the environment is honored and the purchase is recorded. A PLATFORM-level
+    /// audit fact (null organization) whose actor is the buyer and whose resource is the recorded purchase
+    /// transaction (<see cref="AuditLogEntry.ForPurchaseVerification"/>). No proof or receipt content (threat T7).
+    /// </summary>
+    PurchaseVerificationSucceeded = 16,
+
+    /// <summary>
+    /// A submitted purchase proof was NOT verified as a genuine grantable purchase, so nothing was recorded or
+    /// granted (fail-closed) — the catalog's <c>PurchaseVerificationFailed</c> event, emitted by the
+    /// Apple/Google verification endpoints on a rejected proof or an environment the deployment does not honor.
+    /// A PLATFORM-level audit fact (null organization) whose actor is the buyer; it records the provider only,
+    /// never the proof, the rejection detail or any receipt content (threat T7).
+    /// <see cref="AuditLogEntry.ForPurchaseVerification"/>.
+    /// </summary>
+    PurchaseVerificationFailed = 17,
+
+    /// <summary>
+    /// An Apple/Google store server notification was received for handling — the catalog's
+    /// <c>StoreNotificationReceived</c> event, emitted by <see cref="LiveCore.Api.Store.StoreNotificationService"/>
+    /// on the first arrival of a validated, normalized notification (before its effect is applied). A
+    /// PLATFORM-level, system audit fact (null organization, no actor); it records the provider and notification
+    /// type only, never the payload or receipt content (threat T7).
+    /// <see cref="AuditLogEntry.ForStoreNotificationReceived"/>.
+    /// </summary>
+    StoreNotificationReceived = 18,
+
+    /// <summary>
+    /// A received store notification was idempotently applied to the affected purchase's lifecycle — the
+    /// catalog's <c>StoreNotificationProcessed</c> event, emitted by
+    /// <see cref="LiveCore.Api.Store.StoreNotificationService"/> once a notification's effect (the purchase status
+    /// change and its dedup-ledger row, CORE-MON-010) is committed. A PLATFORM-level, system audit fact (null
+    /// organization, no actor) whose new-state records the applied outcome; it records the provider and
+    /// notification type only, never the payload or receipt content (threat T7).
+    /// <see cref="AuditLogEntry.ForStoreNotificationProcessed"/>.
+    /// </summary>
+    StoreNotificationProcessed = 19,
 }

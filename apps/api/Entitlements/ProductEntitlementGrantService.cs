@@ -1,3 +1,5 @@
+using LiveCore.Api.Audit;
+
 namespace LiveCore.Api.Entitlements;
 
 /// <summary>
@@ -43,15 +45,29 @@ public sealed class ProductEntitlementGrantService
 {
     private readonly IPlanDefinitionRepository _plans;
     private readonly SubjectEntitlementAssignmentService _assignment;
+    private readonly IAuditLogRepository? _auditLog;
 
+    /// <param name="plans">The plan-definition repository the product → plan mapping resolves through.</param>
+    /// <param name="assignment">The reused per-subject entitlement assignment/revoke primitive.</param>
+    /// <param name="auditLog">
+    /// The append-only audit log the grant/revoke records a real audit fact on (CORE-SPEC-002:
+    /// <see cref="AuditAction.EntitlementGranted"/> / <see cref="AuditAction.EntitlementRevoked"/>, the catalog's
+    /// EntitlementGranted/Revoked events). OPTIONAL: the API and worker hosts inject it so a real grant/revoke is
+    /// audited as a PLATFORM-level fact (a purchase grant is deployment-spanning, not tenant-scoped — docs/21);
+    /// it is null in focused unit tests of the mapping itself, where no audit is asserted. The grant/revoke is
+    /// emitted in the SAME call as the assignment, so when the caller wraps it in a transaction (the purchase
+    /// verification / store-notification unit of work, CORE-CONC-002) the audit commits or rolls back with it.
+    /// </param>
     public ProductEntitlementGrantService(
         IPlanDefinitionRepository plans,
-        SubjectEntitlementAssignmentService assignment)
+        SubjectEntitlementAssignmentService assignment,
+        IAuditLogRepository? auditLog = null)
     {
         ArgumentNullException.ThrowIfNull(plans);
         ArgumentNullException.ThrowIfNull(assignment);
         _plans = plans;
         _assignment = assignment;
+        _auditLog = auditLog;
     }
 
     /// <summary>
@@ -119,6 +135,18 @@ public sealed class ProductEntitlementGrantService
         var assignment = await _assignment
             .AssignFromPlanAsync(subjectType, subjectId, plan.Id, grantedAt, cancellationToken)
             .ConfigureAwait(false);
+
+        // Record the grant as a real audit fact (CORE-SPEC-002: AuditAction.EntitlementGranted). A PLATFORM-level
+        // fact — a purchase grant is deployment-spanning, not tenant-scoped (docs/21) — so it carries a null
+        // organization and no actor (system-initiated by a verified purchase); the granted subject is the resource.
+        if (_auditLog is not null)
+        {
+            await _auditLog
+                .AppendAsync(
+                    AuditLogEntry.ForEntitlementGranted(subjectType.ToString(), subjectId, grantedAt),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         return ProductEntitlementGrantResult.Granted(plan.Id, assignment);
     }
@@ -195,6 +223,19 @@ public sealed class ProductEntitlementGrantService
             {
                 revoked++;
             }
+        }
+
+        // Record the revocation as a real audit fact (CORE-SPEC-002: AuditAction.EntitlementRevoked) ONLY when a
+        // grant was actually revoked — a refund re-delivery (or a reconciliation no-op) that finds the entitlement
+        // already revoked records nothing, so the audit trail is not spammed by idempotent retries. Like the grant
+        // fact it is PLATFORM-level (null organization, no actor) with the affected subject as the resource.
+        if (revoked > 0 && _auditLog is not null)
+        {
+            await _auditLog
+                .AppendAsync(
+                    AuditLogEntry.ForEntitlementRevoked(subjectType.ToString(), subjectId, revokedAt),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         return ProductEntitlementRevocationResult.Revoked(plan.Id, revoked);

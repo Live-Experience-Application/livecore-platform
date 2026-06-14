@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -100,6 +101,13 @@ public static class StoreNotificationReconciliationServiceCollectionExtensions
         services.AddScoped<SubjectEntitlementAssignmentService>();
         services.AddScoped<ProductEntitlementGrantService>();
         services.AddScoped<PurchaseEntitlementRevocationService>();
+
+        // Append-only audit log (CORE-SPEC-002): the worker audits the entitlement revocation and the
+        // store-notification handling it drives, exactly as the API host does, so a reconciliation-applied
+        // revocation/notification is a real audit fact (AuditAction.EntitlementRevoked / StoreNotification*). The
+        // grant service and the StoreNotificationService pick it up by constructor injection over the same scoped
+        // DbContext; a platform-level fact carries no tenant, so it needs no audit_log_sequences row.
+        services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
         // Transactional unit of work (CORE-CONC-002): the StoreNotificationService takes it by constructor injection
         // to make webhook handling atomic (CORE-MON-010). Reconciliation drives only ChangeStatusAsync and writes no

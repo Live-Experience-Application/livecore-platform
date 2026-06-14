@@ -294,6 +294,19 @@ algorithm could in principle rewrite the whole chain, which is what the REVOKE d
 Core, external anchoring/signing — a documented follow-up) defends against. The read contract is unchanged:
 the existing append + tenant-scoped reads (CORE-SEC-002) keep their shape; verification is a separate routine.
 
+### Platform-level (tenant-less) audit facts (CORE-SPEC-002)
+
+`audit_logs.organization_id` is **nullable** (ADR 0014). A **null** organization marks a PLATFORM-LEVEL audit
+fact — a deployment-spanning, not tenant-scoped security event such as a purchase grant/revocation, a purchase
+verification or a store notification, which carries no organization (a purchase is named globally and a user's
+premium follows the user, not a tenant — `docs/21`). The tenant foreign key stays, now **optional**, so a set
+organization is still enforced at the row level (threat T5); a platform fact has no tenant key. A platform fact
+is append-only but stands **outside** the per-tenant hash chain above (whose spine is the per-tenant append
+sequence): it is appended unsequenced (`sequence` 0, null hashes), exactly the append-only posture the
+`purchase_events` trail has, and the per-tenant chain and `audit_log_sequences` are unchanged. The tenant-scoped
+reads filter by a concrete `organization_id`, so a platform fact is never returned through any tenant's id
+(threat T5). The unique `audit_logs(organization_id, sequence)` index is unchanged.
+
 ## JSONB use
 
 JSONB is allowed for flexible template-defined attributes but not for core authorization fields.

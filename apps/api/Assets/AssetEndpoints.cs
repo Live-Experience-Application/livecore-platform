@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
@@ -248,6 +249,20 @@ internal static class AssetEndpoints
         // session-start quota gates use.
         if (result.Outcome == AssetUploadIntentOutcome.QuotaExceeded)
         {
+            // Record the denial as a real audit fact (CORE-SPEC-002: AuditAction.QuotaExceeded). A tenant-scoped
+            // fact: the caller (the audited actor) is denied for the workspace's asset.storage.bytes.max quota
+            // subject. The intent minted no URL and persisted no asset, so this stands alone (no transaction).
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForQuotaExceeded(
+                        context.OrganizationId,
+                        request.WorkspaceId,
+                        context.UserProfileId,
+                        nameof(EntitlementSubjectType.Workspace),
+                        request.WorkspaceId,
+                        now),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return QuotaExceeded(result.QuotaDenial!);
         }
 
@@ -769,6 +784,7 @@ internal static class AssetEndpoints
         var assetLinks = services.GetService<AssetLinkService>();
         var downloadPolicy = services.GetService<AssetDownloadPolicy>();
         var assetDeletion = services.GetService<AssetDeletionService>();
+        var auditLog = services.GetService<IAuditLogRepository>();
 
         if (resolver is null
             || workspaceMembers is null
@@ -777,14 +793,15 @@ internal static class AssetEndpoints
             || storage is null
             || assetLinks is null
             || downloadPolicy is null
-            || assetDeletion is null)
+            || assetDeletion is null
+            || auditLog is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new AssetEndpointDependencies(
-            resolver, workspaceMembers, uploadIntents, assets, storage, assetLinks, downloadPolicy, assetDeletion);
+            resolver, workspaceMembers, uploadIntents, assets, storage, assetLinks, downloadPolicy, assetDeletion, auditLog);
         return true;
     }
 
@@ -893,5 +910,6 @@ internal static class AssetEndpoints
         IAssetStorage Storage,
         AssetLinkService AssetLinks,
         AssetDownloadPolicy DownloadPolicy,
-        AssetDeletionService AssetDeletion);
+        AssetDeletionService AssetDeletion,
+        IAuditLogRepository AuditLog);
 }

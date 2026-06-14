@@ -220,6 +220,21 @@ function Get-LiveCoreMembershipRole {
     return $roles.ToArray()
 }
 
+function Get-LiveCoreAuditAction {
+    # The Core audit-action vocabulary, parsed from the AuditAction enum so a rename/addition in code is reflected
+    # without editing this script (mirrors Get-LiveCoreMembershipRole). These are the real AuditAction values the
+    # entitlement/store event catalog is bound to (CORE-SPEC-002).
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    $file = Get-LiveCoreSpecFile -RepoRoot $RepoRoot -RelativePath 'apps/api/Audit/AuditAction.cs'
+    $text = Get-Content -LiteralPath $file -Raw
+    $actions = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($text, '(?m)^\s*(?<name>[A-Z][A-Za-z0-9]*)\s*=\s*\d+\s*,')) {
+        $actions.Add($m.Groups['name'].Value)
+    }
+    return $actions.ToArray()
+}
+
 function Get-LiveCoreMobileRoute {
     # The mobile-facing store/entitlement routes (csv/mobile_store_api_routes.csv),
     # a mirror of the /api/v1 routes under a bare /v1 prefix.
@@ -378,13 +393,27 @@ function Test-LiveCoreRouteRole {
 function Test-LiveCoreEntitlementEventCatalog {
     # The store/entitlement domain event catalog must be well-formed and
     # internally consistent. A row with no audit action (a blank/invalid audit
-    # column), or one audited-but-not-persisted, is drift. The dedicated
-    # AuditAction backing for these events is CORE-SPEC-002.
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row)
+    # column), or one audited-but-not-persisted, is drift.
+    #
+    # CORE-SPEC-002 BINDS the catalog to the real AuditAction enum, so the catalog
+    # is a CONTRACT, not aspirational: for every catalog event, audit=true IFF a
+    # matching AuditAction enum member exists. So a catalog event claiming
+    # audit=true with NO backing AuditAction fails, AND an AuditAction added for a
+    # catalog event whose row is still audit=false fails (the catalog must mark it
+    # audited). $AuditAction is the parsed AuditAction vocabulary; pass an empty
+    # set to skip the binding (the pre-CORE-SPEC-002 well-formedness-only check).
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Row,
+        [AllowEmptyCollection()][string[]]$AuditAction = @()
+    )
     $findings = New-Object System.Collections.Generic.List[string]
 
     $seen = New-Object 'System.Collections.Generic.HashSet[string]'
     $bool = @('true', 'false')
+
+    $actionSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($a in $AuditAction) { [void]$actionSet.Add($a) }
+    $bindActions = ($AuditAction.Count -gt 0)
 
     foreach ($r in $Row) {
         $name = if ($null -ne $r.event_name) { ([string]$r.event_name).Trim() } else { '' }
@@ -415,6 +444,18 @@ function Test-LiveCoreEntitlementEventCatalog {
         }
         elseif ($audit -eq 'true' -and $persisted -ne 'true') {
             $findings.Add("ENTL-EVENT: event '$label' is marked audited but not persisted (an audit fact must be persisted)")
+        }
+
+        # CORE-SPEC-002: bind the catalog to the real AuditAction enum so it is a contract, not aspirational.
+        # For a well-formed event name, audit=true IFF a matching AuditAction member exists.
+        if ($bindActions -and $name -ne '' -and $name -cmatch '^[A-Z][A-Za-z]+$' -and ($bool -contains $audit)) {
+            $hasAction = $actionSet.Contains($name)
+            if ($audit -eq 'true' -and -not $hasAction) {
+                $findings.Add("ENTL-EVENT: event '$name' is marked audit=true but no AuditAction.$name backs it (the catalog is aspirational; add the AuditAction or set audit=false) - CORE-SPEC-002")
+            }
+            elseif ($audit -eq 'false' -and $hasAction) {
+                $findings.Add("ENTL-EVENT: AuditAction.$name exists but event '$name' is audit=false (a backed event must be marked audited) - CORE-SPEC-002")
+            }
         }
     }
     return $findings.ToArray()
@@ -701,10 +742,11 @@ function Invoke-LiveCoreSpecConsistency {
     $knownDescriptor = @(Get-LiveCoreKnownRoleDescriptor)
     foreach ($f in (Test-LiveCoreRouteRole -Documented $documented -Implemented $implemented -KnownRole $knownRole -KnownDescriptor $knownDescriptor)) { $findings.Add($f) }
 
-    # --- Check 8: entitlement/store event catalog well-formedness ---
+    # --- Check 8: entitlement/store event catalog well-formedness + AuditAction binding (CORE-SPEC-002) ---
     $checkCount++
     $entitlementEvents = @(Get-LiveCoreEntitlementEvent -RepoRoot $RepoRoot)
-    foreach ($f in (Test-LiveCoreEntitlementEventCatalog -Row $entitlementEvents)) { $findings.Add($f) }
+    $auditActions = @(Get-LiveCoreAuditAction -RepoRoot $RepoRoot)
+    foreach ($f in (Test-LiveCoreEntitlementEventCatalog -Row $entitlementEvents -AuditAction $auditActions)) { $findings.Add($f) }
 
     # --- Check 9: mobile store CSV mirrors the routes + gateway table ---
     $checkCount++
@@ -730,6 +772,7 @@ Export-ModuleMember -Function @(
     'Get-LiveCoreImplementedRoute',
     'Get-LiveCoreDocumentedRoute',
     'Get-LiveCoreMembershipRole',
+    'Get-LiveCoreAuditAction',
     'Get-LiveCoreMobileRoute',
     'Get-LiveCoreGatewayMobileRoute',
     'Get-LiveCoreSnapshotTable',

@@ -457,6 +457,200 @@ public sealed class AuditLogEntryTests
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
             "Live", newState, _now));
 
+    // --- Entitlement / store / purchase audit facts (CORE-SPEC-002) ------------
+
+    [Fact]
+    public void Create_allows_a_null_organization_for_a_platform_level_fact()
+    {
+        // CORE-SPEC-002: a platform-level (tenant-less) audit fact carries a null organization.
+        var entry = AuditLogEntry.Create(
+            organizationId: null,
+            workspaceId: null,
+            AuditAction.EntitlementGranted,
+            actorUserProfileId: null,
+            resourceType: "User",
+            resourceId: Guid.NewGuid(),
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt: _now);
+
+        Assert.Null(entry.OrganizationId);
+        Assert.Equal(AuditAction.EntitlementGranted, entry.Action);
+    }
+
+    [Fact]
+    public void Create_still_rejects_an_explicitly_empty_organization()
+        // Null is the platform sentinel; an all-zeros id is still rejected (never a misleading reference).
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.Create(
+            Guid.Empty, null, AuditAction.EntitlementGranted, null,
+            null, null, null, null, null, _now));
+
+    [Fact]
+    public void ForQuotaExceeded_is_a_tenant_scoped_fact_with_the_subject_as_resource()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var subject = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForQuotaExceeded(org, ws, actor, "Workspace", subject, _now);
+
+        Assert.Equal(AuditAction.QuotaExceeded, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        Assert.Equal("Workspace", entry.ResourceType);
+        Assert.Equal(subject, entry.ResourceId);
+        Assert.Null(entry.PreviousState);
+        Assert.Null(entry.NewState);
+    }
+
+    [Fact]
+    public void ForQuotaExceeded_allows_a_null_workspace()
+    {
+        // A user-subject quota (workspace.active.max) is denied before the workspace exists, so there is no scope.
+        var entry = AuditLogEntry.ForQuotaExceeded(Guid.NewGuid(), null, Guid.NewGuid(), "User", Guid.NewGuid(), _now);
+        Assert.Null(entry.WorkspaceId);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForQuotaExceeded_rejects_a_blank_subject_type(string subjectType)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForQuotaExceeded(
+            Guid.NewGuid(), null, Guid.NewGuid(), subjectType, Guid.NewGuid(), _now));
+
+    [Fact]
+    public void ForQuotaExceeded_rejects_an_empty_organization_actor_or_subject()
+    {
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForQuotaExceeded(
+            Guid.Empty, null, Guid.NewGuid(), "User", Guid.NewGuid(), _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForQuotaExceeded(
+            Guid.NewGuid(), null, Guid.Empty, "User", Guid.NewGuid(), _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForQuotaExceeded(
+            Guid.NewGuid(), null, Guid.NewGuid(), "User", Guid.Empty, _now));
+    }
+
+    [Fact]
+    public void ForEntitlementGranted_is_a_platform_system_fact_with_the_subject_as_resource()
+    {
+        var subject = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForEntitlementGranted("User", subject, _now);
+
+        Assert.Equal(AuditAction.EntitlementGranted, entry.Action);
+        Assert.Null(entry.OrganizationId); // platform-level (deployment-spanning, not tenant-scoped)
+        Assert.Null(entry.WorkspaceId);
+        Assert.Null(entry.ActorUserProfileId); // system-initiated by a verified purchase
+        Assert.Equal("User", entry.ResourceType);
+        Assert.Equal(subject, entry.ResourceId);
+    }
+
+    [Fact]
+    public void ForEntitlementRevoked_is_a_platform_system_fact()
+    {
+        var subject = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForEntitlementRevoked("User", subject, _now);
+
+        Assert.Equal(AuditAction.EntitlementRevoked, entry.Action);
+        Assert.Null(entry.OrganizationId);
+        Assert.Null(entry.ActorUserProfileId);
+        Assert.Equal(subject, entry.ResourceId);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForEntitlementGranted_rejects_a_blank_subject_type(string subjectType)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForEntitlementGranted(subjectType, Guid.NewGuid(), _now));
+
+    [Fact]
+    public void ForEntitlementGranted_rejects_an_empty_subject_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForEntitlementGranted("User", Guid.Empty, _now));
+
+    [Fact]
+    public void ForPurchaseVerification_succeeded_names_the_recorded_purchase()
+    {
+        var actor = Guid.NewGuid();
+        var transaction = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForPurchaseVerification(
+            AuditAction.PurchaseVerificationSucceeded, actor, transaction, _now);
+
+        Assert.Equal(AuditAction.PurchaseVerificationSucceeded, entry.Action);
+        Assert.Null(entry.OrganizationId); // platform-level
+        Assert.Equal(actor, entry.ActorUserProfileId); // the buyer
+        Assert.Equal("PurchaseTransaction", entry.ResourceType);
+        Assert.Equal(transaction, entry.ResourceId);
+    }
+
+    [Theory]
+    [InlineData(AuditAction.PurchaseVerificationSubmitted)]
+    [InlineData(AuditAction.PurchaseVerificationFailed)]
+    public void ForPurchaseVerification_submitted_or_failed_has_no_recorded_purchase(AuditAction action)
+    {
+        var entry = AuditLogEntry.ForPurchaseVerification(action, Guid.NewGuid(), purchaseTransactionId: null, _now);
+
+        Assert.Equal(action, entry.Action);
+        Assert.Null(entry.OrganizationId);
+        Assert.Null(entry.ResourceType);
+        Assert.Null(entry.ResourceId);
+    }
+
+    [Fact]
+    public void ForPurchaseVerification_rejects_a_non_verification_action()
+        => Assert.Throws<ArgumentOutOfRangeException>(() => AuditLogEntry.ForPurchaseVerification(
+            AuditAction.EntitlementGranted, Guid.NewGuid(), null, _now));
+
+    [Fact]
+    public void ForPurchaseVerification_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForPurchaseVerification(
+            AuditAction.PurchaseVerificationSubmitted, Guid.Empty, null, _now));
+
+    [Fact]
+    public void ForStoreNotificationReceived_records_the_type_as_a_platform_system_fact()
+    {
+        var entry = AuditLogEntry.ForStoreNotificationReceived("Refunded", _now);
+
+        Assert.Equal(AuditAction.StoreNotificationReceived, entry.Action);
+        Assert.Null(entry.OrganizationId);
+        Assert.Null(entry.ActorUserProfileId);
+        Assert.Null(entry.ResourceId);
+        Assert.Equal("Refunded", entry.NewState);
+    }
+
+    [Fact]
+    public void ForStoreNotificationProcessed_records_the_outcome()
+    {
+        var entry = AuditLogEntry.ForStoreNotificationProcessed("Applied", _now);
+
+        Assert.Equal(AuditAction.StoreNotificationProcessed, entry.Action);
+        Assert.Null(entry.OrganizationId);
+        Assert.Equal("Applied", entry.NewState);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForStoreNotification_rejects_a_blank_descriptor(string descriptor)
+    {
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForStoreNotificationReceived(descriptor, _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForStoreNotificationProcessed(descriptor, _now));
+    }
+
+    [Fact]
+    public void ToString_of_a_platform_fact_renders_the_platform_sentinel()
+    {
+        var entry = AuditLogEntry.ForEntitlementGranted("User", Guid.NewGuid(), _now);
+
+        var text = entry.ToString();
+
+        Assert.Contains("org=platform", text, StringComparison.Ordinal);
+        Assert.Contains(nameof(AuditAction.EntitlementGranted), text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ToString_of_a_generic_entry_renders_absent_parts()
     {

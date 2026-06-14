@@ -41,9 +41,12 @@ internal sealed class AuditLogConfiguration : IEntityTypeConfiguration<AuditLogE
             .HasColumnName("id")
             .ValueGeneratedNever();
 
+        // NULLABLE since CORE-SPEC-002: a null organization is a PLATFORM-LEVEL audit fact (a deployment-spanning,
+        // not tenant-scoped security event — a purchase grant/revocation, a purchase verification or a store
+        // notification, docs/21), distinct from a tenant-scoped entry whose organization is set. The tenant
+        // foreign key below stays, optional, so a SET organization is still enforced at the row level (threat T5).
         builder.Property(entry => entry.OrganizationId)
-            .HasColumnName("organization_id")
-            .IsRequired();
+            .HasColumnName("organization_id");
 
         builder.Property(entry => entry.WorkspaceId)
             .HasColumnName("workspace_id");
@@ -113,9 +116,10 @@ internal sealed class AuditLogConfiguration : IEntityTypeConfiguration<AuditLogE
             .HasDatabaseName("ix_audit_logs_organization_id_sequence")
             .IsUnique();
 
-        // Tenant foreign key: every audit entry hangs off exactly one organization. Cascade delete
-        // removes a tenant's audit log only with the tenant itself; no finer-grained reference cascades
-        // (see the type summary), so the trail survives workspace/user/resource deletion.
+        // Tenant foreign key, now OPTIONAL (CORE-SPEC-002): a tenant-scoped entry hangs off exactly one
+        // organization and cascade delete removes it with the tenant itself; a PLATFORM-level fact (null
+        // organization) has no tenant foreign key. No finer-grained reference cascades (see the type summary), so
+        // the trail survives workspace/user/resource deletion.
         builder.HasOne<Organization>()
             .WithMany()
             .HasForeignKey(entry => entry.OrganizationId)

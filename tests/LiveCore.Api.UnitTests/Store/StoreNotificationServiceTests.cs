@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Store;
 using Microsoft.Data.Sqlite;
@@ -82,6 +83,28 @@ public sealed class StoreNotificationServiceTests : IDisposable
                 new PurchaseEventRepository(context)),
             new TransactionalUnitOfWork(context));
         return await service.HandleAsync(notification, _receivedAt, CancellationToken.None);
+    }
+
+    // Handle variant wired with the append-only audit log (CORE-SPEC-002), so the emitted
+    // StoreNotificationReceived/Processed audit facts can be asserted against the shared in-memory database.
+    private async Task<StoreNotificationProcessingResult> HandleWithAuditAsync(StoreNotification notification)
+    {
+        await using var context = CreateContext();
+        var service = new StoreNotificationService(
+            new StoreNotificationEventRepository(context),
+            new PurchaseTransactionService(
+                new PurchaseTransactionRepository(context),
+                new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context),
+            revocation: null,
+            auditLog: new AuditLogRepository(context));
+        return await service.HandleAsync(notification, _receivedAt, CancellationToken.None);
+    }
+
+    private async Task<IReadOnlyList<AuditLogEntry>> AuditEntriesAsync()
+    {
+        await using var context = CreateContext();
+        return await context.AuditLogs.AsNoTracking().OrderBy(entry => entry.Id).ToListAsync();
     }
 
     private async Task<PurchaseTransaction?> FindTransactionAsync(PurchaseProvider provider, string transactionId)
@@ -305,6 +328,38 @@ public sealed class StoreNotificationServiceTests : IDisposable
 
         // The purchase trail records the recording plus both transitions.
         Assert.Equal(3, await PurchaseEventCountAsync());
+    }
+
+    // --- Audit (CORE-SPEC-002): apply writes the documented audit record --------
+
+    [Fact]
+    public async Task A_first_arrival_notification_writes_received_and_processed_audit_facts()
+    {
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        await HandleWithAuditAsync(Notification(type: StoreNotificationType.Refunded, transactionId: "txn-1"));
+
+        // The documented audit records: a platform-level StoreNotificationReceived (the type) and, after the
+        // effect committed, a StoreNotificationProcessed (the applied outcome) — both null-organization facts.
+        var entries = await AuditEntriesAsync();
+        Assert.Contains(entries, e => e.Action == AuditAction.StoreNotificationReceived && e.NewState == "Refunded");
+        Assert.Contains(entries, e => e.Action == AuditAction.StoreNotificationProcessed && e.NewState == "Applied");
+        Assert.All(entries, e => Assert.Null(e.OrganizationId));
+    }
+
+    [Fact]
+    public async Task A_duplicate_notification_writes_no_second_audit_fact()
+    {
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+        var notification = Notification(notificationId: "ntf-dup", type: StoreNotificationType.Refunded, transactionId: "txn-1");
+
+        await HandleWithAuditAsync(notification);
+        await HandleWithAuditAsync(notification);
+
+        // The dedup fast-path short-circuits the replay before any audit, so exactly one Received + one Processed.
+        var entries = await AuditEntriesAsync();
+        Assert.Equal(1, entries.Count(e => e.Action == AuditAction.StoreNotificationReceived));
+        Assert.Equal(1, entries.Count(e => e.Action == AuditAction.StoreNotificationProcessed));
     }
 
     // --- Atomic apply+ledger (CORE-MON-010): a failure rolls BOTH back -----------

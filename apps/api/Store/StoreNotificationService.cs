@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Persistence;
 
 namespace LiveCore.Api.Store;
@@ -85,12 +86,30 @@ public sealed class StoreNotificationService
     private readonly PurchaseTransactionService _transactions;
     private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly PurchaseEntitlementRevocationService? _revocation;
+    private readonly IAuditLogRepository? _auditLog;
 
+    /// <param name="notifications">The dedup ledger repository for the (provider, provider notification id) idempotency key.</param>
+    /// <param name="transactions">The reused, idempotent, audited purchase status-change service (CORE-STORE-002).</param>
+    /// <param name="unitOfWork">The transactional unit of work that makes apply + ledger atomic (CORE-MON-010).</param>
+    /// <param name="revocation">
+    /// The entitlement revocation collaborator (CORE-MON-004) invoked before a revoking notification's status
+    /// change; null only in focused unit tests of the status machine.
+    /// </param>
+    /// <param name="auditLog">
+    /// The append-only audit log that records the store-notification audit facts (CORE-SPEC-002:
+    /// <see cref="AuditAction.StoreNotificationReceived"/> on first arrival and
+    /// <see cref="AuditAction.StoreNotificationProcessed"/> when the effect is applied — the catalog's
+    /// StoreNotificationReceived/Processed events). OPTIONAL: the API and worker hosts inject it so a handled
+    /// notification is audited as a PLATFORM-level fact (a store notification is deployment-spanning, not
+    /// tenant-scoped — docs/21); it is null in focused unit tests of the dedup/status machine. Only
+    /// <see cref="HandleAsync"/> emits these (reconciliation receives no notification and writes no ledger row).
+    /// </param>
     public StoreNotificationService(
         IStoreNotificationEventRepository notifications,
         PurchaseTransactionService transactions,
         TransactionalUnitOfWork unitOfWork,
-        PurchaseEntitlementRevocationService? revocation = null)
+        PurchaseEntitlementRevocationService? revocation = null,
+        IAuditLogRepository? auditLog = null)
     {
         ArgumentNullException.ThrowIfNull(notifications);
         ArgumentNullException.ThrowIfNull(transactions);
@@ -99,6 +118,7 @@ public sealed class StoreNotificationService
         _transactions = transactions;
         _unitOfWork = unitOfWork;
         _revocation = revocation;
+        _auditLog = auditLog;
     }
 
     /// <summary>
@@ -126,6 +146,20 @@ public sealed class StoreNotificationService
         if (existing is not null)
         {
             return new StoreNotificationProcessingResult(StoreNotificationProcessingOutcome.AlreadyProcessed);
+        }
+
+        // FIRST ARRIVAL: record the notification's receipt as a real audit fact (CORE-SPEC-002:
+        // AuditAction.StoreNotificationReceived). A re-delivery short-circuits above (dedup), so this is recorded
+        // once per genuinely-new arrival, never on a deduplicated replay. It is a PLATFORM-level fact (a store
+        // notification is deployment-spanning, not tenant-scoped — docs/21): null organization, no actor, and the
+        // generic notification type as the descriptor — never the payload or receipt content (threat T7).
+        if (_auditLog is not null)
+        {
+            await _auditLog
+                .AppendAsync(
+                    AuditLogEntry.ForStoreNotificationReceived(notification.Type.ToString(), receivedAt),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         // Drive the affected purchase's lifecycle. The notification's type maps to exactly one target status; the
@@ -191,6 +225,20 @@ public sealed class StoreNotificationService
                     if (addResult == StoreNotificationEventAddResult.DuplicateNotification)
                     {
                         return new StoreNotificationProcessingResult(StoreNotificationProcessingOutcome.AlreadyProcessed);
+                    }
+
+                    // Record that the notification was idempotently applied as a real audit fact (CORE-SPEC-002:
+                    // AuditAction.StoreNotificationProcessed). It is written INSIDE this unit of work, so it commits
+                    // or rolls back atomically with the status change and the dedup-ledger row (CORE-MON-010): a
+                    // part-way failure leaves no Processed fact, and a replay (above) emits none. PLATFORM-level
+                    // (null organization, no actor); the applied outcome is the descriptor (threat T7).
+                    if (_auditLog is not null)
+                    {
+                        await _auditLog
+                            .AppendAsync(
+                                AuditLogEntry.ForStoreNotificationProcessed(outcome.ToString(), receivedAt),
+                                unitToken)
+                            .ConfigureAwait(false);
                     }
 
                     return new StoreNotificationProcessingResult(outcome);

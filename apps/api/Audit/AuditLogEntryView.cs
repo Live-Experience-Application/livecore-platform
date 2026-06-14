@@ -26,7 +26,7 @@ namespace LiveCore.Api.Audit;
 /// (docs/08_API_CONTRACTS.md).
 /// </summary>
 /// <param name="Id">Surrogate id of the audit entry (UUIDv7, time-ordered).</param>
-/// <param name="OrganizationId">Tenant the audited action happened in.</param>
+/// <param name="OrganizationId">Tenant the audited action happened in, or <see langword="null"/> for a platform-level action.</param>
 /// <param name="WorkspaceId">The workspace the action happened in, or <see langword="null"/> for an organization-level action.</param>
 /// <param name="Action">The kind of security-relevant action recorded.</param>
 /// <param name="ActorUserProfileId">The user that performed the action, or <see langword="null"/> for a system action.</param>
@@ -38,7 +38,7 @@ namespace LiveCore.Api.Audit;
 /// <param name="CreatedAt">When the audited action happened (UTC).</param>
 public sealed record AuditLogEntryView(
     Guid Id,
-    Guid OrganizationId,
+    Guid? OrganizationId,
     Guid? WorkspaceId,
     AuditAction Action,
     Guid? ActorUserProfileId,

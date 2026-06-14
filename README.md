@@ -335,13 +335,14 @@ pwsh -NoProfile -File scripts/boundary-scan.ps1
 
 ### Spec consistency check
 
-Run the spec consistency check (CORE-DOC-001, extended by CORE-SPEC-001). It
-fails with a non-zero exit code when the route, table, event or epic
-specifications in `docs/` and `csv/` drift from each other, from their single
+Run the spec consistency check (CORE-DOC-001, extended by CORE-SPEC-001 and
+CORE-SPEC-002). It fails with a non-zero exit code when the route, table, event or
+epic specifications in `docs/` and `csv/` drift from each other, from their single
 source of truth (the source-of-truth map is `docs/24_SPEC_CONSISTENCY.md`) **or
 from the implementation** — it now also validates `csv/api_routes.csv` against
 the routes the minimal-API registrations mount (both directions), the documented
-roles/auth, the entitlement event catalog, the mobile store CSV against the
+roles/auth, the entitlement event catalog (binding each `audit=true` event to a
+real `AuditAction` enum member, CORE-SPEC-002), the mobile store CSV against the
 in-process gateway route table, and `csv/database_tables.csv` plus its promised
 unique indexes against the EF Core model snapshot. CI runs it as the
 `spec-consistency` job (which first runs `scripts/test-spec-consistency.ps1`,
@@ -1403,7 +1404,9 @@ specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
 `MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`,
-`SessionCancelled`) is
+`SessionCancelled`, plus the entitlement/store actions `EntitlementGranted`, `EntitlementRevoked`,
+`QuotaExceeded`, `PurchaseVerificationSubmitted`, `PurchaseVerificationSucceeded`, `PurchaseVerificationFailed`,
+`StoreNotificationReceived`, `StoreNotificationProcessed` added by CORE-SPEC-002, below) is
 extensible without a schema change because the action persists by its stable name; each producer command wires its
 own action in its own story. The member-removal command (CORE-LIFE-001) is the first wired producer of
 `MemberRemoved`, appending an entry whenever an authorized admin removes a
@@ -1431,6 +1434,25 @@ the session row (and its append-only `session_events`) survives, never deleted. 
 records the `Prepared` → `Live` transition and the end endpoint the `Live` → `Ended` transition, each capturing
 the host who ran the command and the session itself — appended alongside the durable session event the same
 command emits (the audit fact is the security record; the session event is the realtime delivery).
+
+CORE-SPEC-002 (the `Specification Hardening` epic) backs the **entitlement/store** event catalog
+(`csv/entitlement_event_catalog.csv`) with real audit actions, so that catalog is a contract, not aspirational.
+It marked eight events `audit=true` but `AuditAction` carried none of them, so the claims were unbacked. The
+story adds the eight actions and **emits** each on the action it names: `EntitlementGranted`/`EntitlementRevoked`
+by `ProductEntitlementGrantService` (the CORE-MON-003/004 grant/revoke), `QuotaExceeded` at the quota-denial
+sites (workspace create, session create/start, participant join, asset upload-intent), the three
+`PurchaseVerification*` by the Apple/Google verification endpoints, and the two `StoreNotification*` by
+`StoreNotificationService`; `scripts/spec-consistency.ps1` now binds the catalog to the enum (`audit=true` **iff**
+a matching `AuditAction` member exists), so it can never drift back to aspirational without failing CI. Because a
+purchase and the entitlement it grants are **deployment-spanning, not tenant-scoped** (a user's premium follows
+the user's purchase, not an organization; `purchase_transactions` has no `organization_id` — `docs/21`), the
+grant/revoke, purchase-verification and store-notification facts are recorded as **platform-level** audit facts:
+`audit_logs.organization_id` is now **nullable** (the only schema change, `docs/adr/0014-platform-level-audit-facts.md`),
+and such facts are append-only but stand **outside** the per-tenant tamper-evident hash chain (CORE-SEC-003) — the
+same append-only posture the `purchase_events` trail has. `QuotaExceeded` stays a normal tenant-scoped, chained
+fact (it is denied inside an already tenant-scoped command). The tenant-scoped reads filter by a concrete
+organization, so a platform fact is never returned through any tenant's id (threat T5), and only identifiers,
+enum names and generic descriptors are recorded — never a receipt, proof, token or payload (threat T7).
 
 The audit log is still written only as a side effect of an **already-authorized**
 command, so audit writes are inherently authorized. CORE-AUD-005 (the epic's final

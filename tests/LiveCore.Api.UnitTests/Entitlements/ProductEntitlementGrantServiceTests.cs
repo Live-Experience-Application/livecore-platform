@@ -1,3 +1,4 @@
+using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.Persistence;
 using Microsoft.Data.Sqlite;
@@ -78,6 +79,42 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
                 new PlanDefinitionRepository(context),
                 new EntitlementDefinitionRepository(context)));
         return await service.RevokeForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
+    }
+
+    // Grant/revoke variants wired with the append-only audit log (CORE-SPEC-002), so the emitted
+    // EntitlementGranted/Revoked audit facts can be asserted against the shared in-memory database.
+    private async Task GrantWithAuditAsync(
+        EntitlementSubjectType subjectType, Guid subjectId, string productReference, DateTimeOffset at)
+    {
+        await using var context = CreateContext();
+        var service = new ProductEntitlementGrantService(
+            new PlanDefinitionRepository(context),
+            new SubjectEntitlementAssignmentService(
+                new SubjectEntitlementRepository(context),
+                new PlanDefinitionRepository(context),
+                new EntitlementDefinitionRepository(context)),
+            new AuditLogRepository(context));
+        await service.GrantForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
+    }
+
+    private async Task RevokeWithAuditAsync(
+        EntitlementSubjectType subjectType, Guid subjectId, string productReference, DateTimeOffset at)
+    {
+        await using var context = CreateContext();
+        var service = new ProductEntitlementGrantService(
+            new PlanDefinitionRepository(context),
+            new SubjectEntitlementAssignmentService(
+                new SubjectEntitlementRepository(context),
+                new PlanDefinitionRepository(context),
+                new EntitlementDefinitionRepository(context)),
+            new AuditLogRepository(context));
+        await service.RevokeForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
+    }
+
+    private async Task<IReadOnlyList<AuditLogEntry>> AuditEntriesAsync()
+    {
+        await using var context = CreateContext();
+        return await context.AuditLogs.AsNoTracking().ToListAsync();
     }
 
     private async Task<EffectiveEntitlements> ResolveAsync(EntitlementSubjectType subjectType, Guid subjectId)
@@ -340,6 +377,54 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
         var result = await RevokeForProductAsync(EntitlementSubjectType.User, Guid.CreateVersion7(), productReference, _at);
 
         Assert.Equal(ProductEntitlementRevocationOutcome.ProductNotMapped, result.Outcome);
+    }
+
+    // --- Audit (CORE-SPEC-002): grant/revoke write the documented audit record ---
+
+    [Fact]
+    public async Task Granting_a_mapped_product_writes_an_EntitlementGranted_audit_fact()
+    {
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        await GrantWithAuditAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+
+        // The documented audit record: a platform-level (null-organization) EntitlementGranted fact whose resource
+        // is the granted subject (CORE-SPEC-002).
+        var entry = Assert.Single(await AuditEntriesAsync());
+        Assert.Equal(AuditAction.EntitlementGranted, entry.Action);
+        Assert.Null(entry.OrganizationId);
+        Assert.Null(entry.ActorUserProfileId);
+        Assert.Equal(nameof(EntitlementSubjectType.User), entry.ResourceType);
+        Assert.Equal(subjectId, entry.ResourceId);
+    }
+
+    [Fact]
+    public async Task Revoking_a_held_product_writes_an_EntitlementRevoked_audit_fact()
+    {
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+        await GrantWithAuditAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+
+        await RevokeWithAuditAsync(EntitlementSubjectType.User, subjectId, _productReference, _at.AddHours(1));
+
+        var entries = await AuditEntriesAsync();
+        Assert.Contains(entries, e => e.Action == AuditAction.EntitlementGranted);
+        Assert.Contains(
+            entries,
+            e => e.Action == AuditAction.EntitlementRevoked && e.OrganizationId is null && e.ResourceId == subjectId);
+    }
+
+    [Fact]
+    public async Task Revoking_a_never_held_product_writes_no_audit_fact()
+    {
+        // Idempotent re-delivery defence: a refund (or reconciliation) that revokes nothing records no audit fact,
+        // so the trail is not spammed by retries (CORE-SPEC-002).
+        await SeedProductPlanAsync();
+
+        await RevokeWithAuditAsync(EntitlementSubjectType.User, Guid.CreateVersion7(), _productReference, _at);
+
+        Assert.Empty(await AuditEntriesAsync());
     }
 
     // --- Guards -----------------------------------------------------------------

@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using LiveCore.Api.Audit;
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Workspaces;
@@ -112,6 +114,25 @@ internal static class SessionParticipantPresenceEndpoints
         if (result.Admitted)
         {
             return Results.Ok(new ParticipantPresenceResponse(command.SessionId, command.ParticipantId, "Joined"));
+        }
+
+        // CORE-SPEC-002: a participant-quota denial is a real audit fact (AuditAction.QuotaExceeded, the catalog's
+        // QuotaExceeded event). Record it before mapping the typed denial to the response; only the quota reason is
+        // a quota event (the not-found and lifecycle reasons are not). It is a tenant-scoped fact: the caller (the
+        // audited actor) is denied for the session's session.participant.max quota subject.
+        if (result.Reason == SessionJoinDenialReason.QuotaExceeded)
+        {
+            await command.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForQuotaExceeded(
+                        command.OrganizationId,
+                        command.WorkspaceId,
+                        command.ActorUserProfileId,
+                        nameof(EntitlementSubjectType.Session),
+                        command.SessionId,
+                        command.Clock.GetUtcNow()),
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
 
         // Map the typed denial to a fail-closed response. The two not-found reasons hide existence as 404 (a
@@ -272,8 +293,11 @@ internal static class SessionParticipantPresenceEndpoints
             session.WorkspaceId,
             sessionGuid,
             participantGuid,
+            context.UserProfileId,
             deps.Join,
-            deps.Leave));
+            deps.Leave,
+            deps.AuditLog,
+            deps.Clock));
     }
 
     /// <summary>
@@ -289,18 +313,23 @@ internal static class SessionParticipantPresenceEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var join = services.GetService<SessionParticipantJoinService>();
         var leave = services.GetService<SessionParticipantLeaveService>();
+        var auditLog = services.GetService<IAuditLogRepository>();
+        var clock = services.GetService<TimeProvider>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
             || join is null
-            || leave is null)
+            || leave is null
+            || auditLog is null
+            || clock is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new PresenceEndpointDependencies(resolver, sessions, workspaceMembers, join, leave);
+        dependencies = new PresenceEndpointDependencies(
+            resolver, sessions, workspaceMembers, join, leave, auditLog, clock);
         return true;
     }
 
@@ -388,13 +417,18 @@ internal static class SessionParticipantPresenceEndpoints
         Guid WorkspaceId,
         Guid SessionId,
         Guid ParticipantId,
+        Guid ActorUserProfileId,
         SessionParticipantJoinService Join,
-        SessionParticipantLeaveService Leave);
+        SessionParticipantLeaveService Leave,
+        IAuditLogRepository AuditLog,
+        TimeProvider Clock);
 
     private readonly record struct PresenceEndpointDependencies(
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         SessionParticipantJoinService Join,
-        SessionParticipantLeaveService Leave);
+        SessionParticipantLeaveService Leave,
+        IAuditLogRepository AuditLog,
+        TimeProvider Clock);
 }

@@ -31,11 +31,18 @@ namespace LiveCore.Api.Audit;
 /// docs/07_SECURITY_THREAT_MODEL.md) — a tenant teardown removes its audit log, but nothing finer-grained
 /// can.
 ///
-/// TENANT SCOPE. The audit log is tenant-scoped (csv/database_tables.csv scope <c>organization</c>), so
-/// every entry carries <see cref="OrganizationId"/>; the documented critical index is
-/// <c>audit_logs(organization_id, created_at)</c> (docs/10_DATABASE_SCHEMA.md). A visibility change is
-/// also workspace-scoped, so the visibility producer always sets <see cref="WorkspaceId"/>; the column
-/// is nullable so an organization-level generic action (CORE-AUD-001) needs no schema change.
+/// TENANT SCOPE (and PLATFORM-LEVEL facts). The audit log is tenant-scoped (csv/database_tables.csv scope
+/// <c>organization</c>), so a tenant-scoped entry carries <see cref="OrganizationId"/>; the documented critical
+/// index is <c>audit_logs(organization_id, created_at)</c> (docs/10_DATABASE_SCHEMA.md). CORE-SPEC-002 makes the
+/// organization OPTIONAL: a PLATFORM-LEVEL audit fact — a deployment-spanning, not tenant-scoped security event
+/// such as a purchase grant/revocation, a purchase verification or a store notification, which carries no
+/// organization (a purchase is named globally and a user's premium follows the user, not a tenant — docs/21) —
+/// records a <see langword="null"/> organization. Such facts are append-only but stand OUTSIDE the per-tenant
+/// tamper-evident hash chain (CORE-SEC-003), whose spine is the per-tenant append sequence; their integrity
+/// posture is the same append-only + DB-level <c>REVOKE</c> the established <c>purchase_events</c> monetization
+/// trail has (docs/13). A visibility change is also workspace-scoped, so the visibility producer always sets
+/// <see cref="WorkspaceId"/>; the column is nullable so an organization-level generic action (CORE-AUD-001)
+/// needs no schema change.
 ///
 /// NO SENSITIVE CONTENT (threat T7). Every field is an identifier, an enum or a generic state NAME
 /// (Hidden/Visible) — never free-form scene/content body — so <see cref="ToString"/> is safe for
@@ -61,7 +68,7 @@ public sealed class AuditLogEntry
 
     private AuditLogEntry(
         Guid id,
-        Guid organizationId,
+        Guid? organizationId,
         Guid? workspaceId,
         AuditAction action,
         Guid? actorUserProfileId,
@@ -77,9 +84,16 @@ public sealed class AuditLogEntry
             throw new ArgumentException("Audit log entry id must not be empty.", nameof(id));
         }
 
+        // A null organization is a PLATFORM-LEVEL audit fact (CORE-SPEC-002): a deployment-spanning, not
+        // tenant-scoped security event such as a purchase grant/revocation or a store notification, which carries
+        // no organization (a purchase is named globally and a user's premium follows the user, not a tenant —
+        // docs/21). A SET organization must address a real tenant, so an explicit empty id is rejected rather than
+        // stored as a misleading "all zeros" reference.
         if (organizationId == Guid.Empty)
         {
-            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+            throw new ArgumentException(
+                "Organization id must not be empty; pass null for a platform-level entry.",
+                nameof(organizationId));
         }
 
         // A null workspace id means an org-level event; a SET value must address a real workspace. An
@@ -176,11 +190,14 @@ public sealed class AuditLogEntry
 
     /// <summary>
     /// Tenant boundary of the entry: the organization the audited action happened in (the
-    /// <c>organization_id</c> foreign key to <c>organizations</c>). Part of the documented critical
-    /// index <c>audit_logs(organization_id, created_at)</c>; the audit log is read tenant-scoped so one
-    /// tenant's records are never returned through another tenant's id (threat T5).
+    /// <c>organization_id</c> foreign key to <c>organizations</c>), or <see langword="null"/> for a
+    /// PLATFORM-LEVEL audit fact (CORE-SPEC-002) — a deployment-spanning, not tenant-scoped security event such
+    /// as a purchase grant/revocation, a purchase verification or a store notification, which carries no
+    /// organization (docs/21). Part of the documented critical index <c>audit_logs(organization_id, created_at)</c>;
+    /// the tenant-scoped reads filter by a concrete organization id, so a platform fact (null tenant) is never
+    /// returned through any tenant's id and one tenant's records are never returned through another's (threat T5).
     /// </summary>
-    public Guid OrganizationId { get; }
+    public Guid? OrganizationId { get; }
 
     /// <summary>
     /// The workspace the audited action happened in, or <see langword="null"/> for an organization-level
@@ -281,7 +298,7 @@ public sealed class AuditLogEntry
     /// (threat T7). The entry is immutable; there is no update or delete (append-only,
     /// docs/10_DATABASE_SCHEMA.md).
     /// </summary>
-    /// <param name="organizationId">The tenant the action happened in (required).</param>
+    /// <param name="organizationId">The tenant the action happened in, or <see langword="null"/> for a platform-level (deployment-spanning) action.</param>
     /// <param name="workspaceId">The workspace the action happened in, or <see langword="null"/> for an organization-level action.</param>
     /// <param name="action">The kind of security-relevant action (required, must be a defined <see cref="AuditAction"/>).</param>
     /// <param name="actorUserProfileId">The user who performed the action, or <see langword="null"/> for a system action.</param>
@@ -292,12 +309,12 @@ public sealed class AuditLogEntry
     /// <param name="newState">The generic state name after the action, or <see langword="null"/> when the action is not a transition.</param>
     /// <param name="createdAt">When the action happened.</param>
     /// <exception cref="ArgumentException">
-    /// The organization id is empty, a SET optional id is explicitly empty, the resource reference is
-    /// half-set, or a SET resource type / state value is blank.
+    /// The organization id is explicitly empty (pass null for a platform-level entry), a SET optional id is
+    /// explicitly empty, the resource reference is half-set, or a SET resource type / state value is blank.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The action is not a defined <see cref="AuditAction"/>.</exception>
     public static AuditLogEntry Create(
-        Guid organizationId,
+        Guid? organizationId,
         Guid? workspaceId,
         AuditAction action,
         Guid? actorUserProfileId,
@@ -1017,6 +1034,239 @@ public sealed class AuditLogEntry
             newState,
             createdAt);
 
+    // --- Entitlement / store / purchase audit facts (CORE-SPEC-002) -------------
+    //
+    // These back the entitlement/store domain events csv/entitlement_event_catalog.csv marks audit=true. The
+    // grant/revoke, purchase-verification and store-notification facts are PLATFORM-LEVEL (a null organization):
+    // a purchase and the entitlement it grants are deployment-spanning, not tenant-scoped (docs/21). QuotaExceeded
+    // is the exception — a quota is denied inside an already tenant-scoped command, so it is a normal tenant fact.
+
+    /// <summary>
+    /// Records a quota denial (<see cref="AuditAction.QuotaExceeded"/>) — the audit fact written when a protected,
+    /// server-enforced command is REFUSED because it would exceed the subject's quota limit (CORE-SPEC-002; emitted
+    /// by the <see cref="LiveCore.Api.Entitlements.QuotaEnforcementService"/> callers). It is a TENANT-scoped fact:
+    /// the denial happens inside an already authenticated, tenant-scoped command, so the tenant, the denied caller
+    /// (the actor) and the quota subject (the generic subject-kind name and id, as the governed resource) are all
+    /// REQUIRED; the workspace is set where the command has one and null otherwise (a user-subject quota such as
+    /// <c>workspace.active.max</c> has none). It records no caller-supplied content (threat T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the denied command ran in (required).</param>
+    /// <param name="workspaceId">The workspace the command concerned, or <see langword="null"/> when it has none.</param>
+    /// <param name="actorUserProfileId">The caller whose command was denied (required; the audited actor).</param>
+    /// <param name="quotaSubjectType">The generic kind name of the quota subject (e.g. User/Workspace/Session).</param>
+    /// <param name="quotaSubjectId">The quota subject's id.</param>
+    /// <param name="createdAt">When the denial happened.</param>
+    /// <exception cref="ArgumentException">A required id is empty or the subject type is blank.</exception>
+    public static AuditLogEntry ForQuotaExceeded(
+        Guid organizationId,
+        Guid? workspaceId,
+        Guid actorUserProfileId,
+        string quotaSubjectType,
+        Guid quotaSubjectId,
+        DateTimeOffset createdAt)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(quotaSubjectType))
+        {
+            throw new ArgumentException("Quota subject type must not be empty.", nameof(quotaSubjectType));
+        }
+
+        if (quotaSubjectId == Guid.Empty)
+        {
+            throw new ArgumentException("Quota subject id must not be empty.", nameof(quotaSubjectId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.QuotaExceeded,
+            actorUserProfileId,
+            quotaSubjectType,
+            quotaSubjectId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
+    /// Records an entitlement grant (<see cref="AuditAction.EntitlementGranted"/>) — the PLATFORM-level audit fact
+    /// written when a verified, buyer-linked purchase grants the buyer the mapped entitlement (CORE-SPEC-002, the
+    /// CORE-MON-003 grant chain). The grant is deployment-spanning (a subject is not tenant-scoped), so the entry
+    /// carries a NULL organization and, being system-initiated by a verified purchase, no actor; the granted
+    /// subject is the governed resource (its generic kind name and id). It records no receipt, proof or content
+    /// (threat T7).
+    /// </summary>
+    /// <param name="subjectType">The generic kind name of the granted subject (e.g. User).</param>
+    /// <param name="subjectId">The granted subject's id.</param>
+    /// <param name="createdAt">When the grant happened.</param>
+    /// <exception cref="ArgumentException">The subject id is empty or the subject type is blank.</exception>
+    public static AuditLogEntry ForEntitlementGranted(string subjectType, Guid subjectId, DateTimeOffset createdAt)
+        => ForEntitlementChange(AuditAction.EntitlementGranted, subjectType, subjectId, createdAt);
+
+    /// <summary>
+    /// Records an entitlement revocation (<see cref="AuditAction.EntitlementRevoked"/>) — the PLATFORM-level audit
+    /// fact written when a refund, cancellation or chargeback revokes the entitlement a purchase had granted
+    /// (CORE-SPEC-002, the CORE-MON-004 revocation, the inverse of <see cref="ForEntitlementGranted"/>). Same shape
+    /// as the grant fact: a null organization and no actor (system-initiated), with the affected subject as the
+    /// governed resource.
+    /// </summary>
+    /// <param name="subjectType">The generic kind name of the affected subject (e.g. User).</param>
+    /// <param name="subjectId">The affected subject's id.</param>
+    /// <param name="createdAt">When the revocation happened.</param>
+    /// <exception cref="ArgumentException">The subject id is empty or the subject type is blank.</exception>
+    public static AuditLogEntry ForEntitlementRevoked(string subjectType, Guid subjectId, DateTimeOffset createdAt)
+        => ForEntitlementChange(AuditAction.EntitlementRevoked, subjectType, subjectId, createdAt);
+
+    /// <summary>
+    /// Shared specialization behind <see cref="ForEntitlementGranted"/> and <see cref="ForEntitlementRevoked"/>: a
+    /// platform-level (null organization), system-initiated (null actor) audit fact recording an entitlement change
+    /// on a subject (the governed resource). The two differ only in the action they pin.
+    /// </summary>
+    private static AuditLogEntry ForEntitlementChange(
+        AuditAction action,
+        string subjectType,
+        Guid subjectId,
+        DateTimeOffset createdAt)
+    {
+        if (string.IsNullOrWhiteSpace(subjectType))
+        {
+            throw new ArgumentException("Subject type must not be empty.", nameof(subjectType));
+        }
+
+        if (subjectId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject id must not be empty.", nameof(subjectId));
+        }
+
+        return Create(
+            organizationId: null,
+            workspaceId: null,
+            action,
+            actorUserProfileId: null,
+            subjectType,
+            subjectId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
+    /// Records a purchase-verification audit fact (<see cref="AuditAction.PurchaseVerificationSubmitted"/>,
+    /// <see cref="AuditAction.PurchaseVerificationSucceeded"/> or <see cref="AuditAction.PurchaseVerificationFailed"/>)
+    /// — the PLATFORM-level fact written by the Apple/Google verification endpoints as a buyer submits a purchase
+    /// proof, it is verified and recorded, or it is rejected (CORE-SPEC-002). The buyer is the actor; the purchase
+    /// is deployment-spanning, so the entry carries a NULL organization. On success the recorded purchase
+    /// transaction is the governed resource (so the audit names WHICH purchase was verified); on submission/failure
+    /// there is no recorded purchase yet, so the resource is omitted. It records no proof, receipt content or
+    /// rejection detail (threat T7).
+    /// </summary>
+    /// <param name="action">The verification action (Submitted / Succeeded / Failed).</param>
+    /// <param name="actorUserProfileId">The authenticated buyer (required; the audited actor).</param>
+    /// <param name="purchaseTransactionId">The recorded purchase transaction id on success, or <see langword="null"/> on submission/failure.</param>
+    /// <param name="createdAt">When the verification step happened.</param>
+    /// <exception cref="ArgumentException">The actor id is empty, or the purchase transaction id is explicitly empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The action is not a purchase-verification action.</exception>
+    public static AuditLogEntry ForPurchaseVerification(
+        AuditAction action,
+        Guid actorUserProfileId,
+        Guid? purchaseTransactionId,
+        DateTimeOffset createdAt)
+    {
+        if (action is not (AuditAction.PurchaseVerificationSubmitted
+            or AuditAction.PurchaseVerificationSucceeded
+            or AuditAction.PurchaseVerificationFailed))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(action), action, "Action is not a purchase-verification action.");
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        // The recorded purchase is the governed resource only when there is one (success); the (type, id) pair is
+        // supplied together or both omitted.
+        var resourceType = purchaseTransactionId is null ? null : "PurchaseTransaction";
+
+        return Create(
+            organizationId: null,
+            workspaceId: null,
+            action,
+            actorUserProfileId,
+            resourceType,
+            purchaseTransactionId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
+    /// Records the receipt of a store notification (<see cref="AuditAction.StoreNotificationReceived"/>) — the
+    /// PLATFORM-level, system audit fact written by <see cref="LiveCore.Api.Store.StoreNotificationService"/> on the
+    /// first arrival of a validated, normalized notification, before its effect is applied (CORE-SPEC-002). The
+    /// notification is deployment-spanning, so the entry carries a NULL organization and no actor (system). The
+    /// generic notification-type name is recorded as the descriptive value so the audit names WHAT kind of
+    /// notification arrived; no payload or receipt content is ever recorded (threat T7).
+    /// </summary>
+    /// <param name="notificationType">The generic notification-type name (e.g. Renewed/Refunded/Cancelled).</param>
+    /// <param name="createdAt">When the notification was received.</param>
+    /// <exception cref="ArgumentException">The notification type is blank.</exception>
+    public static AuditLogEntry ForStoreNotificationReceived(string notificationType, DateTimeOffset createdAt)
+        => ForStoreNotification(AuditAction.StoreNotificationReceived, notificationType, createdAt);
+
+    /// <summary>
+    /// Records that a store notification was idempotently applied (<see cref="AuditAction.StoreNotificationProcessed"/>)
+    /// — the PLATFORM-level, system audit fact written by <see cref="LiveCore.Api.Store.StoreNotificationService"/>
+    /// once a notification's effect is committed (CORE-SPEC-002, CORE-MON-010). Like the receipt fact it carries a
+    /// NULL organization and no actor; the generic applied-outcome name is recorded as the descriptive value (e.g.
+    /// Applied/Unchanged), and no payload or receipt content is recorded (threat T7).
+    /// </summary>
+    /// <param name="outcome">The generic applied-outcome name (e.g. Applied/Unchanged).</param>
+    /// <param name="createdAt">When the notification was processed.</param>
+    /// <exception cref="ArgumentException">The outcome is blank.</exception>
+    public static AuditLogEntry ForStoreNotificationProcessed(string outcome, DateTimeOffset createdAt)
+        => ForStoreNotification(AuditAction.StoreNotificationProcessed, outcome, createdAt);
+
+    /// <summary>
+    /// Shared specialization behind <see cref="ForStoreNotificationReceived"/> and
+    /// <see cref="ForStoreNotificationProcessed"/>: a platform-level (null organization), system (null actor) audit
+    /// fact whose generic descriptive name (the notification type, or the applied outcome) is recorded in the
+    /// new-state field — the only descriptive slot a tenant-less notification, named by a non-GUID provider key,
+    /// can occupy without storing any payload (threat T7).
+    /// </summary>
+    private static AuditLogEntry ForStoreNotification(AuditAction action, string descriptor, DateTimeOffset createdAt)
+    {
+        if (string.IsNullOrWhiteSpace(descriptor))
+        {
+            throw new ArgumentException("Store notification descriptor must not be empty.", nameof(descriptor));
+        }
+
+        return Create(
+            organizationId: null,
+            workspaceId: null,
+            action,
+            actorUserProfileId: null,
+            resourceType: null,
+            resourceId: null,
+            targetParticipantId: null,
+            previousState: null,
+            newState: descriptor,
+            createdAt);
+    }
+
     /// <summary>
     /// SEALS the entry into its tenant's tamper-evident hash chain at append time (CORE-SEC-003): stamps the
     /// per-tenant append <see cref="Sequence"/> the allocator handed out, records the
@@ -1061,7 +1311,7 @@ public sealed class AuditLogEntry
     /// docs/07_SECURITY_THREAT_MODEL.md).
     /// </summary>
     public override string ToString()
-        => $"AuditLogEntry {Id} action={Action} org={OrganizationId} "
+        => $"AuditLogEntry {Id} action={Action} org={(OrganizationId is { } org ? org.ToString() : "platform")} "
             + $"ws={(WorkspaceId is { } ws ? ws.ToString() : "none")} "
             + $"actor={(ActorUserProfileId is { } actor ? actor.ToString() : "system")} "
             + $"resource={ResourceType ?? "none"}:{(ResourceId is { } rid ? rid.ToString() : "none")} "

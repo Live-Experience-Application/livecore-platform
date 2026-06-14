@@ -228,6 +228,41 @@ The reconciliation candidate scan still computes the latest-per-purchase **clien
 (`ReconcilablePurchaseReader`); a SQL window-function form for high-volume deployments stays a documented
 follow-up, fine for this off-by-default, low-volume job.
 
+## Catalog-as-contract note (CORE-SPEC-002 backed the entitlement/store event catalog with real audit actions)
+
+`csv/entitlement_event_catalog.csv` marked eight events `persisted=true, audit=true`
+(`EntitlementGranted`/`EntitlementRevoked`, `QuotaExceeded`, the three
+`PurchaseVerification*` and the two `StoreNotification*`), but `AuditAction`
+(`apps/api/Audit/AuditAction.cs`) carried only the eleven generic Core actions —
+none entitlement/store/purchase — and `QuotaExceeded` existed only as an HTTP
+helper name. The catalog was therefore **aspirational**, and the spec-consistency
+check did not catch it. CORE-SPEC-002 closes that gap:
+
+- the eight catalog `audit=true` events now have a real `AuditAction` member, and
+  each is **emitted** as a genuine append-only audit fact on the action it names —
+  `EntitlementGranted`/`EntitlementRevoked` by `ProductEntitlementGrantService`,
+  `QuotaExceeded` at the quota-denial sites (workspace create, session
+  create/start, participant join, asset upload-intent), the
+  `PurchaseVerification*` trio by the Apple/Google verification endpoints, and the
+  `StoreNotification*` pair by `StoreNotificationService`;
+- the spec-consistency **check 8** now binds the catalog to the enum (`audit=true`
+  **iff** a matching `AuditAction` member exists), so the catalog can no longer
+  drift back to aspirational without failing CI;
+- a purchase and the entitlement it grants are **deployment-spanning, not
+  tenant-scoped** (a user's premium follows the user's purchase, not an
+  organization; `purchase_transactions` has no `organization_id` — docs/21), so the
+  grant/revoke, purchase-verification and store-notification facts are recorded as
+  **platform-level** audit facts: `audit_logs.organization_id` is now **nullable**
+  (the only schema change, ADR 0014), and such facts are append-only but stand
+  **outside** the per-tenant tamper-evident hash chain (CORE-SEC-003), whose spine
+  is the per-tenant append sequence — the same append-only posture the established
+  `purchase_events` monetization trail has. `QuotaExceeded` is a normal
+  tenant-scoped fact (it is denied inside an already tenant-scoped command). The
+  tenant-scoped audit reads filter by a concrete organization, so a platform fact
+  is never returned through any tenant's id (threat T5). It adds **no route, table
+  or event** — only the nullable column — so the other spec-consistency checks are
+  unchanged.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented
@@ -281,11 +316,16 @@ and five semantic invariants validated against the implementation
    re-derive each route's exact role *set* from the handler bodies, so a role
    *dropped/added* within the known vocabulary is not caught — only an unknown
    role, an empty cell, or an auth-posture flip;
-8. **entitlement/store event catalog.** `csv/entitlement_event_catalog.csv` is
-   well-formed and internally consistent: each event name is a unique generic
-   PascalCase identifier, `persisted`/`audit` are booleans, and an event with no
-   audit action (a blank/invalid `audit`) or one audited-but-not-persisted fails.
-   Binding each `audit=true` event to a real `AuditAction` is CORE-SPEC-002;
+8. **entitlement/store event catalog + AuditAction binding.**
+   `csv/entitlement_event_catalog.csv` is well-formed and internally consistent:
+   each event name is a unique generic PascalCase identifier, `persisted`/`audit`
+   are booleans, and an event with no audit action (a blank/invalid `audit`) or one
+   audited-but-not-persisted fails. CORE-SPEC-002 additionally **binds the catalog
+   to the real `AuditAction` enum** (`apps/api/Audit/AuditAction.cs`): for every
+   catalog event, `audit=true` **iff** a matching `AuditAction` member exists, so an
+   `audit=true` event with no backing action — or an `AuditAction` whose catalog
+   event is still `audit=false` — fails. The catalog is now a contract, not
+   aspirational;
 9. **mobile store CSV.** `csv/mobile_store_api_routes.csv` mirrors real `/api/v1`
    routes — each `/v1/…` path maps to a documented `/api/v1/…` route with the same
    method, `owner` is `Core`, and `auth_required` agrees with that route's

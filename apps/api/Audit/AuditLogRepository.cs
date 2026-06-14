@@ -23,6 +23,20 @@ internal sealed class AuditLogRepository : IAuditLogRepository
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // PLATFORM-LEVEL fact (CORE-SPEC-002): a deployment-spanning, not tenant-scoped audit fact (a purchase
+        // grant/revocation, a purchase verification or a store notification, docs/21) carries no organization. The
+        // per-tenant tamper-evident hash chain (CORE-SEC-003) is the per-TENANT append sequence, so a tenant-less
+        // fact has no chain to join: it is appended unsealed (its append-only integrity is the same DB-level
+        // REVOKE the established purchase_events monetization trail relies on, docs/13). It is never returned by the
+        // tenant-scoped reads (which filter by a concrete organization id), so it never appears in a tenant's
+        // verified chain.
+        if (entry.OrganizationId is not { } organizationId)
+        {
+            _dbContext.AuditLogs.Add(entry);
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // TAMPER-EVIDENT CHAIN (CORE-SEC-003). Allocate the per-tenant, gap-free, strictly monotonic APPEND
         // sequence and seal the entry into the tenant's hash chain BEFORE the insert. The allocation takes a row
         // lock on the tenant's audit_log_sequences counter, so two concurrent appends to the SAME tenant
@@ -30,8 +44,8 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         // rather than forking the chain. Because the allocation and the insert run on the same context, for the
         // transactional commands (CORE-CONC-002) they commit or roll back atomically: a rollback reclaims the
         // number and the chain stays gap-free.
-        var sequence = await AllocateNextSequenceAsync(entry.OrganizationId, cancellationToken).ConfigureAwait(false);
-        var previousHash = await ReadPreviousHashAsync(entry.OrganizationId, sequence, cancellationToken)
+        var sequence = await AllocateNextSequenceAsync(organizationId, cancellationToken).ConfigureAwait(false);
+        var previousHash = await ReadPreviousHashAsync(organizationId, sequence, cancellationToken)
             .ConfigureAwait(false);
         entry.Seal(sequence, previousHash);
 

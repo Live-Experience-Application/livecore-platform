@@ -346,6 +346,19 @@ internal static class SessionEndpoints
             .ConfigureAwait(false);
         if (!quotaDecision.IsAllowed)
         {
+            // Record the denial as a real audit fact (CORE-SPEC-002: AuditAction.QuotaExceeded). A tenant-scoped
+            // fact: the caller (the audited actor) is denied for the workspace's session.active.max quota subject.
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForQuotaExceeded(
+                        context.OrganizationId,
+                        workspaceGuid,
+                        context.UserProfileId,
+                        nameof(EntitlementSubjectType.Workspace),
+                        workspaceGuid,
+                        timeProvider.GetUtcNow()),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return QuotaExceeded(quotaDecision);
         }
 
@@ -713,6 +726,20 @@ internal static class SessionEndpoints
         // generic quota key). This is the race-loser path of the atomic consume above.
         if (outcome.QuotaDenial is { } denial)
         {
+            // Record the denial as a real audit fact (CORE-SPEC-002: AuditAction.QuotaExceeded). The consume rolled
+            // back with the (empty) transaction, so this append-only fact is written AFTER it, outside the unit of
+            // work: a denied start changes nothing but is still audited. Tenant-scoped (the workspace subject).
+            await deps.AuditLog
+                .AppendAsync(
+                    AuditLogEntry.ForQuotaExceeded(
+                        context.OrganizationId,
+                        session.WorkspaceId,
+                        context.UserProfileId,
+                        nameof(EntitlementSubjectType.Workspace),
+                        session.WorkspaceId,
+                        now),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return QuotaExceeded(denial);
         }
 
