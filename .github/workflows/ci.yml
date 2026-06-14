@@ -102,12 +102,17 @@ jobs:
   spec-consistency:
     name: Spec consistency (routes/tables/events/epics)
     runs-on: ubuntu-latest
-    # CORE-DOC-001: fails when the route, table, event or epic specifications in
-    # docs/ and csv/ drift from each other or from their single source of truth
-    # (see docs/24_SPEC_CONSISTENCY.md). Pure docs/csv check, no build needed.
+    # CORE-DOC-001 + CORE-SPEC-001: fails when the route, table, event or epic
+    # specifications in docs/ and csv/ drift from each other, from their single
+    # source of truth (see docs/24_SPEC_CONSISTENCY.md) OR from the implementation
+    # (the minimal-API registrations + the EF model snapshot). Pure source check,
+    # no build needed.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Test the spec consistency check logic
+        run: pwsh -NoProfile -File scripts/test-spec-consistency.ps1
 
       - name: Run spec consistency check
         run: pwsh -NoProfile -File scripts/spec-consistency.ps1

@@ -86,7 +86,9 @@ packages/design-tokens   @livecore/design-tokens - generic design tokens and the
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
-scripts/spec-consistency.ps1  doc/csv route/table/event/epic consistency check (CORE-DOC-001)
+scripts/spec-consistency.ps1  doc/csv/code route/table/event/epic consistency check CLI (CORE-DOC-001, CORE-SPEC-001)
+scripts/LiveCoreSpecConsistency.psm1  spec-consistency check logic: name-set invariants + semantic checks against the minimal-API registrations and EF model snapshot (CORE-SPEC-001)
+scripts/test-spec-consistency.ps1  seeded-drift tests for the spec-consistency checks (a changed role, an undocumented endpoint, an entitlement event with no audit action fail; the real tree passes — CORE-SPEC-001)
 scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic and the at-rest encryption sink for the systems of record (CORE-OPS-010, CORE-DR-001)
 scripts/backup-livecore.ps1  backs up PostgreSQL + object storage, encrypts the dump and mirrored assets at rest, and writes a coverage manifest (fail-closed without an encryption passphrase)
 scripts/restore-livecore.ps1 decrypts, restores PostgreSQL + object storage and verifies the systems of record
@@ -333,10 +335,18 @@ pwsh -NoProfile -File scripts/boundary-scan.ps1
 
 ### Spec consistency check
 
-Run the spec consistency check (CORE-DOC-001). It fails with a non-zero exit
-code when the route, table, event or epic specifications in `docs/` and `csv/`
-drift from each other or from their single source of truth (the source-of-truth
-map is `docs/24_SPEC_CONSISTENCY.md`). CI runs it as the `spec-consistency` job.
+Run the spec consistency check (CORE-DOC-001, extended by CORE-SPEC-001). It
+fails with a non-zero exit code when the route, table, event or epic
+specifications in `docs/` and `csv/` drift from each other, from their single
+source of truth (the source-of-truth map is `docs/24_SPEC_CONSISTENCY.md`) **or
+from the implementation** — it now also validates `csv/api_routes.csv` against
+the routes the minimal-API registrations mount (both directions), the documented
+roles/auth, the entitlement event catalog, the mobile store CSV against the
+in-process gateway route table, and `csv/database_tables.csv` plus its promised
+unique indexes against the EF Core model snapshot. CI runs it as the
+`spec-consistency` job (which first runs `scripts/test-spec-consistency.ps1`,
+the seeded-drift tests for the check logic in
+`scripts/LiveCoreSpecConsistency.psm1`).
 
 ```powershell
 # Windows (Windows PowerShell 5.1 or pwsh)

@@ -7,7 +7,19 @@ implementation, it is listed here as **deferred** rather than left to drift.
 
 The machine-checkable parts of this agreement are enforced by
 `scripts/spec-consistency.ps1` (run locally or in CI alongside the boundary
-scan).
+scan). The check logic lives in `scripts/LiveCoreSpecConsistency.psm1` and is
+exercised by `scripts/test-spec-consistency.ps1` (seeded-drift tests), the same
+module + test pattern as the other `scripts/` gates.
+
+Since CORE-SPEC-001 the check validates **semantics, not just names**: as well as
+the original name-set membership invariants it cross-checks the specs against the
+implementation — `csv/api_routes.csv` against the routes the minimal-API
+registrations actually mount (both directions), the documented roles/auth against
+the `MembershipRole` vocabulary and the `AllowAnonymous` endpoints, the mobile
+store CSV against the `MobileApiGateway` route table, and `csv/database_tables.csv`
+plus its promised unique indexes against the EF Core model snapshot. So a green
+"Spec consistency passed" now also means no undocumented endpoint, no auth-role
+drift, no dead/ill-formed store event and no schema/index drift slipped through.
 
 ## Sources of truth
 
@@ -245,7 +257,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
 
 The script exits `0` when every invariant holds, `1` when it finds drift (with a
 per-finding report), and `2` on a configuration error (a spec file it cannot
-find or parse). It checks:
+find or parse). It runs ten checks — the five name-set invariants (CORE-DOC-001)
+and five semantic invariants validated against the implementation
+(CORE-SPEC-001):
 
 1. every route in the `docs/08` representative block is a row in
    `csv/api_routes.csv`;
@@ -254,4 +268,37 @@ find or parse). It checks:
    `csv/database_tables.csv`;
 4. the `docs/09` event table equals the event set in `csv/event_catalog.csv`;
 5. the `docs/18` epic list equals the union of the `epic` columns of
-   `csv/core_epics_stories.csv` and `csv/core_phase2_epics_stories.csv`.
+   `csv/core_epics_stories.csv` and `csv/core_phase2_epics_stories.csv`;
+6. **routes vs implementation (both directions).** `csv/api_routes.csv` equals
+   the `/api/v1` routes the minimal-API registrations (`apps/api/**/*Endpoints.cs`
+   — `MapGroup` + `Map{Get,Post,Put,Delete}`) actually mount; a documented route
+   that nothing mounts, or an undocumented endpoint, fails;
+7. **route roles/auth.** Every `roles` cell in `csv/api_routes.csv` uses only real
+   `MembershipRole` names (`apps/api/Organizations/MembershipRole.cs`) and a fixed
+   set of audience descriptors, and the routes documented as unauthenticated
+   provider callbacks (`roles = none (provider callback)`) are exactly the
+   `AllowAnonymous` endpoints in code (both directions). The check does not (yet)
+   re-derive each route's exact role *set* from the handler bodies, so a role
+   *dropped/added* within the known vocabulary is not caught — only an unknown
+   role, an empty cell, or an auth-posture flip;
+8. **entitlement/store event catalog.** `csv/entitlement_event_catalog.csv` is
+   well-formed and internally consistent: each event name is a unique generic
+   PascalCase identifier, `persisted`/`audit` are booleans, and an event with no
+   audit action (a blank/invalid `audit`) or one audited-but-not-persisted fails.
+   Binding each `audit=true` event to a real `AuditAction` is CORE-SPEC-002;
+9. **mobile store CSV.** `csv/mobile_store_api_routes.csv` mirrors real `/api/v1`
+   routes — each `/v1/…` path maps to a documented `/api/v1/…` route with the same
+   method, `owner` is `Core`, and `auth_required` agrees with that route's
+   documented authentication — and its path set equals the in-process
+   `MobileApiGateway` route table (`apps/api/Hosting/MobileApiGateway.cs`);
+10. **table columns/indexes.** `csv/database_tables.csv` equals the tables the EF
+    Core model snapshot maps (`LiveCoreDbContextModelSnapshot.cs`, both
+    directions), and the security/idempotency/tenant-isolation **unique** indexes
+    the spec promises (idempotent purchases and store notifications, one buyer per
+    receipt, per-subject entitlement/quota uniqueness, tenant/workspace slug
+    uniqueness, the gap-free audit and session-event sequences) are declared
+    `IsUnique()` in the snapshot.
+
+Checks 6–10 are the reason a spec change that touches a route, role, store event,
+mobile path or table must be reconciled with the code (or the code with the spec)
+before CI goes green.
