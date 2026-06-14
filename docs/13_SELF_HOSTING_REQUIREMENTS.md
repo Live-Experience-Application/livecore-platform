@@ -613,6 +613,66 @@ A managed/secured server uses the full StackExchange.Redis connection-string for
 `Realtime__Backplane__ConnectionString="redis.example.com:6380,password=<secret>,ssl=true"`. All API
 instances must point at the **same** server (and the same channel prefix) for cross-instance delivery to work.
 
+## Graceful shutdown and SignalR sticky-session affinity (CORE-DEP-002)
+
+### Graceful shutdown drain window (`Hosting:ShutdownTimeout`)
+
+Both hosts **drain their in-flight work on shutdown within a tuned window**, so a **rolling restart does not
+abruptly cut an in-flight request**. On a rolling deploy the orchestrator brings up a new instance, waits for it
+to pass `/health/ready`, then sends the old instance a termination signal (SIGTERM). The old host stops
+accepting new connections and **drains**:
+
+- the **API** lets in-flight HTTP requests and open SignalR connections complete, and
+- the **worker** lets each background job loop's current tick observe cancellation and unwind (the loops already
+  honor the stopping token — see the job loops in `apps/worker`).
+
+`HostOptions.ShutdownTimeout` bounds that drain. Both hosts set it from configuration
+(`Hosting:ShutdownTimeout`, a `TimeSpan`) with a tuned default of **25 seconds**, rather than leaving it at the
+implicit framework default — one explicit, configurable, documented window applied identically to the API and
+the worker (`apps/api/Hosting/GracefulShutdownConfiguration.cs`, wired by both hosts).
+
+- **Coordinate it with the orchestration grace period.** The drain window must stay **at or below** the
+  orchestrator's termination grace period (Kubernetes `terminationGracePeriodSeconds`, default 30s; the Compose
+  `stop_grace_period`), or the process is force-killed (SIGKILL) **mid-drain**. The 25-second default is
+  deliberately a few seconds under the conventional 30-second grace period so the process exits cleanly before
+  SIGKILL. A deployment that needs a longer drain raises **both** in lockstep (for example
+  `Hosting__ShutdownTimeout=00:00:50` with `terminationGracePeriodSeconds: 60`).
+- **Fail-safe configuration.** A present-but-malformed or non-positive value is rejected at startup rather than
+  silently collapsing the window; with nothing configured the safe default applies, so both hosts run without any
+  shutdown configuration (the same posture as the worker heartbeat/metrics options).
+
+| Setting (config key)      | Env var                    | Default    | Consumer    | Purpose                                                       |
+| ------------------------- | -------------------------- | ---------- | ----------- | ------------------------------------------------------------- |
+| `Hosting:ShutdownTimeout` | `Hosting__ShutdownTimeout` | `00:00:25` | API, worker | Drain window for in-flight HTTP/SignalR/job work on shutdown. |
+
+### Multi-instance SignalR requires sticky sessions / ARR affinity
+
+The Redis/Valkey backplane (CORE-OPS-007, above) is **necessary but not sufficient** for a multi-instance
+SignalR deployment. A SignalR connection begins with a **negotiate** request that returns a `connectionId` and
+the transports the server supports, followed by the actual transport connection. Unless the client negotiates
+**WebSockets and only WebSockets** (a single, long-lived connection), the handshake and the non-WebSocket
+fallbacks (Server-Sent Events, long polling) make **multiple HTTP requests that must all reach the same server
+instance** that issued the `connectionId`. Without affinity a load balancer can route the negotiate and the
+follow-up transport requests to **different** instances, and the handshake **breaks** — the second instance has
+never heard of that `connectionId`.
+
+So a deployment running **more than one API instance** must enable **sticky sessions** (session affinity / ARR
+affinity) at the reverse proxy or load balancer for the `/hubs` SignalR endpoint, **in addition to** configuring
+the backplane:
+
+- **Nginx** — a cookie/IP-hash `sticky` upstream (or `ip_hash`).
+- **HAProxy** — `cookie SERVERID insert indirect nofollow` with per-server `cookie` values.
+- **Kubernetes ingress** — `nginx.ingress.kubernetes.io/affinity: "cookie"` (or the equivalent for your ingress
+  controller).
+- **Azure App Service / IIS ARR** — ARR affinity (the `ARRAffinity` cookie) enabled.
+
+The two controls solve **different** problems and are both required at scale: **affinity** keeps a single
+client's negotiate + transport handshake pinned to one instance, while the **backplane** fans a server-computed
+event out to the connections held by **every** instance. Affinity is a deployment/edge concern (a proxy
+setting), not a Core host setting; the only way to avoid it entirely is to force WebSockets-only transport and
+disable the fallbacks, which is brittle across corporate proxies and is not the default. See
+`docs/11_REALTIME_SYNC.md` ("Scale-out").
+
 ## Store receipt verification adapter (CORE-MON-008)
 
 Apple/Google receipt verification is **delegated to a deployment-supplied adapter**, exactly like the
@@ -685,6 +745,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
 | `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
 | `RateLimiting:Enabled` / `Global:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 60/60s per webhook IP (CORE-SEC-001) |
+| `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |

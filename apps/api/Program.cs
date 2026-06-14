@@ -100,6 +100,21 @@ builder.Services.AddLiveCoreCors(builder.Configuration);
 // the scheme (threat T7).
 builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 
+// Graceful shutdown drain window (CORE-DEP-002, the "Deployment and Supply Chain" epic). On a rolling restart
+// the orchestrator sends this instance a termination signal; the host then stops accepting new connections and
+// DRAINS its in-flight work before exiting. This applies ONE explicit, tuned, configurable
+// HostOptions.ShutdownTimeout (Hosting:ShutdownTimeout) so an in-flight HTTP request or SignalR connection is
+// allowed to complete within the window rather than being abruptly cut — before this story the host left the
+// window at the implicit framework default, untuned and not coordinated with the deployment's termination grace
+// period. The same wiring is applied identically in the worker host (WorkerHostFactory), so both hosts drain
+// within a tuned window. The window is deployment policy read from configuration only with a safe default
+// (docs/13_SELF_HOSTING_REQUIREMENTS.md "Graceful shutdown drain window"), and it must stay at or below the
+// orchestration grace period so the process exits cleanly before it is force-killed. A multi-instance SignalR
+// deployment additionally requires sticky sessions / ARR affinity at the proxy for the negotiate/transport
+// handshake (documented alongside the Redis backplane in docs/13); affinity is an edge concern, not a host
+// setting, so it is configured at the proxy rather than here.
+builder.Services.AddLiveCoreGracefulShutdown(builder.Configuration);
+
 // Request rate limiting (CORE-SEC-001, the "Security Hardening" epic). Before this story the pipeline applied
 // NO rate limiting anywhere, leaving two abuse/DoS surfaces unbounded: the two AllowAnonymous store-notification
 // webhooks (which do DB work and run a deployment-supplied external parser per call — a ledger-amplification and

@@ -142,6 +142,15 @@ multi-replica deployment **must** configure a backplane; without one, an event c
 only the clients connected to that replica and is silently dropped for clients connected to the others. This
 is the documented single-instance fallback (see `docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
+**Sticky-session affinity is also required at scale (CORE-DEP-002).** The backplane is necessary but not
+sufficient for multiple instances: a SignalR connection starts with a **negotiate** request that issues a
+`connectionId`, and the non-WebSocket fallbacks (Server-Sent Events, long polling) then make further HTTP
+requests that **must all reach the same instance** that issued it. A multi-instance deployment therefore also
+needs **sticky sessions / ARR affinity** at the reverse proxy for the `/hubs` endpoint, alongside the backplane;
+the affinity (negotiate/transport handshake) and the backplane (cross-instance fan-out) solve different
+problems. The proxy-specific configuration is documented in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Graceful
+shutdown and SignalR sticky-session affinity").
+
 The backplane only ever forwards an already-authorized delivery — one recipient-safe payload to one
 server-managed group, computed by the per-recipient recipient resolver. It cannot widen the audience: the
 Redis transport carries each already-computed group send verbatim and a connection only ever belongs to a

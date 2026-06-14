@@ -1,5 +1,6 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.Exports;
+using LiveCore.Api.Hosting;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Store;
@@ -90,6 +91,15 @@ public static class WorkerHostFactory
         // (no database/identity needed), exactly like the API's /metrics, so the surface exists even when the
         // worker runs without a database.
         builder.Services.AddLiveCorePrometheusMetrics();
+
+        // Graceful shutdown drain window (CORE-DEP-002). The same wiring the API host uses, so BOTH hosts drain
+        // in-flight work within ONE explicit, tuned, configurable HostOptions.ShutdownTimeout
+        // (Hosting:ShutdownTimeout) on a rolling restart rather than relying on the implicit framework default.
+        // The worker's job loops already honor the stopping token (each sweep observes cancellation); this bounds
+        // how long the host waits for a loop's in-flight tick to unwind before forcing shutdown, so a rolling
+        // restart does not abruptly cut a tick mid-flight. Deployment policy read from configuration only with a
+        // safe default, coordinated with the orchestration grace period (docs/13_SELF_HOSTING_REQUIREMENTS.md).
+        builder.Services.AddLiveCoreGracefulShutdown(builder.Configuration);
 
         // Background jobs (CORE-AST-006 asset cleanup, CORE-JOB-001 recap generation, CORE-JOB-002 export
         // processing). Each Add* extension

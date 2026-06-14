@@ -807,6 +807,34 @@ server-side; it never widens authorization (`docs/07_SECURITY_THREAT_MODEL.md`),
 like the CORS allow-list. See `docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration
 keys.
 
+### Graceful shutdown and SignalR sticky sessions
+
+Both hosts **drain in-flight work on shutdown within a tuned window** (CORE-DEP-002), so a
+**rolling restart does not abruptly cut an in-flight request**. On a termination signal the
+host stops accepting new connections and drains: the API lets in-flight HTTP requests and
+open SignalR connections complete, and the worker lets each background job loop's current
+tick observe cancellation and unwind (the loops already honor the stopping token).
+`HostOptions.ShutdownTimeout` bounds that drain, and both hosts now set it explicitly from
+configuration (`Hosting:ShutdownTimeout`, a `TimeSpan`) with a tuned default of **25 seconds**
+instead of leaving it at the implicit framework default — one window applied identically to
+the API and the worker (`apps/api/Hosting/GracefulShutdownConfiguration.cs`). The window is
+read from configuration only (a present-but-malformed or non-positive value is rejected at
+startup) and must be kept **at or below** the orchestration termination grace period
+(Kubernetes `terminationGracePeriodSeconds`, default 30s; the Compose `stop_grace_period`) so
+the process exits cleanly before SIGKILL — the 25s default sits a few seconds under the
+conventional 30s for headroom.
+
+A **multi-instance** SignalR deployment additionally requires **sticky sessions / ARR
+affinity** at the reverse proxy for the `/hubs` endpoint, _on top of_ the Redis/Valkey
+backplane (CORE-OPS-007): a SignalR connection starts with a **negotiate** request that issues
+a `connectionId`, and the non-WebSocket fallbacks (Server-Sent Events, long polling) then make
+further HTTP requests that **must reach the same instance** — without affinity the
+negotiate/transport handshake breaks. Affinity (handshake pinning) and the backplane
+(cross-instance event fan-out) solve different problems and are both required at scale.
+Affinity is a proxy/edge concern, not a Core host setting; the proxy-specific configuration is
+documented in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Graceful shutdown and SignalR
+sticky-session affinity") and `docs/11_REALTIME_SYNC.md`.
+
 ### Tenant model and HTTP API
 
 The Identity and Tenant Boundaries epic builds the tenant model in the
