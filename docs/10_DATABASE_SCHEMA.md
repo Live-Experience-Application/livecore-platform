@@ -97,6 +97,35 @@ purchase_events(purchase_transaction_id, created_at)
 idempotency_keys(scope, key)
 ```
 
+## Optimistic concurrency (CORE-CONC-001)
+
+The mutable aggregates carry an optimistic-concurrency token so a concurrent
+read-modify-write fails loudly instead of silently losing an update. The token is the
+PostgreSQL system column `xmin` (the id of the transaction that last wrote the row),
+mapped as an EF Core row-version concurrency token
+(`Property<uint>("xmin").IsRowVersion().HasColumnName("xmin")`). Because `xmin` is a
+column every row already has, this needs **no data migration and adds no real column**
+— the schema is unchanged; only the EF model maps it. PostgreSQL advances `xmin` on
+every UPDATE, so EF adds `WHERE ... AND xmin = @original` to a write and a stale write
+affects zero rows, raising a conflict that the API surfaces as `409`
+(`docs/08_API_CONTRACTS.md`).
+
+The token is applied to exactly the aggregates that are updated in place:
+
+```text
+sessions
+visibility_rules
+workspaces
+participants
+quota_usage
+purchase_transactions
+```
+
+Append-only tables (`session_events`, `audit_logs`, `purchase_events`,
+`store_notification_events`) are never updated and so carry no token. The mapping is
+PostgreSQL-only (the test suite's SQLite provider has no `xmin` system column), so it
+is applied only when the provider is Npgsql.
+
 ## JSONB use
 
 JSONB is allowed for flexible template-defined attributes but not for core authorization fields.

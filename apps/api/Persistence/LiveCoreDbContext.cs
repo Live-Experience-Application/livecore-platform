@@ -189,5 +189,79 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new PurchaseTransactionConfiguration());
         modelBuilder.ApplyConfiguration(new PurchaseEventConfiguration());
         modelBuilder.ApplyConfiguration(new StoreNotificationEventConfiguration());
+
+        ConfigureOptimisticConcurrency(modelBuilder);
+    }
+
+    /// <summary>
+    /// Maps the PostgreSQL system column <c>xmin</c> as an EF Core optimistic
+    /// concurrency token on every MUTABLE aggregate (CORE-CONC-001). With the token
+    /// in place a concurrent read-modify-write fails LOUDLY with a
+    /// <see cref="DbUpdateConcurrencyException"/> — which the
+    /// <see cref="ConcurrencyConflictMiddleware"/> translates to a <c>409 Conflict</c>
+    /// — instead of the second writer silently overwriting (last-write-wins) and
+    /// losing the first writer's update. The aggregates' in-memory state-machine
+    /// guards (for example <c>Session.CanStart</c>/<c>CanEnd</c> and
+    /// <c>VisibilityRule.ChangeVisibility</c>) run per <see cref="DbContext"/> and so
+    /// give NO protection across two contexts, replicas or interleaved requests; the
+    /// row-version token is the cross-context guarantee.
+    ///
+    /// <para>
+    /// <c>xmin</c> is a system column every PostgreSQL row already carries (the
+    /// transaction id that last wrote the row), so the mapping needs NO data migration
+    /// and adds no real column: there is nothing to create, and the accompanying
+    /// <c>AddOptimisticConcurrencyTokens</c> migration is a deliberate no-op (issuing
+    /// <c>ALTER TABLE ... ADD COLUMN xmin</c> would in fact fail, because <c>xmin</c>
+    /// conflicts with a reserved system column name). PostgreSQL bumps the value on
+    /// every UPDATE, so EF's <c>WHERE ... AND xmin = @original</c> predicate detects a
+    /// stale write automatically. The shadow <c>uint xmin</c> property is mapped
+    /// read-only (<c>IsRowVersion()</c> = value-generated-on-add-or-update + concurrency
+    /// token), so no aggregate gains a CLR property.
+    /// </para>
+    ///
+    /// <para>
+    /// It is applied ONLY on the Npgsql provider. <c>xmin</c> is PostgreSQL-specific,
+    /// and the test suite runs by default on the EF Core SQLite provider (which has no
+    /// such system column); mapping it unconditionally would make SQLite try to create
+    /// and write a non-existent column and break every insert. Guarding on the provider
+    /// keeps the SQLite test path (schema from <c>EnsureCreated()</c>) untouched while
+    /// production and the PostgreSQL integration suite get real cross-context
+    /// concurrency protection.
+    /// </para>
+    /// </summary>
+    private void ConfigureOptimisticConcurrency(ModelBuilder modelBuilder)
+    {
+        if (!Database.IsNpgsql())
+        {
+            return;
+        }
+
+        // The mutable aggregates named by CORE-CONC-001: each is loaded and then
+        // re-saved by a read-modify-write command (Session start/end/cancel,
+        // VisibilityRule reveal/hide, Workspace rename/archive, Participant
+        // join/leave/rename, QuotaUsage record/release, PurchaseTransaction status
+        // change), so each needs the token. Append-only aggregates (audit logs,
+        // session events, purchase events) are never updated and so need none.
+        Type[] mutableAggregates =
+        [
+            typeof(Session),
+            typeof(VisibilityRule),
+            typeof(Workspace),
+            typeof(Participant),
+            typeof(QuotaUsage),
+            typeof(PurchaseTransaction),
+        ];
+
+        foreach (var aggregate in mutableAggregates)
+        {
+            // The documented mapping: the PostgreSQL system column xmin as a
+            // row-version concurrency token. xmin already exists on every row as a
+            // system column, so the accompanying AddOptimisticConcurrencyTokens
+            // migration deliberately creates nothing — this maps the existing column.
+            modelBuilder.Entity(aggregate)
+                .Property<uint>("xmin")
+                .HasColumnName("xmin")
+                .IsRowVersion();
+        }
     }
 }

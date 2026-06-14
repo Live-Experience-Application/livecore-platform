@@ -556,6 +556,30 @@ through the `LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment
 variables; with them unset it stays on in-memory SQLite, so local runs need no
 database server.
 
+### Optimistic concurrency
+
+The mutable aggregates (`Session`, `VisibilityRule`, `Workspace`, `Participant`,
+`PurchaseTransaction` and quota usage) carry an optimistic-concurrency token so a
+concurrent read-modify-write fails loudly instead of silently losing an update
+(CORE-CONC-001). The token is the PostgreSQL system column `xmin`, mapped as an EF Core
+row-version concurrency token, so PostgreSQL bumps it on every UPDATE and EF appends
+`WHERE ... AND xmin = @original` to a write. When two commands interleave on one row —
+for example a session `start` racing a session `end`, or a reveal racing a hide — the
+second writer's stale write is rejected with a `DbUpdateConcurrencyException`, which the
+`ConcurrencyConflictMiddleware` translates into a fail-closed `409 Conflict` (reload and
+retry) rather than overwriting the first writer's change. The in-memory state-machine
+guards (`Session.CanStart`/`CanEnd`, `VisibilityRule.ChangeVisibility`) run per
+`DbContext` and give no cross-context/replica protection, so the row-version token is the
+cross-context guarantee.
+
+`xmin` is a system column every PostgreSQL row already carries, so the token needs **no
+data migration** and adds no real column (the `AddOptimisticConcurrencyTokens` migration
+is a deliberate schema-level no-op; the token lives in the EF model only). Because `xmin`
+is PostgreSQL-specific, the mapping is applied only on the Npgsql provider — the default
+in-memory SQLite test provider has no such column and is left untouched; the real
+cross-context conflict is exercised by the integration suite's PostgreSQL job. See
+`docs/10_DATABASE_SCHEMA.md` and `docs/08_API_CONTRACTS.md`.
+
 ### Reverse-proxy edge: CORS, forwarded headers and HTTPS posture
 
 The API is meant to run **behind a TLS-terminating reverse proxy** (CORE-OPS-003).

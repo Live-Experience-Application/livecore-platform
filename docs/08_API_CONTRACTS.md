@@ -81,3 +81,20 @@ Reveal and hide (un-reveal) execution must be idempotent for client retry.
 
 A repeated reveal or hide request with the same idempotency key must not create duplicate events.
 Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.
+
+## Optimistic concurrency (CORE-CONC-001)
+
+The mutable aggregates — `Session`, `VisibilityRule`, `Workspace`, `Participant`,
+`PurchaseTransaction` and quota usage — carry a server-side optimistic-concurrency
+token (the PostgreSQL `xmin` row version; see `docs/10_DATABASE_SCHEMA.md`). When two
+read-modify-write commands interleave on the same row, the second write fails the row
+version check and the API returns **`409 Conflict`** instead of silently overwriting
+(losing) the first writer's update. The caller's correct response is to reload the
+resource and retry the command against the fresh state.
+
+The token is enforced **server-side**; the client never has to send it. The `409`
+Problem Details carries only the generic "modified by a concurrent request" reason and
+no resource, tenant or internal state (threat T7). This is distinct from the
+state-machine `409`s (for example starting a non-`Prepared` session): both are
+conflicts, but a concurrency `409` means "the resource changed underneath you, retry",
+while a state `409` means "the command is not legal from the current state".

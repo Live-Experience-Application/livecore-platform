@@ -906,6 +906,17 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // tracer/exporter is listening, starting the span is a no-op, so this is free when tracing is off.
 app.UseMiddleware<RequestTracingMiddleware>();
 
+// Optimistic-concurrency conflict translation (CORE-CONC-001). The mutable
+// aggregates carry the PostgreSQL xmin row-version token, so an interleaved
+// read-modify-write makes the second SaveChanges throw a
+// DbUpdateConcurrencyException (a conflicting write fails loudly rather than
+// silently overwriting). This middleware wraps the whole endpoint pipeline and
+// turns that exception into a fail-closed 409 Conflict for every endpoint, while
+// leaving all other exceptions untouched. It sits inside the request
+// metrics/tracing spans (so the 409 is observed) and before CORS/auth so it wraps
+// the endpoint handlers where SaveChanges runs.
+app.UseMiddleware<ConcurrencyConflictMiddleware>();
+
 // CORS runs before authentication so a browser preflight (an OPTIONS request that
 // carries no credentials) is answered by the CORS middleware itself rather than
 // being challenged with 401. The single named policy (CorsConfiguration.PolicyName)
