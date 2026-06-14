@@ -16,6 +16,16 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- CS1591 (missing XML doc comment) is intentionally not enforced. -->
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!--
+      Reproducible restore (CORE-DEP-003, supply chain). Every project writes a
+      committed NuGet lock file (packages.lock.json) capturing the exact resolved
+      package graph and content hashes. The published container images restore in
+      locked mode (the `dotnet restore` locked-mode switch in apps/api/Dockerfile,
+      apps/worker/Dockerfile and apps/api/Migrations.Dockerfile), so a build fails
+      if the resolved dependencies ever drift from the committed lock file - the
+      image layers can no longer silently float.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
 </Project>

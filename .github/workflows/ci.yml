@@ -11,10 +11,10 @@
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
-#   publish-dry-run      - verify image tags + dry-run build the publish path, no push (CORE-OPS-009)
+#   publish-dry-run      - verify image tags + image-scan gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002)
-#   publish              - push immutable, versioned images on a release tag only (CORE-OPS-009)
+#   publish              - SBOM + CVE scan (fail on critical) then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
 #
 # Every push and pull request runs the quality gates only. The publish job runs
 # only on a release tag push ('v<MAJOR>.<MINOR>.<PATCH>') and only after every
@@ -369,6 +369,14 @@ jobs:
         shell: pwsh
         run: ./scripts/test-image-tags.ps1
 
+      - name: Test the image scan gate and SBOM validation logic (seeded critical CVE fails)
+        # CORE-DEP-003: proves deterministically, with no Docker/registry, that a
+        # seeded CRITICAL vulnerability blocks the publish, the failing severities
+        # are configurable and only a usable SBOM is accepted. This is the
+        # required "a seeded critical CVE fails the gate" test, run every push/PR.
+        shell: pwsh
+        run: ./scripts/test-image-scan.ps1
+
       - name: Derive a release-shaped reference for the dry-run build
         id: tags
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -387,6 +395,54 @@ jobs:
           docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
           docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
           echo "Dry-run built $API_REFERENCE and $WORKER_REFERENCE; this job never logs in or pushes."
+
+      - name: Install Trivy (SBOM generator and vulnerability scanner)
+        # CORE-DEP-003: installs the Trivy CLI from its APT repository (the same
+        # pattern the backup-restore-postgres job uses for the PostgreSQL client),
+        # so no extra GitHub Action enters the supply chain.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Produce an SBOM and a CVE scan report for the dry-run images
+        # CORE-DEP-003 required test: the publish dry-run produces an SBOM and a
+        # scan report. The gate runs report-only here, so a transient base-image
+        # CVE documents itself on a pull request without blocking development -
+        # the release publish job runs the same gate for real.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+            name="${entry%%=*}"
+            reference="${entry#*=}"
+            trivy image --format cyclonedx --output "$name.sbom.cdx.json" "$reference"
+            trivy image --format json --output "$name.scan.json" "$reference"
+            pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
+              -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json" -ReportOnly
+          done
+
+      - name: Upload the dry-run SBOMs and scan reports
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-dry-run
+          path: |
+            api.sbom.cdx.json
+            api.scan.json
+            worker.sbom.cdx.json
+            worker.scan.json
+          if-no-files-found: error
 
   powershell-lint:
     name: PowerShell script analysis
@@ -561,13 +617,57 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: ./scripts/derive-image-tags.ps1 -Ref $env:GIT_REF -Registry $env:REGISTRY -Owner $env:REPOSITORY_OWNER -OutputPath $env:GITHUB_OUTPUT
 
+      - name: Install Trivy (SBOM generator and vulnerability scanner)
+        # CORE-DEP-003: installs the Trivy CLI from its APT repository, mirroring
+        # the dry-run job and the backup-restore-postgres client install, so no
+        # extra GitHub Action enters the supply chain.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
       - name: Log in to the container registry
         env:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 
-      - name: Build and push the versioned API and worker images
+      - name: Build the versioned API and worker images
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
+          docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
+
+      - name: Produce an SBOM and a CVE scan report, and fail the publish on a critical vulnerability
+        # CORE-DEP-003: before anything is pushed, generate a CycloneDX SBOM and a
+        # vulnerability scan report for each image, then run the supply-chain gate
+        # in blocking mode. A CRITICAL finding (for example a known-CVE base image)
+        # or a missing/empty SBOM fails the job here, so the release is never
+        # pushed. The reports are uploaded as build artifacts below.
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+            name="${entry%%=*}"
+            reference="${entry#*=}"
+            trivy image --format cyclonedx --output "$name.sbom.cdx.json" "$reference"
+            trivy image --format json --output "$name.scan.json" "$reference"
+            pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
+              -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json"
+          done
+
+      - name: Refuse to overwrite an already-published immutable tag, then push
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
@@ -582,10 +682,19 @@ jobs:
               exit 1
             fi
           done
-          docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
-          docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
           docker push "$API_REFERENCE"
           docker push "$WORKER_REFERENCE"
+
+      - name: Upload the published SBOMs and scan reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-attestations
+          path: |
+            api.sbom.cdx.json
+            api.scan.json
+            worker.sbom.cdx.json
+            worker.scan.json
+          if-no-files-found: error
 
       - name: Summarize the published images
         env:
@@ -597,4 +706,8 @@ jobs:
             echo ""
             echo "- \`$API_REFERENCE\`"
             echo "- \`$WORKER_REFERENCE\`"
+            echo ""
+            echo "A CycloneDX SBOM and a CVE scan report were produced for each"
+            echo "image and the critical-vulnerability gate passed before push"
+            echo "(see the \`supply-chain-attestations\` build artifact)."
           } >> "$GITHUB_STEP_SUMMARY"

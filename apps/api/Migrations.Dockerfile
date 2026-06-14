@@ -38,19 +38,26 @@
 #   - no credentials in the image; the connection string is provided at run time
 #   - no port is exposed and no HEALTHCHECK is defined: the container is a
 #     run-to-completion job whose exit code is the success signal
+#
+# Supply chain (CORE-DEP-003): the base images are pinned by immutable digest and
+# the NuGet restore runs in locked mode against the committed packages.lock.json,
+# exactly as apps/api/Dockerfile - see that file for the rationale and how to bump
+# a digest.
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:548d93f8a18a1acbe6cc127bc4f47281430d34a9e35c18afa80a8d6741c2adc3 AS build
 WORKDIR /src
 ENV DOTNET_NOLOGO=1 \
     DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 # Restore the project and the pinned dotnet-ef tool with only the project,
-# repository-wide build files and the tool manifest in the layer, so the restore
-# layers stay cached until dependencies change.
+# repository-wide build files, the committed lock file and the tool manifest in
+# the layer, so the restore layers stay cached until dependencies change. Locked
+# mode fails the build if the resolved package graph ever drifts from the
+# committed packages.lock.json (CORE-DEP-003).
 COPY Directory.Build.props .editorconfig ./
 COPY .config/dotnet-tools.json .config/
-COPY apps/api/LiveCore.Api.csproj apps/api/
-RUN dotnet restore apps/api/LiveCore.Api.csproj
+COPY apps/api/LiveCore.Api.csproj apps/api/packages.lock.json apps/api/
+RUN dotnet restore apps/api/LiveCore.Api.csproj --locked-mode
 RUN dotnet tool restore
 
 # Copy the source and build the migrations bundle: a framework-dependent,
@@ -64,7 +71,7 @@ RUN dotnet ef migrations bundle \
     --configuration Release \
     --output /app/efbundle
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:ddcf70ad1ab963a4fcd41fbd722a6b660e404e87567cfbd46fd2809c21b02088 AS runtime
 WORKDIR /app
 COPY --from=build /app/efbundle ./efbundle
 

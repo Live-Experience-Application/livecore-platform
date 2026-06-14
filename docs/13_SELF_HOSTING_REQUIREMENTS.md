@@ -842,6 +842,40 @@ instead. Because the tags are immutable and version-pinned, a deployment that re
 `publish-dry-run` CI job exercises the same derivation and build on every push and pull request **without
 pushing**, so the publish path is verified continuously, not only at release time.
 
+### Pinned base images, SBOM and vulnerability scan (CORE-DEP-003)
+
+The immutable, versioned **release tag** above fixes what a deployment *pulls*, but it does not by itself fix what the
+image is *built from*. Three supply-chain controls close that gap so the layers underneath a published version cannot
+silently drift and a known-CVE base image cannot ship:
+
+- **Base images pinned by digest.** All three Dockerfiles (`apps/api/Dockerfile`, `apps/worker/Dockerfile`,
+  `apps/api/Migrations.Dockerfile`) pin the .NET SDK and ASP.NET runtime base images by immutable digest
+  (`mcr.microsoft.com/dotnet/sdk:10.0@sha256:...` and `aspnet:10.0@sha256:...`), not by the floating `10.0` tag. A
+  rebuild therefore always resolves the exact same base layers, and a re-published upstream tag cannot change what a
+  release was built on. The readable `:10.0` tag is kept beside the digest only for humans. Bump a digest
+  deliberately — resolve the new one with `docker buildx imagetools inspect mcr.microsoft.com/dotnet/sdk:10.0` (it
+  reports the multi-arch manifest-list digest, which Docker resolves to the right architecture) and commit the change
+  so it is reviewed.
+- **Reproducible NuGet restore (locked mode).** Each .NET project commits a `packages.lock.json` (enabled repository
+  wide by `RestorePackagesWithLockFile` in `Directory.Build.props`), and the image builds restore in **locked mode**,
+  so the published dependency graph is reproducible and the build fails if the resolved packages ever drift from the
+  committed lock file.
+- **SBOM and CVE scan on the publish path.** The publish job builds each image, then — **before any push** — produces a
+  CycloneDX **SBOM** and a vulnerability **scan report** for it (with Trivy) and runs the supply-chain gate
+  (`scripts/assert-image-scan.ps1`). The gate is **fail-closed**: a **critical** vulnerability (for example a known-CVE
+  base image), a missing/empty SBOM, or an unreadable report **fails the publish before the image is pushed**. The
+  failing severities are configurable (critical by default). The SBOMs and reports are uploaded as the
+  `supply-chain-attestations` build artifact. The existing immutable-tag guard is unchanged: after the gate passes, the
+  job still refuses to overwrite an already-published tag before pushing.
+
+The gate decision and the SBOM check are pure logic (`scripts/LiveCoreImageScan.psm1`) tested from seeded fixtures by
+`scripts/test-image-scan.ps1`, so "a seeded critical CVE fails the gate" is proven deterministically on every push and
+pull request. The `publish-dry-run` job additionally produces a real SBOM and scan report for the dry-run images on
+every push/pull request, running the gate in **report-only** mode there so a transient base-image CVE documents itself
+without blocking ordinary development — the release publish runs the same gate for real. Cryptographic build
+**provenance/attestation** (for example cosign signatures) is a natural next step and is left as a follow-up; it needs
+signing-key management that is out of scope here.
+
 ## Backup and restore (CORE-OPS-010)
 
 The Core holds **systems of record whose loss is unrecoverable**: the tenant-isolated, **append-only** audit

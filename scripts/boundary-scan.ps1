@@ -108,6 +108,13 @@ if ($sourceDirs.Count -eq 0) {
 # Generated/vendor output that must not be scanned.
 $excludedDirPattern = '[\\/](bin|obj|node_modules|dist|coverage|TestResults|\.git)([\\/]|$)'
 
+# Generated dependency manifests: machine-written, not authored Core source.
+# NuGet lock files (packages.lock.json, CORE-DEP-003) carry base64 content
+# hashes whose incidental two-letter uppercase runs can look like a forbidden
+# acronym after the CamelCase/acronym splitting below, so they are excluded like
+# the other generated output above.
+$excludedFileNames = @('packages.lock.json')
+
 # Text files considered Core source. Extensionless files are scanned too.
 $sourceExtensions = @(
     '.cs', '.csproj', '.sln', '.slnx', '.props', '.targets', '.razor', '.cshtml',
@@ -125,6 +132,7 @@ foreach ($dir in $sourceDirs) {
     # dot-prefixed files as hidden and would silently skip them otherwise.
     $files = Get-ChildItem -Path $dir -Recurse -File -Force | Where-Object {
         $_.FullName -notmatch $excludedDirPattern -and
+        $excludedFileNames -notcontains $_.Name -and
         (
             $_.Extension -eq '' -or
             $sourceExtensions -contains $_.Extension.ToLowerInvariant()

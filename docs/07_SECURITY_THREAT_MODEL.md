@@ -138,6 +138,33 @@ Controls:
 - the chain is unsigned (no secret), so cryptographic signing/external anchoring against a fully privileged
   actor is a documented follow-up
 
+## Supply chain integrity (CORE-DEP-003)
+
+The published API, worker and migrations images are part of the trusted computing base a deployment runs. An
+immutable, versioned **release tag** (CORE-OPS-009) fixes what is pulled, but the layers underneath it can still
+drift — a floating base-image tag is re-published over time, an unpinned dependency restore resolves differently,
+and a known-CVE base image ships unnoticed.
+
+Risk:
+
+- a base image floats (`mcr.microsoft.com/dotnet/{sdk,aspnet}:10.0`), so a rebuild of the same release version
+  silently changes the underlying layers
+- a known critical vulnerability in a base image is published without any gate catching it
+- no bill of materials exists for a shipped image, so an operator cannot tell what is inside it
+
+Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Pinned base images, SBOM and vulnerability scan"):
+
+- base images pinned by **immutable digest** in all three Dockerfiles, so a release always builds on the exact
+  same layers and an upstream re-tag cannot drift into it
+- a **reproducible** NuGet restore: every project commits `packages.lock.json` and the image builds restore in
+  locked mode, so the dependency graph cannot float
+- the publish job produces a CycloneDX **SBOM** and a **CVE scan** for each image and runs a **fail-closed gate**
+  (`scripts/assert-image-scan.ps1`) that **blocks the push on a critical vulnerability** or a missing SBOM; the
+  gate decision is unit-tested from a seeded critical CVE (`scripts/test-image-scan.ps1`)
+- the existing immutable-tag guard is unchanged (a published version is never overwritten)
+- cryptographic build provenance/attestation (e.g. cosign) is a documented follow-up (it needs signing-key
+  management out of scope here)
+
 ## Required test categories
 
 - foreign workspace ID denial

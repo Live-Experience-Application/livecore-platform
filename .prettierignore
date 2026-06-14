@@ -6,6 +6,8 @@ LICENSE
 
 # Lockfiles and generated output.
 pnpm-lock.yaml
+# NuGet lock files are machine-generated dependency manifests (CORE-DEP-003).
+**/packages.lock.json
 node_modules/
 dist/
 bin/

@@ -64,10 +64,13 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds; pushes versioned images on a release tag)
+.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
+scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
+scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
+scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
 .dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
@@ -3215,6 +3218,10 @@ Image baseline:
 - Configuration is supplied at runtime through environment variables
   (for example `ASPNETCORE_ENVIRONMENT` and logging levels); no secrets are
   baked into the images.
+- The base images are pinned by **immutable digest** (`...:10.0@sha256:...`), not
+  the floating `10.0` tag, and the NuGet restore runs in **locked mode** against a
+  committed `packages.lock.json`, so a rebuild always resolves the same base layers
+  and the same dependency graph (CORE-DEP-003, see "Supply chain" below).
 
 Local development orchestration (Compose with database, auth and storage
 services) lives in `livecore-deploy`, not in this repository (see
@@ -3255,6 +3262,40 @@ authenticates with the workflow's `GITHUB_TOKEN` (granted `packages: write` only
 for that job). `scripts/test-image-tags.ps1` tests these properties and the
 `publish-dry-run` job exercises the same derivation and build on every push and
 pull request without pushing.
+
+### Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)
+
+The immutable release **tag** fixes what a deployment pulls; three further controls
+fix what the image is built from and prove it carries no known-critical
+vulnerability, so the layers underneath a version cannot silently drift and a
+known-CVE base image cannot ship:
+
+- **Base images pinned by digest.** `apps/api/Dockerfile`, `apps/worker/Dockerfile`
+  and `apps/api/Migrations.Dockerfile` pin the .NET SDK and ASP.NET runtime base
+  images by `sha256` digest (the readable `:10.0` tag is kept only for humans). Bump
+  a digest deliberately with
+  `docker buildx imagetools inspect mcr.microsoft.com/dotnet/sdk:10.0` and commit it.
+- **Reproducible restore (locked mode).** `RestorePackagesWithLockFile` in
+  `Directory.Build.props` makes every project commit a `packages.lock.json`, and the
+  image builds restore in locked mode, so the build fails if the resolved package
+  graph ever drifts from the committed lock file.
+- **SBOM + CVE scan gate on publish.** The `publish` job builds each image, then —
+  before any push — produces a CycloneDX **SBOM** and a vulnerability **scan report**
+  (with Trivy) and runs the fail-closed gate (`scripts/assert-image-scan.ps1`): a
+  **critical** vulnerability, a missing/empty SBOM, or an unreadable report fails the
+  publish before the image is pushed. The SBOMs and reports are uploaded as the
+  `supply-chain-attestations` build artifact, and the existing immutable-tag guard
+  still runs before push.
+
+The gate decision and the SBOM check are pure logic
+(`scripts/LiveCoreImageScan.psm1`) tested from seeded fixtures by
+`scripts/test-image-scan.ps1`, so "a seeded critical CVE fails the gate" is proven
+deterministically on every push/pull request; the `publish-dry-run` job additionally
+produces a real SBOM and scan report (running the gate in report-only mode so a
+transient base-image CVE never blocks ordinary development). Cryptographic build
+provenance/attestation (e.g. cosign) is a documented follow-up. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base images, SBOM and vulnerability
+scan").
 
 ### Backup and restore (CORE-OPS-010)
 
