@@ -77,7 +77,8 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
             new StoreNotificationEventRepository(context),
             new PurchaseTransactionService(
                 new PurchaseTransactionRepository(context),
-                new PurchaseEventRepository(context)));
+                new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context));
         return await service.HandleAsync(notification, _receivedAt, CancellationToken.None);
     }
 
@@ -90,7 +91,8 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
                 new StoreNotificationEventRepository(context),
                 new PurchaseTransactionService(
                     new PurchaseTransactionRepository(context),
-                    new PurchaseEventRepository(context))),
+                    new PurchaseEventRepository(context)),
+                new TransactionalUnitOfWork(context)),
             new StoreNotificationReconciliationOptions(enabled: true, TimeSpan.FromHours(1), batchSize),
             NullLogger<StoreNotificationReconciliationService>.Instance);
         return await service.ReconcileDriftedPurchasesAsync(CancellationToken.None);
@@ -300,7 +302,8 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
             new StoreNotificationEventRepository(context),
             new PurchaseTransactionService(
                 new PurchaseTransactionRepository(context),
-                new PurchaseEventRepository(context)));
+                new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context));
 
         var outcome = await service.ReconcileTransactionAsync(PurchaseProvider.Apple, "txn-orphan", CancellationToken.None);
 
@@ -318,7 +321,8 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
             new StoreNotificationEventRepository(context),
             new PurchaseTransactionService(
                 new PurchaseTransactionRepository(context),
-                new PurchaseEventRepository(context)));
+                new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context));
 
         var outcome = await service.ReconcileTransactionAsync(PurchaseProvider.Apple, "txn-1", CancellationToken.None);
 

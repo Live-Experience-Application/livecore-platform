@@ -897,7 +897,10 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // affected purchase's lifecycle by REUSING the CORE-STORE-002 PurchaseTransactionService.ChangeStatusAsync, so a
     // renewal/cancellation/refund/grace period updates the server-side purchase status (the source of truth for
     // premium state) safely and auditably (the story acceptance criterion). The two unauthenticated store
-    // notification endpoints sit on this service.
+    // notification endpoints sit on this service. It now takes the TransactionalUnitOfWork (registered above) by
+    // constructor injection so the status change AND its dedup-ledger write commit in ONE transaction (CORE-MON-010):
+    // a crash between them can never leave a status applied without its first-arrival record, and a re-delivery can
+    // never double-append the purchase_events audit trail.
     builder.Services.AddScoped<IStoreNotificationEventRepository, StoreNotificationEventRepository>();
     builder.Services.AddScoped<StoreNotificationService>();
 

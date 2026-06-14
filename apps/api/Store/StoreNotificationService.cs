@@ -1,3 +1,5 @@
+using LiveCore.Api.Persistence;
+
 namespace LiveCore.Api.Store;
 
 /// <summary>
@@ -63,22 +65,39 @@ namespace LiveCore.Api.Store;
 /// renewal recorded after a refund cannot resurrect the purchase through reconciliation either. It converges the
 /// purchase by REUSING the same idempotent, audited <see cref="PurchaseTransactionService.ChangeStatusAsync"/> and
 /// the same revocation path, so the reconciliation job reuses this service rather than building a parallel pipeline.
+///
+/// ATOMIC APPLY+LEDGER (CORE-MON-010). <see cref="HandleAsync"/> applies the purchase status change AND writes its
+/// dedup-ledger row in ONE database transaction (reusing the CORE-CONC-002 <see cref="TransactionalUnitOfWork"/>).
+/// Before this the status change committed first (its own <c>SaveChanges</c> through
+/// <see cref="PurchaseTransactionService.ChangeStatusAsync"/>) and only THEN the
+/// <c>store_notification_events</c> dedup row was inserted, in SEPARATE transactions — so a crash between them left
+/// the status changed but the notification unrecorded, and the store's at-least-once RE-DELIVERY re-applied it and
+/// could double-append the <c>purchase_events</c> audit trail. Wrapping both (and, for a revoking notification, the
+/// entitlement revocation that precedes them) in one transaction makes a part-way failure roll EVERYTHING back: a
+/// re-delivery then either finds the ledger row and is a deduplicated no-op, or replays the whole effect from
+/// scratch — never a status applied without its first-arrival record, never a duplicated audit entry. The dedup
+/// fast-path read stays OUTSIDE the transaction (it only short-circuits a known re-delivery; the unique
+/// <c>store_notification_events(provider, provider_notification_id)</c> index is the real race guard, inside).
 /// </summary>
 public sealed class StoreNotificationService
 {
     private readonly IStoreNotificationEventRepository _notifications;
     private readonly PurchaseTransactionService _transactions;
+    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly PurchaseEntitlementRevocationService? _revocation;
 
     public StoreNotificationService(
         IStoreNotificationEventRepository notifications,
         PurchaseTransactionService transactions,
+        TransactionalUnitOfWork unitOfWork,
         PurchaseEntitlementRevocationService? revocation = null)
     {
         ArgumentNullException.ThrowIfNull(notifications);
         ArgumentNullException.ThrowIfNull(transactions);
+        ArgumentNullException.ThrowIfNull(unitOfWork);
         _notifications = notifications;
         _transactions = transactions;
+        _unitOfWork = unitOfWork;
         _revocation = revocation;
     }
 
@@ -115,51 +134,69 @@ public sealed class StoreNotificationService
         // purchase event, while the ledger row records when we received the notification.
         var targetStatus = notification.Type.ToTransactionStatus();
 
-        // On a revoking notification (refund/cancellation/chargeback) revoke the granted entitlement BEFORE the
-        // status change (CORE-MON-004; "on entering a revoked state revoke the granted entitlement"). Revoking first
-        // means a revoke failure throws before the ledger row is written, so the store's re-delivery retries the
-        // whole effect; the revoke is idempotent, so the retry converges. An unrecorded/unlinked purchase or an
-        // unmapped product revokes nothing (fail-closed).
-        if (PurchaseTransactionStatusMachine.IsRevoked(targetStatus) && _revocation is not null)
-        {
-            await _revocation
-                .RevokeForPurchaseAsync(
-                    notification.Provider,
-                    notification.ProviderTransactionId,
-                    notification.OccurredAt,
-                    cancellationToken)
-                .ConfigureAwait(false);
-        }
+        // ONE unit of work (CORE-MON-010, reusing the CORE-CONC-002 TransactionalUnitOfWork): the entitlement
+        // revocation, the purchase STATUS CHANGE and the dedup-LEDGER write commit together or roll back together.
+        // Before this the status change and the ledger row were separate transactions, so a crash between them left
+        // the status applied without its first-arrival record and a re-delivery re-applied it — double-appending the
+        // purchase_events trail. Now a part-way failure rolls the whole effect back, so a re-delivery either dedups
+        // (the ledger row is present) or replays the whole effect from scratch. Every repository writes through the
+        // SAME scoped DbContext this unit of work begins the transaction on, so each SaveChanges enrols in the one
+        // transaction; it is opened inside the EF execution strategy's ExecuteAsync, so it stays correct under the
+        // CORE-CONC-003 retrying strategy.
+        return await _unitOfWork
+            .ExecuteAsync(
+                async unitToken =>
+                {
+                    // On a revoking notification (refund/cancellation/chargeback) revoke the granted entitlement
+                    // BEFORE the status change (CORE-MON-004; "on entering a revoked state revoke the granted
+                    // entitlement"). Inside this transaction a revoke failure rolls back the status change and the
+                    // ledger write too, so the store's re-delivery retries the whole effect; the revoke is
+                    // idempotent, so the retry converges. An unrecorded/unlinked purchase or an unmapped product
+                    // revokes nothing (fail-closed).
+                    if (PurchaseTransactionStatusMachine.IsRevoked(targetStatus) && _revocation is not null)
+                    {
+                        await _revocation
+                            .RevokeForPurchaseAsync(
+                                notification.Provider,
+                                notification.ProviderTransactionId,
+                                notification.OccurredAt,
+                                unitToken)
+                            .ConfigureAwait(false);
+                    }
 
-        var changeOutcome = await _transactions
-            .ChangeStatusAsync(
-                notification.Provider,
-                notification.ProviderTransactionId,
-                targetStatus,
-                notification.OccurredAt,
+                    var changeOutcome = await _transactions
+                        .ChangeStatusAsync(
+                            notification.Provider,
+                            notification.ProviderTransactionId,
+                            targetStatus,
+                            notification.OccurredAt,
+                            unitToken)
+                        .ConfigureAwait(false);
+
+                    var outcome = changeOutcome switch
+                    {
+                        PurchaseStatusChangeOutcome.Changed => StoreNotificationProcessingOutcome.Applied,
+                        PurchaseStatusChangeOutcome.Unchanged => StoreNotificationProcessingOutcome.Unchanged,
+                        PurchaseStatusChangeOutcome.TransactionNotFound => StoreNotificationProcessingOutcome.TransactionNotFound,
+                        _ => throw new InvalidOperationException($"Unhandled purchase status change outcome '{changeOutcome}'."),
+                    };
+
+                    // Record the notification's arrival and effect as an auditable, append-only ledger fact in the
+                    // SAME transaction as the status change above. This also claims the (provider, provider
+                    // notification id) so a later re-delivery is deduplicated. A concurrent handler that won the race
+                    // already recorded it: the unique index rejects this insert, and we report the idempotent
+                    // AlreadyProcessed (the status change we drove above was itself idempotent, so no double effect).
+                    var notificationEvent = StoreNotificationEvent.Record(notification, outcome, receivedAt);
+                    var addResult = await _notifications.AddAsync(notificationEvent, unitToken).ConfigureAwait(false);
+                    if (addResult == StoreNotificationEventAddResult.DuplicateNotification)
+                    {
+                        return new StoreNotificationProcessingResult(StoreNotificationProcessingOutcome.AlreadyProcessed);
+                    }
+
+                    return new StoreNotificationProcessingResult(outcome);
+                },
                 cancellationToken)
             .ConfigureAwait(false);
-
-        var outcome = changeOutcome switch
-        {
-            PurchaseStatusChangeOutcome.Changed => StoreNotificationProcessingOutcome.Applied,
-            PurchaseStatusChangeOutcome.Unchanged => StoreNotificationProcessingOutcome.Unchanged,
-            PurchaseStatusChangeOutcome.TransactionNotFound => StoreNotificationProcessingOutcome.TransactionNotFound,
-            _ => throw new InvalidOperationException($"Unhandled purchase status change outcome '{changeOutcome}'."),
-        };
-
-        // Record the notification's arrival and effect as an auditable, append-only ledger fact. This also claims
-        // the (provider, provider notification id) so a later re-delivery is deduplicated. A concurrent handler
-        // that won the race already recorded it: the unique index rejects this insert, and we report the
-        // idempotent AlreadyProcessed (the status change we drove above was itself idempotent, so no double effect).
-        var notificationEvent = StoreNotificationEvent.Record(notification, outcome, receivedAt);
-        var addResult = await _notifications.AddAsync(notificationEvent, cancellationToken).ConfigureAwait(false);
-        if (addResult == StoreNotificationEventAddResult.DuplicateNotification)
-        {
-            return new StoreNotificationProcessingResult(StoreNotificationProcessingOutcome.AlreadyProcessed);
-        }
-
-        return new StoreNotificationProcessingResult(outcome);
     }
 
     /// <summary>

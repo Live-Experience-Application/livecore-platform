@@ -338,6 +338,20 @@ periods update entitlements safely** (the story's acceptance criterion). It adds
   idempotent notification → purchase-status pipeline (the server-side source of truth) that a future grant/revoke
   story consumes as its trigger. The `store_notification_events` row stores only the **normalized** identifiers,
   never the raw notification body (which may embed signed receipt content — threat T7).
+- **Atomic apply + ledger (CORE-MON-010).** The handler applies the purchase **status change** and writes its
+  **dedup-ledger row** in **one database transaction** (reusing the CORE-CONC-002 `TransactionalUnitOfWork`).
+  Before this the status change committed first (its own `SaveChanges` via
+  `PurchaseTransactionService.ChangeStatusAsync`) and only **then** the `store_notification_events` dedup row was
+  inserted, in **separate** transactions — so a crash between them left the status applied but the notification
+  unrecorded, and the store's at-least-once **re-delivery** re-applied it, which could **double-append** the
+  `purchase_events` audit trail. Wrapping both (and, for a revoking notification, the entitlement revocation that
+  precedes them) in one transaction makes a part-way failure roll **everything** back, so a re-delivery either
+  finds the ledger row and is a deduplicated no-op or replays the whole effect from scratch — never a status
+  applied without its first-arrival record, never a duplicated audit entry. The dedup fast-path read stays
+  **outside** the transaction (it only short-circuits a known re-delivery; the unique
+  `store_notification_events(provider, provider_notification_id)` index is the real race guard, inside). The
+  reconciliation job (below) writes no ledger row — it re-derives from the existing ledger and drives only the
+  status change — so it needs no such wrap.
 
 ## Store notification reconciliation job (CORE-JOB-003)
 

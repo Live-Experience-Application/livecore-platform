@@ -1,3 +1,4 @@
+using LiveCore.Api.Persistence;
 using LiveCore.Api.Store;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -77,6 +78,9 @@ public class StoreNotificationReconciliationServiceCollectionExtensionsTests
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(StoreNotificationReconciliationService));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IReconcilablePurchaseReader));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(StoreNotificationService));
+        // The StoreNotificationService takes the TransactionalUnitOfWork (CORE-MON-010), so it must be registered too
+        // or the worker could not construct the reused notification service.
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(TransactionalUnitOfWork));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(StoreNotificationReconciliationOptions));
         // The revocation graph (CORE-MON-004) is wired too, so the sweep can revoke a granted entitlement when it
         // converges a purchase to a revoked state (a missed refund only the reconciliation job can apply).

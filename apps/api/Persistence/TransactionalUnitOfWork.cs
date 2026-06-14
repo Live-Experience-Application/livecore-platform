@@ -35,8 +35,16 @@ namespace LiveCore.Api.Persistence;
 /// see <see cref="LiveCore.Api.Realtime.ISessionEventPublisher"/>), so a delivery failure can never roll
 /// back already-committed state.
 /// </para>
+///
+/// <para>
+/// It is PUBLIC because, besides the internal command endpoints and deletion services, the Store module's
+/// public application service <see cref="LiveCore.Api.Store.StoreNotificationService"/> takes it by constructor
+/// injection to make store-notification handling atomic (CORE-MON-010): the purchase status change and the
+/// dedup-ledger write commit together or roll back together, so a crash between them can never leave a status
+/// applied without its first-arrival record and a re-delivery can never double-append the purchase audit trail.
+/// </para>
 /// </summary>
-internal sealed class TransactionalUnitOfWork
+public sealed class TransactionalUnitOfWork
 {
     private readonly LiveCoreDbContext _dbContext;
 

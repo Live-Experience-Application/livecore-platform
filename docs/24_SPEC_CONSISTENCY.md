@@ -198,6 +198,24 @@ routes), the `docs/08` representative block, `csv/database_tables.csv`, the `doc
 spec-consistency check are all unchanged, and the check stays green. The gateway's route table is the in-code
 mirror of `csv/mobile_store_api_routes.csv`, which stays the single source of truth for the mobile path shapes.
 
+**Atomicity note (CORE-MON-010 made store-notification handling atomic).** The synchronous webhook handler
+(`StoreNotificationService.HandleAsync`) now applies a notification's purchase **status change** and writes its
+**dedup-ledger row** (`store_notification_events`) in **one database transaction**, reusing the CORE-CONC-002
+`TransactionalUnitOfWork`. Before CORE-MON-010 the status change committed first (its own `SaveChanges` via
+`PurchaseTransactionService.ChangeStatusAsync`) and only **then** the ledger row was inserted, in **separate**
+transactions — so a crash between them left the status applied but the notification **unrecorded**, and the
+store's at-least-once **re-delivery** re-applied it, which could **double-append** the `purchase_events` audit
+trail. Wrapping both — and, for a revoking notification, the entitlement revocation that precedes them — in one
+transaction makes a part-way failure roll **everything** back, so a re-delivery either finds the ledger row and
+is a deduplicated no-op or replays the whole effect from scratch: never a status applied without its first-arrival
+record, never a duplicated audit entry. The dedup fast-path read stays **outside** the transaction (the unique
+`store_notification_events(provider, provider_notification_id)` index is the real race guard, inside). It
+**adds no route, table, event or migration** — it only changes a transactional boundary — so the
+spec-consistency check stays green. With CORE-MON-010 the Monetization v1 epic (CORE-MON-001..010) is complete.
+The reconciliation candidate scan still computes the latest-per-purchase **client-side**
+(`ReconcilablePurchaseReader`); a SQL window-function form for high-volume deployments stays a documented
+follow-up, fine for this off-by-default, low-volume job.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented

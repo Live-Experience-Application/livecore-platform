@@ -70,6 +70,7 @@ public sealed class PurchaseRevocationMonotonicTests : IDisposable
             new PurchaseTransactionService(
                 new PurchaseTransactionRepository(context),
                 new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context),
             new PurchaseEntitlementRevocationService(
                 new PurchaseTransactionRepository(context),
                 new BillingAccountLinkRepository(context),

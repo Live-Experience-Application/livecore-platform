@@ -73,11 +73,14 @@ public sealed class StoreNotificationServiceTests : IDisposable
     private async Task<StoreNotificationProcessingResult> HandleAsync(StoreNotification notification)
     {
         await using var context = CreateContext();
+        // The service and every repository it composes share one context so the unit of work's transaction enrols
+        // each SaveChanges — the apply (status change) and the dedup-ledger write commit atomically (CORE-MON-010).
         var service = new StoreNotificationService(
             new StoreNotificationEventRepository(context),
             new PurchaseTransactionService(
                 new PurchaseTransactionRepository(context),
-                new PurchaseEventRepository(context)));
+                new PurchaseEventRepository(context)),
+            new TransactionalUnitOfWork(context));
         return await service.HandleAsync(notification, _receivedAt, CancellationToken.None);
     }
 
@@ -302,5 +305,92 @@ public sealed class StoreNotificationServiceTests : IDisposable
 
         // The purchase trail records the recording plus both transitions.
         Assert.Equal(3, await PurchaseEventCountAsync());
+    }
+
+    // --- Atomic apply+ledger (CORE-MON-010): a failure rolls BOTH back -----------
+
+    [Fact]
+    public async Task A_failure_writing_the_dedup_ledger_rolls_back_the_status_change()
+    {
+        // CORE-MON-010 required test: "Inject a failure between status change and ledger write -> neither persists."
+        // The status change and the dedup-ledger write run in ONE transaction, so a failure on the ledger write rolls
+        // the status change back too — a crash can never leave a status applied without its first-arrival record.
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        await using (var context = CreateContext())
+        {
+            // The ledger repository throws on the write (the seam between the applied status change and the ledger
+            // row), while still serving the dedup read so the handler reaches the write at all.
+            var service = new StoreNotificationService(
+                new LedgerWriteFailingRepository(new StoreNotificationEventRepository(context)),
+                new PurchaseTransactionService(
+                    new PurchaseTransactionRepository(context),
+                    new PurchaseEventRepository(context)),
+                new TransactionalUnitOfWork(context));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.HandleAsync(
+                Notification(type: StoreNotificationType.Refunded, transactionId: "txn-1"),
+                _receivedAt,
+                CancellationToken.None));
+        }
+
+        // Neither persists: the purchase is still Active (the downgrade rolled back), no dedup-ledger row exists, and
+        // the purchase trail carries only the initial recording event (no downgrade audit event was committed).
+        var transaction = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
+        Assert.NotNull(transaction);
+        Assert.Equal(PurchaseTransactionStatus.Active, transaction.Status);
+        Assert.Equal(0, await NotificationCountAsync());
+        Assert.Equal(1, await PurchaseEventCountAsync());
+    }
+
+    [Fact]
+    public async Task A_replayed_notification_after_an_atomic_apply_is_a_no_op()
+    {
+        // CORE-MON-010 required test: "replay of the same notificationUUID is a no-op." After the first handling
+        // atomically applies the downgrade and records the ledger row, replaying the SAME notification id is
+        // recognized by the dedup ledger and changes nothing further (no second status change, ledger row or event).
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+        var notification = Notification(notificationId: "ntf-replay", type: StoreNotificationType.Refunded, transactionId: "txn-1");
+
+        var first = await HandleAsync(notification);
+        var replay = await HandleAsync(notification);
+
+        Assert.Equal(StoreNotificationProcessingOutcome.Applied, first.Outcome);
+        Assert.Equal(StoreNotificationProcessingOutcome.AlreadyProcessed, replay.Outcome);
+        Assert.Equal(1, await NotificationCountAsync());
+        Assert.Equal(2, await PurchaseEventCountAsync()); // recording + the one downgrade only
+
+        var transaction = await FindTransactionAsync(PurchaseProvider.Apple, "txn-1");
+        Assert.NotNull(transaction);
+        Assert.Equal(PurchaseTransactionStatus.Refunded, transaction.Status);
+    }
+
+    /// <summary>
+    /// An <see cref="IStoreNotificationEventRepository"/> decorator that serves the dedup read but THROWS on the
+    /// ledger write, modeling a crash/failure at the seam between the applied purchase status change and the
+    /// dedup-ledger write so the CORE-MON-010 atomicity (status change + ledger commit together) is exercised.
+    /// </summary>
+    private sealed class LedgerWriteFailingRepository : IStoreNotificationEventRepository
+    {
+        private readonly IStoreNotificationEventRepository _inner;
+
+        public LedgerWriteFailingRepository(IStoreNotificationEventRepository inner) => _inner = inner;
+
+        public Task<StoreNotificationEvent?> FindByProviderNotificationAsync(
+            PurchaseProvider provider,
+            string providerNotificationId,
+            CancellationToken cancellationToken)
+            => _inner.FindByProviderNotificationAsync(provider, providerNotificationId, cancellationToken);
+
+        public Task<IReadOnlyList<StoreNotificationEvent>> ListByProviderTransactionAsync(
+            PurchaseProvider provider,
+            string providerTransactionId,
+            CancellationToken cancellationToken)
+            => _inner.ListByProviderTransactionAsync(provider, providerTransactionId, cancellationToken);
+
+        public Task<StoreNotificationEventAddResult> AddAsync(
+            StoreNotificationEvent notificationEvent,
+            CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Injected dedup-ledger write failure.");
     }
 }

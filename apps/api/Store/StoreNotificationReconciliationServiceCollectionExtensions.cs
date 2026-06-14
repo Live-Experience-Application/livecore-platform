@@ -101,6 +101,12 @@ public static class StoreNotificationReconciliationServiceCollectionExtensions
         services.AddScoped<ProductEntitlementGrantService>();
         services.AddScoped<PurchaseEntitlementRevocationService>();
 
+        // Transactional unit of work (CORE-CONC-002): the StoreNotificationService takes it by constructor injection
+        // to make webhook handling atomic (CORE-MON-010). Reconciliation drives only ChangeStatusAsync and writes no
+        // ledger row, so this sweep never opens the transaction itself — but the shared service requires the
+        // dependency, so it is registered here over the same scoped DbContext, exactly as the API host registers it.
+        services.AddScoped<TransactionalUnitOfWork>();
+
         services.AddScoped<StoreNotificationService>();
         services.AddScoped<StoreNotificationReconciliationService>();
 
