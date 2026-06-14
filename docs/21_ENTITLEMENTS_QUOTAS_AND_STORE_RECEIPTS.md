@@ -632,6 +632,42 @@ and freeing an asset restores headroom (the story's acceptance criterion).
   follow-up: the background cleanup of **abandoned** never-confirmed pending intents, CORE-AST-006,
   does not yet release their reserved bytes; the host-delete path does.)
 
+## Workspace quota release on archive (CORE-MON-007)
+
+CORE-ENTL-004 made `workspace.active.max` consume one unit on `POST /api/v1/workspaces` for the
+creating **User** subject, so a free user (`workspace.active.max = 1`) cannot create more workspaces
+than their plan allows. But the symmetric **release** was missing: `ArchiveWorkspaceAsync` performed
+no `QuotaEnforcementService.ReleaseAsync`, while the active-workspace list excludes archived
+workspaces (`WorkspaceRepository.ListByMemberAsync` filters `Status == Active`, CORE-LIFE-009). So the
+recorded usage drifted permanently **up** — a free user who created then archived their one workspace
+saw an empty active list yet stayed at `used = 1` and was **locked out forever** from creating again.
+This is the same "active" quota that `session.active.max` already releases on session end; the
+workspace path simply never closed the loop. CORE-MON-007 closes it: archiving a workspace **releases**
+its `workspace.active.max` consumption so the count tracks the user's actual active workspaces.
+
+- **Release mirrors session end, via the existing quota services.** After the authorized, persisted
+  `Active -> Archived` transition, `ArchiveWorkspaceAsync` calls the reused
+  `QuotaEnforcementService.ReleaseAsync` for the `(User, workspace.active.max)` pair — the same key and
+  subject kind the create consumed — exactly as `session/end` releases the `(Workspace,
+  session.active.max)` slot it consumed at start. Create still consumes; archive releases; the counter
+  reflects the **current** active count rather than a lifetime total. **No new table and no EF
+  migration** — it reuses the existing `quota_usage` table.
+- **Idempotent and fail-closed.** The release is a clamped decrement (never negative) and a no-op when
+  nothing is recorded or no quota governs the deployment, so it is safe to repeat. The terminal
+  archive guard (`Workspace.CanArchive`, an `Active`-only check) returns `409` for an
+  already-archived workspace **before** any mutation or release, and the release runs only **after**
+  the status write commits — so a concurrent second archive loses the optimistic-concurrency write
+  (CORE-CONC-001) and is rejected before reaching the release. A **double archive therefore never
+  double-releases**: the first archive frees exactly one unit and a second is a no-op `409`. The
+  release runs only after the Owner-only authorization and the tenant/workspace existence checks
+  pass, so a denied (`403`/hidden-`404`) archive frees nothing (fail-closed; threats T1/T5).
+- **Subject note.** `workspace.active.max` is keyed on the **creating user** at create time; the
+  workspace aggregate does not record its creator, so the release is keyed on the archiving Owner. In
+  the free-tier shape this story targets (one Owner who is the creator, limit 1) these are the same
+  subject. Releasing against a *different* creator (a multi-Owner organization where a second Owner
+  archives a workspace a first Owner created) would require persisting the workspace creator and is
+  left as a follow-up; it does not affect the free-tier lock-out this story fixes.
+
 ## Security requirements
 
 - Never trust client-side premium flags.

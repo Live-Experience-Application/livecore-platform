@@ -435,8 +435,205 @@ public sealed class QuotaEnforcementEndpointTests
     }
 
     // =====================================================================
+    // POST /api/v1/workspaces/{workspaceId}/archive — releases workspace.active.max (CORE-MON-007).
+    //
+    // Archiving a workspace is the symmetric counterpart of session end: it RELEASES the workspace.active.max
+    // unit the create consumed for the User subject, so the counter tracks the user's CURRENT active workspaces
+    // and a free user (limit 1) is not locked out forever after a single create -> archive. The release is
+    // idempotent and fail-closed (it runs only after an authorized, persisted archive).
+    // =====================================================================
+
+    [Fact]
+    public async Task Archive_releases_the_slot_so_a_free_user_at_limit_one_can_create_again()
+    {
+        // Required test: "Create then archive then create succeeds at limit 1" and "quota_usage returns to 0 after
+        // archive". A free user with workspace.active.max = 1 creates (consumes the slot), is blocked from a second
+        // create, archives the first (releasing the slot back to 0), and can then create again at the same limit.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "owner-a";
+        Guid orgId = Guid.Empty;
+        Guid userId = Guid.Empty;
+        Guid quotaId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Owner);
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync(QuotaEntitlementKeys.WorkspaceActiveMax);
+            var quota = await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User);
+            await db.AddSubjectQuotaEntitlementAsync(EntitlementSubjectType.User, user.Id, entitlement, limit: 1);
+            orgId = org.Id;
+            userId = user.Id;
+            quotaId = quota.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+
+        // First create lands AT the limit of 1 (allowed) and records one unit of usage.
+        var first = await client.PostAsJsonAsync(
+            "/api/v1/workspaces", new CreateWorkspaceRequest(_orgA, "first", "First"));
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+
+        // While at the limit, a second create is rejected and records nothing more.
+        var blocked = await client.PostAsJsonAsync(
+            "/api/v1/workspaces", new CreateWorkspaceRequest(_orgA, "second", "Second"));
+        Assert.Equal(HttpStatusCode.Conflict, blocked.StatusCode);
+
+        // Archiving the first workspace releases its consumption: quota_usage returns to 0.
+        var firstId = await GetWorkspaceIdAsync(factory, orgId, "first");
+        var archive = await client.PostAsync($"/api/v1/workspaces/{firstId}/archive?organizationSlug={_orgA}", null);
+        Assert.Equal(HttpStatusCode.OK, archive.StatusCode);
+        Assert.Equal(0, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+
+        // The freed slot lets the user create again, at the same limit of 1.
+        var third = await client.PostAsJsonAsync(
+            "/api/v1/workspaces", new CreateWorkspaceRequest(_orgA, "third", "Third"));
+        Assert.Equal(HttpStatusCode.Created, third.StatusCode);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+    }
+
+    [Fact]
+    public async Task Double_archive_does_not_double_release_the_workspace_quota()
+    {
+        // Required test: "double-archive does not double-release". At a limit of 2, two creates consume two units;
+        // the first archive releases exactly one (usage 2 -> 1); the terminal archive guard rejects the second
+        // archive (409) BEFORE the release, so usage stays 1 — a second archive never frees another unit.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "owner-a";
+        Guid orgId = Guid.Empty;
+        Guid userId = Guid.Empty;
+        Guid quotaId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Owner);
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync(QuotaEntitlementKeys.WorkspaceActiveMax);
+            var quota = await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User);
+            await db.AddSubjectQuotaEntitlementAsync(EntitlementSubjectType.User, user.Id, entitlement, limit: 2);
+            orgId = org.Id;
+            userId = user.Id;
+            quotaId = quota.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+
+        Assert.Equal(HttpStatusCode.Created,
+            (await client.PostAsJsonAsync("/api/v1/workspaces", new CreateWorkspaceRequest(_orgA, "first", "First")))
+                .StatusCode);
+        Assert.Equal(HttpStatusCode.Created,
+            (await client.PostAsJsonAsync("/api/v1/workspaces", new CreateWorkspaceRequest(_orgA, "second", "Second")))
+                .StatusCode);
+        Assert.Equal(2, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+
+        var firstId = await GetWorkspaceIdAsync(factory, orgId, "first");
+
+        // First archive releases exactly one unit.
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.PostAsync($"/api/v1/workspaces/{firstId}/archive?organizationSlug={_orgA}", null)).StatusCode);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+
+        // The second archive of the same (now-archived) workspace is a 409 and releases nothing: usage stays 1.
+        Assert.Equal(HttpStatusCode.Conflict,
+            (await client.PostAsync($"/api/v1/workspaces/{firstId}/archive?organizationSlug={_orgA}", null)).StatusCode);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+    }
+
+    [Fact]
+    public async Task Archive_is_403_for_a_non_owner_and_releases_no_quota()
+    {
+        // NEGATIVE AUTH: archive is Owner-only, so an org Admin is denied (403). The denial happens BEFORE the
+        // release, so a non-Owner can never free a workspace slot they are not authorized to archive (fail-closed;
+        // threat T1). The pre-recorded usage is left untouched.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "admin-a";
+        Guid userId = Guid.Empty;
+        Guid quotaId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Admin);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync(QuotaEntitlementKeys.WorkspaceActiveMax);
+            var quota = await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User);
+            await db.AddSubjectQuotaEntitlementAsync(EntitlementSubjectType.User, user.Id, entitlement, limit: 1);
+            await db.AddQuotaUsageAsync(EntitlementSubjectType.User, user.Id, quota, usedAmount: 1);
+            userId = user.Id;
+            quotaId = quota.Id;
+            workspaceId = workspace.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.PostAsync($"/api/v1/workspaces/{workspaceId}/archive?organizationSlug={_orgA}", null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await AssertWorkspaceStatusAsync(factory, workspaceId, WorkspaceStatus.Active);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+    }
+
+    [Fact]
+    public async Task Archive_is_404_for_a_foreign_tenant_workspace_and_releases_no_quota()
+    {
+        // NEGATIVE AUTH (tenant isolation, threat T5): a real Active workspace in org B, addressed with
+        // organizationSlug = A. The cross-tenant id is hidden as 404 before the release runs, so the workspace is
+        // not archived and the user's pre-recorded workspace quota is not released.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "user-ab";
+        Guid userId = Guid.Empty;
+        Guid quotaId = Guid.Empty;
+        Guid workspaceInB = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var orgA = await db.AddOrganizationAsync(_orgA);
+            var orgB = await db.AddOrganizationAsync(_orgB);
+            await db.AddOrganizationMemberAsync(orgA.Id, user.Id, MembershipRole.Owner);
+            await db.AddOrganizationMemberAsync(orgB.Id, user.Id, MembershipRole.Owner);
+            var workspace = await db.AddWorkspaceAsync(orgB.Id, "b-show", "B Show");
+            var entitlement = await db.AddQuotaEntitlementDefinitionAsync(QuotaEntitlementKeys.WorkspaceActiveMax);
+            var quota = await db.AddQuotaDefinitionAsync(entitlement, EntitlementSubjectType.User);
+            await db.AddSubjectQuotaEntitlementAsync(EntitlementSubjectType.User, user.Id, entitlement, limit: 5);
+            await db.AddQuotaUsageAsync(EntitlementSubjectType.User, user.Id, quota, usedAmount: 1);
+            userId = user.Id;
+            quotaId = quota.Id;
+            workspaceInB = workspace.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA, _orgB);
+        var response = await client.PostAsync(
+            $"/api/v1/workspaces/{workspaceInB}/archive?organizationSlug={_orgA}", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        await AssertWorkspaceStatusAsync(factory, workspaceInB, WorkspaceStatus.Active);
+        Assert.Equal(1, await ReadUsageAsync(factory, EntitlementSubjectType.User, userId, quotaId));
+    }
+
+    // =====================================================================
     // Helpers.
     // =====================================================================
+
+    private static async Task<Guid> GetWorkspaceIdAsync(WorkspaceApiFactory factory, Guid organizationId, string slug)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        var workspace = await context.Workspaces.AsNoTracking()
+            .SingleAsync(w => w.OrganizationId == organizationId && w.Slug == slug);
+        return workspace.Id;
+    }
+
+    private static async Task AssertWorkspaceStatusAsync(
+        WorkspaceApiFactory factory,
+        Guid workspaceId,
+        WorkspaceStatus expected)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        var workspace = await context.Workspaces.AsNoTracking().SingleAsync(w => w.Id == workspaceId);
+        Assert.Equal(expected, workspace.Status);
+    }
 
     private static async Task<int> CountWorkspacesAsync(WorkspaceApiFactory factory, Guid organizationId)
     {

@@ -507,6 +507,26 @@ internal static class WorkspaceEndpoints
         workspace.Archive(now);
         await deps.Workspaces.UpdateAsync(workspace, cancellationToken).ConfigureAwait(false);
 
+        // QUOTA RELEASE (CORE-MON-007): archiving a workspace frees the creating user's active-workspace slot, so
+        // release the unit consumed at create (CreateWorkspaceAsync consumes one workspace.active.max for the User
+        // subject). Without this the active-list query excludes the archived workspace (WorkspaceRepository.cs:104)
+        // while quota_usage keeps the consumption, so a free user (limit 1) is locked out forever after a single
+        // create -> archive — the symmetric counterpart to how session end releases session.active.max
+        // (SessionEndpoints.cs). The release is keyed on the SAME (User, key) pair the create consumes, so the
+        // counter tracks the user's CURRENT active workspaces rather than a lifetime total. It is idempotent: the
+        // decrement is clamped at zero and is a no-op when nothing is recorded, and it runs only AFTER the
+        // transition is persisted (a concurrent second archive loses the optimistic-concurrency write above and is
+        // rejected as 409 before reaching here, so it can never double-release), and a no-op when no quota governs
+        // the deployment. Mirrors the create-side consume, which reserves before creating and releases on failure.
+        await deps.QuotaEnforcement
+            .ReleaseAsync(
+                EntitlementSubjectType.User,
+                context.UserProfileId,
+                QuotaEntitlementKeys.WorkspaceActiveMax,
+                amount: 1,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         // AUDIT: an archive is a security-relevant lifecycle change, so append an append-only audit record
         // capturing the actor (the owner who archived it), the archived workspace and the Active -> Archived
         // status transition (threats T1/T5). Unlike a deletion, an archive records the before/after status
