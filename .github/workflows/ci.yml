@@ -3,7 +3,7 @@
 # Runs the commands documented in README.md verbatim. Independent jobs:
 #   dotnet               - locked-mode restore verification, build, the whole test suite on SQLite, format/code-style verification
 #   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
-#   typescript           - pnpm install, lint, format check, package builds/tests
+#   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
@@ -12,11 +12,11 @@
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
-#   publish-dry-run      - verify image tags + image-scan gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003)
+#   publish-dry-run      - verify image tags + image-scan gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003, CORE-CMP-003)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
 #   unit-smoke-postgres  - run the unit + smoke suites against real Postgres so provider-specific behavior is exercised (CORE-TST-004)
-#   publish              - SBOM + CVE scan (fail on critical) then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
+#   publish              - assert release tag == package version (CORE-CMP-003), SBOM + CVE scan (fail on critical), then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
 #
 # Every push and pull request runs the quality gates only. The publish job runs
 # only on a release tag push ('v<MAJOR>.<MINOR>.<PATCH>') and only after every
@@ -152,6 +152,13 @@ jobs:
 
       - name: Run package tests
         run: pnpm --recursive run test
+
+      - name: Cross-package version lockstep test (CORE-CMP-003)
+        # The per-package build tests check each package's OWN version triple;
+        # this asserts the four packages share ONE version across package.json,
+        # the exported VERSION and every changelog (incl. the root CHANGELOG), so
+        # bumping one package out of lockstep fails CI (docs/23_PACKAGE_VERSIONING.md).
+        run: pnpm run test:versions
 
   boundary-scan:
     name: Boundary scan (forbidden vertical terms)
@@ -445,6 +452,16 @@ jobs:
         # required "a seeded critical CVE fails the gate" test, run every push/PR.
         shell: pwsh
         run: ./scripts/test-image-scan.ps1
+
+      - name: Test the release-tag-vs-package-version gate (a mismatching tag fails)
+        # CORE-CMP-003: proves the publish gate logic with no registry I/O - a
+        # release tag matching the four packages' shared version passes, and a
+        # mismatching tag (or the packages out of lockstep) fails closed. This is
+        # the required "a release tag mismatching the package version fails the
+        # publish gate" test, run on every push and pull request; the real gate
+        # runs against the actual tag in the publish job below.
+        shell: pwsh
+        run: ./scripts/test-release-version.ps1
 
       - name: Derive a release-shaped reference for the dry-run build
         id: tags
@@ -749,6 +766,16 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Assert the release tag matches the packages' shared version (drift cannot ship)
+        # CORE-CMP-003: fail the publish before building or pushing any image when
+        # the release tag's version does not equal the four published packages'
+        # shared version. The host images are versioned by this tag, so asserting
+        # tag == package version keeps a release coherent (docs/23_PACKAGE_VERSIONING.md).
+        shell: pwsh
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: ./scripts/assert-release-version.ps1 -Ref $env:GIT_REF
 
       - name: Derive immutable, versioned image references
         id: tags

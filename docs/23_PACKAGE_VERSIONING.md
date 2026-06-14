@@ -91,6 +91,41 @@ The consistency of the process is enforced by tests, not convention:
   that `VERSION` is valid SemVer, that it equals the package's own
   `package.json` version, that `CHANGELOG.md` has a top entry for that version,
   and that the changelog ships with the package (`files` includes `CHANGELOG.md`).
+- A **cross-package version lockstep test** (CORE-CMP-003,
+  `tests/version-lockstep/version-lockstep.test.mjs`, run by `pnpm run test:versions`
+  and the CI `typescript` job) checks that the four packages agree on **one**
+  shared version. The per-package tests above each validate only their **own**
+  triple, so without this test bumping one package to `0.2.0` while the others
+  stayed at `0.1.0` still passed; the lockstep test asserts every package's
+  `package.json` version, exported `VERSION` and `CHANGELOG.md` top entry — and
+  the root `CHANGELOG.md` — all match the same value, so a one-package bump fails
+  CI rather than shipping.
+
+## Release-tag and package-version consistency
+
+The .NET API and worker host **images** are versioned by the **release tag**
+(`v<MAJOR>.<MINOR>.<PATCH>`, `scripts/LiveCoreImageTags.psm1`), not by a manifest
+of their own — they are deployed applications, not published packages. So the
+hosts are versioned separately from the packages by mechanism, and the intended
+relationship at release time is that the release tag equals the packages' shared
+version: one coherent repository release where the published image tag and the
+package version are the same number.
+
+A publish gate enforces this so drift cannot ship (CORE-CMP-003):
+
+- `scripts/LiveCoreReleaseVersion.psm1` reads the four packages' shared version
+  (fail-closed if the four disagree) and compares it to the release tag's version.
+- `scripts/assert-release-version.ps1` is the gate the CI `publish` job runs on a
+  release tag **before** building or pushing any image: it exits non-zero — and
+  the publish fails — when the release tag's version does not equal the shared
+  package version.
+- `scripts/test-release-version.ps1` tests the gate logic (a matching tag passes;
+  a mismatching tag, a non-release ref, or the four packages out of lockstep fail
+  closed) and runs on every push and pull request via the CI `publish-dry-run`
+  job, so the gate itself is proven without a registry push.
+
+Cutting a release therefore means the version in step 2–4 of "How to cut a
+release" above and the `v<version>` tag you push are the **same** value.
 
 ## Publishing
 

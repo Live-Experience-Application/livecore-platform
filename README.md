@@ -68,6 +68,9 @@ Directory.Build.props    repository-wide .NET build/lint enforcement
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
+scripts/LiveCoreReleaseVersion.psm1 release-tag-vs-package-version gate logic: reads the four packages' shared version (fail-closed if they disagree) and compares it to the release tag's version (CORE-CMP-003)
+scripts/assert-release-version.ps1  CLI the publish job runs to fail the publish when the release tag's version does not equal the packages' shared version (drift cannot ship, CORE-CMP-003)
+scripts/test-release-version.ps1    tests for the release-version gate (a matching tag passes; a mismatching tag, a non-release ref, or packages out of lockstep fail closed, CORE-CMP-003)
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
 scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
@@ -88,6 +91,7 @@ packages/ui-core         @livecore/ui-core    - generic, framework-agnostic UI p
 packages/design-tokens   @livecore/design-tokens - generic design tokens and theme contracts
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
+tests/version-lockstep/version-lockstep.test.mjs  cross-package version lockstep test: the four packages share one version across package.json + exported VERSION + per-package + root CHANGELOG (CORE-CMP-003; run via `pnpm run test:versions`)
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
 scripts/spec-consistency.ps1  doc/csv/code route/table/event/epic consistency check CLI (CORE-DOC-001, CORE-SPEC-001)
 scripts/LiveCoreSpecConsistency.psm1  spec-consistency check logic: name-set invariants + semantic checks against the minimal-API registrations and EF model snapshot (CORE-SPEC-001)
@@ -338,6 +342,18 @@ well-formed, non-widened SemVer literal, and its package-build tests check
 `VERSION` equals `package.json` and that `CHANGELOG.md` documents it — so a
 release with the version, manifest or changelog out of step fails CI rather than
 shipping.
+
+The **lockstep** itself is enforced too (CORE-CMP-003). The per-package tests
+above each check only their **own** version triple, so a cross-package test
+(`tests/version-lockstep/version-lockstep.test.mjs`, run by `pnpm run test:versions`
+and the CI `typescript` job) asserts the four packages share **one** version
+across `package.json`, the exported `VERSION` and every `CHANGELOG.md` (including
+the root `CHANGELOG.md`) — so bumping one package out of lockstep fails CI. And
+because the API/worker host images are versioned by the **release tag** rather
+than a manifest of their own, a publish gate (`scripts/assert-release-version.ps1`,
+run by the CI `publish` job before any image is built or pushed) asserts the
+release tag's version equals the packages' shared version, so a tag that drifts
+from the package version cannot ship. See `docs/23_PACKAGE_VERSIONING.md`.
 
 ### Boundary scan
 
