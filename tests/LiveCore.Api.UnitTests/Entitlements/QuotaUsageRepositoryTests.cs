@@ -178,4 +178,72 @@ public sealed class QuotaUsageRepositoryTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListBySubjectAsync(
             EntitlementSubjectType.User, Guid.Empty, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task TryConsume_creates_then_increments_a_capped_row_only_within_the_limit()
+    {
+        // The limit-guarded increment (CORE-CONC-004): first consume inserts the row at one, the second lands at the
+        // cap of two, and the third would exceed it and is rejected with the recorded usage left at two.
+        var quota = await SeedQuotaAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        await using var context = CreateContext();
+        var repository = new QuotaUsageRepository(context);
+
+        Assert.Equal(QuotaUsageConsumeResult.Consumed, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 1, limit: 2, _seedTime, CancellationToken.None));
+        Assert.Equal(QuotaUsageConsumeResult.Consumed, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 1, limit: 2, _seedTime, CancellationToken.None));
+        Assert.Equal(QuotaUsageConsumeResult.LimitExceeded, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 1, limit: 2, _seedTime, CancellationToken.None));
+
+        Assert.Equal(2, await repository.GetUsedAmountAsync(
+            EntitlementSubjectType.User, subjectId, quota.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TryConsume_rejects_a_first_consumption_that_alone_exceeds_the_limit()
+    {
+        // No row exists and the requested amount alone overruns the cap, so nothing is inserted.
+        var quota = await SeedQuotaAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        await using var context = CreateContext();
+        var repository = new QuotaUsageRepository(context);
+
+        Assert.Equal(QuotaUsageConsumeResult.LimitExceeded, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 5, limit: 2, _seedTime, CancellationToken.None));
+        Assert.Equal(0, await repository.GetUsedAmountAsync(
+            EntitlementSubjectType.User, subjectId, quota.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TryConsume_always_consumes_under_an_unlimited_grant()
+    {
+        var quota = await SeedQuotaAsync();
+        var subjectId = Guid.CreateVersion7();
+
+        await using var context = CreateContext();
+        var repository = new QuotaUsageRepository(context);
+
+        Assert.Equal(QuotaUsageConsumeResult.Consumed, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 10, limit: null, _seedTime, CancellationToken.None));
+        Assert.Equal(QuotaUsageConsumeResult.Consumed, await repository.TryConsumeAsync(
+            EntitlementSubjectType.User, subjectId, quota, 10, limit: null, _seedTime, CancellationToken.None));
+
+        Assert.Equal(20, await repository.GetUsedAmountAsync(
+            EntitlementSubjectType.User, subjectId, quota.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetUsedAmount_returns_zero_when_no_usage_is_recorded()
+    {
+        var quota = await SeedQuotaAsync();
+
+        await using var context = CreateContext();
+        var repository = new QuotaUsageRepository(context);
+
+        Assert.Equal(0, await repository.GetUsedAmountAsync(
+            EntitlementSubjectType.User, Guid.CreateVersion7(), quota.Id, CancellationToken.None));
+    }
 }

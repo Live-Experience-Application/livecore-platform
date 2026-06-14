@@ -402,6 +402,24 @@ adds `billing_account_links` + the product→plan mapping and wires the existing
 verify/notify pipeline to the existing assignment primitive — no part of the v1
 work is wasted.
 
+## Atomic quota check-and-consume (CORE-CONC-004)
+
+Server-side quota enforcement (CORE-ENTL-004) is the gate that makes "Free limits cannot be bypassed
+by clients" real, so the check-and-consume it performs must be safe under concurrency. CORE-CONC-004
+makes it atomic: `QuotaEnforcementService.TryConsumeAsync` performs the limit check **and** the usage
+increment as a SINGLE limit-guarded statement
+(`UPDATE quota_usage SET used_amount = used_amount + @amount WHERE … AND used_amount + @amount <= @limit`),
+not a separate read-then-write. The database re-evaluates the cap against the row it locks, so two
+concurrent protected commands can never both pass the limit — N parallel `session/start` /
+`workspace/create` at a limit of one yield exactly one success and N-1 quota-exceeded, and
+`session.active.max` / `workspace.active.max` can never be exceeded under a race.
+
+It stays fail-closed and reuses the existing `quota_usage` table (no schema change): a subject not
+entitled to a defined quota has no allowance and consumes nothing; an unlimited (fair-use) grant
+increments unconditionally; an ungoverned command (no active quota definition) consumes nothing. A
+command that frees a counted resource (a session ending) releases the unit with a clamped decrement,
+so an "active" quota reflects the current count.
+
 ## Security requirements
 
 - Never trust client-side premium flags.

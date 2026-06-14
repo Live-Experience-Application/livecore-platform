@@ -638,6 +638,37 @@ resource-deletion commands), never a bare user-initiated `BeginTransaction` — 
 strategy rejects the latter because it could not re-run the work after a transient
 failure. See `docs/02_ARCHITECTURE.md`.
 
+### Atomic quota check-and-consume (no TOCTOU race)
+
+A protected command that consumes a server-side quota does its check **and** its consume in
+**one atomic, limit-guarded statement** (CORE-CONC-004). Previously `QuotaEnforcementService`
+ran a `CheckAsync` read and a `RecordConsumptionAsync` write as two separate, non-transactional
+steps with no row lock or reserved increment, so two concurrent `session/start` or
+`workspace/create` commands could **both** read `used < limit` and **both** record — overrunning
+`session.active.max` / `workspace.active.max`. `QuotaEnforcementService.TryConsumeAsync` replaces
+that with a single conditional increment in the database
+(`UPDATE quota_usage SET used_amount = used_amount + @amount WHERE … AND used_amount + @amount <= @limit`):
+the cap is re-evaluated against the row the database locks, so a concurrent writer is rejected
+rather than overrunning it. The result is that **N concurrent commands consuming the same quota at
+a limit of one yield exactly one success and N-1 quota-exceeded** — the cap can never be exceeded
+under a race. The first consumption inserts the usage row (only when the amount fits the cap); the
+unique per-subject index makes a concurrent insert a safe lost-create race that re-runs the guarded
+increment. An unlimited (fair-use) grant increments unconditionally; an ungoverned command (no
+active quota definition) consumes nothing.
+
+It is fail-closed and consistent with the status read: a subject not entitled to a defined quota
+has **no** allowance (consumes nothing, denied), and the reported decision reuses the same
+`QuotaStatus.Calculate` math the `GET /api/v1/.../quota-status` endpoints use. `workspace/create`
+**reserves** the slot atomically before creating and releases it again if the create then fails
+(a duplicate slug), so a rejected create never burns the user's allowance; `session/start` runs the
+atomic consume **inside** the command's existing transaction (the commit-then-publish unit of work),
+so an over-quota start commits nothing and the session stays `Prepared`. The schema is unchanged —
+the consume reuses the existing Entitlements `quota_usage` table. A read-only `CheckAsync` remains
+for the advisory pre-flight on a command that does **not** itself consume (creating a `Prepared`
+session is blocked while the workspace already runs its maximum number of **live** sessions, which
+are consumed at start). Releasing a counted resource (`session/end`) stays a clamped decrement.
+See `docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`.
+
 ### Reverse-proxy edge: CORS, forwarded headers and HTTPS posture
 
 The API is meant to run **behind a TLS-terminating reverse proxy** (CORE-OPS-003).

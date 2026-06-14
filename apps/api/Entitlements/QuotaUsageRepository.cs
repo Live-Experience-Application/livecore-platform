@@ -68,6 +68,111 @@ internal sealed class QuotaUsageRepository : IQuotaUsageRepository
     }
 
     /// <inheritdoc />
+    public async Task<QuotaUsageConsumeResult> TryConsumeAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        QuotaDefinition definition,
+        long amount,
+        long? limit,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        if (subjectId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject id must not be empty.", nameof(subjectId));
+        }
+
+        if (amount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(amount), amount, "A consumed amount must be strictly positive.");
+        }
+
+        if (limit is < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "A quota limit must not be negative.");
+        }
+
+        // A capped grant whose very first unit overruns the cap can never be consumed (a fresh row would start
+        // over the cap, and an existing row is already at/over it), so it is rejected before any write.
+        if (limit is { } cap && amount > cap)
+        {
+            return QuotaUsageConsumeResult.LimitExceeded;
+        }
+
+        // The atomic check-and-consume is a SINGLE database UPSERT (INSERT ... ON CONFLICT ... DO UPDATE), so two
+        // concurrent commands can never both pass the cap and it never throws on a concurrent insert (so it is safe
+        // inside an outer transaction). When no usage row exists the INSERT creates it at the consumed amount (legal
+        // because the over-cap first unit was rejected above); when one exists the conflict path increments it only
+        // when the limit-guard holds (re-evaluated by the database against the row it locks). Zero rows affected
+        // means the existing row had no headroom -> over the limit. The subject type is passed as its stored string
+        // name; every value is a parameter.
+        var subjectTypeName = subjectType.ToString();
+        var newId = Guid.CreateVersion7();
+        var key = definition.EntitlementKey;
+        var definitionId = definition.Id;
+
+        int affected;
+        if (limit is { } capValue)
+        {
+            affected = await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $@"INSERT INTO quota_usage
+                       (id, subject_type, subject_id, quota_definition_id, entitlement_key, used_amount, created_at, updated_at)
+                   VALUES
+                       ({newId}, {subjectTypeName}, {subjectId}, {definitionId}, {key}, {amount}, {now}, {now})
+                   ON CONFLICT (subject_type, subject_id, quota_definition_id)
+                   DO UPDATE SET used_amount = quota_usage.used_amount + {amount}, updated_at = {now}
+                   WHERE quota_usage.used_amount + {amount} <= {capValue}",
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // Unlimited (fair-use) grant: the increment is unconditional (no cap guard).
+            affected = await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $@"INSERT INTO quota_usage
+                       (id, subject_type, subject_id, quota_definition_id, entitlement_key, used_amount, created_at, updated_at)
+                   VALUES
+                       ({newId}, {subjectTypeName}, {subjectId}, {definitionId}, {key}, {amount}, {now}, {now})
+                   ON CONFLICT (subject_type, subject_id, quota_definition_id)
+                   DO UPDATE SET used_amount = quota_usage.used_amount + {amount}, updated_at = {now}",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return affected > 0 ? QuotaUsageConsumeResult.Consumed : QuotaUsageConsumeResult.LimitExceeded;
+    }
+
+    /// <inheritdoc />
+    public async Task<long> GetUsedAmountAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        Guid quotaDefinitionId,
+        CancellationToken cancellationToken)
+    {
+        if (subjectId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject id must not be empty.", nameof(subjectId));
+        }
+
+        if (quotaDefinitionId == Guid.Empty)
+        {
+            throw new ArgumentException("Quota definition id must not be empty.", nameof(quotaDefinitionId));
+        }
+
+        // No-tracking read so the post-consume value is the committed row, never a stale tracked snapshot from an
+        // earlier read in this scope; scoped by the subject pair then the quota, so it never returns another
+        // subject's usage.
+        return await _dbContext.QuotaUsage
+            .AsNoTracking()
+            .Where(usage => usage.SubjectType == subjectType
+                && usage.SubjectId == subjectId
+                && usage.QuotaDefinitionId == quotaDefinitionId)
+            .Select(usage => (long?)usage.UsedAmount)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false) ?? 0L;
+    }
+
+    /// <inheritdoc />
     public async Task<QuotaUsage?> FindBySubjectAndQuotaAsync(
         EntitlementSubjectType subjectType,
         Guid subjectId,

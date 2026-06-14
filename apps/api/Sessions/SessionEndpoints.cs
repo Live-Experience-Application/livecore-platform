@@ -326,7 +326,8 @@ internal static class SessionEndpoints
         // AFTER role authorization and BEFORE the session is created, computed entirely
         // server-side and fail-closed ("Free limits cannot be bypassed by clients";
         // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). The create only CHECKS the
-        // quota; it deliberately does NOT record consumption. session.active.max counts a
+        // quota (a READ-ONLY pre-flight, not the atomic consume); it deliberately does NOT
+        // record consumption. session.active.max counts a
         // workspace's currently-LIVE sessions (it is consumed at start and released at
         // end, see RunLifecycleCommandAsync), and a created session is Prepared, not
         // live. Recording here would double-count when the session later starts and would
@@ -514,20 +515,20 @@ internal static class SessionEndpoints
             return Forbidden();
         }
 
-        // Guard the transition (and, for start, the quota) BEFORE any transaction is opened — reads and the
-        // in-memory state-machine guard only. CanStart/CanEnd/CanCancel guard the only legal predecessor
-        // state, so an out-of-state command is a 409 Conflict (not a no-op and not a 5xx) that changes
-        // nothing. This 409-on-invalid-transition also makes a retried command at-most-once for its side
-        // effect. The injected TimeProvider stamps the transition timestamp, exactly like the workspace
-        // write handlers.
+        // Guard the transition BEFORE any transaction is opened — reads and the in-memory state-machine guard
+        // only. CanStart/CanEnd/CanCancel guard the only legal predecessor state, so an out-of-state command is
+        // a 409 Conflict (not a no-op and not a 5xx) that changes nothing. This 409-on-invalid-transition also
+        // makes a retried command at-most-once for its side effect. The injected TimeProvider stamps the
+        // transition timestamp, exactly like the workspace write handlers.
         //
-        // Quota enforcement (CORE-ENTL-004): starting a session consumes one unit of the session's WORKSPACE's
-        // session.active.max quota, and ending it releases that unit, so the quota reflects the workspace's CURRENT
-        // count of live sessions. The check runs AFTER role authorization and the state guard, and BEFORE the
-        // transition is persisted; it is computed entirely server-side and is fail-closed, so a free workspace
-        // cannot run more concurrent sessions than its plan allows ("Free limits cannot be bypassed by clients";
-        // docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). When no quota governs the deployment the command
-        // proceeds unchanged. A rejected guard or over-quota start returns here, before the transaction.
+        // Quota enforcement (CORE-ENTL-004; atomic per CORE-CONC-004): starting a session consumes one unit of the
+        // session's WORKSPACE's session.active.max quota, and ending it releases that unit, so the quota reflects
+        // the workspace's CURRENT count of live sessions. The atomic check-and-consume runs INSIDE the transaction
+        // below (so the consume commits or rolls back with the transition) and is the single limit-guarded
+        // statement that makes N concurrent starts at a limit of one yield exactly one success and N-1
+        // quota-exceeded; it is computed entirely server-side and is fail-closed ("Free limits cannot be bypassed
+        // by clients"; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). A rejected state guard returns here,
+        // before the transaction.
         var now = timeProvider.GetUtcNow();
         switch (command)
         {
@@ -535,19 +536,6 @@ internal static class SessionEndpoints
                 if (!session.CanStart)
                 {
                     return CannotStartConflict();
-                }
-
-                var quotaDecision = await deps.QuotaEnforcement
-                    .CheckAsync(
-                        EntitlementSubjectType.Workspace,
-                        session.WorkspaceId,
-                        QuotaEntitlementKeys.SessionActiveMax,
-                        amount: 1,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                if (!quotaDecision.IsAllowed)
-                {
-                    return QuotaExceeded(quotaDecision);
                 }
 
                 break;
@@ -588,7 +576,7 @@ internal static class SessionEndpoints
         // Cancelled transition (its event is not a documented catalog entry). Realtime DELIVERY is held until
         // AFTER the commit (commit-then-publish, below), so a delivery failure cannot roll back committed
         // state.
-        var toDeliver = await deps.UnitOfWork
+        var outcome = await deps.UnitOfWork
             .ExecuteAsync(
                 async transactionCancellationToken =>
                 {
@@ -596,23 +584,32 @@ internal static class SessionEndpoints
                     switch (command)
                     {
                         case SessionLifecycleCommand.Start:
-                            // Capture the previous status name BEFORE the transition for the audit record, so
-                            // the audited "before" state is independent of the mutation below.
-                            var startPreviousStatus = session.Status.ToString();
-
-                            session.Start(now);
-                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
-
-                            // Record the consumption inside the same transaction as the transition, so a
-                            // rolled-back start never increments the count.
-                            await deps.QuotaEnforcement
-                                .RecordConsumptionAsync(
+                            // ATOMIC check-and-consume FIRST (CORE-CONC-004): the session's WORKSPACE consumes one
+                            // unit of its session.active.max quota in a single limit-guarded statement. If the
+                            // consume is denied (the workspace is at its limit, including under a concurrent race),
+                            // the transition is NOT applied and the command carries the denial out; because nothing
+                            // was mutated, the (empty) transaction commits cleanly and the endpoint returns 409. A
+                            // successful consume commits with the transition, so a rolled-back start never leaves a
+                            // consumed slot behind.
+                            var startDecision = await deps.QuotaEnforcement
+                                .TryConsumeAsync(
                                     EntitlementSubjectType.Workspace,
                                     session.WorkspaceId,
                                     QuotaEntitlementKeys.SessionActiveMax,
                                     amount: 1,
                                     transactionCancellationToken)
                                 .ConfigureAwait(false);
+                            if (!startDecision.IsAllowed)
+                            {
+                                return new SessionLifecycleOutcome(startDecision, events);
+                            }
+
+                            // Capture the previous status name BEFORE the transition for the audit record, so
+                            // the audited "before" state is independent of the mutation below.
+                            var startPreviousStatus = session.Status.ToString();
+
+                            session.Start(now);
+                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
 
                             // AUDIT + EVENT (CORE-EVT-001): record the Prepared -> Live transition as an
                             // append-only audit fact and APPEND the durable SessionStarted session event.
@@ -706,16 +703,24 @@ internal static class SessionEndpoints
                             throw new InvalidOperationException("Unsupported session lifecycle command.");
                     }
 
-                    return events;
+                    return new SessionLifecycleOutcome(QuotaDenial: null, events);
                 },
                 cancellationToken)
             .ConfigureAwait(false);
+
+        // An over-quota start committed nothing (the transition was not applied), so the session is unchanged and
+        // the command is a 409 — the limit, not the caller, is the reason (threat T7: the detail names only the
+        // generic quota key). This is the race-loser path of the atomic consume above.
+        if (outcome.QuotaDenial is { } denial)
+        {
+            return QuotaExceeded(denial);
+        }
 
         // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction has committed, so deliver each appended
         // session event to the whole session audience OUTSIDE the transaction. Delivery is best-effort, so a
         // delivery failure cannot roll back the committed transition; reconnect replay re-delivers later
         // (CORE-RT-005). Cancel appended no event, so it delivers nothing.
-        foreach (var sessionEvent in toDeliver)
+        foreach (var sessionEvent in outcome.Events)
         {
             await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
@@ -776,6 +781,16 @@ internal static class SessionEndpoints
         End = 2,
         Cancel = 3,
     }
+
+    /// <summary>
+    /// The result of the lifecycle unit of work. Carries either a quota <see cref="QuotaDenial"/> (an over-quota
+    /// start that applied no transition, so the committed transaction was empty and the endpoint returns 409) or
+    /// the durable <see cref="Events"/> appended inside the transaction to deliver after the commit
+    /// (commit-then-publish). The two are mutually exclusive: a denial carries no events.
+    /// </summary>
+    private sealed record SessionLifecycleOutcome(
+        QuotaEnforcementDecision? QuotaDenial,
+        IReadOnlyList<SessionEvent> Events);
 
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They

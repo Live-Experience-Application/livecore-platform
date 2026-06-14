@@ -203,51 +203,173 @@ public sealed class QuotaEnforcementServiceTests : IDisposable
     }
 
     // =====================================================================
-    // RecordConsumptionAsync — the increment.
+    // TryConsumeAsync — the atomic check-and-consume (CORE-CONC-004).
     // =====================================================================
 
     [Fact]
-    public async Task Record_creates_the_usage_row_on_first_consumption()
+    public async Task TryConsume_creates_the_usage_row_on_first_consumption()
     {
         var subjectId = Guid.CreateVersion7();
         var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: 5, grant: true);
 
         await using (var context = CreateContext())
         {
-            await CreateService(context).RecordConsumptionAsync(
+            var decision = await CreateService(context).TryConsumeAsync(
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            Assert.True(decision.IsAllowed);
+            Assert.Equal(1, decision.Used);
         }
 
         Assert.Equal(1, await ReadUsageAsync(subjectId, quotaId));
     }
 
     [Fact]
-    public async Task Record_increments_an_existing_usage_row()
+    public async Task TryConsume_increments_an_existing_usage_row()
     {
         var subjectId = Guid.CreateVersion7();
         var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: 5, grant: true, startingUsage: 2);
 
         await using (var context = CreateContext())
         {
-            await CreateService(context).RecordConsumptionAsync(
+            var decision = await CreateService(context).TryConsumeAsync(
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            Assert.True(decision.IsAllowed);
         }
 
         Assert.Equal(3, await ReadUsageAsync(subjectId, quotaId));
     }
 
     [Fact]
-    public async Task Record_does_nothing_for_an_ungoverned_command()
+    public async Task TryConsume_denies_and_records_nothing_at_the_limit()
     {
-        // No quota defined: there is nothing to key a usage row to, so nothing is recorded.
+        // Used 1 of a limit of 1: a further unit would exceed the cap, so the consume is denied AND the usage is
+        // left unchanged (the atomic guard never increments past the cap).
+        var subjectId = Guid.CreateVersion7();
+        var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: 1, grant: true, startingUsage: 1);
+
+        await using (var context = CreateContext())
+        {
+            var decision = await CreateService(context).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            Assert.False(decision.IsAllowed);
+        }
+
+        Assert.Equal(1, await ReadUsageAsync(subjectId, quotaId));
+    }
+
+    [Fact]
+    public async Task TryConsume_denies_fail_closed_and_records_nothing_when_not_entitled()
+    {
+        // The quota is defined but the subject holds NO entitlement: fail-closed, no allowance, nothing consumed.
+        var subjectId = Guid.CreateVersion7();
+        var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: null, grant: false);
+
+        await using (var context = CreateContext())
+        {
+            var decision = await CreateService(context).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            Assert.False(decision.IsAllowed);
+            Assert.True(decision.IsGoverned);
+            Assert.Equal(0, decision.Limit);
+        }
+
+        Assert.Equal(0, await ReadUsageAsync(subjectId, quotaId));
+    }
+
+    [Fact]
+    public async Task TryConsume_always_consumes_for_an_unlimited_grant()
+    {
+        var subjectId = Guid.CreateVersion7();
+        var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: null, grant: true, startingUsage: 1000);
+
+        await using (var context = CreateContext())
+        {
+            var decision = await CreateService(context).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            Assert.True(decision.IsAllowed);
+            Assert.Null(decision.Limit);
+        }
+
+        Assert.Equal(1001, await ReadUsageAsync(subjectId, quotaId));
+    }
+
+    [Fact]
+    public async Task TryConsume_does_nothing_for_an_ungoverned_command()
+    {
+        // No quota defined: there is nothing to key a usage row to, so nothing is recorded and the command proceeds.
         var subjectId = Guid.CreateVersion7();
 
         await using var context = CreateContext();
-        await CreateService(context).RecordConsumptionAsync(
+        var decision = await CreateService(context).TryConsumeAsync(
             EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
 
+        Assert.True(decision.IsAllowed);
+        Assert.False(decision.IsGoverned);
         Assert.Empty(await new QuotaUsageRepository(context).ListBySubjectAsync(
             EntitlementSubjectType.User, subjectId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TryConsume_rejects_an_empty_subject_id_and_a_non_positive_amount()
+    {
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => service.TryConsumeAsync(
+            EntitlementSubjectType.User, Guid.Empty, "workspace.active.max", 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.TryConsumeAsync(
+            EntitlementSubjectType.User, Guid.CreateVersion7(), "workspace.active.max", 0, CancellationToken.None));
+    }
+
+    // =====================================================================
+    // TryConsumeAsync — atomicity across independent contexts (the TOCTOU close, CORE-CONC-004).
+    // =====================================================================
+
+    [Fact]
+    public async Task TryConsume_is_atomic_only_one_of_two_independent_consumers_at_limit_one_succeeds()
+    {
+        // Two independent DbContexts (the cross-context conflict the separate check-then-record could not guard)
+        // both consume the same quota at a limit of one. The atomic limit-guarded increment lets exactly ONE
+        // succeed; the second re-evaluates the cap against the just-committed row and is denied. The OLD
+        // check-then-record would have let both pass (both read used=0). Final usage is exactly one.
+        var subjectId = Guid.CreateVersion7();
+        var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: 1, grant: true);
+
+        QuotaEnforcementDecision first;
+        QuotaEnforcementDecision second;
+        await using (var contextA = CreateContext())
+        await using (var contextB = CreateContext())
+        {
+            first = await CreateService(contextA).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+            second = await CreateService(contextB).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
+        }
+
+        Assert.True(first.IsAllowed);
+        Assert.False(second.IsAllowed);
+        Assert.Equal(1, await ReadUsageAsync(subjectId, quotaId));
+    }
+
+    [Fact]
+    public async Task TryConsume_first_writer_creates_the_row_second_loses_the_create_race_under_the_cap()
+    {
+        // Neither consumer has a usage row yet, and the limit is two. The first consume inserts the row at one; the
+        // second consume's guarded increment finds the freshly-created row and (since 1 + 1 <= 2) succeeds, so the
+        // lost-create-race retry path consumes correctly rather than dropping the consumption.
+        var subjectId = Guid.CreateVersion7();
+        var quotaId = await SeedQuotaAsync("workspace.active.max", subjectId, limit: 2, grant: true);
+
+        await using (var contextA = CreateContext())
+        await using (var contextB = CreateContext())
+        {
+            Assert.True((await CreateService(contextA).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None)).IsAllowed);
+            Assert.True((await CreateService(contextB).TryConsumeAsync(
+                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None)).IsAllowed);
+        }
+
+        Assert.Equal(2, await ReadUsageAsync(subjectId, quotaId));
     }
 
     // =====================================================================
@@ -312,14 +434,12 @@ public sealed class QuotaEnforcementServiceTests : IDisposable
         {
             var service = CreateService(context);
 
-            // Consume the only slot.
-            Assert.True((await service.CheckAsync(
+            // Consume the only slot (atomic check-and-consume).
+            Assert.True((await service.TryConsumeAsync(
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None)).IsAllowed);
-            await service.RecordConsumptionAsync(
-                EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
 
-            // Now AT the limit: another consume is denied.
-            Assert.False((await service.CheckAsync(
+            // Now AT the limit: another consume is denied and records nothing.
+            Assert.False((await service.TryConsumeAsync(
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None)).IsAllowed);
 
             // Release the slot.
@@ -327,7 +447,7 @@ public sealed class QuotaEnforcementServiceTests : IDisposable
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None);
 
             // The slot is free again.
-            Assert.True((await service.CheckAsync(
+            Assert.True((await service.TryConsumeAsync(
                 EntitlementSubjectType.User, subjectId, "workspace.active.max", 1, CancellationToken.None)).IsAllowed);
         }
     }

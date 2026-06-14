@@ -214,14 +214,17 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
-        // Quota enforcement (CORE-ENTL-004): a workspace creation consumes one unit of the creating user's
-        // workspace.active.max quota. The check runs AFTER role authorization (so quota state is never consulted for
-        // an unauthorized caller) and BEFORE any write; it is computed entirely server-side and is fail-closed, so a
-        // free user cannot exceed their limit by tampering with the client ("Free limits cannot be bypassed by
-        // clients"; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). When no quota governs the deployment the
-        // command proceeds unchanged.
+        // Quota enforcement (CORE-ENTL-004; atomic per CORE-CONC-004): a workspace creation consumes one unit of the
+        // creating user's workspace.active.max quota. The atomic check-and-consume runs AFTER role authorization (so
+        // quota state is never consulted for an unauthorized caller) and BEFORE the create; it is computed entirely
+        // server-side and is fail-closed, so a free user cannot exceed their limit by tampering with the client
+        // ("Free limits cannot be bypassed by clients"; docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). The
+        // consume is a SINGLE limit-guarded increment, so N concurrent creates at a limit of one yield exactly one
+        // success and N-1 quota-exceeded (no time-of-check-to-time-of-use race). The slot is RESERVED first and
+        // released below if the create then fails, so a rejected create never burns the user's allowance. When no
+        // quota governs the deployment the command proceeds unchanged.
         var quotaDecision = await deps.QuotaEnforcement
-            .CheckAsync(
+            .TryConsumeAsync(
                 EntitlementSubjectType.User,
                 context.UserProfileId,
                 QuotaEntitlementKeys.WorkspaceActiveMax,
@@ -241,25 +244,21 @@ internal static class WorkspaceEndpoints
         {
             // Duplicate workspace slug within the organization -> 409 Conflict
             // (docs/08_API_CONTRACTS.md). The error carries no other tenant data.
-            // No quota was consumed (it is recorded only after a successful create
-            // below), so a rejected create never burns the user's allowance.
+            // Compensate the reserved quota slot so a rejected create never burns
+            // the user's allowance (a no-op when the deployment governs no quota).
+            await deps.QuotaEnforcement
+                .ReleaseAsync(
+                    EntitlementSubjectType.User,
+                    context.UserProfileId,
+                    QuotaEntitlementKeys.WorkspaceActiveMax,
+                    amount: 1,
+                    cancellationToken)
+                .ConfigureAwait(false);
             return Results.Problem(
                 statusCode: StatusCodes.Status409Conflict,
                 title: "Conflict",
                 detail: "A workspace with this slug already exists in the organization.");
         }
-
-        // The workspace now exists, so record the consumption of the user's workspace.active.max quota. Recording
-        // only after the successful write keeps enforcement and the recorded usage consistent (a failed create never
-        // increments the count).
-        await deps.QuotaEnforcement
-            .RecordConsumptionAsync(
-                EntitlementSubjectType.User,
-                context.UserProfileId,
-                QuotaEntitlementKeys.WorkspaceActiveMax,
-                amount: 1,
-                cancellationToken)
-            .ConfigureAwait(false);
 
         var response = WorkspaceResponse.From(workspace);
         return Results.Created($"/api/v1/workspaces/{workspace.Id}", response);
