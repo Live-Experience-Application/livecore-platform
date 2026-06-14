@@ -102,6 +102,23 @@ deployment network, exactly as orchestration probes the unauthenticated `/health
 only aggregate series, never content. A deployment restricts it at the reverse-proxy/network edge
 (`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
+#### Prerelease exporter justification (CORE-CMP-002)
+
+The Prometheus scrape endpoint uses `OpenTelemetry.Exporter.Prometheus.AspNetCore`, pinned to a **prerelease**
+(`1.16.0-beta.1`) alongside its stable `1.16.0` OpenTelemetry siblings. That `-beta` in a release build is
+deliberate and justified per `AGENTS.md` (whose "no new dependencies without explicit justification" rule
+applies equally to keeping a prerelease pin): the OpenTelemetry .NET Prometheus exporter has **no stable
+release**. It ships on the same version train as the stable SDK but keeps the prerelease suffix because the
+upstream OpenTelemetry-to-Prometheus exposition specification is not yet declared stable, so the suffix
+reflects that spec's status rather than instability of the package — it is the OpenTelemetry-maintained
+exporter. It cannot be replaced with a stable release without dropping the mandated `/metrics` endpoint: the
+only alternative, `OpenTelemetry.Exporter.Prometheus.HttpListener`, is equally prerelease, so there is no
+stable substitute. The supply-chain risk a prerelease would otherwise carry is contained — the exact build is
+pinned and restored in **locked mode** against the committed `packages.lock.json`, CI verifies that same
+locked restore over the whole solution so the closure cannot float, and the release images are SBOM- and
+CVE-scanned before publish (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, CORE-DEP-003). The pin is revisited when a
+stable `OpenTelemetry.Exporter.Prometheus.AspNetCore` is published.
+
 The background **worker** records job failures onto the same `LiveCore` meter from all four of its job loops
 (asset cleanup, recap generation, export processing and the billing-gated store-notification reconciliation),
 and it now exposes its OWN Prometheus scrape endpoint at `GET /metrics` (CORE-DR-003), wired exactly as the

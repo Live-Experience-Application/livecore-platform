@@ -482,7 +482,12 @@ The error counter counts only server errors (5xx); the fail-closed `401`/`403`/`
 the authorization model returns by design are not counted as errors. Two new
 dependencies are added to `apps/api`: `OpenTelemetry.Extensions.Hosting` (the SDK +
 host integration) and `OpenTelemetry.Exporter.Prometheus.AspNetCore` (the scrape
-endpoint). The background worker records job failures onto the same meter and now
+endpoint). The Prometheus exporter is pinned to a **prerelease** (`1.16.0-beta.1`)
+because the OpenTelemetry .NET Prometheus exporter has no stable release; that pin is
+explicitly justified per `AGENTS.md` and its supply-chain risk is contained by the
+locked-mode restore (enforced in CI and in every image build) and the publish-time
+CVE scan — see `docs/15_OBSERVABILITY.md` and `docs/13_SELF_HOSTING_REQUIREMENTS.md`
+(CORE-CMP-002). The background worker records job failures onto the same meter and now
 exposes its **own** Prometheus scrape endpoint too (see "Worker metrics and per-loop
 liveness" below).
 

@@ -859,7 +859,13 @@ silently drift and a known-CVE base image cannot ship:
 - **Reproducible NuGet restore (locked mode).** Each .NET project commits a `packages.lock.json` (enabled repository
   wide by `RestorePackagesWithLockFile` in `Directory.Build.props`), and the image builds restore in **locked mode**,
   so the published dependency graph is reproducible and the build fails if the resolved packages ever drift from the
-  committed lock file.
+  committed lock file. **CI enforces the same locked restore** over the whole solution before it builds and tests (the
+  `dotnet` job runs `dotnet restore LiveCore.slnx --locked-mode`, and the `integration-postgres` job restores in
+  locked mode too), so the dependency closure CI exercises is exactly the one a published image restores — the two can
+  never silently diverge (CORE-CMP-002). This is also what makes pinning a justified **prerelease** dependency safe:
+  the `OpenTelemetry.Exporter.Prometheus.AspNetCore` `-beta` (no stable release exists; see
+  `docs/15_OBSERVABILITY.md`) is locked to an exact, content-hashed build and CVE-scanned at publish, so it cannot
+  float.
 - **SBOM and CVE scan on the publish path.** The publish job builds each image, then — **before any push** — produces a
   CycloneDX **SBOM** and a vulnerability **scan report** for it (with Trivy) and runs the supply-chain gate
   (`scripts/assert-image-scan.ps1`). The gate is **fail-closed**: a **critical** vulnerability (for example a known-CVE

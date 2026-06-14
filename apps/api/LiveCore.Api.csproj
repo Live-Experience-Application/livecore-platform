@@ -54,11 +54,25 @@
          vendor-neutral metrics SDK for .NET; reimplementing metric aggregation and the Prometheus exposition
          format by hand would duplicate a correctness-sensitive subsystem. A justified new dependency.
          OpenTelemetry.Extensions.Hosting is the SDK plus the host integration that starts the MeterProvider;
-         OpenTelemetry.Exporter.Prometheus.AspNetCore serves the pull-based /metrics scrape endpoint (this
-         exporter ships pre-release on the otherwise-stable OpenTelemetry train). No telemetry backend,
-         endpoint or credential is read from source; the scrape surface carries only low-cardinality
-         aggregates, never content (threat T7). -->
+         OpenTelemetry.Exporter.Prometheus.AspNetCore serves the pull-based /metrics scrape endpoint (its
+         prerelease pin is justified below). No telemetry backend, endpoint or credential is read from source;
+         the scrape surface carries only low-cardinality aggregates, never content (threat T7). -->
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
+    <!-- Prerelease justification (CORE-CMP-002; AGENTS.md "no new dependencies without explicit
+         justification" applies equally to keeping a -beta in a release build). The Prometheus exporter is
+         pinned to 1.16.0-beta.1 - a -beta alongside its stable 1.16.0 OpenTelemetry siblings - and that is
+         deliberate, not an oversight: the OpenTelemetry .NET Prometheus exporter has NO stable release. It
+         ships on the same 1.16.0 train as the stable SDK but keeps the -beta suffix because the upstream
+         OpenTelemetry-to-Prometheus exposition specification is not yet declared stable; the suffix reflects
+         that spec's status, not instability of this package (it is the OpenTelemetry-maintained exporter, not
+         an unofficial fork). It cannot be swapped for a "stable release" without dropping the Prometheus
+         /metrics scrape endpoint docs/15_OBSERVABILITY.md mandates - the only alternative,
+         OpenTelemetry.Exporter.Prometheus.HttpListener, is equally prerelease, so there is no stable
+         substitute. The supply-chain risk a prerelease would otherwise carry is contained: the exact build is
+         pinned and restored in locked mode against the committed packages.lock.json (content hash captured,
+         CORE-DEP-003), CI verifies that same locked restore over the whole solution so the closure cannot
+         float, and the release images are SBOM- and CVE-scanned before publish. Revisit the pin when a stable
+         OpenTelemetry.Exporter.Prometheus.AspNetCore is published. -->
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.16.0-beta.1" />
     <!-- OpenTelemetry distributed tracing export (CORE-OBS-003). docs/15_OBSERVABILITY.md requires the key
          request and realtime flows to be exportable to a configured collector. LiveCoreActivitySource produces

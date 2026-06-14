@@ -1,7 +1,7 @@
 # CI pipeline for livecore-platform (CORE-FND-003, docker job: CORE-FND-005).
 #
 # Runs the commands documented in README.md verbatim. Independent jobs:
-#   dotnet               - build, the whole test suite on SQLite, format/code-style verification
+#   dotnet               - locked-mode restore verification, build, the whole test suite on SQLite, format/code-style verification
 #   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
@@ -51,6 +51,15 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+
+      - name: Verify locked restore (committed lock files match the resolved graph)
+        # CORE-CMP-002: restore the whole solution in locked mode so CI fails if any
+        # committed packages.lock.json drifts from the graph the .csproj files resolve.
+        # The release images restore in this same locked mode (apps/api/Dockerfile,
+        # apps/worker/Dockerfile, apps/api/Migrations.Dockerfile), so gating CI on it
+        # guarantees the dependency closure CI builds and tests against is exactly the
+        # one a published image restores - the two can never silently diverge.
+        run: dotnet restore LiveCore.slnx --locked-mode
 
       - name: Build solution
         run: dotnet build LiveCore.slnx
@@ -643,8 +652,9 @@ jobs:
         # dotnet ef retrieves project metadata through a design-time build that
         # does not restore implicitly, so without an explicit restore the next
         # step fails with NETSDK1004 (apps/api/obj/project.assets.json missing).
-        # Restoring here also primes the integration test build below.
-        run: dotnet restore LiveCore.slnx
+        # Restoring here also primes the integration test build below. Locked mode
+        # keeps this leg's closure pinned to the committed lock files too (CORE-CMP-002).
+        run: dotnet restore LiveCore.slnx --locked-mode
 
       - name: Fail on model-vs-migration drift
         # Returns non-zero when the EF Core model has changes not captured in a
