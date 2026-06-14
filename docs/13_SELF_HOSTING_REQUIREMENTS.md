@@ -250,6 +250,38 @@ for example `AllowedHosts=app.example.com` (semicolon-separated for several), so
 the host-filtering middleware rejects requests carrying an unexpected `Host`
 header.
 
+### Request rate limiting (`RateLimiting:*`) (CORE-SEC-001)
+
+The API applies ASP.NET Core's built-in rate limiting (`UseRateLimiter`) as two
+complementary fixed-window limiters, **on by default** with safe, generous limits:
+
+- A **strict per-IP** limit on the anonymous store-notification webhooks
+  (`POST /api/v1/store-notifications/{apple,google/rtdn}`). These are
+  unauthenticated server-to-server callbacks that do database work and run a
+  deployment-supplied parser per call, so they are the primary abuse/DoS surface;
+  the per-IP partition uses the **real client IP** restored by `UseForwardedHeaders`
+  from a trusted proxy. Defaults: `60` requests per `60` seconds per IP. The
+  webhooks additionally have a hard request-body-size cap
+  (`RateLimiting__Webhooks__MaxRequestBodyBytes`, default `131072` bytes) — a body
+  over the cap is rejected `413` before it is buffered or parsed.
+- A **per-principal global** limit on the authenticated surface, partitioned on the
+  OIDC issuer+subject pair so one caller's burst cannot exhaust another's allowance.
+  Defaults: `300` requests per `60` seconds per principal. Anonymous infrastructure
+  traffic (the `/health/*` and `/metrics` endpoints) is **not** throttled by the
+  global limiter, so probes/scrapes stay reachable.
+
+- Every limit is runtime configuration: `RateLimiting__Global__PermitLimit` /
+  `__WindowSeconds` / `__QueueLimit`, `RateLimiting__Webhooks__PermitLimit` /
+  `__WindowSeconds` / `__QueueLimit` / `__MaxRequestBodyBytes`. A non-positive
+  value falls back to the default (a misconfiguration never silently removes a
+  limit). Setting `RateLimiting__Enabled=false` turns the feature off entirely (for
+  a deployment that throttles at its edge instead); both limiters then become
+  no-ops.
+- An excess request gets `429 Too Many Requests` as RFC 7807 Problem Details with a
+  `Retry-After` header and no tenant/principal/resource detail (threat T7). Rate
+  limiting is a coarse abuse ceiling layered **on top of** the OIDC/tenant
+  authorization every endpoint already enforces; it never widens authorization.
+
 ## Readiness and worker liveness (CORE-OPS-005)
 
 ### Production readiness gate
@@ -460,6 +492,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Cors:AllowedOrigins:N`             | `Cors__AllowedOrigins__0`          |   no   | for a cross-origin PWA  | API         | No cross-origin browser client allowed                  |
 | `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
 | `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
+| `RateLimiting:Enabled` / `Global:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 60/60s per webhook IP (CORE-SEC-001) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |

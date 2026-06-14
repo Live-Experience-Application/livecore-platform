@@ -698,6 +698,49 @@ default** (the full deployment guide is in `docs/13_SELF_HOSTING_REQUIREMENTS.md
   `AllowedHosts=app.example.com`) so requests with an unexpected `Host` are
   rejected.
 
+### Request rate limiting
+
+The API applies ASP.NET Core's built-in rate limiting (`UseRateLimiter`, CORE-SEC-001,
+the "Security Hardening" epic). Before this the HTTP pipeline applied no rate limiting
+anywhere, leaving two abuse/DoS surfaces unbounded: the two `AllowAnonymous`
+store-notification webhooks (`POST /api/v1/store-notifications/{apple,google/rtdn}`),
+which do database work and run a deployment-supplied external parser per call — a clear
+DoS and ledger-amplification surface anyone can POST to, plus an invite-token /
+`organizationSlug` enumeration surface — and every authenticated endpoint, which had no
+per-caller ceiling. Two complementary fixed-window limiters close that, both built on the
+shared framework (`Microsoft.AspNetCore.RateLimiting` / `System.Threading.RateLimiting`),
+so **no new dependency** is added:
+
+- A **strict per-IP** limit on the anonymous webhooks (the named
+  `RateLimitingConfiguration.WebhookPolicyName` policy the webhook route group opts into
+  with `RequireRateLimiting`). The partition key is the **real client IP** that
+  `UseForwardedHeaders` (which runs first in the pipeline) restores from a trusted proxy,
+  so the limit follows the actual caller, not the proxy hop (threat T7). The webhooks also
+  get a hard request-body-size cap beyond the application-level payload cap
+  (`StoreNotificationEnvelope.MaxRawPayloadLength`): a body over the cap is rejected `413`
+  before it is buffered or handed to the parser.
+- A **per-principal global** limiter on the authenticated surface
+  (`RateLimiterOptions.GlobalLimiter`), partitioned on the authenticated principal's OIDC
+  issuer+subject pair (subjects are unique only per issuer), so one caller's burst cannot
+  exhaust another's allowance (threats T5/T1). Anonymous infrastructure traffic (the
+  `/health/*` and `/metrics` endpoints) is intentionally **not** throttled by the global
+  limiter, so orchestration probes and the Prometheus scrape stay reachable.
+
+Rate limiting runs after authentication (so the per-principal partition sees the principal)
+and before authorization and the endpoints (so an excess request is rejected before any
+per-call database work or the webhook's external parser runs). Every limit is **runtime
+configuration** (`RateLimiting:*`, fail-safe to the default on a non-positive value) with
+safe, generous defaults so normal traffic is unaffected — 300 requests / 60s per principal,
+60 / 60s per webhook IP — and the whole feature can be disabled
+(`RateLimiting__Enabled=false`) for a deployment that throttles at its edge instead, in
+which case both limiters become no-ops and the middleware is inert. An excess request gets
+`429 Too Many Requests` as RFC 7807 Problem Details with a `Retry-After` header and no
+tenant/principal/resource detail (threat T7). Rate limiting is a coarse abuse ceiling
+layered **on top of** the OIDC/tenant authorization every endpoint already enforces
+server-side; it never widens authorization (`docs/07_SECURITY_THREAT_MODEL.md`), exactly
+like the CORS allow-list. See `docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration
+keys.
+
 ### Tenant model and HTTP API
 
 The Identity and Tenant Boundaries epic builds the tenant model in the

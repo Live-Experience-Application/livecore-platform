@@ -105,6 +105,22 @@ Controls:
 - export role-based projection
 - explicit host/admin export scopes
 
+### T9: Abuse / denial of service
+
+Risk:
+
+- an unauthenticated client floods the anonymous store-notification webhooks (each call does database work and
+  runs an external parser — a DoS and ledger-amplification surface), or probes invite-token / organizationSlug
+  enumeration
+- an authenticated client hammers the API with no per-caller ceiling
+
+Controls:
+
+- ASP.NET Core rate limiting (`UseRateLimiter`, CORE-SEC-001): a strict per-IP limit on the anonymous webhooks
+  and a per-principal global limit on the authenticated surface; excess requests get `429`
+- a hard request-body-size cap on the anonymous webhooks beyond the application-level payload cap
+- all limits configurable; `429` Problem Details carry no tenant/principal/resource detail (T7)
+
 ## Required test categories
 
 - foreign workspace ID denial

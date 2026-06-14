@@ -1,4 +1,6 @@
 using System.Text;
+using LiveCore.Api.Hosting;
+using Microsoft.AspNetCore.Http.Features;
 
 namespace LiveCore.Api.Store;
 
@@ -48,9 +50,16 @@ internal static class StoreNotificationEndpoints
     {
         // No authenticated group: a store delivers these notifications without an OIDC token. Authenticity is
         // established inside the deployment-supplied parser adapter (signature/source), not by the HTTP layer.
+        // Because the surface is UNAUTHENTICATED and runs DB work plus an external parser per call, it is the
+        // primary abuse/DoS target this story hardens (CORE-SEC-001): a strict PER-IP rate limit (the
+        // RateLimitingConfiguration.WebhookPolicyName policy → 429 past the threshold) and a hard request-body-size
+        // cap (RejectOversizeBodyAsync → 413 beyond StoreNotificationEnvelope.MaxRawPayloadLength, before the body
+        // is buffered or handed to the parser).
         var group = endpoints
             .MapGroup("/api/v1/store-notifications")
-            .AllowAnonymous();
+            .AllowAnonymous()
+            .RequireRateLimiting(RateLimitingConfiguration.WebhookPolicyName)
+            .AddEndpointFilter(RejectOversizeBodyAsync);
 
         group.MapPost("/apple", (HttpContext httpContext, CancellationToken cancellationToken)
             => HandleAsync(httpContext, PurchaseProvider.Apple, cancellationToken));
@@ -136,6 +145,38 @@ internal static class StoreNotificationEndpoints
     }
 
     /// <summary>
+    /// Endpoint filter (CORE-SEC-001) that enforces a hard request-body-size cap on the anonymous webhooks BEFORE
+    /// the handler reads the body or invokes the deployment-supplied parser. The cap is the configurable
+    /// <see cref="RateLimitingConfiguration.RateLimitingSettings.WebhookMaxRequestBodyBytes"/>, set beyond the
+    /// application-level <see cref="StoreNotificationEnvelope.MaxRawPayloadLength"/> so any legitimate notification
+    /// passes while an abusive oversize body is rejected with <c>413 Payload Too Large</c> and records nothing. A
+    /// declared oversize body (a <c>Content-Length</c> over the cap) is rejected up front without reading it; an
+    /// undeclared/chunked body is additionally capped at the server level so Kestrel aborts a stream that runs over.
+    /// </summary>
+    private static async ValueTask<object?> RejectOversizeBodyAsync(
+        EndpointFilterInvocationContext context,
+        EndpointFilterDelegate next)
+    {
+        var httpContext = context.HttpContext;
+        var maxBytes = httpContext.RequestServices
+            .GetRequiredService<RateLimitingConfiguration.RateLimitingSettings>()
+            .WebhookMaxRequestBodyBytes;
+
+        if (httpContext.Request.ContentLength is { } declaredLength && declaredLength > maxBytes)
+        {
+            return PayloadTooLarge(maxBytes);
+        }
+
+        var bodySizeFeature = httpContext.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (bodySizeFeature is { IsReadOnly: false })
+        {
+            bodySizeFeature.MaxRequestBodySize = maxBytes;
+        }
+
+        return await next(context).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Reads the request body as a bounded UTF-8 string. Reads at most one character beyond
     /// <see cref="StoreNotificationEnvelope.MaxRawPayloadLength"/> so an oversize body is detected and rejected by
     /// <see cref="StoreNotificationEnvelope.Create"/> rather than buffered without limit.
@@ -202,6 +243,14 @@ internal static class StoreNotificationEndpoints
             statusCode: StatusCodes.Status400BadRequest,
             title: "Bad Request",
             detail: detail);
+
+    // A body larger than the configured webhook cap (CORE-SEC-001): a 413, recording nothing. The detail names
+    // the byte ceiling only — never any part of the (rejected, possibly forged) payload (threat T7).
+    private static IResult PayloadTooLarge(long maxBytes)
+        => Results.Problem(
+            statusCode: StatusCodes.Status413PayloadTooLarge,
+            title: "Payload Too Large",
+            detail: $"A store notification payload must be at most {maxBytes} bytes.");
 
     // A payload the adapter could not validate as an authentic store notification (a forged/replayed/unparseable
     // body): a 400, recording nothing. The detail is the adapter's generic, log-safe reason (never the payload or
