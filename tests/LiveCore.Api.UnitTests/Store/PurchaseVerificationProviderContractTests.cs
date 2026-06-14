@@ -58,6 +58,44 @@ public class PurchaseVerificationProviderContractTests
         Assert.DoesNotContain(FakeProvider.ForgedProof, result.RejectionReason!, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(PurchaseProvider.Apple)]
+    [InlineData(PurchaseProvider.Google)]
+    public async Task A_replayed_proof_the_provider_already_consumed_is_rejected(PurchaseProvider provider)
+    {
+        // CORE-MON-008 replay protection (the adapter's half): a proof the provider reports as already
+        // consumed/redeemed is NOT a fresh grantable purchase, so the adapter MUST reject it. (Core adds a second
+        // layer: recording is idempotent on (provider, provider transaction id) — exercised by the endpoint tests.)
+        IPurchaseVerificationProvider adapter = new FakeProvider(provider);
+        var request = PurchaseVerificationRequest.Create(provider, FakeProvider.ReplayedProof, "product.premium");
+
+        var result = await adapter.VerifyAsync(request, CancellationToken.None);
+
+        Assert.False(result.IsVerified);
+        Assert.Equal(PurchaseVerificationStatus.Rejected, result.Status);
+        Assert.Null(result.Purchase);
+        Assert.False(string.IsNullOrWhiteSpace(result.RejectionReason));
+    }
+
+    [Theory]
+    [InlineData(PurchaseProvider.Apple)]
+    [InlineData(PurchaseProvider.Google)]
+    public async Task A_verified_purchase_reports_the_environment_it_was_verified_in(PurchaseProvider provider)
+    {
+        // CORE-MON-008 sandbox/prod separation (the adapter's half): the verified purchase carries the environment
+        // the proof was verified in, so Core can keep sandbox and production apart through the
+        // PurchaseEnvironmentPolicy without parsing any provider payload.
+        IPurchaseVerificationProvider productionAdapter = new FakeProvider(provider, PurchaseEnvironment.Production);
+        IPurchaseVerificationProvider sandboxAdapter = new FakeProvider(provider, PurchaseEnvironment.Sandbox);
+        var request = PurchaseVerificationRequest.Create(provider, "genuine-proof", "product.premium");
+
+        var productionResult = await productionAdapter.VerifyAsync(request, CancellationToken.None);
+        var sandboxResult = await sandboxAdapter.VerifyAsync(request, CancellationToken.None);
+
+        Assert.Equal(PurchaseEnvironment.Production, productionResult.Purchase!.Environment);
+        Assert.Equal(PurchaseEnvironment.Sandbox, sandboxResult.Purchase!.Environment);
+    }
+
     [Fact]
     public async Task The_resolver_drives_each_provider_through_the_same_calling_code()
     {
@@ -87,13 +125,16 @@ public class PurchaseVerificationProviderContractTests
 
     /// <summary>
     /// A deterministic in-memory <see cref="IPurchaseVerificationProvider"/> standing in for a real,
-    /// deployment-supplied verifier. It "verifies" any proof except the sentinel <see cref="ForgedProof"/>,
-    /// which it rejects — enough to exercise the port contract without contacting a real store API. It is NOT a
-    /// production verifier.
+    /// deployment-supplied verifier. It "verifies" any proof except the sentinels <see cref="ForgedProof"/>
+    /// (forged/unverifiable) and <see cref="ReplayedProof"/> (already consumed at the provider), which it rejects,
+    /// and reports the environment it was constructed with — enough to exercise the port contract without
+    /// contacting a real store API. It is NOT a production verifier.
     /// </summary>
-    private sealed class FakeProvider(PurchaseProvider provider) : IPurchaseVerificationProvider
+    private sealed class FakeProvider(PurchaseProvider provider, PurchaseEnvironment environment = PurchaseEnvironment.Production)
+        : IPurchaseVerificationProvider
     {
         public const string ForgedProof = "forged-proof";
+        public const string ReplayedProof = "replayed-proof";
 
         public PurchaseProvider Provider { get; } = provider;
 
@@ -108,10 +149,16 @@ public class PurchaseVerificationProviderContractTests
                 return Task.FromResult(PurchaseVerificationResult.Rejected("The proof could not be verified."));
             }
 
+            if (string.Equals(request.Proof, ReplayedProof, StringComparison.Ordinal))
+            {
+                return Task.FromResult(PurchaseVerificationResult.Rejected("The proof was already redeemed."));
+            }
+
             var purchase = VerifiedPurchase.Create(
                 Provider,
                 $"{Provider}-txn-0001",
-                request.ProductReference ?? "product.unknown");
+                request.ProductReference ?? "product.unknown",
+                environment);
 
             return Task.FromResult(PurchaseVerificationResult.Verified(purchase));
         }

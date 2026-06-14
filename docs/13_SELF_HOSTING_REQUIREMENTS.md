@@ -389,6 +389,48 @@ A managed/secured server uses the full StackExchange.Redis connection-string for
 `Realtime__Backplane__ConnectionString="redis.example.com:6380,password=<secret>,ssl=true"`. All API
 instances must point at the **same** server (and the same channel prefix) for cross-instance delivery to work.
 
+## Store receipt verification adapter (CORE-MON-008)
+
+Apple/Google receipt verification is **delegated to a deployment-supplied adapter**, exactly like the
+S3-compatible `IAssetStorage` (CORE-OPS-006) and the Valkey/Redis `IRealtimeBackplane` (CORE-OPS-007). Core
+ships the fail-closed **port** (`IPurchaseVerificationProvider`, CORE-STORE-001) and the verify-then-record
+endpoints over it (CORE-STORE-003/004), but **no native store SDK and no provider keys** — the cryptographic
+verification needs the deployment's App Store key / Google service-account credentials, which must never live in
+this repository (threat T7). A deployment registers one adapter per provider it supports
+(`services.AddSingleton<IPurchaseVerificationProvider, MyAppleAdapter>()`); with none registered the resolver
+fails closed and every verification request is `503` (no entitlement is ever granted without a real verification
+behind it).
+
+### What an adapter MUST guarantee
+
+A conforming `IPurchaseVerificationProvider` adapter owns the cryptographic verification and MUST:
+
+- **Verify the proof against the provider's server APIs** — treat the client-supplied proof as opaque, untrusted
+  input; only the provider's confirmation makes it a genuine purchase. Reduce the provider's raw response to a
+  provider-neutral `PurchaseVerificationResult` (a normalized `VerifiedPurchase` on success, a generic log-safe
+  rejection otherwise). Never log the proof or any receipt content.
+- **Report the verified environment.** Set `VerifiedPurchase.Environment` to `Production` or `Sandbox` from the
+  verified receipt (Apple's signed transaction carries an `environment`; Google distinguishes a test purchase
+  from a live one). Core enforces **sandbox/production separation** with this: a **production** deployment
+  (`ASPNETCORE_ENVIRONMENT=Production`) honors only a `Production` purchase and rejects a `Sandbox` one (`422`,
+  nothing recorded or granted) — **a sandbox receipt is not honored in production**. If the adapter genuinely
+  cannot determine the environment it must report `Sandbox` (the fail-closed default), never `Production`.
+- **Reject a replayed receipt.** A proof the provider reports as already consumed/redeemed is not a fresh
+  grantable purchase — return it as a `Rejected` result (`422`). Core adds a second, provider-independent layer:
+  recording is idempotent on the (`provider`, `provider_transaction_id`) pair, so a replayed-but-genuine proof
+  that re-verifies to the same purchase grants nothing twice.
+- **Distinguish "not genuine" from "unavailable".** A definitive "not a real purchase" verdict is a `Rejected`
+  result; a provider being unreachable/misconfigured is an exception (fail-closed) — so a transient outage is
+  never mistaken for a definitive rejection and never silently grants.
+
+### Configuration
+
+The adapter's credentials (Apple/Google server keys, signing keys) are consumed by the **adapter**, not read from
+a fixed Core configuration key — supply them to your adapter through your secret store. No provider key lives in
+the repository. The host environment that selects the production vs sandbox honoring posture is the standard
+`ASPNETCORE_ENVIRONMENT` (the same variable the OIDC audience guard, the readiness gate and the configuration
+contract below key off); a production deployment sets it to `Production`.
+
 ## Secret management and the configuration contract (CORE-OPS-008)
 
 Core holds **no secret in source**. Every connection string, identity setting and credential is supplied at

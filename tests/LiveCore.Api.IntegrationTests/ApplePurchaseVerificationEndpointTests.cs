@@ -25,10 +25,16 @@ namespace LiveCore.Api.IntegrationTests;
 ///   <item>CONTRACT (happy path): an authenticated user submits a genuine proof → 200 with the normalized,
 ///   provider-neutral purchase identity (provider/transaction id/product) at status <c>Active</c>, and EXACTLY
 ///   one <c>purchase_transactions</c> row plus one initial <c>purchase_events</c> audit entry are persisted.</item>
-///   <item>IDEMPOTENCY: re-submitting the same genuine proof → 200 again, with still exactly one transaction and
-///   one audit event (a replayed-but-genuine proof grants nothing twice).</item>
+///   <item>IDEMPOTENCY (replay): re-submitting the same genuine proof → 200 again, with still exactly one
+///   transaction and one audit event (a replayed-but-genuine proof grants nothing twice; CORE-MON-008).</item>
 ///   <item>NEGATIVE VERIFICATION (the crown jewel): a forged/unverifiable proof → 422 and NOTHING is recorded —
 ///   no entitlement can be granted off an unverified proof ("Never trust client-side premium flags").</item>
+///   <item>REPLAY REJECTION (CORE-MON-008): a proof the store reports as already consumed/redeemed → 422 and
+///   NOTHING is recorded (the adapter's provider-side replay defence).</item>
+///   <item>SANDBOX/PRODUCTION SEPARATION (CORE-MON-008): a sandbox receipt on a PRODUCTION deployment → 422 and
+///   NOTHING is recorded ("a sandbox receipt is not honored in production"); a sandbox receipt on a non-production
+///   deployment IS honored, and a production receipt on a production deployment IS honored (the gate neither
+///   over-rejects nor leaks).</item>
 ///   <item>AUTHORIZATION (fail-closed): 401 unauthenticated; a service account has no personal purchase (403),
 ///   recording nothing. There is no tenant on this route — a purchase is named globally (CORE-STORE-002), so
 ///   there is no foreign-tenant case to test here.</item>
@@ -176,6 +182,71 @@ public sealed class ApplePurchaseVerificationEndpointTests
         Assert.Equal(0, await TransactionCountAsync(factory));
     }
 
+    [Fact]
+    public async Task Apple_verification_is_422_for_a_replayed_receipt_the_store_already_consumed_and_records_nothing()
+    {
+        // CORE-MON-008 replay rejection: a proof the store reports as already consumed/redeemed is rejected by the
+        // adapter, so the request is 422 and NOTHING is recorded — a replayed receipt grants nothing.
+        await using var factory = new FakeAppleVerifierApiFactory();
+        using var client = factory.CreateClientFor("buyer-a", _issuer);
+
+        var response = await PostAsync(client, Body(FakeAppleVerifier.ReplayedProof, "product.premium"));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal(0, await TransactionCountAsync(factory));
+        Assert.Equal(0, await EventCountAsync(factory));
+    }
+
+    [Fact]
+    public async Task Apple_verification_rejects_a_sandbox_receipt_on_a_production_deployment_and_records_nothing()
+    {
+        // CORE-MON-008 headline: "a sandbox receipt is not honored in production." The adapter verifies a genuine
+        // proof but reports the SANDBOX environment; on a production deployment the fail-closed
+        // PurchaseEnvironmentPolicy rejects it (422) and NOTHING is recorded or granted — a free test-harness
+        // receipt can never unlock premium in production.
+        await using var factory = new FakeAppleVerifierApiFactory(
+            environment: PurchaseEnvironment.Sandbox,
+            productionDeployment: true);
+        using var client = factory.CreateClientFor("buyer-a", _issuer);
+
+        var response = await PostAsync(client, Body("genuine-proof", "product.premium"));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal(0, await TransactionCountAsync(factory));
+        Assert.Equal(0, await EventCountAsync(factory));
+    }
+
+    [Fact]
+    public async Task Apple_verification_honors_a_sandbox_receipt_on_a_non_production_deployment()
+    {
+        // The gate does not over-reject: a non-production deployment (the default test host) honors a sandbox
+        // receipt, so a developer can verify sandbox purchases end-to-end.
+        await using var factory = new FakeAppleVerifierApiFactory(
+            environment: PurchaseEnvironment.Sandbox,
+            productionDeployment: false);
+        using var client = factory.CreateClientFor("buyer-a", _issuer);
+
+        var response = await PostAsync(client, Body("genuine-proof", "product.premium"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, await TransactionCountAsync(factory));
+    }
+
+    [Fact]
+    public async Task Apple_verification_honors_a_production_receipt_on_a_production_deployment()
+    {
+        // The gate does not leak: a production receipt on a production deployment is honored and recorded.
+        await using var factory = new FakeAppleVerifierApiFactory(
+            environment: PurchaseEnvironment.Production,
+            productionDeployment: true);
+        using var client = factory.CreateClientFor("buyer-a", _issuer);
+
+        var response = await PostAsync(client, Body("genuine-proof", "product.premium"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, await TransactionCountAsync(factory));
+    }
+
     // =====================================================================
     // Helpers.
     // =====================================================================
@@ -226,8 +297,16 @@ public sealed class ApplePurchaseVerificationEndpointTests
     /// deployment-supplied verifier. The production fail-closed resolver picks the fake up because it resolves
     /// adapters from the registered <see cref="IPurchaseVerificationProvider"/> set; every other production
     /// behavior (auth, the recording service, persistence) runs unchanged.
+    ///
+    /// The fake reports the configured <paramref name="environment"/> (default <see cref="PurchaseEnvironment.Production"/>,
+    /// so the happy-path/idempotency/forged tests are honored on any deployment). When
+    /// <paramref name="productionDeployment"/> is set it also overrides the registered
+    /// <see cref="PurchaseEnvironmentPolicy"/> with the production posture, so the sandbox/production gate
+    /// (CORE-MON-008) can be exercised in the endpoint without flipping the host environment.
     /// </summary>
-    private sealed class FakeAppleVerifierApiFactory : WorkspaceApiFactory
+    private sealed class FakeAppleVerifierApiFactory(
+        PurchaseEnvironment environment = PurchaseEnvironment.Production,
+        bool productionDeployment = false) : WorkspaceApiFactory
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -235,20 +314,29 @@ public sealed class ApplePurchaseVerificationEndpointTests
 
             builder.ConfigureServices(services =>
             {
-                services.AddSingleton<IPurchaseVerificationProvider, FakeAppleVerifier>();
+                services.AddSingleton<IPurchaseVerificationProvider>(new FakeAppleVerifier(environment));
+
+                if (productionDeployment)
+                {
+                    // Last registration wins for GetService<T>, so this overrides Program.cs's host-derived policy.
+                    services.AddSingleton(PurchaseEnvironmentPolicy.ForProductionDeployment());
+                }
             });
         }
     }
 
     /// <summary>
     /// A deterministic in-memory Apple <see cref="IPurchaseVerificationProvider"/> standing in for a real,
-    /// deployment-supplied verifier. It "verifies" any proof except the sentinel <see cref="ForgedProof"/>, which
-    /// it rejects, and derives a stable provider transaction id from the proof so a replayed proof verifies to the
-    /// same purchase (exercising idempotency). It never contacts a real store API and is NOT a production verifier.
+    /// deployment-supplied verifier. It "verifies" any proof except the sentinels <see cref="ForgedProof"/>
+    /// (forged/unverifiable) and <see cref="ReplayedProof"/> (already consumed at the store), which it rejects, and
+    /// derives a stable provider transaction id from the proof so a replayed-but-genuine proof verifies to the
+    /// same purchase (exercising idempotency). It reports the environment it was constructed with (CORE-MON-008).
+    /// It never contacts a real store API and is NOT a production verifier.
     /// </summary>
-    private sealed class FakeAppleVerifier : IPurchaseVerificationProvider
+    private sealed class FakeAppleVerifier(PurchaseEnvironment environment) : IPurchaseVerificationProvider
     {
         public const string ForgedProof = "forged-proof";
+        public const string ReplayedProof = "replayed-proof";
 
         public PurchaseProvider Provider => PurchaseProvider.Apple;
 
@@ -263,10 +351,16 @@ public sealed class ApplePurchaseVerificationEndpointTests
                 return Task.FromResult(PurchaseVerificationResult.Rejected("The transaction could not be verified."));
             }
 
+            if (string.Equals(request.Proof, ReplayedProof, StringComparison.Ordinal))
+            {
+                return Task.FromResult(PurchaseVerificationResult.Rejected("The transaction was already redeemed."));
+            }
+
             var purchase = VerifiedPurchase.Create(
                 PurchaseProvider.Apple,
                 $"apple-txn-{request.Proof}",
-                request.ProductReference ?? "product.unknown");
+                request.ProductReference ?? "product.unknown",
+                environment);
 
             return Task.FromResult(PurchaseVerificationResult.Verified(purchase));
         }

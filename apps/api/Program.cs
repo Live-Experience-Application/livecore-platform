@@ -156,6 +156,18 @@ builder.Services.AddLiveCoreAssetStorageMetrics();
 // adapter and verify; persistence of the verified transaction (CORE-STORE-002) is a later story.
 builder.Services.AddSingleton<PurchaseVerificationProviderResolver>();
 
+// Purchase environment policy (CORE-MON-008): the fail-closed Core decision of whether a verified purchase may be
+// honored given the environment its proof was verified in. The deployment-supplied adapter reports the
+// VerifiedPurchase.Environment (sandbox/test vs live production); this policy decides — BEFORE any record or grant —
+// whether to honor it: a PRODUCTION deployment honors only a production purchase and rejects a sandbox receipt, so
+// "a sandbox receipt is not honored in production" (docs/21). The deployment posture is derived from the host
+// environment exactly as the OIDC audience guard (CORE-OPS-004), the readiness gate (CORE-OPS-005) and the
+// production configuration contract (CORE-OPS-008) are (production = ASPNETCORE_ENVIRONMENT=Production, the default
+// when unset), so a production host fails closed against sandbox receipts with no extra configuration while a
+// local/test deployment keeps the latitude to verify sandbox receipts. It is a stateless, secret-free value (threat
+// T7), registered unconditionally like the resolver above.
+builder.Services.AddSingleton(PurchaseEnvironmentPolicy.ForDeployment(builder.Environment.IsProduction()));
+
 // Store notification parser seam (CORE-STORE-005, the "Store Notifications" epic). IStoreNotificationParser is
 // the single port between Core and a store's server-to-server notification format; one adapter serves one
 // provider (Apple/Google), VALIDATES the inbound payload's signature/source and reduces it to a provider-neutral
@@ -1279,13 +1291,14 @@ app.MapMeEntitlementsEndpoints();
 
 // Apple transaction verification endpoint (CORE-STORE-003): the Store module's first HTTP route,
 // POST /api/v1/purchases/apple/transactions. It lives in an authenticated route group and fails closed (503)
-// when persistence is not configured, exactly like the asset/quota endpoints. No new DI registration is
-// required: the PurchaseVerificationProviderResolver (registered unconditionally above) and the
-// PurchaseTransactionService + TimeProvider (registered in the persistence conditional, CORE-STORE-002) it
-// reuses are already registered. It authorizes the caller as a user principal (a service account is 403; the
+// when persistence is not configured, exactly like the asset/quota endpoints. It reuses only registrations made
+// above: the PurchaseVerificationProviderResolver and the PurchaseEnvironmentPolicy (both registered
+// unconditionally above) and the PurchaseTransactionService + TimeProvider (registered in the persistence
+// conditional, CORE-STORE-002). It authorizes the caller as a user principal (a service account is 403; the
 // purchase is global, so there is no tenant boundary — CORE-STORE-002), resolves the deployment-supplied Apple
 // verifier and verifies the submitted proof, and ONLY a verified result is recorded as a PurchaseTransaction
-// (verify-then-record): a rejected proof is 422 and records nothing, and an unconfigured verifier is 503, so
+// (verify-then-record): a rejected proof is 422 and records nothing, an unconfigured verifier is 503, and a
+// sandbox receipt is rejected (422, records nothing) on a production deployment (CORE-MON-008), so
 // "Apple transaction data is verified before entitlements are granted" (the story acceptance criterion;
 // docs/21). CORE-MON-002 additionally LINKS the verified purchase to the authenticated buyer's subject in the
 // same transaction (billing_account_links), so a different subject submitting the same external receipt is 409
@@ -1296,13 +1309,14 @@ app.MapApplePurchaseEndpoints();
 // Google purchase token verification endpoint (CORE-STORE-004): the Store module's second HTTP route, the
 // Google analogue of the Apple endpoint above, POST /api/v1/purchases/google/tokens. It lives in an
 // authenticated route group and fails closed (503) when persistence is not configured, exactly like the
-// Apple/asset/quota endpoints. No new DI registration is required: the PurchaseVerificationProviderResolver
-// (registered unconditionally above) and the PurchaseTransactionService + TimeProvider (registered in the
-// persistence conditional, CORE-STORE-002) it reuses are already registered. It authorizes the caller as a
+// Apple/asset/quota endpoints. It reuses only registrations made above: the PurchaseVerificationProviderResolver
+// and the PurchaseEnvironmentPolicy (both registered unconditionally above) and the PurchaseTransactionService +
+// TimeProvider (registered in the persistence conditional, CORE-STORE-002). It authorizes the caller as a
 // user principal (a service account is 403; the purchase is global, so there is no tenant boundary —
 // CORE-STORE-002), resolves the deployment-supplied Google verifier and verifies the submitted purchase token,
 // and ONLY a verified result is recorded as a PurchaseTransaction (verify-then-record): a rejected token is 422
-// and records nothing, and an unconfigured verifier is 503, so "Google purchase tokens are verified before
+// and records nothing, an unconfigured verifier is 503, and a sandbox receipt is rejected (422, records nothing)
+// on a production deployment (CORE-MON-008), so "Google purchase tokens are verified before
 // entitlements are granted" (the story acceptance criterion; docs/21). CORE-MON-002 additionally LINKS the
 // verified purchase to the authenticated buyer's subject in the same transaction (billing_account_links), so a
 // different subject submitting the same external receipt is 409 and granted nothing; granting the

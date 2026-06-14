@@ -161,6 +161,25 @@ participant-join/leave path (the `Session` quota subject), and CORE-MON-006 adde
 `quota_usage` table), so `csv/database_tables.csv`, the `docs/10` table list and
 the spec-consistency check are unchanged.
 
+**Adapter-contract note (CORE-MON-008 made the receipt-verification contract
+explicit).** The verify gate already delegated Apple/Google receipt verification
+to a deployment-supplied adapter behind a fail-closed port (CORE-STORE-001/003/004)
+and shipped no provider keys. CORE-MON-008 makes the adapter contract **explicit**
+for the two security properties such a seam must guarantee: **sandbox/production
+separation** — a `VerifiedPurchase` now carries the verified `PurchaseEnvironment`
+and the fail-closed `PurchaseEnvironmentPolicy` makes a **production** deployment
+honor only a `Production` purchase (a sandbox receipt is `422`, recorded/granted
+nothing — "a sandbox receipt is not honored in production") — and **receipt-replay
+protection** (the adapter rejects an already-consumed proof; Core's recording stays
+idempotent on `(provider, provider_transaction_id)`). The cryptographic verification
+itself stays adapter-supplied (out of Core per threat T7 / `docs/13`). CORE-MON-008
+**adds no new table, route or migration** — the environment is consumed by the
+honoring gate **before** a purchase is recorded, so a recorded purchase is always
+one the deployment honors and no schema column is needed; it reuses the existing
+verifier ports and `purchase_transactions`/`purchase_events` model — so
+`csv/database_tables.csv`, the `csv/api_routes.csv` route list, the `docs/10` table
+list and the spec-consistency check are unchanged.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented

@@ -668,6 +668,52 @@ its `workspace.active.max` consumption so the count tracks the user's actual act
   archives a workspace a first Owner created) would require persisting the workspace creator and is
   left as a follow-up; it does not affect the free-tier lock-out this story fixes.
 
+## Receipt verification adapter contract — fail-closed, sandbox/prod separation, replay protection (CORE-MON-008)
+
+CORE-STORE-001 isolated provider verification behind the fail-closed `IPurchaseVerificationProvider` port and
+CORE-STORE-003/004 wired the Apple/Google verify-then-record endpoints over it. As part of enabling v1 billing,
+CORE-MON-008 makes the **adapter contract explicit** for the two security properties a receipt-verification seam
+must guarantee — **sandbox/production separation** and **receipt-replay protection** — and adds the negative tests
+Core can own, so that "Apple/Google receipt verification is delegated to a deployment-supplied adapter behind a
+fail-closed port that distinguishes sandbox vs production and rejects replayed receipts" (the story acceptance
+criterion). The cryptographic verification itself stays in the deployment-supplied adapter (out of Core per threat
+T7 / `docs/13_SELF_HOSTING_REQUIREMENTS.md`); Core guarantees the fail-closed separation **around** it and ships no
+provider keys.
+
+- **The verified environment is part of the port's output.** A `VerifiedPurchase` now carries the
+  `PurchaseEnvironment` (`Sandbox`/`Production`) the proof was verified in (`apps/api/Store/PurchaseEnvironment.cs`).
+  A conforming adapter MUST report it from the verified receipt — Apple's signed transaction carries an
+  `environment` of `Sandbox`/`Production`, and Google distinguishes a test purchase from a live one — so Core keeps
+  the two apart without ever parsing a provider payload. `VerifiedPurchase.Create` defaults it to the fail-closed
+  `Sandbox` (the value a production deployment refuses to honor), so an adapter that omits it can never silently
+  unlock premium in production.
+- **Sandbox is not honored in production (the headline guarantee), fail-closed.** The product-neutral
+  `PurchaseEnvironmentPolicy` (`apps/api/Store/`) is the Core decision of whether a verified purchase may be honored
+  on this deployment: a **production** deployment honors only a `Production` purchase and **rejects** a `Sandbox`
+  one; a non-production (local/CI/staging) deployment honors either, so developers can verify sandbox receipts. The
+  Apple (CORE-STORE-003) and Google (CORE-STORE-004) endpoints apply this gate **after** a verified result and
+  **before** any persistence or grant, so a sandbox receipt on a production host is `422` and records/grants
+  **nothing** — a sandbox receipt is free to mint in the provider's test harness, so honoring one in production
+  would let anyone unlock premium without paying. The deployment posture is derived from the host environment
+  exactly as the OIDC audience guard (CORE-OPS-004), the readiness gate (CORE-OPS-005) and the production
+  configuration contract (CORE-OPS-008) are (production = `ASPNETCORE_ENVIRONMENT=Production`, the default when
+  unset), so a production host fails closed with no extra configuration.
+- **Replay protection is two-layered.** A receipt whose proof has already been consumed/redeemed is not a fresh
+  grantable purchase: the **adapter** MUST surface that as a `Rejected` result (so a replayed proof is `422` and
+  grants nothing — the provider-side replay defence the adapter owns). Core adds a second, provider-independent
+  layer: recording is **idempotent** on the (`provider`, `provider_transaction_id`) pair (CORE-STORE-002), so even
+  a replayed-but-genuine proof that re-verifies to the **same** purchase records no second row and grants nothing
+  twice. The forged-sentinel rejection test already existed; CORE-MON-008 adds the **replay** and **sandbox/prod**
+  negative tests.
+- **Unconfigured adapter still fails closed (unchanged, re-asserted).** With no adapter wired for a provider the
+  `PurchaseVerificationProviderResolver` throws `PurchaseProviderNotConfiguredException` and the request is `503`,
+  granting nothing — the verification analogue of the unconfigured asset storage. Core registers no adapter and no
+  provider keys.
+- **No new table, no EF migration, no route change.** The environment is consumed by the honoring gate **before**
+  a purchase is recorded, so a recorded purchase is always one this deployment honors and no schema column is
+  needed — the chain reuses the existing verifier ports and `purchase_transactions`/`purchase_events` model. (A
+  follow-up could persist the verified environment for audit; it is not required for the fail-closed guarantee.)
+
 ## Security requirements
 
 - Never trust client-side premium flags.

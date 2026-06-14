@@ -48,6 +48,13 @@ namespace LiveCore.Api.Store;
 /// belongs to THIS buyer (a fresh link or this buyer's idempotent re-link): a conflicting cross-subject claim
 /// grants nothing (fail-closed), and a product reference that maps to no active plan grants nothing.
 ///
+/// SANDBOX vs PRODUCTION SEPARATION (CORE-MON-008). After a verified result, the adapter-reported
+/// <see cref="VerifiedPurchase.Environment"/> is gated through the fail-closed <see cref="PurchaseEnvironmentPolicy"/>
+/// BEFORE any persistence or grant: a production deployment honors only a production purchase, so a SANDBOX receipt
+/// is 422 and records/grants NOTHING — "a sandbox receipt is not honored in production" (docs/21). Replay defence is
+/// two-layered: the adapter rejects an already-consumed proof (422), and recording is idempotent on the (provider,
+/// provider transaction id) pair, so a replayed-but-genuine proof grants nothing twice.
+///
 /// Authorization model (server-side; docs/06_AUTHORIZATION_MATRIX.md; threats T1/T5):
 /// <list type="bullet">
 ///   <item>The bearer middleware challenges a missing/invalid token with 401 before any handler runs; a
@@ -166,6 +173,15 @@ internal static class ApplePurchaseEndpoints
             return VerificationRejected(result.RejectionReason);
         }
 
+        // Sandbox/production separation, fail-closed (CORE-MON-008). The adapter reported which environment it
+        // verified the proof in; a production deployment honors ONLY a production purchase, so a SANDBOX receipt
+        // (free to mint in the provider's test harness) is rejected here and records/grants NOTHING — "a sandbox
+        // receipt is not honored in production" (docs/21). The decision happens BEFORE any persistence or grant.
+        if (!deps.EnvironmentPolicy.IsHonored(result.Purchase!.Environment))
+        {
+            return EnvironmentNotHonored();
+        }
+
         // Verified. Resolve the authenticated BUYER's user profile — the subject the purchase grants premium to —
         // exactly as /me/entitlements resolves the current user (idempotent on first sight). WHO is buying is the
         // authenticated caller, never anything the client asserts (CORE-MON-002).
@@ -229,6 +245,7 @@ internal static class ApplePurchaseEndpoints
     {
         var services = httpContext.RequestServices;
         var resolver = services.GetService<PurchaseVerificationProviderResolver>();
+        var environmentPolicy = services.GetService<PurchaseEnvironmentPolicy>();
         var transactions = services.GetService<PurchaseTransactionService>();
         var billingLinks = services.GetService<BillingAccountLinkService>();
         var grants = services.GetService<ProductEntitlementGrantService>();
@@ -237,6 +254,7 @@ internal static class ApplePurchaseEndpoints
         var timeProvider = services.GetService<TimeProvider>();
 
         if (resolver is null
+            || environmentPolicy is null
             || transactions is null
             || billingLinks is null
             || grants is null
@@ -250,6 +268,7 @@ internal static class ApplePurchaseEndpoints
 
         dependencies = new ApplePurchaseEndpointDependencies(
             resolver,
+            environmentPolicy,
             transactions,
             billingLinks,
             grants,
@@ -311,6 +330,16 @@ internal static class ApplePurchaseEndpoints
             title: "Unprocessable Entity",
             detail: string.IsNullOrWhiteSpace(reason) ? "The transaction could not be verified." : reason);
 
+    // A genuine purchase verified in an environment this deployment does not honor (CORE-MON-008) — for example a
+    // SANDBOX receipt on a PRODUCTION deployment. It is a semantically invalid command for this environment (422),
+    // and records/grants nothing. The detail is generic and log-safe (it names no proof or receipt content; threat
+    // T7) and does not reveal the deployment's environment posture.
+    private static IResult EnvironmentNotHonored()
+        => Results.Problem(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            title: "Unprocessable Entity",
+            detail: "The transaction was verified in an environment this deployment does not accept.");
+
     // A genuine purchase whose receipt is already linked to a DIFFERENT buyer (CORE-MON-002): the buyer linkage is
     // a conflicting claim, so it is denied 409 and nothing is granted to this caller. The detail is generic and
     // reveals nothing about the owning subject (threats T5/T7).
@@ -322,6 +351,7 @@ internal static class ApplePurchaseEndpoints
 
     private readonly record struct ApplePurchaseEndpointDependencies(
         PurchaseVerificationProviderResolver Resolver,
+        PurchaseEnvironmentPolicy EnvironmentPolicy,
         PurchaseTransactionService Transactions,
         BillingAccountLinkService BillingLinks,
         ProductEntitlementGrantService Grants,

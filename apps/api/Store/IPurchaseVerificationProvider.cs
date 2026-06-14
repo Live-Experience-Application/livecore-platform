@@ -40,6 +40,23 @@ namespace LiveCore.Api.Store;
 ///   provider being unreachable/misconfigured is an EXCEPTION (fail-closed), so a transient outage is never
 ///   mistaken for a definitive rejection.
 ///   </item>
+///   <item>
+///   SANDBOX vs PRODUCTION (CORE-MON-008). It reports the <see cref="VerifiedPurchase.Environment"/> the proof
+///   was verified in (the provider's sandbox/test environment or its live production environment — Apple's signed
+///   transaction carries this; Google distinguishes test from live purchases). Core keeps the two apart through
+///   the fail-closed <see cref="PurchaseEnvironmentPolicy"/> — a production deployment honors only a
+///   <see cref="PurchaseEnvironment.Production"/> purchase — so "a sandbox receipt is not honored in production".
+///   When the adapter genuinely cannot determine the environment it reports the fail-closed default
+///   (<see cref="PurchaseEnvironment.Sandbox"/>), never production.
+///   </item>
+///   <item>
+///   REPLAY PROTECTION (CORE-MON-008). A receipt whose proof has already been consumed/redeemed at the provider
+///   is NOT a fresh grantable purchase: the adapter MUST surface that as a <see cref="PurchaseVerificationStatus.Rejected"/>
+///   RESULT (so a replayed proof grants nothing). Core adds a second, provider-independent layer of replay
+///   defence: recording is idempotent on the (<see cref="PurchaseProvider"/>,
+///   <see cref="VerifiedPurchase.ProviderTransactionId"/>) pair (CORE-STORE-002), so even a replayed-but-genuine
+///   proof that re-verifies to the SAME purchase records no second row and grants nothing twice.
+///   </item>
 /// </list>
 ///
 /// AUTHORIZATION IS UPSTREAM, NOT HERE. This port does not decide WHO may submit a proof or WHETHER they are
