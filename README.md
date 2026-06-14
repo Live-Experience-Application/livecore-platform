@@ -96,7 +96,7 @@ csv/                     backlog stories and forbidden term list
 
 The Core includes product-neutral Entitlements, Quotas, Purchase Verification and Ad Eligibility contracts so that mobile apps cannot bypass limits or premium state client-side.
 Core does not render ads, own mobile screens, or contain App Store / Google Play marketing copy.
-Billing itself is out of scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted and auditable, but the purchase-to-entitlement grant chain (the `billing_account_links` table and the product-to-plan mapping) is formally deferred to post-v1 (CORE-DOC-002), so no verified purchase grants a `SubjectEntitlement` in v1 (see `docs/24_SPEC_CONSISTENCY.md`).
+Billing/monetization is in scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`): a verified purchase is persisted, auditable and grants the buyer the mapped `SubjectEntitlement`, refunds/cancellations revoke or downgrade it, and free-tier quotas are enforced server-side. The verify-and-record foundation (CORE-STORE-001..005, CORE-ENTL-001..004, CORE-ADS-001) is implemented; the purchase-to-entitlement grant chain (the `billing_account_links` table and the product-to-plan mapping) is built by the Monetization v1 epic (CORE-MON-001..010), which reversed the earlier CORE-DOC-002 post-v1 deferral. The single source of truth for the v1 monetization scope and acceptance is `docs/24_SPEC_CONSISTENCY.md`.
 
 ## Prerequisites
 

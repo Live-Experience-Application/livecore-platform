@@ -44,30 +44,31 @@ contain an entry absent from its source of truth.
   Phase 1 (15 epics, matching `csv/core_epics_stories.csv`) and Phase 2
   (8 epics, matching `csv/core_phase2_epics_stories.csv`) separately.
 
-## Decision recorded (CORE-DOC-002): billing deferred for Core v1
+## Decision recorded (CORE-MON-001): billing in scope for Core v1 (reverses CORE-DOC-002)
 
-`billing_account_links` was documented as a Store "Database addition"
-(`docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md`) but never built, so a
-verified purchase has no way to link a store account to a Core subject and grant
-that buyer a `SubjectEntitlement` — the purchase-to-entitlement chain is
-incomplete. CORE-DOC-002 is the explicit decision on that gap.
+CORE-DOC-002 previously **formally deferred** the purchase-to-entitlement grant
+chain (and `billing_account_links`) to post-v1, on the basis that billing was
+out of scope for Core v1. The product now **requires** monetization in v1, so
+CORE-MON-001 reverses that decision. This section is the **single source of truth
+for the v1 monetization scope and acceptance**; `docs/01`, `docs/21`, `docs/22`,
+`README.md` and the entitlement/store/ad story rows of
+`csv/core_epics_stories.csv` defer to it.
 
-**Decision: formally defer billing and the purchase-to-entitlement grant chain
-to post-v1.** Billing is out of scope for Core v1
-(`docs/01_PRODUCT_VISION_AND_SCOPE.md`, "Out of scope"), so completing the
-monetization loop is deferred rather than built now. The following remain
-**deferred** (documented design intent, not drift):
+**Decision: billing and the purchase-to-entitlement grant chain are IN SCOPE for
+Core v1.** Completing the monetization loop is built in v1, not deferred. What v1
+must now deliver (previously deferred by CORE-DOC-002):
 
-- the `billing_account_links` table (store-account-to-subject link) and the
-  `purchase_providers` table (provider handling is in-code, CORE-STORE-001);
+- the `billing_account_links` table (store-account-to-subject link) that links a
+  verified purchase to the authenticated buyer (CORE-MON-002);
 - the product → plan → entitlement mapping that turns a verified purchase into a
-  plan grant;
-- the trigger that would wire purchase verification (CORE-STORE-003/004) and
-  store notifications (CORE-STORE-005, CORE-JOB-003) to
-  `SubjectEntitlementAssignmentService.AssignFromPlanAsync`/`RevokeAsync`.
+  plan grant (CORE-MON-003);
+- the trigger that wires purchase verification (CORE-STORE-003/004) and store
+  notifications (CORE-STORE-005, CORE-JOB-003) to
+  `SubjectEntitlementAssignmentService.AssignFromPlanAsync`/`RevokeAsync`
+  (CORE-MON-003/004).
 
-What Core v1 **does** ship of this area is intact and in scope (it is annotated
-as such on the store/ad/entitlement rows of `csv/core_epics_stories.csv`):
+The v1 monetization foundation already shipped (CORE-DOC-002 confirmed it is
+intact and in scope) and is reused, not rebuilt:
 
 - the provider-neutral verify-and-record gate — a verified purchase is persisted
   as an idempotent, auditable `purchase_transactions`/`purchase_events` record
@@ -77,31 +78,55 @@ as such on the store/ad/entitlement rows of `csv/core_epics_stories.csv`):
   source of truth) convergent (CORE-STORE-005, CORE-JOB-003);
 - the reusable `SubjectEntitlement` assignment/lookup primitive and server-side
   quota enforcement (CORE-ENTL-001..004), and the entitlement-driven ad
-  eligibility read (CORE-ADS-001), which operate on entitlements assigned by
-  other means (administrative/seed assignment), not by a verified purchase.
+  eligibility read (CORE-ADS-001).
 
-**No verified purchase grants a `SubjectEntitlement` in Core v1.** This is a
-scope decision consistent with `docs/01`, not an architecture change, so it is
-recorded here rather than in an ADR (ADR 0010 already records Core-owned
-entitlements/quotas and ADR 0011 that mobile ads stay outside Core). When
-billing leaves deferral, the grant story adds `billing_account_links` + the
-product→plan mapping and wires the existing verify/notify pipeline to the
-existing assignment primitive, so no part of the v1 work is wasted.
+**v1 monetization acceptance.** Monetization is done for Core v1 when:
+
+- a verified, buyer-linked purchase grants the buyer the mapped
+  `SubjectEntitlement`, idempotently (a retry or duplicate notification does not
+  double-grant), and the grant shows up in the effective-entitlements read;
+- a refund, cancellation or chargeback revokes or downgrades the granted
+  entitlement and stays revoked (a revoked state is terminal — a later renewal
+  cannot resurrect it);
+- free-tier quotas (`workspace.active.max`, `session.active.max`,
+  `session.participant.max`, `asset.storage.bytes.max`) are enforced
+  server-side and cannot be bypassed by clients;
+- user-visible premium state comes only from server entitlements; an
+  unverified/failed purchase grants nothing (fail-closed).
+
+This is a scope decision consistent with the updated `docs/01`, not an
+architecture change, so it is recorded here rather than in an ADR (ADR 0010
+already records Core-owned entitlements/quotas and ADR 0011 that mobile ads stay
+outside Core). The delivering stories are the Monetization v1 epic
+(CORE-MON-001..010) in `csv/core_phase3_epics_stories.csv`; CORE-MON-001 (this
+spec reversal) unblocks CORE-MON-002..010. Core stays product-neutral and still
+never processes payments, renders a paywall/store or displays ads.
+
+**Schema note (why the table CSV still says DEFERRED).** `billing_account_links`
+is in scope for v1 but **not yet in the implemented schema** — CORE-MON-002 adds
+it. Until it lands in `csv/database_tables.csv` it stays marked DEFERRED in
+`csv/entitlement_database_tables.csv` so the spec-consistency check (which
+requires every *non-deferred* entitlement table to exist in the schema) stays
+green. That marker now means "documented and planned for v1 but not yet built",
+not "deferred to post-v1".
 
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented
-Core v1 schema/behavior. They are not drift; they are explicit deferrals.
+Core v1 schema/behavior. They are not drift; they are explicit deferrals or
+in-scope-for-v1 items not yet built (noted per item).
 
 - **`purchase_providers`** — provider handling is in-code (the purchase-provider
   abstraction, CORE-STORE-001), not a database table. Marked DEFERRED in
   `csv/entitlement_database_tables.csv`.
-- **`billing_account_links`** — the store-account-to-subject link table.
-  Billing is out of scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`);
-  **CORE-DOC-002 formally defers it** (and the rest of the
-  purchase-to-entitlement grant chain) to post-v1 — see "Decision recorded
-  (CORE-DOC-002)" above. Marked DEFERRED in
-  `csv/entitlement_database_tables.csv`.
+- **`billing_account_links`** — the store-account-to-subject link table. It is
+  **in scope for Core v1** (`docs/01_PRODUCT_VISION_AND_SCOPE.md`) but **not yet
+  in the implemented schema**: CORE-MON-002 adds it (CORE-MON-001 reversed the
+  CORE-DOC-002 post-v1 deferral — see "Decision recorded (CORE-MON-001)" above).
+  It stays marked DEFERRED in `csv/entitlement_database_tables.csv` only because
+  it is not yet built, so the spec-consistency check skips it until CORE-MON-002
+  lands it in `csv/database_tables.csv` — a not-yet-implemented marker, not a
+  scope deferral.
 - **Planned-but-unemitted session events** — `SessionCreated`, `SceneCreated`,
   `ContentBlockCreated`, `PrivateMessageSent`, `AssetRevealed`,
   `SessionNoteCreated` and `RecapGenerated` are in the catalog but not yet

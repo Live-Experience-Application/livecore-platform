@@ -20,9 +20,11 @@ The source of truth for the Core schema is `csv/database_tables.csv` (one row
 per table, with its owning module, scope and notes). The list below mirrors
 that file and the implemented EF Core model; keep all three in step (see
 `docs/24_SPEC_CONSISTENCY.md`). Tables documented elsewhere but not present in
-this list are not in the implemented schema and are tracked as deferred (for
-example `purchase_providers` and `billing_account_links`, which CORE-DOC-002
-formally defers to post-v1; see `csv/entitlement_database_tables.csv` and
+this list are not in the implemented schema (for example `purchase_providers`,
+whose provider handling is in-code rather than a table, and
+`billing_account_links`, which is **in scope for Core v1 but not yet built** —
+CORE-MON-002 adds it after CORE-MON-001 reversed the CORE-DOC-002 post-v1
+deferral; see `csv/entitlement_database_tables.csv` and
 `docs/24_SPEC_CONSISTENCY.md`).
 
 Current Core tables:

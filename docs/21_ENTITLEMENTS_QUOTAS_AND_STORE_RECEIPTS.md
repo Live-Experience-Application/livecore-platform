@@ -358,8 +358,9 @@ HTTP route.
   crash-retried sweep changes nothing. A notification recorded for a purchase Core never persisted converges
   nothing (`TransactionNotFound`): nothing is fabricated, so no entitlement is granted without a real verified
   purchase. Purchases are global (no tenant/buyer column), so there is no tenant boundary on this system job.
-- **Gated on billing, fail-closed (`only runs when billing is configured`).** Store receipts/billing are out of
-  scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`), so the job runs only when a deployment has both a
+- **Gated on billing, fail-closed (`only runs when billing is configured`).** Billing/monetization is in scope for
+  Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`), but it requires deployment-supplied store adapters and credentials
+  (`docs/13_SELF_HOSTING_REQUIREMENTS.md`), so the job runs only when a deployment has both a
   configured database **and** `Store:Reconciliation:Enabled=true`. With the flag unset (the default) the worker
   registers no reconciliation loop — the same fail-closed posture as the verification/notification parser
   resolvers, which register no adapter until a deployment supplies one. The worker schedules it every
@@ -369,38 +370,47 @@ HTTP route.
   window-function candidate query for high-volume deployments (the candidate scan computes the latest-per-purchase
   client-side, which suits this off-by-default, low-volume job).
 
-## Purchase-to-entitlement grant chain — formally deferred for Core v1 (CORE-DOC-002)
+## Purchase-to-entitlement grant chain — in scope for Core v1 (CORE-MON-001)
 
 Every store story above stops at the **persisted, audited purchase status** and
-explicitly defers "granting the resulting `SubjectEntitlement` from the recorded
-purchase (the product → plan → entitlement mapping) and linking the buyer
-(`billing_account_links`)" to "a later story". CORE-DOC-002 is the decision on
-that deferred chain, and it records it **formally deferred to post-v1**: billing
-is out of scope for Core v1 (`docs/01_PRODUCT_VISION_AND_SCOPE.md`, "Out of
-scope"), so the monetization loop is not closed in v1.
+defers "granting the resulting `SubjectEntitlement` from the recorded purchase
+(the product → plan → entitlement mapping) and linking the buyer
+(`billing_account_links`)" to "a later story". CORE-DOC-002 had recorded that
+chain as **deferred to post-v1**; CORE-MON-001 **reverses that decision** — the
+product now requires monetization in v1, so the grant chain is **in scope for
+Core v1** and is built by the Monetization v1 epic (CORE-MON-001..010). The
+single source of truth for the v1 monetization scope and acceptance is
+`docs/24_SPEC_CONSISTENCY.md` ("Decision recorded (CORE-MON-001)").
 
-Deferred (tracked in `docs/24_SPEC_CONSISTENCY.md`, not drift):
+The chain to build in v1 (the later stories the store sections point to):
 
 - the `billing_account_links` "Database addition" (store-account-to-subject
-  link) — `purchase_transactions` deliberately carries no buyer column for it —
-  and the still-in-code-only `purchase_providers`;
-- the product → plan → entitlement mapping;
-- the trigger that would call `SubjectEntitlementAssignmentService` from a
-  verified purchase (CORE-STORE-003/004) or a store notification
-  (CORE-STORE-005, CORE-JOB-003).
+  link) — `purchase_transactions` deliberately carries no buyer column, so the
+  buyer linkage lives here (CORE-MON-002);
+- the product → plan → entitlement mapping that turns a verified purchase into a
+  plan grant (CORE-MON-003);
+- the trigger that calls `SubjectEntitlementAssignmentService` from a verified
+  purchase (CORE-STORE-003/004) or a store notification (CORE-STORE-005,
+  CORE-JOB-003), including the refund/cancellation revocation path
+  (CORE-MON-003/004).
 
-In scope and shipped in v1 (so this area is not orphaned dead code): the
+The v1 monetization foundation already shipped is reused, not rebuilt: the
 provider-neutral verify-and-record gate (CORE-STORE-001..004), the idempotent
 store-notification → purchase-status pipeline and its reconciliation job
 (CORE-STORE-005, CORE-JOB-003), the reusable `SubjectEntitlement`
 assignment/lookup primitive and server-side quota enforcement
 (CORE-ENTL-001..004), and the entitlement-driven ad eligibility read
-(CORE-ADS-001). These operate on entitlements assigned by other means
-(administrative/seed assignment); **no verified purchase grants a
-`SubjectEntitlement` in Core v1**. When billing leaves deferral, the grant story
-adds `billing_account_links` + the product→plan mapping and wires the existing
-verify/notify pipeline to the existing assignment primitive — no part of the v1
-work is wasted.
+(CORE-ADS-001). The grant story wires this existing verify/notify pipeline to the
+existing assignment primitive over the new `billing_account_links` + product→plan
+mapping — no part of the foundation work is wasted.
+
+**v1 acceptance** (recorded in full in `docs/24_SPEC_CONSISTENCY.md`): a
+verified, buyer-linked purchase grants the buyer the mapped `SubjectEntitlement`
+idempotently and the grant shows up in the effective-entitlements read; a
+refund/cancellation/chargeback revokes or downgrades it and stays revoked; the
+free-tier quotas are enforced server-side and cannot be bypassed by clients; and
+user-visible premium state comes only from server entitlements (an
+unverified/failed purchase grants nothing — fail-closed).
 
 ## Atomic quota check-and-consume (CORE-CONC-004)
 
