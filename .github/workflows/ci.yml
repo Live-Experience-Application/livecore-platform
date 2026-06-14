@@ -2,6 +2,7 @@
 #
 # Runs the commands documented in README.md verbatim. Independent jobs:
 #   dotnet               - build, smoke tests, format/code-style verification
+#   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
@@ -58,6 +59,54 @@ jobs:
 
       - name: Verify formatting and code style
         run: dotnet format LiveCore.slnx --verify-no-changes
+
+  coverage:
+    name: Code coverage (collect, report, gate)
+    runs-on: ubuntu-latest
+    # CORE-TST-001: coverlet.collector is referenced by every test project, but no
+    # step collected coverage or gated on it, so the strong test coverage was
+    # unguarded - a new untested production handler could silently regress it and
+    # the "no feature without tests" Definition of Done rested on author
+    # discipline alone (docs/14, docs/17). This job closes that gap:
+    #   1. it unit-tests the gate logic first (a seeded, deliberately-untested new
+    #      handler trips the threshold once blocking is enabled),
+    #   2. collects coverage with the already-referenced collector (no new
+    #      dependency) - one coverage.cobertura.xml per test project,
+    #   3. uploads the reports as a build artifact, and
+    #   4. runs the threshold gate over the merged, de-duplicated,
+    #      production-focused number (test assemblies and generated EF migrations
+    #      excluded; see scripts/LiveCoreCoverage.psm1).
+    # The gate STARTS NON-BLOCKING (assert-coverage.ps1 -ReportOnly): it reports
+    # coverage and warns on a regression below the minimum without failing the
+    # build. It is flipped to BLOCKING by dropping -ReportOnly once the team is
+    # ready, exactly like the supply-chain dry-run's report-only posture.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test the coverage gate logic (a seeded untested handler trips it)
+        run: pwsh -NoProfile -File scripts/test-coverage-gate.ps1
+
+      - name: Run the test suite with coverage collection
+        run: dotnet test LiveCore.slnx --collect:"XPlat Code Coverage" --results-directory ./TestResults
+
+      - name: Upload the coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-cobertura
+          path: "TestResults/**/coverage.cobertura.xml"
+          if-no-files-found: error
+
+      - name: Report coverage and run the threshold gate (non-blocking for now)
+        # Drop -ReportOnly to make a coverage regression below the minimum fail
+        # the build (the blocking posture). Raise -MinimumLineCoverage toward the
+        # current production coverage as the team ratchets the floor up.
+        run: pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 80 -ReportOnly
 
   typescript:
     name: TypeScript lint, format and build
@@ -590,6 +639,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - dotnet
+      - coverage
       - typescript
       - boundary-scan
       - spec-consistency

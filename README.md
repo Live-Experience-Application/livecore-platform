@@ -64,13 +64,16 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, format/lint, boundary scan, image builds; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
+.github/workflows/ci.yml CI pipeline (build, tests, code-coverage report + gate, format/lint, boundary scan, image builds; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
 scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
+scripts/LiveCoreCoverage.psm1  code-coverage gate logic: merges the Cobertura reports into one de-duplicated, production-focused line-coverage number and the threshold pass/fail decision (CORE-TST-001)
+scripts/assert-coverage.ps1    CLI the CI coverage job runs to report coverage and fail below the minimum (fail-closed; report-only while the gate is non-blocking, CORE-TST-001)
+scripts/test-coverage-gate.ps1 tests for the coverage gate (a deliberately-untested new handler trips the threshold once blocking is enabled, CORE-TST-001)
 .dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
@@ -152,6 +155,25 @@ dotnet format LiveCore.slnx
 C# style rules live in `.editorconfig`. `Directory.Build.props` additionally
 enforces them at build time (`EnforceCodeStyleInBuild`) and treats warnings as
 errors, so `dotnet build` doubles as the .NET lint gate.
+
+### Code coverage and the coverage gate
+
+Collect coverage with the referenced `coverlet.collector` and run the threshold
+gate (CORE-TST-001). The CI `coverage` job runs the same commands:
+
+```bash
+dotnet test LiveCore.slnx --collect:"XPlat Code Coverage" --results-directory ./TestResults
+pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 80 -ReportOnly
+```
+
+`assert-coverage.ps1` merges the per-project Cobertura reports into one
+de-duplicated, production-focused line-coverage number (test assemblies and
+generated EF migrations excluded) and checks it against the minimum. The gate is
+**non-blocking** for now (`-ReportOnly` reports and warns without failing); drop
+`-ReportOnly` to make a regression below the minimum fail the build. The gate
+logic is tested by `scripts/test-coverage-gate.ps1`. See
+`docs/14_TESTING_STRATEGY.md` ("Coverage measurement and the CI gate") and
+`docs/17_DEFINITION_OF_DONE.md`.
 
 ### TypeScript packages
 
