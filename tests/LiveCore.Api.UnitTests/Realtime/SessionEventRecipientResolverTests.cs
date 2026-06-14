@@ -185,6 +185,7 @@ public sealed class SessionEventRecipientResolverTests
         public Task<bool> CanAudienceReceiveAsync(
             Guid organizationId,
             Guid workspaceId,
+            Guid sessionId,
             string subjectType,
             Guid subjectId,
             CancellationToken cancellationToken)
@@ -196,6 +197,7 @@ public sealed class SessionEventRecipientResolverTests
         public Task<bool> CanParticipantReceiveAsync(
             Guid organizationId,
             Guid workspaceId,
+            Guid sessionId,
             Guid participantId,
             string subjectType,
             Guid subjectId,

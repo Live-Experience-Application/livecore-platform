@@ -91,6 +91,12 @@ internal sealed class RevealService
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The session's workspace the resource belongs to.</param>
+    /// <param name="sessionId">
+    /// The session the reveal happens in (CORE-SVIS-001). The reveal is SESSION-SCOPED: the rule it
+    /// creates/flips belongs to this session, so the resource becomes visible ONLY within it and never
+    /// in a concurrent session of the same workspace (the cross-session leak; threat T5/T3). The caller
+    /// (the endpoint) supplies the session it loaded and authorized. Must be non-empty.
+    /// </param>
     /// <param name="resourceType">The kind of resource to reveal.</param>
     /// <param name="resourceId">The surrogate id of the resource to reveal.</param>
     /// <param name="targetParticipantId">
@@ -107,13 +113,14 @@ internal sealed class RevealService
     /// <param name="now">The command timestamp.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id, resource id or actor id is empty, the target participant id is
-    /// empty, or the idempotency key is blank.
+    /// The organization id, workspace id, session id, resource id or actor id is empty, the target
+    /// participant id is empty, or the idempotency key is blank.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The resource type is not defined.</exception>
     public async Task<RevealResult> RevealAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
@@ -127,6 +134,7 @@ internal sealed class RevealService
                 VisibilityState.Visible,
                 organizationId,
                 workspaceId,
+                sessionId,
                 resourceType,
                 resourceId,
                 targetParticipantId,
@@ -154,6 +162,11 @@ internal sealed class RevealService
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The session's workspace the resource belongs to.</param>
+    /// <param name="sessionId">
+    /// The session the hide happens in (CORE-SVIS-001). The hide is SESSION-SCOPED: it flips only the
+    /// rule of this session, so it never touches the resource's visibility in a concurrent session of
+    /// the same workspace. Must be non-empty.
+    /// </param>
     /// <param name="resourceType">The kind of resource to hide.</param>
     /// <param name="resourceId">The surrogate id of the resource to hide.</param>
     /// <param name="targetParticipantId">
@@ -169,13 +182,14 @@ internal sealed class RevealService
     /// <param name="now">The command timestamp.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id, resource id or actor id is empty, the target participant id is
-    /// empty, or the idempotency key is blank.
+    /// The organization id, workspace id, session id, resource id or actor id is empty, the target
+    /// participant id is empty, or the idempotency key is blank.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The resource type is not defined.</exception>
     public async Task<HideResult> HideAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
@@ -189,6 +203,7 @@ internal sealed class RevealService
                 VisibilityState.Hidden,
                 organizationId,
                 workspaceId,
+                sessionId,
                 resourceType,
                 resourceId,
                 targetParticipantId,
@@ -217,6 +232,7 @@ internal sealed class RevealService
         VisibilityState targetState,
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
@@ -233,6 +249,11 @@ internal sealed class RevealService
         if (workspaceId == Guid.Empty)
         {
             throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
         }
 
         if (!VisibilityRule.IsValidResourceType(resourceType))
@@ -281,7 +302,7 @@ internal sealed class RevealService
         // a crash between the two leaves the key unrecorded, so a retry safely re-ensures the target
         // state (the effect is idempotent) rather than skipping it.
         var change = await EnsureStateAsync(
-                organizationId, workspaceId, resourceType, resourceId, targetParticipantId, targetState, now, cancellationToken)
+                organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, targetState, now, cancellationToken)
             .ConfigureAwait(false);
 
         // AUDIT (CORE-VIS-006): append an append-only audit record IFF the visibility actually changed.
@@ -341,6 +362,7 @@ internal sealed class RevealService
     private async Task<VisibilityChange?> EnsureStateAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
@@ -348,8 +370,11 @@ internal sealed class RevealService
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        // Session-scoped (CORE-SVIS-001): only the rules of THIS session are relevant, so a reveal/hide
+        // never reads or flips a rule of a concurrent session of the same workspace (the cross-session
+        // leak; threat T5/T3).
         var rules = await _rules
-            .ListByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken)
+            .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
         // Only the rules in the SAME target dimension are relevant: audience-wide rules for an
@@ -387,9 +412,9 @@ internal sealed class RevealService
         // participant, per the target. There is no prior state.
         var created = targetParticipantId is { } participantId
             ? VisibilityRule.CreateForParticipant(
-                organizationId, workspaceId, resourceType, resourceId, participantId, targetState, now)
+                organizationId, workspaceId, sessionId, resourceType, resourceId, participantId, targetState, now)
             : VisibilityRule.Create(
-                organizationId, workspaceId, resourceType, resourceId, targetState, now);
+                organizationId, workspaceId, sessionId, resourceType, resourceId, targetState, now);
         await _rules.AddAsync(created, cancellationToken).ConfigureAwait(false);
         return new VisibilityChange(PreviousVisibility: null, NewVisibility: targetState);
     }

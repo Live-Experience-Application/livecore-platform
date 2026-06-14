@@ -248,35 +248,42 @@ internal static class TestData
     }
 
     /// <summary>
-    /// Creates and persists a visibility rule for the given resource in the given workspace, driving
-    /// the real <see cref="VisibilityRule.Create"/> aggregate factory. Used to arrange a resource's
-    /// existing visibility (for example a Hidden rule the reveal command flips to Visible).
+    /// Creates and persists a SESSION-SCOPED visibility rule for the given resource in the given session,
+    /// driving the real <see cref="VisibilityRule.Create"/> aggregate factory (CORE-SVIS-001). Used to
+    /// arrange a resource's existing visibility within a session (for example a Hidden rule the reveal
+    /// command flips to Visible, or an audience-wide reveal made in one session that must not leak into a
+    /// concurrent session). The <paramref name="sessionId"/> must reference a real session in the
+    /// workspace (the session foreign key).
     /// </summary>
     public static async Task<VisibilityRule> AddVisibilityRuleAsync(
         this LiveCoreDbContext context,
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         VisibilityState visibility)
     {
-        var rule = VisibilityRule.Create(organizationId, workspaceId, resourceType, resourceId, visibility, SeedTime);
+        var rule = VisibilityRule.Create(
+            organizationId, workspaceId, sessionId, resourceType, resourceId, visibility, SeedTime);
         context.VisibilityRules.Add(rule);
         await context.SaveChangesAsync();
         return rule;
     }
 
     /// <summary>
-    /// Creates and persists a SELECTED-participant visibility rule for the given resource in the given
-    /// workspace, driving the real <see cref="VisibilityRule.CreateForParticipant"/> aggregate factory.
-    /// The rule's visibility applies ONLY to <paramref name="targetParticipantId"/> — a private reveal —
-    /// so a non-selected participant must not see it. Used to arrange the selected-participant guarantee
+    /// Creates and persists a SELECTED-participant, SESSION-SCOPED visibility rule for the given resource
+    /// in the given session, driving the real <see cref="VisibilityRule.CreateForParticipant"/> aggregate
+    /// factory (CORE-VIS-005 + CORE-SVIS-001). The rule's visibility applies ONLY to
+    /// <paramref name="targetParticipantId"/> within <paramref name="sessionId"/> — a private reveal — so
+    /// a non-selected participant must not see it. Used to arrange the selected-participant guarantee
     /// (the crown-jewel: one participant does not see another participant's private reveal).
     /// </summary>
     public static async Task<VisibilityRule> AddParticipantVisibilityRuleAsync(
         this LiveCoreDbContext context,
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid targetParticipantId,
@@ -285,6 +292,7 @@ internal static class TestData
         var rule = VisibilityRule.CreateForParticipant(
             organizationId,
             workspaceId,
+            sessionId,
             resourceType,
             resourceId,
             targetParticipantId,

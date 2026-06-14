@@ -19,7 +19,7 @@ public enum EntitySearchView
     /// <summary>
     /// The AUDIENCE view: the visibility-filtered set returned to an audience caller. For an audience
     /// PARTICIPANT it holds exactly the entities the central Visibility engine
-    /// (<see cref="Visibility.VisibilityPolicy.CanParticipantViewResourceAsync"/>, CORE-VIS-005)
+    /// (<see cref="Visibility.VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, Visibility.VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>, CORE-VIS-005)
     /// reveals to that participant — an audience-wide visible rule, or a visible rule scoped to exactly
     /// them (CORE-API-006); a caller with no content-view standing (the audit role, any undefined role,
     /// an audience role with no participant) receives the same view, fail-closed EMPTY, so the two are

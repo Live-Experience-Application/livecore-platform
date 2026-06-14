@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -128,6 +129,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subject = "participant-a";
         Guid participantId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var user = await db.AddUserAsync(_issuer, subject);
@@ -137,13 +139,15 @@ public sealed class ParticipantVisibleFeedEndpointTests
             await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
             var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             participantId = participant.Id;
             workspaceId = workspace.Id;
+            sessionId = session.Id;
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertEmptyFeedAsync(response, participantId, workspaceId);
@@ -160,6 +164,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subject = "participant-a";
         Guid participantId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var user = await db.AddUserAsync(_issuer, subject);
@@ -168,13 +173,15 @@ public sealed class ParticipantVisibleFeedEndpointTests
             var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
             // Deliberately NO workspace membership for the caller.
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             participantId = participant.Id;
             workspaceId = workspace.Id;
+            sessionId = session.Id;
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertEmptyFeedAsync(response, participantId, workspaceId);
@@ -194,6 +201,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         var subject = $"previewer-{role}";
         Guid participantId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var previewer = await db.AddUserAsync(_issuer, subject);
@@ -205,13 +213,15 @@ public sealed class ParticipantVisibleFeedEndpointTests
             await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, previewer.Id, role);
             // The participant belongs to a DIFFERENT user, not the previewer.
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, other.Id);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             participantId = participant.Id;
             workspaceId = workspace.Id;
+            sessionId = session.Id;
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertEmptyFeedAsync(response, participantId, workspaceId);
@@ -226,6 +236,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subject = "host-a";
         Guid participantId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var host = await db.AddUserAsync(_issuer, subject);
@@ -235,13 +246,15 @@ public sealed class ParticipantVisibleFeedEndpointTests
             await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, host.Id, MembershipRole.Host);
             // Anonymous participant: no user link.
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, userProfileId: null);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             participantId = participant.Id;
             workspaceId = workspace.Id;
+            sessionId = session.Id;
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertEmptyFeedAsync(response, participantId, workspaceId);
@@ -539,6 +552,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subject = "participant-a";
         Guid participantId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         Guid audienceWideSceneId = Guid.Empty;
         Guid privateToMeContentId = Guid.Empty;
         await factory.SeedAsync(async db =>
@@ -550,32 +564,41 @@ public sealed class ParticipantVisibleFeedEndpointTests
             workspaceId = workspace.Id;
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
             participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
 
             // Visible to the whole audience -> in the feed.
             audienceWideSceneId = Guid.CreateVersion7();
             await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Scene, audienceWideSceneId, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, audienceWideSceneId, VisibilityState.Visible);
 
             // Revealed privately to THIS participant -> in the feed.
             privateToMeContentId = Guid.CreateVersion7();
             await db.AddParticipantVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, privateToMeContentId,
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, privateToMeContentId,
                 participant.Id, VisibilityState.Visible);
 
             // Hidden from the audience -> NOT in the feed (carries a rule, but Hidden).
             await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Entity, Guid.CreateVersion7(), VisibilityState.Hidden);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, Guid.CreateVersion7(), VisibilityState.Hidden);
+
+            // A reveal in a DIFFERENT, concurrent session of the SAME workspace -> NOT in this
+            // session's feed (the cross-session guarantee; threat T5/T3, CORE-SVIS-001).
+            var otherSession = await db.AddSessionAsync(org.Id, workspace.Id, "Other Session", SessionStatus.Live);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, otherSession.Id, VisibilityResourceType.Scene, Guid.CreateVersion7(), VisibilityState.Visible);
 
             // A second workspace with an audience-wide visible scene -> NOT in this
             // participant's feed (a foreign workspace never contributes; threat T5).
             var otherWorkspace = await db.AddWorkspaceAsync(org.Id, "other-show", "Other Show");
+            var otherWorkspaceSession = await db.AddSessionAsync(org.Id, otherWorkspace.Id, "Other Workspace Session", SessionStatus.Live);
             await db.AddVisibilityRuleAsync(
-                org.Id, otherWorkspace.Id, VisibilityResourceType.Scene, Guid.CreateVersion7(), VisibilityState.Visible);
+                org.Id, otherWorkspace.Id, otherWorkspaceSession.Id, VisibilityResourceType.Scene, Guid.CreateVersion7(), VisibilityState.Visible);
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(
@@ -598,6 +621,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subjectP = "participant-p-owner";
         Guid participantPId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         Guid privateToQResourceId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
@@ -610,17 +634,19 @@ public sealed class ParticipantVisibleFeedEndpointTests
             var participantP = await db.AddParticipantAsync(org.Id, workspace.Id, ownerP.Id, displayName: "P");
             participantPId = participantP.Id;
             var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
 
             // The resource is revealed ONLY to Q.
             privateToQResourceId = Guid.CreateVersion7();
             await db.AddParticipantVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Scene, privateToQResourceId,
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, privateToQResourceId,
                 participantQ.Id, VisibilityState.Visible);
         });
 
         using var client = factory.CreateClientFor(subjectP, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantPId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantPId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         // P is authorized (own feed) but sees NOTHING — the reveal belongs to Q.
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -637,6 +663,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subjectQ = "participant-q-owner";
         Guid participantQId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         Guid privateToQResourceId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
@@ -647,16 +674,18 @@ public sealed class ParticipantVisibleFeedEndpointTests
             workspaceId = workspace.Id;
             var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
             participantQId = participantQ.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
 
             privateToQResourceId = Guid.CreateVersion7();
             await db.AddParticipantVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Scene, privateToQResourceId,
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, privateToQResourceId,
                 participantQ.Id, VisibilityState.Visible);
         });
 
         using var client = factory.CreateClientFor(subjectQ, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(
@@ -674,6 +703,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
         const string subject = "host-a";
         Guid participantQId = Guid.Empty;
         Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
         Guid privateToQResourceId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
@@ -686,20 +716,84 @@ public sealed class ParticipantVisibleFeedEndpointTests
             await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, host.Id, MembershipRole.Host);
             var participantQ = await db.AddParticipantAsync(org.Id, workspace.Id, ownerQ.Id, displayName: "Q");
             participantQId = participantQ.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
 
             privateToQResourceId = Guid.CreateVersion7();
             await db.AddParticipantVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Entity, privateToQResourceId,
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, privateToQResourceId,
                 participantQ.Id, VisibilityState.Visible);
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await client.GetAsync(
-            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}");
+            $"/api/v1/participants/{participantQId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(
             response, participantQId, workspaceId, ("Entity", privateToQResourceId));
+    }
+
+    // =====================================================================
+    // SESSION SCOPE (CORE-SVIS-001) — the feed is bounded by a required session.
+    // =====================================================================
+
+    [Fact]
+    public async Task Missing_session_id_is_400_for_an_authorized_caller()
+    {
+        // The feed is session-scoped (CORE-SVIS-001), so it requires a sessionId. An authorized own-feed
+        // caller who omits it gets 400 — the request-shape error is surfaced only AFTER authorization, so
+        // an unauthorized caller never learns the parameter is required.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_session_in_a_different_workspace_is_404()
+    {
+        // T5 cross-workspace: the participant lives in workspace X but the supplied session belongs to a
+        // sibling workspace Y of the same tenant. The session must be the participant's OWN workspace's
+        // session, so a foreign-workspace session is hidden as 404 (never leaking that the session
+        // exists), even for the participant's own owner.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid foreignSessionId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspaceX = await db.AddWorkspaceAsync(org.Id, "workspace-x", "Workspace X");
+            var participant = await db.AddParticipantAsync(org.Id, workspaceX.Id, user.Id);
+            participantId = participant.Id;
+            // A session in a DIFFERENT workspace of the same tenant.
+            var workspaceY = await db.AddWorkspaceAsync(org.Id, "workspace-y", "Workspace Y");
+            var foreignSession = await db.AddSessionAsync(org.Id, workspaceY.Id, "Foreign Session", SessionStatus.Live);
+            foreignSessionId = foreignSession.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={foreignSessionId}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     // =====================================================================

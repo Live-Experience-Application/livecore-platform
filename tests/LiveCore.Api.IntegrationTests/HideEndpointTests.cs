@@ -167,7 +167,7 @@ public sealed class HideEndpointTests
         const string subject = "host-a";
         var resourceId = Guid.CreateVersion7();
         var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
-        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.ContentBlock, resourceId);
+        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.ContentBlock, resourceId);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
 
@@ -231,7 +231,7 @@ public sealed class HideEndpointTests
         var subject = $"member-{role}";
         var resourceId = Guid.CreateVersion7();
         var seed = await SeedSessionAsync(factory, subject, role);
-        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Scene, resourceId);
+        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.Scene, resourceId);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await PostHideAsync(client, seed.SessionId, Body(_orgA, "Scene", resourceId), "key-1");
@@ -248,7 +248,7 @@ public sealed class HideEndpointTests
         var subject = $"member-{role}";
         var resourceId = Guid.CreateVersion7();
         var seed = await SeedSessionAsync(factory, subject, role);
-        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Entity, resourceId);
+        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.Entity, resourceId);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await PostHideAsync(client, seed.SessionId, Body(_orgA, "Entity", resourceId), "key-1");
@@ -276,7 +276,7 @@ public sealed class HideEndpointTests
             var session = await db.AddSessionAsync(org.Id, workspace.Id, "S", SessionStatus.Live);
             seed = new SeedResult(org.Id, workspace.Id, session.Id);
         });
-        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Entity, resourceId);
+        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.Entity, resourceId);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await PostHideAsync(client, seed.SessionId, Body(_orgA, "Entity", resourceId), "key-1");
@@ -305,7 +305,7 @@ public sealed class HideEndpointTests
             var session = await db.AddSessionAsync(orgB.Id, workspaceInB.Id, "B", SessionStatus.Live);
             seedB = new SeedResult(orgB.Id, workspaceInB.Id, session.Id);
         });
-        await SeedVisibleRuleAsync(factory, seedB.OrganizationId, seedB.WorkspaceId, VisibilityResourceType.Entity, resourceId);
+        await SeedVisibleRuleAsync(factory, seedB.OrganizationId, seedB.WorkspaceId, seedB.SessionId, VisibilityResourceType.Entity, resourceId);
 
         // Address the org-B session with organizationSlug = A (the caller's own org).
         using var client = factory.CreateClientFor(subject, _issuer, _orgA, _orgB);
@@ -363,7 +363,7 @@ public sealed class HideEndpointTests
         const string subject = "host-a";
         var resourceId = Guid.CreateVersion7();
         var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
-        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Entity, resourceId);
+        await SeedVisibleRuleAsync(factory, seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.Entity, resourceId);
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA);
         var response = await PostHideAsync(client, seed.SessionId, Body(_orgA, "Entity", resourceId), idempotencyKey: null);
@@ -462,18 +462,22 @@ public sealed class HideEndpointTests
         return participantId;
     }
 
-    /// <summary>Seeds an audience-wide VISIBLE rule for the resource, so a hide has something to flip.</summary>
+    /// <summary>
+    /// Seeds an audience-wide VISIBLE rule for the resource IN THE GIVEN SESSION, so a hide has something
+    /// to flip (the hide is session-scoped, CORE-SVIS-001, so the rule must be in the session being hidden).
+    /// </summary>
     private static async Task SeedVisibleRuleAsync(
         WorkspaceApiFactory factory,
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId)
     {
         using var scope = factory.Services.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
         var rule = VisibilityRule.Create(
-            organizationId, workspaceId, resourceType, resourceId, VisibilityState.Visible, DateTimeOffset.UtcNow);
+            organizationId, workspaceId, sessionId, resourceType, resourceId, VisibilityState.Visible, DateTimeOffset.UtcNow);
         context.VisibilityRules.Add(rule);
         await context.SaveChangesAsync();
     }

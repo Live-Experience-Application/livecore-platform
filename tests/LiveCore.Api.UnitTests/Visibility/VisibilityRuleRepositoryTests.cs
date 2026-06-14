@@ -1,5 +1,6 @@
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -91,15 +92,41 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         return workspace;
     }
 
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
+
+    private async Task<Session> SeedSessionAsync(Guid organizationId, Guid workspaceId, string title = "Live Session")
+    {
+        var session = Session.Create(organizationId, workspaceId, title, _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        return session;
+    }
+
+    /// <summary>Lazily seeds and caches ONE session per workspace, so rules sharing a workspace share a session.</summary>
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = await SeedSessionAsync(organizationId, workspaceId);
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     private async Task<VisibilityRule> SeedRuleAsync(
         Guid organizationId,
         Guid workspaceId,
         VisibilityResourceType resourceType = VisibilityResourceType.ContentBlock,
         Guid? resourceId = null,
-        VisibilityState visibility = VisibilityState.Hidden)
+        VisibilityState visibility = VisibilityState.Hidden,
+        Guid? sessionId = null)
     {
+        var session = sessionId ?? await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.Create(
-            organizationId, workspaceId, resourceType, resourceId ?? Guid.NewGuid(), visibility, _createdAt);
+            organizationId, workspaceId, session, resourceType, resourceId ?? Guid.NewGuid(), visibility, _createdAt);
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
         Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
@@ -236,7 +263,7 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
         var listed = await repository.ListByResourceAsync(
-            org, ws, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+            org, ws, await SessionIdAsync(org, ws), VisibilityResourceType.Entity, resourceId, CancellationToken.None);
 
         Assert.Equal(2, listed.Count);
         Assert.Contains(listed, rule => rule.Id == ruleA.Id);
@@ -257,8 +284,68 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
 
         // The same resource id queried in workspace B returns nothing.
         var listed = await repository.ListByResourceAsync(
-            organization.Id, workspaceB.Id, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            organization.Id,
+            workspaceB.Id,
+            await SessionIdAsync(organization.Id, workspaceB.Id),
+            VisibilityResourceType.ContentBlock,
+            resourceId,
+            CancellationToken.None);
         Assert.Empty(listed);
+    }
+
+    // --- Session isolation (CORE-SVIS-001, the cross-session leak) --------------
+
+    [Fact]
+    public async Task ListByResource_is_session_scoped_and_never_borrows_another_sessions_rules()
+    {
+        // THE CROWN-JEWEL at the repository level: a workspace runs two concurrent sessions A and B. A
+        // rule revealed for a resource in session A is returned for session A but NEVER for session B,
+        // so a reveal in one session can never be read through a concurrent session of the same
+        // workspace (threat T5/T3).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        var resourceId = Guid.NewGuid();
+        var ruleInA = await SeedRuleAsync(
+            org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible, sessionA.Id);
+
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+
+        var inA = await repository.ListByResourceAsync(
+            org, ws, sessionA.Id, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
+        Assert.Single(inA);
+        Assert.Equal(ruleInA.Id, inA[0].Id);
+
+        // Session B sees nothing for the same resource — the reveal is bounded to session A.
+        var inB = await repository.ListByResourceAsync(
+            org, ws, sessionB.Id, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
+        Assert.Empty(inB);
+    }
+
+    [Fact]
+    public async Task ListByResourceAcrossSessions_returns_rules_from_every_session_for_the_role_level_path()
+    {
+        // The workspace-wide, session-agnostic lookup (used by the role-level asset-download and
+        // entity-search reads) returns the resource's rules across ALL sessions of the workspace.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        var resourceId = Guid.NewGuid();
+        var ruleInA = await SeedRuleAsync(
+            org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionA.Id);
+        var ruleInB = await SeedRuleAsync(
+            org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden, sessionB.Id);
+
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+
+        var across = await repository.ListByResourceAcrossSessionsAsync(
+            org, ws, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+
+        Assert.Equal(2, across.Count);
+        Assert.Contains(across, rule => rule.Id == ruleInA.Id);
+        Assert.Contains(across, rule => rule.Id == ruleInB.Id);
     }
 
     // --- Foreign keys ----------------------------------------------------------
@@ -266,10 +353,11 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
     [Fact]
     public async Task Foreign_key_rejects_a_rule_for_a_nonexistent_organization()
     {
-        var (_, ws) = await SeedWorkspaceAsync();
-        // A real workspace but a tenant id that does not exist.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var session = await SeedSessionAsync(org, ws);
+        // A real workspace and session but a tenant id that does not exist.
         var rule = VisibilityRule.Create(
-            Guid.NewGuid(), ws, VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Hidden, _createdAt);
+            Guid.NewGuid(), ws, session.Id, VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Hidden, _createdAt);
 
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
@@ -282,7 +370,22 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
     {
         var organization = await SeedOrganizationAsync(_organizationSlugA);
         var rule = VisibilityRule.Create(
-            organization.Id, Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Hidden, _createdAt);
+            organization.Id, Guid.NewGuid(), Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Hidden, _createdAt);
+
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => repository.AddAsync(rule, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Foreign_key_rejects_a_rule_for_a_nonexistent_session()
+    {
+        // A real tenant and workspace but a session id that does not exist (CORE-SVIS-001 added the
+        // session foreign key): the rule is rejected at the database boundary.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var rule = VisibilityRule.Create(
+            org, ws, Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Hidden, _createdAt);
 
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
@@ -331,10 +434,12 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         var repository = new VisibilityRuleRepository(context);
 
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByResourceAsync(
-            Guid.Empty, Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), CancellationToken.None));
+            Guid.Empty, Guid.NewGuid(), Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByResourceAsync(
-            Guid.NewGuid(), Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), CancellationToken.None));
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), VisibilityResourceType.Entity, Guid.NewGuid(), CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByResourceAsync(
-            Guid.NewGuid(), Guid.NewGuid(), VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ListByResourceAsync(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
     }
 }

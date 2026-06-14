@@ -31,7 +31,7 @@ namespace LiveCore.Api.Entities;
 ///   <item>An AUDIENCE PARTICIPANT (a Participant/Observer role with an identified participant) gets
 ///   the entities the central Visibility engine says are visible TO THEM: each matching candidate is
 ///   routed through
-///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/> over
+///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> over
 ///   <see cref="VisibilityResourceType.Entity"/> — the SAME participant-aware primitive
 ///   <see cref="VisibilityPreviewService"/> and the realtime recipient resolver use, so entity search
 ///   can never diverge from the participant-visible feed or per-resource access. An entity is kept iff

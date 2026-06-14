@@ -1,5 +1,6 @@
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -8,15 +9,18 @@ namespace LiveCore.Api.Visibility;
 
 /// <summary>
 /// Relational mapping of <see cref="VisibilityRule"/> to the <c>visibility_rules</c> table
-/// (CORE-VIS-001; csv/database_tables.csv: module Visibility, scope <c>workspace</c>, "Audience
-/// rules"). The rule is workspace-scoped, so it carries a <c>workspace_id</c> column that is a
-/// foreign key into <c>workspaces(id)</c>, and tenant-scoped, so it carries an <c>organization_id</c>
-/// column that is a foreign key into <c>organizations(id)</c> (docs/10_DATABASE_SCHEMA.md principle:
-/// "tenant-scoped tables include <c>organization_id</c>", "workspace-scoped tables include
-/// <c>workspace_id</c>"; threat T5 in docs/07_SECURITY_THREAT_MODEL.md). The owning workspace already
-/// pins the organization, but storing the tenant on the row lets isolation be enforced at the row
-/// level and the organization boundary be checked before the workspace boundary
-/// (docs/06_AUTHORIZATION_MATRIX.md authorization principles).
+/// (CORE-VIS-001, scoped to the session by CORE-SVIS-001; csv/database_tables.csv: module Visibility,
+/// scope <c>session</c>, "Session-scoped audience rules"). A reveal is session-scoped
+/// (docs/adr/0013-session-scoped-visibility-rules.md), so the rule carries a <c>session_id</c> column
+/// that is a foreign key into <c>sessions(id)</c>, in addition to the <c>workspace_id</c> foreign key
+/// into <c>workspaces(id)</c> and the <c>organization_id</c> foreign key into <c>organizations(id)</c>
+/// (docs/10_DATABASE_SCHEMA.md principle: "tenant-scoped tables include <c>organization_id</c>",
+/// "workspace-scoped tables include <c>workspace_id</c>", "session-scoped tables include
+/// <c>session_id</c>"; threat T5 in docs/07_SECURITY_THREAT_MODEL.md). The owning session already pins
+/// the workspace and tenant, but storing all three on the row lets isolation be enforced at the row
+/// level and the boundaries be checked in order (organization, then workspace, then session) — and,
+/// crucially, lets a reveal be isolated to its own session when a workspace runs several concurrent
+/// sessions (the cross-session leak, threat T5/T3).
 ///
 /// Rule columns are REAL COLUMNS, never JSON: <c>resource_type</c> stores the generic governed
 /// resource kind name (Scene/ContentBlock/Entity), <c>resource_id</c> the governed resource's
@@ -37,19 +41,22 @@ namespace LiveCore.Api.Visibility;
 /// Two indexes back the documented access patterns:
 /// <list type="bullet">
 ///   <item>
-///   The non-unique composite index on (<c>workspace_id</c>, <c>resource_type</c>,
+///   The non-unique composite index on (<c>session_id</c>, <c>resource_type</c>,
 ///   <c>resource_id</c>) is the documented critical index
-///   <c>visibility_rules(workspace_id, resource_type, resource_id)</c>
-///   (docs/10_DATABASE_SCHEMA.md): it keeps "find the rule(s) for this resource" efficient and makes
-///   every visibility read lead with the workspace column. It is NON-unique on purpose — a resource
-///   may accumulate more than one rule (the base audience rule now; per-participant scoped rules in
-///   the later selected-participant reveal, CORE-VIS-005) — so this story does not impose a
-///   uniqueness a later story would have to drop.
+///   <c>visibility_rules(session_id, resource_type, resource_id)</c>
+///   (docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped (CORE-SVIS-001), so "find the rule(s) for
+///   this resource in this session" leads with the session column — the lookup the session-scoped
+///   policy and the reveal command perform. It is NON-unique on purpose — a resource may accumulate
+///   more than one rule within a session (the base audience rule plus per-participant scoped rules,
+///   CORE-VIS-005) — so this story does not impose a uniqueness a later story (the
+///   single-rule-per-(session, resource, dimension) constraint, CORE-SVIS-002) would have to widen.
 ///   </item>
 ///   <item>
 ///   The non-unique composite index on (<c>organization_id</c>, <c>workspace_id</c>) keeps the
 ///   tenant boundary check (checked before the workspace boundary) and the organization foreign-key
-///   check efficient and makes tenant-scoped reads lead with <c>organization_id</c> (threat T5).
+///   check efficient and makes tenant-scoped reads lead with <c>organization_id</c> (threat T5). It
+///   also backs the workspace-wide candidate read (the participant feed) and the role-level
+///   workspace-wide visibility read (asset download), which lead with the tenant then workspace.
 ///   </item>
 /// </list>
 ///
@@ -79,6 +86,14 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
 
         builder.Property(rule => rule.WorkspaceId)
             .HasColumnName("workspace_id")
+            .IsRequired();
+
+        // Session boundary (CORE-SVIS-001): a reveal is session-scoped, so the rule carries the session
+        // it belongs to as a first-class, required column. A workspace may run several concurrent
+        // sessions, so this column is what isolates a reveal to its own session (the cross-session leak,
+        // threat T5/T3).
+        builder.Property(rule => rule.SessionId)
+            .HasColumnName("session_id")
             .IsRequired();
 
         builder.Property(rule => rule.ResourceType)
@@ -113,11 +128,15 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
         builder.Property(rule => rule.TargetParticipantId)
             .HasColumnName("target_participant_id");
 
-        // Documented critical index visibility_rules(workspace_id, resource_type, resource_id):
-        // resource reads lead with the workspace column (docs/10_DATABASE_SCHEMA.md). NON-unique on
-        // purpose (a resource may accumulate multiple rules; see the type summary).
-        builder.HasIndex(rule => new { rule.WorkspaceId, rule.ResourceType, rule.ResourceId })
-            .HasDatabaseName("ix_visibility_rules_workspace_id_resource_type_resource_id");
+        // Documented critical index visibility_rules(session_id, resource_type, resource_id)
+        // (CORE-SVIS-001; docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped, so "find the rule(s)
+        // for this resource in this session" leads with the session column — the lookup the
+        // session-scoped policy and the reveal command perform. NON-unique on purpose (a resource may
+        // accumulate the audience-wide rule plus per-participant scoped rules within a session; the
+        // single-rule-per-(session, resource, dimension) uniqueness is the later CORE-SVIS-002 concern,
+        // so this story does not impose a uniqueness a later story would have to widen).
+        builder.HasIndex(rule => new { rule.SessionId, rule.ResourceType, rule.ResourceId })
+            .HasDatabaseName("ix_visibility_rules_session_id_resource_type_resource_id");
 
         // Tenant-scoped composite index leading with organization_id: keeps the organization
         // boundary check (checked before the workspace boundary) and tenant-scoped reads efficient
@@ -139,6 +158,15 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
             .WithMany()
             .HasForeignKey(rule => rule.WorkspaceId)
             .HasConstraintName("fk_visibility_rules_workspaces_workspace_id")
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Session foreign key (CORE-SVIS-001): every visibility rule hangs off exactly one session — the
+        // session the reveal happened in. Cascade delete removes a session's rules with it, mirroring the
+        // organization and workspace cascades; a rule has no meaning without its session.
+        builder.HasOne<Session>()
+            .WithMany()
+            .HasForeignKey(rule => rule.SessionId)
+            .HasConstraintName("fk_visibility_rules_sessions_session_id")
             .OnDelete(DeleteBehavior.Cascade);
 
         // Selected-participant foreign key (CORE-VIS-005): a participant-scoped rule references one

@@ -6,6 +6,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -303,11 +304,15 @@ public sealed class ContentBlockDeletionServiceTests : IDisposable
         context.Participants.Add(participant);
         await context.SaveChangesAsync();
 
+        var session = Session.Create(org.Id, workspace.Id, "Live Session", _seedTime);
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+
         // BlockA dependents.
         var audienceRuleA = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockA.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockA.Id, VisibilityState.Visible, _seedTime);
         var participantRuleA = VisibilityRule.CreateForParticipant(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockA.Id, participant.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockA.Id, participant.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.AddRange(audienceRuleA, participantRuleA);
 
         var asset = Asset.Create(
@@ -322,7 +327,7 @@ public sealed class ContentBlockDeletionServiceTests : IDisposable
 
         // UNRELATED BlockB dependents (must survive BlockA's deletion).
         var unrelatedRuleB = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockB.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockB.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.Add(unrelatedRuleB);
         var unrelatedLinkToB = AssetLink.Create(
             org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, blockB.Id, actor.Id, _seedTime);

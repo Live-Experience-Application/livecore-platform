@@ -36,7 +36,7 @@ public enum VisibilityAccessReason
 }
 
 /// <summary>
-/// The outcome of a <see cref="VisibilityPolicy.CanViewResourceAsync"/> decision (CORE-VIS-002):
+/// The outcome of a <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, System.Guid, Organizations.MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> decision (CORE-VIS-002):
 /// whether a viewer may see a specific resource, together with the <see cref="VisibilityAccessReason"/>
 /// that produced it. It is a server-side authorization decision; the reason exists for testing and
 /// the later audit trail, never as an input to another decision.

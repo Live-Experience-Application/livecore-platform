@@ -5,7 +5,9 @@ namespace LiveCore.Api.Visibility;
 /// CORE-API-004), providing the <c>GetVisibleResourcesForParticipant</c> /
 /// <c>PreviewVisibilityForHost</c> operations docs/05_MODULE_CONTRACTS.md assigns to the Visibility
 /// module ("audience calculations", "preview-as-participant", "visible state reconstruction"). It
-/// computes the SET of resources a SPECIFIC participant may currently see in a workspace —
+/// computes the SET of resources a SPECIFIC participant may currently see in a SESSION (a reveal is
+/// session-scoped, CORE-SVIS-001, so the set is bounded by the session and never includes a reveal made
+/// in a concurrent session of the same workspace — the cross-session leak; threat T5/T3) —
 /// "Participant visibility is computed server-side" (docs/06_AUTHORIZATION_MATRIX.md). A host invokes
 /// it to PREVIEW what a participant sees (preview-as-participant); a participant's own visible feed is
 /// the same set. It is a plain, unit-testable query service over explicit inputs, exactly like
@@ -17,8 +19,9 @@ namespace LiveCore.Api.Visibility;
 ///
 /// REUSES THE CENTRAL DECISION — does NOT re-derive it. The participant-visible set is computed by
 /// routing every candidate resource through
-/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/> (the CORE-VIS-005 participant-aware
-/// primitive, the SAME one <see cref="EventRecipientVisibility"/> uses for realtime delivery), so the
+/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>
+/// (the CORE-VIS-005 participant-aware primitive made session-scoped by CORE-SVIS-001, the SAME one
+/// <see cref="EventRecipientVisibility"/> uses for realtime delivery), so the
 /// REST preview, the realtime recipient calculation and per-resource access can NEVER diverge and the
 /// visibility decision lives in exactly ONE place (docs/05_MODULE_CONTRACTS.md: "Do not duplicate
 /// visibility logic elsewhere"; docs/02_ARCHITECTURE.md: "entity visibility is not computed ad hoc in
@@ -65,30 +68,37 @@ internal sealed class VisibilityPreviewService
     }
 
     /// <summary>
-    /// Computes the set of resources the given participant may currently see in the given workspace —
+    /// Computes the set of resources the given participant may currently see in the given session —
     /// the preview-as-participant result. Every candidate resource (any resource with a visibility
-    /// rule in the workspace) is decided by
-    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/>, so the participant sees a
-    /// resource iff an audience-wide visible rule, or a visible rule scoped to exactly them, applies;
-    /// only those the policy allows are returned, in a deterministic order (by resource type then id).
-    /// The set is tenant- and workspace-scoped and fails closed (a resource the participant may not
+    /// rule in the workspace) is decided by the session-scoped
+    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>,
+    /// so the participant sees a resource iff an audience-wide visible rule, or a visible rule scoped to
+    /// exactly them, applies IN THIS SESSION; only those the policy allows are returned, in a deterministic
+    /// order (by resource type then id).
+    /// The set is tenant-, workspace- and session-scoped and fails closed (a resource the participant may not
     /// see, including one revealed only to another participant, is excluded).
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The participant's workspace whose visible set is computed.</param>
+    /// <param name="sessionId">
+    /// The session the feed is scoped to (CORE-SVIS-001). A reveal is session-scoped, so the visible set
+    /// is the resources revealed IN THIS SESSION that the participant may see; a reveal in a concurrent
+    /// session of the same workspace is never in this feed (the cross-session leak; threat T5/T3).
+    /// </param>
     /// <param name="participantId">The participant whose visible set is computed.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The distinct resources visible to that participant, in deterministic order.</returns>
-    /// <exception cref="ArgumentException">The organization id, workspace id or participant id is empty.</exception>
+    /// <returns>The distinct resources visible to that participant in that session, in deterministic order.</returns>
+    /// <exception cref="ArgumentException">The organization id, workspace id, session id or participant id is empty.</exception>
     public async Task<IReadOnlyList<VisibleResource>> GetVisibleResourcesForParticipantAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         Guid participantId,
         CancellationToken cancellationToken)
     {
-        // Empty ids can never address a stored workspace's rules or a real participant, so the query
-        // fails fast instead of computing over an arbitrary set (mirrors the repository/policy empty-id
-        // guards; fail-closed).
+        // Empty ids can never address a stored workspace's rules, a real session or a real participant, so
+        // the query fails fast instead of computing over an arbitrary set (mirrors the repository/policy
+        // empty-id guards; fail-closed).
         if (organizationId == Guid.Empty)
         {
             throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
@@ -99,14 +109,21 @@ internal sealed class VisibilityPreviewService
             throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
         }
 
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
         if (participantId == Guid.Empty)
         {
             throw new ArgumentException("Participant id must not be empty.", nameof(participantId));
         }
 
-        // Candidate resources = exactly the resources that carry at least one rule in this workspace
-        // (a rule-less resource is host-only by default and the policy denies it to a participant). The
-        // list is tenant- and workspace-scoped, so no foreign tenant/workspace rule contributes
+        // Candidate resources = the resources that carry at least one rule in this workspace (a rule-less
+        // resource is host-only by default and the policy denies it to a participant). The candidate set
+        // spans the workspace's sessions; each candidate is then decided by the SESSION-SCOPED policy
+        // below, so a resource revealed only in another session resolves to "not visible" and is excluded.
+        // The list is tenant- and workspace-scoped, so no foreign tenant/workspace rule contributes
         // (threat T5). Distinct, deterministically ordered, so the result is stable.
         var allRules = await _rules
             .ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken)
@@ -122,15 +139,18 @@ internal sealed class VisibilityPreviewService
         var visible = new List<VisibleResource>(candidates.Length);
         foreach (var candidate in candidates)
         {
-            // Route every candidate through the canonical per-participant decision (CORE-VIS-005), so
-            // the preview can never diverge from per-resource access or the realtime recipient gate and
-            // the visibility decision lives in exactly one place (docs/05). Visible to THIS participant
-            // iff an audience-wide visible rule, or a visible rule scoped to exactly them; a reveal to a
-            // different participant is excluded (fail-closed; the selected-participant guarantee).
+            // Route every candidate through the canonical SESSION-SCOPED per-participant decision
+            // (CORE-VIS-005 + CORE-SVIS-001), so the preview can never diverge from per-resource access or
+            // the realtime recipient gate and the visibility decision lives in exactly one place (docs/05).
+            // Visible to THIS participant IN THIS SESSION iff an audience-wide visible rule, or a visible
+            // rule scoped to exactly them, exists for this session; a reveal to a different participant, or
+            // a reveal in a different session, is excluded (fail-closed; the selected-participant and
+            // session-scope guarantees).
             var canView = await _policy
                 .CanParticipantViewResourceAsync(
                     organizationId,
                     workspaceId,
+                    sessionId,
                     participantId,
                     candidate.ResourceType,
                     candidate.ResourceId,

@@ -27,17 +27,19 @@ namespace LiveCore.Api.Visibility;
 /// exactly as <c>Session.Start</c>/<c>Session.End</c> (the CORE-SES-002 model story) are the
 /// primitives the CORE-SES-004 start/end COMMAND builds on.
 ///
-/// Tenant + workspace boundary: a visibility rule is workspace-scoped
-/// (csv/database_tables.csv scopes <c>visibility_rules</c> to <c>workspace</c>), so it carries
-/// <see cref="OrganizationId"/> (the tenant; checked before the workspace boundary) and
-/// <see cref="WorkspaceId"/>, mirroring every other workspace-scoped aggregate
-/// (docs/10_DATABASE_SCHEMA.md: tenant-scoped tables include <c>organization_id</c>, workspace-scoped
-/// tables include <c>workspace_id</c>; threat T5 in docs/07_SECURITY_THREAT_MODEL.md). A rule
-/// belongs to exactly one organization and one workspace for its whole lifetime. The surrogate
-/// <see cref="Id"/> alone never authorizes access: every lookup is scoped by
-/// <see cref="OrganizationId"/> and <see cref="WorkspaceId"/> so one workspace's rule can never be
-/// reached through another workspace's or another tenant's id (threat T5; T1 broken object-level
-/// authorization).
+/// Tenant + workspace + SESSION boundary: a reveal is session-scoped (CORE-SVIS-001;
+/// csv/database_tables.csv scopes <c>visibility_rules</c> to <c>session</c>;
+/// docs/adr/0013-session-scoped-visibility-rules.md), so the rule carries <see cref="OrganizationId"/>
+/// (the tenant; checked first), <see cref="WorkspaceId"/> and <see cref="SessionId"/> (checked last),
+/// mirroring the session-scoped <c>session_events</c> stream (docs/10_DATABASE_SCHEMA.md: tenant-scoped
+/// tables include <c>organization_id</c>, workspace-scoped tables include <c>workspace_id</c>,
+/// session-scoped tables include <c>session_id</c>; threat T5 in docs/07_SECURITY_THREAT_MODEL.md). A
+/// rule belongs to exactly one organization, one workspace and one session for its whole lifetime.
+/// Because a workspace may run several CONCURRENT sessions, the workspace boundary alone is NOT enough:
+/// the surrogate <see cref="Id"/> alone never authorizes access, and every lookup is scoped by
+/// <see cref="OrganizationId"/>, <see cref="WorkspaceId"/> and <see cref="SessionId"/> so a reveal in one
+/// session can never be read — or fanned out — through another session's, another workspace's or another
+/// tenant's id (the cross-session data leak; threat T5/T3; T1 broken object-level authorization).
 ///
 /// Resource reference: <see cref="ResourceType"/> + <see cref="ResourceId"/> name the governed
 /// resource. <see cref="ResourceId"/> is a plain surrogate id, NOT a database foreign key: a single
@@ -64,6 +66,7 @@ public sealed class VisibilityRule
         Guid id,
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         VisibilityState visibility,
@@ -84,6 +87,11 @@ public sealed class VisibilityRule
         if (workspaceId == Guid.Empty)
         {
             throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
         }
 
         if (!IsValidResourceType(resourceType))
@@ -127,6 +135,7 @@ public sealed class VisibilityRule
         Id = id;
         OrganizationId = organizationId;
         WorkspaceId = workspaceId;
+        SessionId = sessionId;
         ResourceType = resourceType;
         ResourceId = resourceId;
         Visibility = visibility;
@@ -166,10 +175,26 @@ public sealed class VisibilityRule
     public Guid WorkspaceId { get; }
 
     /// <summary>
+    /// Session boundary of the rule: the id of the session this rule belongs to (the <c>session_id</c>
+    /// foreign key to the <c>sessions</c> table). A reveal is SESSION-SCOPED (CORE-SVIS-001,
+    /// docs/adr/0013-session-scoped-visibility-rules.md): a resource revealed in one session is visible
+    /// ONLY within that session, so the rule that records the reveal belongs to exactly one session and
+    /// every visibility decision and realtime recipient set is bounded by it. A workspace may run several
+    /// concurrent sessions, so the <see cref="WorkspaceId"/> alone is NOT enough to isolate a reveal — a
+    /// participant connected to a DIFFERENT concurrent session of the same workspace must never see it
+    /// (the cross-session leak threat T5/T3 in docs/07_SECURITY_THREAT_MODEL.md). Immutable; a rule never
+    /// moves to another session. The owning session already pins the workspace and tenant, but storing all
+    /// three on the row lets isolation be enforced at the row level and checked in boundary order
+    /// (organization, then workspace, then session).
+    /// </summary>
+    public Guid SessionId { get; }
+
+    /// <summary>
     /// Generic kind of the governed resource — Scene, ContentBlock or Entity
     /// (docs/03_DOMAIN_LANGUAGE.md). Immutable; a rule governs one resource for its whole lifetime.
-    /// Part of the documented critical index <c>visibility_rules(workspace_id, resource_type,
-    /// resource_id)</c>.
+    /// Part of the documented critical index <c>visibility_rules(session_id, resource_type,
+    /// resource_id)</c> (CORE-SVIS-001; docs/10_DATABASE_SCHEMA.md), now led by the session column so a
+    /// resource's rules are looked up WITHIN a session.
     /// </summary>
     public VisibilityResourceType ResourceType { get; }
 
@@ -205,14 +230,16 @@ public sealed class VisibilityRule
 
     /// <summary>
     /// Creates a new visibility rule binding the given resource (named by type + id) in the given
-    /// workspace (owned by the given organization) to the given base audience visibility state. The
-    /// caller (a later reveal / visibility-rule command) supplies the tenant, workspace and resource
-    /// ids; it is responsible for having resolved the resource through a workspace-scoped lookup so
-    /// the resource is in the rule's own workspace. The aggregate enforces only the structural
-    /// invariants (non-empty ids, a defined resource type and visibility state).
+    /// session (owned by the given workspace and organization) to the given base audience visibility
+    /// state. The reveal is SESSION-SCOPED (CORE-SVIS-001): the rule is visible only within
+    /// <paramref name="sessionId"/>. The caller (the reveal / visibility-rule command) supplies the
+    /// tenant, workspace, session and resource ids; it is responsible for having resolved the resource
+    /// through a workspace-scoped lookup so the resource is in the rule's own workspace, and the session
+    /// through a tenant-scoped lookup so the session is in that workspace. The aggregate enforces only
+    /// the structural invariants (non-empty ids, a defined resource type and visibility state).
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id or resource id is empty.
+    /// The organization id, workspace id, session id or resource id is empty.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The resource type or the visibility state is not defined.
@@ -220,6 +247,7 @@ public sealed class VisibilityRule
     public static VisibilityRule Create(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         VisibilityState visibility,
@@ -228,6 +256,7 @@ public sealed class VisibilityRule
             Guid.CreateVersion7(),
             organizationId,
             workspaceId,
+            sessionId,
             resourceType,
             resourceId,
             visibility,
@@ -243,7 +272,7 @@ public sealed class VisibilityRule
     /// participant is in the rule's own workspace (mirrors the resource same-workspace coupling).
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id, resource id or target participant id is empty.
+    /// The organization id, workspace id, session id, resource id or target participant id is empty.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The resource type or the visibility state is not defined.
@@ -251,6 +280,7 @@ public sealed class VisibilityRule
     public static VisibilityRule CreateForParticipant(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid targetParticipantId,
@@ -266,6 +296,7 @@ public sealed class VisibilityRule
             Guid.CreateVersion7(),
             organizationId,
             workspaceId,
+            sessionId,
             resourceType,
             resourceId,
             visibility,
@@ -289,6 +320,15 @@ public sealed class VisibilityRule
     /// </summary>
     public bool BelongsToWorkspace(Guid workspaceId)
         => workspaceId != Guid.Empty && WorkspaceId == workspaceId;
+
+    /// <summary>
+    /// Whether this rule belongs to exactly the given session. Empty ids match nothing. This is the
+    /// session-boundary check (checked after the organization and workspace boundaries): a reveal is
+    /// session-scoped, so a rule belongs only to the session it names and never makes a resource visible
+    /// in any other concurrent session of the same workspace (the cross-session leak, threat T5/T3).
+    /// </summary>
+    public bool BelongsToSession(Guid sessionId)
+        => sessionId != Guid.Empty && SessionId == sessionId;
 
     /// <summary>
     /// Whether this rule governs exactly the given resource (type AND id). An empty id matches
@@ -392,7 +432,7 @@ public sealed class VisibilityRule
     /// carry identifiers, not sensitive content).
     /// </summary>
     public override string ToString()
-        => $"VisibilityRule {Id} org={OrganizationId} ws={WorkspaceId} "
+        => $"VisibilityRule {Id} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
             + $"resource={ResourceType}:{ResourceId} visibility={Visibility} "
             + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")}";
 }

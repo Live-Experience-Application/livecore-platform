@@ -6,6 +6,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Scenes;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -369,6 +370,10 @@ public sealed class SceneDeletionServiceTests : IDisposable
         context.Participants.Add(participant);
         await context.SaveChangesAsync();
 
+        var session = Session.Create(org.Id, workspace.Id, "Live Session", _seedTime);
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+
         // Child content blocks of the scene to delete.
         var child1 = ContentBlock.Create(org.Id, workspace.Id, sceneToDelete.Id, ContentBlockType.Text, "child-1 body", _seedTime);
         var child2 = ContentBlock.Create(org.Id, workspace.Id, sceneToDelete.Id, ContentBlockType.Text, "child-2 body", _seedTime);
@@ -385,16 +390,16 @@ public sealed class SceneDeletionServiceTests : IDisposable
 
         // The scene's OWN visibility rules (resource_type = Scene).
         var sceneAudienceRule = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.Scene, sceneToDelete.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, sceneToDelete.Id, VisibilityState.Visible, _seedTime);
         var sceneParticipantRule = VisibilityRule.CreateForParticipant(
-            org.Id, workspace.Id, VisibilityResourceType.Scene, sceneToDelete.Id, participant.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, sceneToDelete.Id, participant.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.AddRange(sceneAudienceRule, sceneParticipantRule);
 
         // Child block 1 dependents.
         var child1AudienceRule = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, child1.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, child1.Id, VisibilityState.Visible, _seedTime);
         var child1ParticipantRule = VisibilityRule.CreateForParticipant(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, child1.Id, participant.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, child1.Id, participant.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.AddRange(child1AudienceRule, child1ParticipantRule);
         var child1Link = AssetLink.Create(
             org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, child1.Id, actor.Id, _seedTime);
@@ -402,7 +407,7 @@ public sealed class SceneDeletionServiceTests : IDisposable
 
         // Child block 2 dependents.
         var child2AudienceRule = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, child2.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, child2.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.Add(child2AudienceRule);
         var child2Link = AssetLink.Create(
             org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, child2.Id, actor.Id, _seedTime);
@@ -410,10 +415,10 @@ public sealed class SceneDeletionServiceTests : IDisposable
 
         // SURVIVING scene 3's own rule, and an UNRELATED block's rule + link (all must survive).
         var scene3OwnRule = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.Scene, scene3.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, scene3.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.Add(scene3OwnRule);
         var unrelatedBlockRule = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.ContentBlock, unrelatedBlock.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, unrelatedBlock.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.Add(unrelatedBlockRule);
         var unrelatedBlockLink = AssetLink.Create(
             org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, unrelatedBlock.Id, actor.Id, _seedTime);

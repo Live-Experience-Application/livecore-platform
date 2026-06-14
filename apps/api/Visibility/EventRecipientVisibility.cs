@@ -31,6 +31,7 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
     public async Task<bool> CanAudienceReceiveAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         string subjectType,
         Guid subjectId,
         CancellationToken cancellationToken)
@@ -41,12 +42,15 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
             return false;
         }
 
-        // Reuse the canonical CanViewResource decision under the AUDIENCE viewpoint (Participant), exactly
-        // as the preview-as-participant query does, so the realtime audience gate equals the REST one.
+        // Reuse the canonical SESSION-SCOPED CanViewResource decision under the AUDIENCE viewpoint
+        // (Participant), exactly as the participant feed does, so the realtime audience gate equals the
+        // REST one AND is bounded by the event's own session (CORE-SVIS-001): a reveal in a concurrent
+        // session of the same workspace can never make this event's subject visible to the audience here.
         var decision = await _policy
             .CanViewResourceAsync(
                 organizationId,
                 workspaceId,
+                sessionId,
                 MembershipRole.Participant,
                 resourceType,
                 subjectId,
@@ -60,6 +64,7 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
     public async Task<bool> CanParticipantReceiveAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         Guid participantId,
         string subjectType,
         Guid subjectId,
@@ -70,12 +75,15 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
             return false;
         }
 
-        // Reuse the canonical per-participant decision (CORE-VIS-005): visible to THIS participant iff an
-        // audience-wide visible rule, or a visible rule scoped to exactly them.
+        // Reuse the canonical SESSION-SCOPED per-participant decision (CORE-VIS-005 + CORE-SVIS-001):
+        // visible to THIS participant iff an audience-wide visible rule, or a visible rule scoped to
+        // exactly them, exists IN THE EVENT'S OWN SESSION — so a reveal in a concurrent session never
+        // reaches them.
         return await _policy
             .CanParticipantViewResourceAsync(
                 organizationId,
                 workspaceId,
+                sessionId,
                 participantId,
                 resourceType,
                 subjectId,

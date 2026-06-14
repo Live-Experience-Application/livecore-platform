@@ -2,6 +2,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -42,6 +43,7 @@ public sealed class AssetDownloadPolicyTests : IDisposable
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
 
     public AssetDownloadPolicyTests()
     {
@@ -111,10 +113,26 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         Assert.Equal(AssetLinkAddResult.Added, await new AssetLinkRepository(context).AddAsync(link, CancellationToken.None));
     }
 
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = Session.Create(organizationId, workspaceId, "Live Session", _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     private async Task SeedRuleAsync(
         Guid organizationId, Guid workspaceId, VisibilityResourceType resourceType, Guid resourceId, VisibilityState visibility)
     {
-        var rule = VisibilityRule.Create(organizationId, workspaceId, resourceType, resourceId, visibility, _createdAt);
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
+        var rule = VisibilityRule.Create(organizationId, workspaceId, sessionId, resourceType, resourceId, visibility, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }

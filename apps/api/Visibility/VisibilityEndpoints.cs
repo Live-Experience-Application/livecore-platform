@@ -2,6 +2,7 @@ using System.Security.Claims;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -112,6 +113,13 @@ internal static class VisibilityEndpoints
     /// <summary>Required query parameter naming the target organization.</summary>
     private const string _organizationSlugQuery = "organizationSlug";
 
+    /// <summary>
+    /// Required query parameter naming the session the feed is scoped to (CORE-SVIS-001). A reveal is
+    /// session-scoped, so the feed is "what this participant may see IN this session"; a reveal in a
+    /// concurrent session of the same workspace is never in it (the cross-session leak; threat T5/T3).
+    /// </summary>
+    private const string _sessionIdQuery = "sessionId";
+
     public static IEndpointRouteBuilder MapVisibilityEndpoints(this IEndpointRouteBuilder endpoints)
     {
         // Authenticated group: the bearer middleware authenticates the caller, so
@@ -125,11 +133,12 @@ internal static class VisibilityEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/participants/{participantId}/visible-feed?organizationSlug={slug}
+    // GET /api/v1/participants/{participantId}/visible-feed?organizationSlug={slug}&sessionId={sessionId}
     private static async Task<IResult> GetParticipantVisibleFeedAsync(
         HttpContext httpContext,
         string participantId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = _sessionIdQuery)] string? sessionId,
         TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
@@ -205,21 +214,49 @@ internal static class VisibilityEndpoints
             return HiddenFeed();
         }
 
-        // Authorized. Compute the participant's ACTUALLY-VISIBLE set server-side
-        // (CORE-API-005) through the participant-aware preview query (CORE-API-004),
-        // which routes every candidate resource through the central VisibilityPolicy
-        // — so this REST feed, the realtime recipient calculation and per-resource
-        // access can never diverge and the visibility decision lives in exactly one
-        // place (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic
-        // elsewhere"). The set is the resources visible to THIS participant: an
-        // audience-wide reveal OR a reveal scoped to exactly them, never one revealed
-        // only to a different participant (the selected-participant guarantee, decided
-        // fail-closed by the policy; threat T5). It is scoped to the participant's own
-        // tenant and workspace, both already enforced above.
+        // Authorized. Only now validate the request-shape session scope, so an unauthorized caller never
+        // receives request-shape feedback (mirrors the reveal command). The feed is SESSION-SCOPED
+        // (CORE-SVIS-001): a reveal is visible only within its session, so the feed must name which session
+        // it is for. A missing/blank sessionId is a 400; a malformed one is a 400.
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return MissingSession();
+        }
+
+        if (!Guid.TryParse(sessionId, out var sessionGuid) || sessionGuid == Guid.Empty)
+        {
+            return ValidationError($"The '{_sessionIdQuery}' value is not a valid session id.");
+        }
+
+        // The session must exist WITHIN the resolved tenant and be the participant's OWN workspace's
+        // session. The lookup leads with the organization id, so a session in another tenant is never
+        // returned; a cross-tenant, cross-workspace or unknown session is hidden as 404 — a caller must
+        // not be able to probe for a session outside the participant's workspace (threats T1/T5). The feed
+        // would be empty for such a session anyway (its rules never match this workspace), but hiding it
+        // keeps the private-feed posture consistent.
+        var session = await deps.Sessions
+            .FindByIdInOrganizationAsync(context.OrganizationId, sessionGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (session is null || session.WorkspaceId != participant.WorkspaceId)
+        {
+            return HiddenFeed();
+        }
+
+        // Compute the participant's ACTUALLY-VISIBLE set server-side for THIS SESSION (CORE-API-005 +
+        // CORE-SVIS-001) through the participant-aware preview query (CORE-API-004), which routes every
+        // candidate resource through the central session-scoped VisibilityPolicy — so this REST feed, the
+        // realtime recipient calculation and per-resource access can never diverge and the visibility
+        // decision lives in exactly one place (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility
+        // logic elsewhere"). The set is the resources visible to THIS participant IN THIS SESSION: an
+        // audience-wide reveal OR a reveal scoped to exactly them, never one revealed only to a different
+        // participant (the selected-participant guarantee) and never one revealed in a concurrent session
+        // (the session-scope guarantee), decided fail-closed by the policy; threat T5/T3. It is scoped to
+        // the participant's own tenant and workspace, both already enforced above.
         var visibleResources = await deps.Preview
             .GetVisibleResourcesForParticipantAsync(
                 context.OrganizationId,
                 participant.WorkspaceId,
+                session.Id,
                 participant.Id,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -303,11 +340,13 @@ internal static class VisibilityEndpoints
         var services = httpContext.RequestServices;
         var resolver = services.GetService<TenantContextResolver>();
         var participants = services.GetService<IParticipantRepository>();
+        var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var preview = services.GetService<VisibilityPreviewService>();
 
         if (resolver is null
             || participants is null
+            || sessions is null
             || workspaceMembers is null
             || preview is null)
         {
@@ -315,7 +354,7 @@ internal static class VisibilityEndpoints
             return false;
         }
 
-        dependencies = new VisibilityEndpointDependencies(resolver, participants, workspaceMembers, preview);
+        dependencies = new VisibilityEndpointDependencies(resolver, participants, sessions, workspaceMembers, preview);
         return true;
     }
 
@@ -353,6 +392,9 @@ internal static class VisibilityEndpoints
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
+    private static IResult MissingSession()
+        => ValidationError($"The '{_sessionIdQuery}' value is required.");
+
     private static IResult ValidationError(string detail)
         => Results.Problem(
             statusCode: StatusCodes.Status400BadRequest,
@@ -377,6 +419,7 @@ internal static class VisibilityEndpoints
     private readonly record struct VisibilityEndpointDependencies(
         TenantContextResolver Resolver,
         IParticipantRepository Participants,
+        ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         VisibilityPreviewService Preview);
 }

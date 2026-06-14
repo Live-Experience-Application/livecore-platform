@@ -2,6 +2,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.SystemModule;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
@@ -49,6 +50,7 @@ public sealed class HideServiceTests : IDisposable
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
 
     public HideServiceTests()
     {
@@ -103,18 +105,35 @@ public sealed class HideServiceTests : IDisposable
         return (organization.Id, workspace.Id);
     }
 
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = Session.Create(organizationId, workspaceId, "Live Session", _now);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     private async Task SeedRuleAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId, VisibilityState visibility)
     {
-        var rule = VisibilityRule.Create(org, ws, type, resourceId, visibility, _now);
+        var sessionId = await SessionIdAsync(org, ws);
+        var rule = VisibilityRule.Create(org, ws, sessionId, type, resourceId, visibility, _now);
         await using var context = CreateContext();
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
 
     private async Task<IReadOnlyList<VisibilityRule>> ListRulesAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId)
     {
+        var sessionId = await SessionIdAsync(org, ws);
         await using var context = CreateContext();
         return await new VisibilityRuleRepository(context)
-            .ListByResourceAsync(org, ws, type, resourceId, CancellationToken.None);
+            .ListByResourceAsync(org, ws, sessionId, type, resourceId, CancellationToken.None);
     }
 
     private async Task<RevealResult> RevealAsync(
@@ -125,10 +144,11 @@ public sealed class HideServiceTests : IDisposable
         string key,
         Guid? targetParticipantId = null)
     {
+        var sessionId = await SessionIdAsync(org, ws);
         await using var context = CreateContext();
         var service = CreateService(context);
         return await service.RevealAsync(
-            org, ws, type, resourceId, targetParticipantId, _actor, key, _now, CancellationToken.None);
+            org, ws, sessionId, type, resourceId, targetParticipantId, _actor, key, _now, CancellationToken.None);
     }
 
     private async Task<HideResult> HideAsync(
@@ -139,10 +159,11 @@ public sealed class HideServiceTests : IDisposable
         string key,
         Guid? targetParticipantId = null)
     {
+        var sessionId = await SessionIdAsync(org, ws);
         await using var context = CreateContext();
         var service = CreateService(context);
         return await service.HideAsync(
-            org, ws, type, resourceId, targetParticipantId, _actor, key, _now, CancellationToken.None);
+            org, ws, sessionId, type, resourceId, targetParticipantId, _actor, key, _now, CancellationToken.None);
     }
 
     private async Task<IReadOnlyList<AuditLogEntry>> ListAuditAsync(Guid org)
@@ -377,34 +398,36 @@ public sealed class HideServiceTests : IDisposable
     public async Task Hide_rejects_empty_ids_and_blank_key()
     {
         var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
         await using var context = CreateContext();
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            Guid.Empty, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
+            Guid.Empty, ws, sessionId, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            org, Guid.Empty, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
+            org, Guid.Empty, sessionId, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.Empty, null, _actor, "key", _now, CancellationToken.None));
+            org, ws, sessionId, VisibilityResourceType.Entity, Guid.Empty, null, _actor, "key", _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "  ", _now, CancellationToken.None));
+            org, ws, sessionId, VisibilityResourceType.Entity, Guid.NewGuid(), null, _actor, "  ", _now, CancellationToken.None));
         // An explicitly empty (non-null) target participant id is rejected.
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), Guid.Empty, _actor, "key", _now, CancellationToken.None));
+            org, ws, sessionId, VisibilityResourceType.Entity, Guid.NewGuid(), Guid.Empty, _actor, "key", _now, CancellationToken.None));
         // An empty actor id is rejected: a visibility change must record who made it (CORE-VIS-006).
         await Assert.ThrowsAsync<ArgumentException>(() => service.HideAsync(
-            org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), null, Guid.Empty, "key", _now, CancellationToken.None));
+            org, ws, sessionId, VisibilityResourceType.Entity, Guid.NewGuid(), null, Guid.Empty, "key", _now, CancellationToken.None));
     }
 
     [Fact]
     public async Task Hide_rejects_an_undefined_resource_type()
     {
         var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
         await using var context = CreateContext();
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.HideAsync(
-            org, ws, (VisibilityResourceType)999, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
+            org, ws, sessionId, (VisibilityResourceType)999, Guid.NewGuid(), null, _actor, "key", _now, CancellationToken.None));
     }
 
     // --- Audit (CORE-VIS-006) --------------------------------------------------

@@ -119,8 +119,10 @@ public sealed class OptimisticConcurrencyTokenTests
         {
             var organization = await context.AddOrganizationAsync("concurrency-org");
             var workspace = await context.AddWorkspaceAsync(organization.Id, "concurrency-ws", "Concurrency Workspace");
+            var session = await context.AddSessionAsync(
+                organization.Id, workspace.Id, "Concurrency Session", SessionStatus.Live);
             var rule = await context.AddVisibilityRuleAsync(
-                organization.Id, workspace.Id, VisibilityResourceType.Scene, resourceId, VisibilityState.Hidden);
+                organization.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, resourceId, VisibilityState.Hidden);
             ruleId = rule.Id;
         });
 

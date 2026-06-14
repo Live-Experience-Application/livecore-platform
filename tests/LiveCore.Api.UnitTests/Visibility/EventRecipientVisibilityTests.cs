@@ -1,6 +1,7 @@
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -31,6 +32,7 @@ public sealed class EventRecipientVisibilityTests : IDisposable
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
 
     public EventRecipientVisibilityTests()
     {
@@ -75,17 +77,34 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         return participant.Id;
     }
 
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = Session.Create(organizationId, workspaceId, "Live Session", _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     private async Task SeedAudienceRuleAsync(Guid organizationId, Guid workspaceId, Guid resourceId, VisibilityState state)
     {
-        var rule = VisibilityRule.Create(organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, state, _createdAt);
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
+        var rule = VisibilityRule.Create(organizationId, workspaceId, sessionId, VisibilityResourceType.Entity, resourceId, state, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
 
     private async Task SeedParticipantRuleAsync(Guid organizationId, Guid workspaceId, Guid resourceId, Guid participantId, VisibilityState state)
     {
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.CreateForParticipant(
-            organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, participantId, state, _createdAt);
+            organizationId, workspaceId, sessionId, VisibilityResourceType.Entity, resourceId, participantId, state, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
@@ -106,8 +125,8 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, subjectType, resourceId, CancellationToken.None));
-        Assert.False(await service.CanParticipantReceiveAsync(org, ws, participant, subjectType, resourceId, CancellationToken.None));
+        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), subjectType, resourceId, CancellationToken.None));
+        Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, subjectType, resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -119,8 +138,8 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, "Entity", Guid.Empty, CancellationToken.None));
-        Assert.False(await service.CanParticipantReceiveAsync(org, ws, participant, "Entity", Guid.Empty, CancellationToken.None));
+        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", Guid.Empty, CancellationToken.None));
+        Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", Guid.Empty, CancellationToken.None));
     }
 
     [Fact]
@@ -134,8 +153,8 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.True(await service.CanAudienceReceiveAsync(org, ws, "Entity", resourceId, CancellationToken.None));
-        Assert.True(await service.CanParticipantReceiveAsync(org, ws, participant, "Entity", resourceId, CancellationToken.None));
+        Assert.True(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        Assert.True(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -149,8 +168,8 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, "Entity", resourceId, CancellationToken.None));
-        Assert.False(await service.CanParticipantReceiveAsync(org, ws, participant, "Entity", resourceId, CancellationToken.None));
+        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -167,8 +186,8 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, "Entity", resourceId, CancellationToken.None));
-        Assert.True(await service.CanParticipantReceiveAsync(org, ws, selected, "Entity", resourceId, CancellationToken.None));
-        Assert.False(await service.CanParticipantReceiveAsync(org, ws, other, "Entity", resourceId, CancellationToken.None));
+        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        Assert.True(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), selected, "Entity", resourceId, CancellationToken.None));
+        Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), other, "Entity", resourceId, CancellationToken.None));
     }
 }

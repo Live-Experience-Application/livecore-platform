@@ -23,13 +23,16 @@ internal interface IEventRecipientVisibility
     /// Whether the AUDIENCE (the audience roles — participants/observers — at large) may receive an event
     /// about the given subject resource: true iff a visibility rule makes the resource visible to the
     /// whole audience. Used to gate the observers group delivery of an audience-wide event. The lookup is
-    /// tenant- and workspace-scoped (the organization boundary is checked before the workspace boundary;
-    /// threat T5). An unrecognized subject kind yields <see langword="false"/> (fail-closed).
+    /// tenant-, workspace- AND SESSION-scoped (CORE-SVIS-001): only the rules of the event's own session
+    /// are consulted, so a reveal in a concurrent session of the same workspace can never make this
+    /// event's subject visible here (the cross-session leak; threat T5/T3). An unrecognized subject kind
+    /// yields <see langword="false"/> (fail-closed).
     /// </summary>
-    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentException">The organization id, workspace id or session id is empty.</exception>
     Task<bool> CanAudienceReceiveAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         string subjectType,
         Guid subjectId,
         CancellationToken cancellationToken);
@@ -39,15 +42,17 @@ internal interface IEventRecipientVisibility
     /// iff a visibility rule makes the resource visible to them (an audience-wide visible rule, or a
     /// visible rule scoped to exactly this participant). A rule scoped to a DIFFERENT participant does NOT
     /// grant it — the selected-participant guarantee, so a non-selected participant never receives a
-    /// private event (threat T3/T5). The lookup is tenant- and workspace-scoped. An unrecognized subject
-    /// kind yields <see langword="false"/> (fail-closed).
+    /// private event (threat T3/T5). The lookup is tenant-, workspace- AND SESSION-scoped (CORE-SVIS-001):
+    /// only the event's own session's rules are consulted, so a reveal in a concurrent session never
+    /// reaches them. An unrecognized subject kind yields <see langword="false"/> (fail-closed).
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id or participant id is empty.
+    /// The organization id, workspace id, session id or participant id is empty.
     /// </exception>
     Task<bool> CanParticipantReceiveAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid sessionId,
         Guid participantId,
         string subjectType,
         Guid subjectId,

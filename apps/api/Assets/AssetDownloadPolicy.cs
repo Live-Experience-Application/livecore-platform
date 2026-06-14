@@ -23,7 +23,7 @@ namespace LiveCore.Api.Assets;
 ///   <see cref="VisibilityRoles.IsAudienceRole"/>) may download ONLY when the asset is linked to a content
 ///   block or entity that is VISIBLE to the audience. The policy lists the asset's links
 ///   (<see cref="IAssetLinkRepository.ListByAssetAsync"/>, tenant- and workspace-scoped) and DELEGATES
-///   each target to <see cref="VisibilityPolicy.CanViewResourceAsync"/> (the SAME central decision the
+///   each target to <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> (the SAME central decision the
 ///   REST/realtime paths use, so an asset's audience access can never diverge from its target's visibility
 ///   — docs/05_MODULE_CONTRACTS.md: do not duplicate visibility logic). It ALLOWS as soon as ANY linked
 ///   target is visible to the audience; otherwise DENIES.</item>
@@ -40,10 +40,12 @@ namespace LiveCore.Api.Assets;
 /// short-lived signed URL only after this allow (threat T4 "Asset leak").
 ///
 /// PARTICIPANT-LEVEL vs ROLE-LEVEL. This is a ROLE-level decision (the download route authorizes by the
-/// caller's workspace role, not a specific participant record), so it uses the audience-WIDE
-/// <see cref="VisibilityPolicy.CanViewResourceAsync"/>: a selected-participant reveal (a rule scoped to one
-/// participant) does NOT grant a role-level audience download, exactly as the role-level visibility policy
-/// treats it. Per-participant asset access (a participant downloading an asset linked to a resource
+/// caller's workspace role, not a specific participant record), so it uses the audience-WIDE,
+/// SESSION-AGNOSTIC <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>:
+/// a selected-participant reveal (a rule scoped to one participant) does NOT grant a role-level audience
+/// download, exactly as the role-level visibility policy treats it. The download route carries no session,
+/// so this decision spans the workspace's sessions (a follow-up could make asset download session-scoped,
+/// CORE-SVIS-001). Per-participant asset access (a participant downloading an asset linked to a resource
 /// revealed only to them) would build on <c>CanParticipantViewResource</c> and a participant-identified
 /// download route; that route does not exist, so it is deferred and the role-level decision stays
 /// fail-closed.

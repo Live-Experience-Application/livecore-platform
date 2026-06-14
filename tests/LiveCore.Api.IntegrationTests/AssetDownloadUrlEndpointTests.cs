@@ -4,6 +4,7 @@ using System.Text.Json;
 using LiveCore.Api.Assets;
 using LiveCore.Api.Content;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -359,7 +360,8 @@ public sealed class AssetDownloadUrlEndpointTests
             var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id, available: true);
             var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Scene", 1);
             var block = await db.AddContentBlockAsync(org.Id, workspace.Id, scene.Id, ContentBlockType.Text, "Generic");
-            await db.AddVisibilityRuleAsync(org.Id, workspace.Id, VisibilityResourceType.ContentBlock, block.Id, visibility);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            await db.AddVisibilityRuleAsync(org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, block.Id, visibility);
             await db.AddAssetLinkAsync(org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, block.Id, user.Id);
             seed = new SeedResult(org.Id, workspace.Id, asset.Id);
         });

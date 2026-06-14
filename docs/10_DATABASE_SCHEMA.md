@@ -77,7 +77,7 @@ participants(workspace_id, id)
 sessions(workspace_id, id)
 scenes(workspace_id, id)
 content_blocks(workspace_id, scene_id)
-visibility_rules(workspace_id, resource_type, resource_id)
+visibility_rules(session_id, resource_type, resource_id)
 session_events(session_id, created_at, event_id)
 assets(workspace_id, id)
 asset_links(workspace_id, asset_id)
@@ -125,6 +125,21 @@ Append-only tables (`session_events`, `audit_logs`, `purchase_events`,
 `store_notification_events`) are never updated and so carry no token. The mapping is
 PostgreSQL-only (the test suite's SQLite provider has no `xmin` system column), so it
 is applied only when the provider is Npgsql.
+
+## Session-scoped visibility rules (CORE-SVIS-001)
+
+`visibility_rules` is **session-scoped**: it carries a required `session_id` column (a foreign key into
+`sessions(id)`, `ON DELETE CASCADE`) in addition to `organization_id` and `workspace_id`. A reveal is
+session-scoped (`docs/adr/0013-session-scoped-visibility-rules.md`): a workspace may run several
+**concurrent** sessions, and a resource revealed in one session must be visible **only** within that
+session — a participant connected to a different concurrent session of the same workspace must never see
+it (the cross-session leak; threats T5/T3 in `docs/07_SECURITY_THREAT_MODEL.md`). The critical index is
+therefore led by the session: `visibility_rules(session_id, resource_type, resource_id)`. Every
+session-scoped visibility surface (the reveal/hide command, the participant-visible feed, the realtime
+recipient gate and reconnect replay) is bounded by `session_id`; the role-level, session-agnostic
+asset-download and entity-search reads remain workspace-wide. The index is **non-unique** (a resource may
+carry the audience-wide rule plus per-participant rules within a session); the single-rule-per-`(session,
+resource, dimension)` constraint is a follow-up (CORE-SVIS-002).
 
 ## JSONB use
 

@@ -112,7 +112,7 @@ public sealed class VisibilityLifecycleEventEmissionEndpointTests
         var scenario = await SeedScenarioAsync(factory);
         var resourceId = Guid.CreateVersion7();
         await factory.SeedAsync(async db => await db.AddVisibilityRuleAsync(
-            scenario.OrganizationId, scenario.WorkspaceId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible));
+            scenario.OrganizationId, scenario.WorkspaceId, scenario.SessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible));
 
         using var host = factory.CreateClientFor(_hostSubject, _issuer, _orgA);
         var response = await PostHideAsync(host, scenario.SessionId, Body("Entity", resourceId), "k-1");

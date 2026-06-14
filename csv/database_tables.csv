@@ -14,7 +14,7 @@ entity_types,Entities/Templates,workspace/template,Template-defined types
 entity_relationships,Entities,workspace,Graph edges
 assets,Assets,workspace,Metadata only
 asset_links,Assets,workspace,Asset-to-content/entity links
-visibility_rules,Visibility,workspace,Audience rules
+visibility_rules,Visibility,session,Session-scoped audience rules (reveals)
 session_events,Realtime,session,Append-only event stream
 audit_logs,Audit,organization,Append-only audit
 templates,Templates,global/organization,Template registry

@@ -2,6 +2,7 @@ using LiveCore.Api.Entities;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -55,6 +56,7 @@ public sealed class EntitySearchServiceTests : IDisposable
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
 
     public EntitySearchServiceTests()
     {
@@ -139,6 +141,21 @@ public sealed class EntitySearchServiceTests : IDisposable
         return participant;
     }
 
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = Session.Create(organizationId, workspaceId, "Live Session", _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     /// <summary>Seeds an AUDIENCE-WIDE visibility rule for the given resource (visible to everyone).</summary>
     private async Task SeedRuleAsync(
         Guid organizationId,
@@ -146,8 +163,9 @@ public sealed class EntitySearchServiceTests : IDisposable
         Guid resourceId,
         VisibilityState visibility)
     {
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.Create(
-            organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, visibility, _createdAt);
+            organizationId, workspaceId, sessionId, VisibilityResourceType.Entity, resourceId, visibility, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(
             VisibilityRuleAddResult.Added,
@@ -162,8 +180,9 @@ public sealed class EntitySearchServiceTests : IDisposable
         Guid targetParticipantId,
         VisibilityState visibility)
     {
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.CreateForParticipant(
-            organizationId, workspaceId, VisibilityResourceType.Entity, resourceId, targetParticipantId, visibility, _createdAt);
+            organizationId, workspaceId, sessionId, VisibilityResourceType.Entity, resourceId, targetParticipantId, visibility, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(
             VisibilityRuleAddResult.Added,

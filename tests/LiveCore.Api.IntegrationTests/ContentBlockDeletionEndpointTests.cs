@@ -4,6 +4,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -126,13 +127,14 @@ public sealed class ContentBlockDeletionEndpointTests
             blockAId = blockA.Id;
             blockBId = blockB.Id;
             var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
 
             // BlockA dependents.
             var audienceRule = await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockA.Id, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockA.Id, VisibilityState.Visible);
             audienceRuleAId = audienceRule.Id;
             var participantRule = await db.AddParticipantVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockA.Id, participant.Id, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockA.Id, participant.Id, VisibilityState.Visible);
             participantRuleAId = participantRule.Id;
             var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id);
             assetId = asset.Id;
@@ -142,7 +144,7 @@ public sealed class ContentBlockDeletionEndpointTests
 
             // UNRELATED BlockB dependents that must survive.
             var unrelatedRule = await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, blockB.Id, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, blockB.Id, VisibilityState.Visible);
             unrelatedRuleBId = unrelatedRule.Id;
             var unrelatedLink = await db.AddAssetLinkAsync(
                 org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, blockB.Id, user.Id);

@@ -5,6 +5,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -275,11 +276,15 @@ public sealed class EntityDeletionServiceTests : IDisposable
         context.Participants.Add(participant);
         await context.SaveChangesAsync();
 
+        var session = Session.Create(org.Id, workspace.Id, "Live Session", _seedTime);
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+
         // EntityA dependents.
         var audienceRuleA = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.Entity, entityA.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entityA.Id, VisibilityState.Visible, _seedTime);
         var participantRuleA = VisibilityRule.CreateForParticipant(
-            org.Id, workspace.Id, VisibilityResourceType.Entity, entityA.Id, participant.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entityA.Id, participant.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.AddRange(audienceRuleA, participantRuleA);
 
         var edgeAToB = EntityRelationship.Create(org.Id, workspace.Id, entityA.Id, entityB.Id, "links-to", _seedTime);
@@ -298,7 +303,7 @@ public sealed class EntityDeletionServiceTests : IDisposable
 
         // UNRELATED EntityC dependents (must survive EntityA's deletion).
         var unrelatedRuleC = VisibilityRule.Create(
-            org.Id, workspace.Id, VisibilityResourceType.Entity, entityC.Id, VisibilityState.Visible, _seedTime);
+            org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entityC.Id, VisibilityState.Visible, _seedTime);
         context.VisibilityRules.Add(unrelatedRuleC);
         var unrelatedLinkToC = AssetLink.Create(
             org.Id, workspace.Id, asset.Id, AssetLinkTargetType.Entity, entityC.Id, actor.Id, _seedTime);

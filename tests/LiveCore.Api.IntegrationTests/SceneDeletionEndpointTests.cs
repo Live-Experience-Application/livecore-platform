@@ -4,6 +4,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -123,15 +124,16 @@ public sealed class SceneDeletionEndpointTests
             sceneToDeleteId = sceneToDelete.Id;
             var scene2 = await db.AddSceneAsync(org.Id, workspace.Id, "Scene Two", 2);
             scene2Id = scene2.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
 
             // The scene's own visibility rule, a child content block with its own rule + asset link.
             var sceneRule = await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.Scene, sceneToDelete.Id, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, sceneToDelete.Id, VisibilityState.Visible);
             sceneRuleId = sceneRule.Id;
             var childBlock = await db.AddContentBlockAsync(org.Id, workspace.Id, sceneToDelete.Id, ContentBlockType.Text, _secretBody);
             childBlockId = childBlock.Id;
             var childRule = await db.AddVisibilityRuleAsync(
-                org.Id, workspace.Id, VisibilityResourceType.ContentBlock, childBlock.Id, VisibilityState.Visible);
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, childBlock.Id, VisibilityState.Visible);
             childRuleId = childRule.Id;
             var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id);
             assetId = asset.Id;

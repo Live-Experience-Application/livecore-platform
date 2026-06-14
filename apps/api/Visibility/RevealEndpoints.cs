@@ -256,6 +256,7 @@ internal static class RevealEndpoints
                         .RevealAsync(
                             context.OrganizationId,
                             session.WorkspaceId,
+                            session.Id,
                             resourceType,
                             request.ResourceId,
                             targetParticipantId,

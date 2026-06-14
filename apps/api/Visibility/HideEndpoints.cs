@@ -235,6 +235,7 @@ internal static class HideEndpoints
                         .HideAsync(
                             context.OrganizationId,
                             session.WorkspaceId,
+                            session.Id,
                             resourceType,
                             request.ResourceId,
                             targetParticipantId,

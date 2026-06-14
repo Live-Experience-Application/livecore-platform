@@ -1,6 +1,7 @@
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
@@ -13,7 +14,7 @@ namespace LiveCore.Api.UnitTests.Visibility;
 /// CORE-API-004) — the preview-as-participant query (<c>GetVisibleResourcesForParticipant</c>). The
 /// service computes the set of resources a SPECIFIC participant may see in a workspace by routing every
 /// candidate resource through the CORE-VIS-005 per-participant decision
-/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync"/>, driven against an in-memory SQLite
+/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>, driven against an in-memory SQLite
 /// database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>), so the tenant/workspace-scoped
 /// rule reads run against genuinely persisted rules — exactly like the CORE-VIS-002 policy tests.
 ///
@@ -46,6 +47,7 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
 
     private readonly SqliteConnection _connection;
     private readonly DbContextOptions<LiveCoreDbContext> _contextOptions;
+    private readonly Dictionary<Guid, Guid> _sessionByWorkspace = new();
 
     public VisibilityPreviewServiceTests()
     {
@@ -101,6 +103,21 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
         return participant;
     }
 
+    private async Task<Guid> SessionIdAsync(Guid organizationId, Guid workspaceId)
+    {
+        if (_sessionByWorkspace.TryGetValue(workspaceId, out var existing))
+        {
+            return existing;
+        }
+
+        var session = Session.Create(organizationId, workspaceId, "Live Session", _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        _sessionByWorkspace[workspaceId] = session.Id;
+        return session.Id;
+    }
+
     private async Task SeedRuleAsync(
         Guid organizationId,
         Guid workspaceId,
@@ -108,7 +125,8 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
         Guid resourceId,
         VisibilityState visibility)
     {
-        var rule = VisibilityRule.Create(organizationId, workspaceId, resourceType, resourceId, visibility, _createdAt);
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
+        var rule = VisibilityRule.Create(organizationId, workspaceId, sessionId, resourceType, resourceId, visibility, _createdAt);
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
         Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
@@ -122,8 +140,9 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
         Guid targetParticipantId,
         VisibilityState visibility)
     {
+        var sessionId = await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.CreateForParticipant(
-            organizationId, workspaceId, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
+            organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
         await using var context = CreateContext();
         var repository = new VisibilityRuleRepository(context);
         Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
@@ -142,7 +161,7 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
     {
         await using var context = CreateContext();
         var service = CreateService(context);
-        return await service.GetVisibleResourcesForParticipantAsync(org, ws, participant, CancellationToken.None);
+        return await service.GetVisibleResourcesForParticipantAsync(org, ws, await SessionIdAsync(org, ws), participant, CancellationToken.None);
     }
 
     [Fact]
@@ -382,10 +401,10 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
         var service = CreateService(context);
 
         await Assert.ThrowsAsync<ArgumentException>(() => service.GetVisibleResourcesForParticipantAsync(
-            Guid.Empty, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None));
+            Guid.Empty, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.GetVisibleResourcesForParticipantAsync(
-            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), CancellationToken.None));
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), Guid.NewGuid(), CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.GetVisibleResourcesForParticipantAsync(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, CancellationToken.None));
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, CancellationToken.None));
     }
 }

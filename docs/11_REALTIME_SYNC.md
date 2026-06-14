@@ -32,6 +32,31 @@ command -> authorize -> persist event -> compute recipients -> project payload -
 
 Participant events must contain only data visible to that participant.
 
+## Session-scoped delivery (CORE-SVIS-001)
+
+The recipient set and every visibility decision are bounded by the event's `sessionId`. A reveal is
+session-scoped (`docs/adr/0013-session-scoped-visibility-rules.md`, `docs/10_DATABASE_SCHEMA.md`), so a
+workspace running several **concurrent** sessions keeps each run's reveals to its own session: a reveal in
+session A must never be delivered to — or replayed for — a participant connected to a different concurrent
+session B of the same workspace (the cross-session leak; threats T5/T3 in
+`docs/07_SECURITY_THREAT_MODEL.md`). Two things enforce this together:
+
+- **Session-keyed groups.** Every group a delivery is addressed to is keyed by the event's session
+  (`session:{sessionId}:hosts` / `:observers` / `:participant:{participantId}`), and a connection joins
+  only the groups of the session it connected to. So a delivery for session A reaches only connections in
+  session A's groups.
+- **Session-scoped visibility gate.** The recipient resolver gates every audience and per-recipient
+  delivery through the central Visibility engine **bounded by the event's session**, so the decision
+  consults only the reveal rules of that session. The participant-visible feed
+  (`GET /api/v1/participants/{participantId}/visible-feed`, now scoped by a required `sessionId` query
+  parameter) and reconnect replay reuse the same session-scoped decision, so REST feed, live delivery and
+  replay can never diverge.
+
+A participant is workspace-scoped and there is no persisted session-participant roster yet (deferred to
+the Presence epic), so the audience fan-out still enumerates the workspace's active participants as the
+candidate set; the session boundary is enforced by the session-keyed groups and the session-scoped gate
+above, not by a roster.
+
 ## Offline/reconnect
 
 The initial production-ready version supports reconnect replay and local read cache. It does not support full peer-to-peer offline multiplayer.

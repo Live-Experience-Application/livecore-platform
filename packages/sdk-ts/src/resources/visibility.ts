@@ -49,16 +49,22 @@ export class VisibilityClient {
 
   /**
    * `GET /api/v1/participants/{participantId}/visible-feed` — a single
-   * participant's private, already-filtered visible feed.
+   * participant's private, already-filtered visible feed WITHIN a session. A
+   * reveal is session-scoped (CORE-SVIS-001), so the feed is "what this
+   * participant may see in this session"; the `sessionId` is required and a
+   * reveal made in a concurrent session of the same workspace is never in it.
    */
   getParticipantVisibleFeed(
     participantId: Uuid,
-    params: { organizationSlug: string },
+    params: { organizationSlug: string; sessionId: Uuid },
   ): Promise<ParticipantVisibleFeedResponse> {
     return this.http.send<ParticipantVisibleFeedResponse>({
       method: "GET",
       path: `/participants/${encodeURIComponent(participantId)}/visible-feed`,
-      query: { organizationSlug: params.organizationSlug },
+      query: {
+        organizationSlug: params.organizationSlug,
+        sessionId: params.sessionId,
+      },
     });
   }
 }

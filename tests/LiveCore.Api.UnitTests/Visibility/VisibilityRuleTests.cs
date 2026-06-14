@@ -14,6 +14,7 @@ public sealed class VisibilityRuleTests
 {
     private static readonly Guid _organizationId = Guid.Parse("00000000-0000-0000-0000-0000000000a1");
     private static readonly Guid _workspaceId = Guid.Parse("00000000-0000-0000-0000-0000000000b1");
+    private static readonly Guid _sessionId = Guid.Parse("00000000-0000-0000-0000-0000000000d1");
     private static readonly Guid _resourceId = Guid.Parse("00000000-0000-0000-0000-0000000000c1");
     private static readonly DateTimeOffset _createdAt = new(2026, 6, 12, 8, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _updatedAt = new(2026, 6, 12, 9, 0, 0, TimeSpan.Zero);
@@ -22,7 +23,7 @@ public sealed class VisibilityRuleTests
         VisibilityResourceType resourceType = VisibilityResourceType.ContentBlock,
         VisibilityState visibility = VisibilityState.Hidden)
         => VisibilityRule.Create(
-            _organizationId, _workspaceId, resourceType, _resourceId, visibility, _createdAt);
+            _organizationId, _workspaceId, _sessionId, resourceType, _resourceId, visibility, _createdAt);
 
     [Fact]
     public void Create_sets_all_fields()
@@ -32,6 +33,7 @@ public sealed class VisibilityRuleTests
         Assert.NotEqual(Guid.Empty, rule.Id);
         Assert.Equal(_organizationId, rule.OrganizationId);
         Assert.Equal(_workspaceId, rule.WorkspaceId);
+        Assert.Equal(_sessionId, rule.SessionId);
         Assert.Equal(VisibilityResourceType.Scene, rule.ResourceType);
         Assert.Equal(_resourceId, rule.ResourceId);
         Assert.Equal(VisibilityState.Hidden, rule.Visibility);
@@ -43,7 +45,7 @@ public sealed class VisibilityRuleTests
     public void Create_rejects_empty_organization_id()
     {
         var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.Create(
-            Guid.Empty, _workspaceId, VisibilityResourceType.Entity, _resourceId, VisibilityState.Hidden, _createdAt));
+            Guid.Empty, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, VisibilityState.Hidden, _createdAt));
         Assert.Equal("organizationId", exception.ParamName);
     }
 
@@ -51,15 +53,23 @@ public sealed class VisibilityRuleTests
     public void Create_rejects_empty_workspace_id()
     {
         var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.Create(
-            _organizationId, Guid.Empty, VisibilityResourceType.Entity, _resourceId, VisibilityState.Hidden, _createdAt));
+            _organizationId, Guid.Empty, _sessionId, VisibilityResourceType.Entity, _resourceId, VisibilityState.Hidden, _createdAt));
         Assert.Equal("workspaceId", exception.ParamName);
+    }
+
+    [Fact]
+    public void Create_rejects_empty_session_id()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.Create(
+            _organizationId, _workspaceId, Guid.Empty, VisibilityResourceType.Entity, _resourceId, VisibilityState.Hidden, _createdAt));
+        Assert.Equal("sessionId", exception.ParamName);
     }
 
     [Fact]
     public void Create_rejects_empty_resource_id()
     {
         var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.Create(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, Guid.Empty, VisibilityState.Hidden, _createdAt));
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, Guid.Empty, VisibilityState.Hidden, _createdAt));
         Assert.Equal("resourceId", exception.ParamName);
     }
 
@@ -67,7 +77,7 @@ public sealed class VisibilityRuleTests
     public void Create_rejects_undefined_resource_type()
     {
         var exception = Assert.Throws<ArgumentOutOfRangeException>(() => VisibilityRule.Create(
-            _organizationId, _workspaceId, (VisibilityResourceType)999, _resourceId, VisibilityState.Hidden, _createdAt));
+            _organizationId, _workspaceId, _sessionId, (VisibilityResourceType)999, _resourceId, VisibilityState.Hidden, _createdAt));
         Assert.Equal("resourceType", exception.ParamName);
     }
 
@@ -75,7 +85,7 @@ public sealed class VisibilityRuleTests
     public void Create_rejects_undefined_visibility()
     {
         var exception = Assert.Throws<ArgumentOutOfRangeException>(() => VisibilityRule.Create(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, (VisibilityState)999, _createdAt));
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, (VisibilityState)999, _createdAt));
         Assert.Equal("visibility", exception.ParamName);
     }
 
@@ -129,6 +139,17 @@ public sealed class VisibilityRuleTests
         Assert.True(rule.BelongsToWorkspace(_workspaceId));
         Assert.False(rule.BelongsToWorkspace(Guid.NewGuid()));
         Assert.False(rule.BelongsToWorkspace(Guid.Empty));
+    }
+
+    [Fact]
+    public void BelongsToSession_matches_only_the_owning_session()
+    {
+        var rule = CreateRule();
+
+        Assert.True(rule.BelongsToSession(_sessionId));
+        // A reveal is session-scoped: a rule never belongs to another concurrent session (CORE-SVIS-001).
+        Assert.False(rule.BelongsToSession(Guid.NewGuid()));
+        Assert.False(rule.BelongsToSession(Guid.Empty));
     }
 
     [Fact]
@@ -190,6 +211,7 @@ public sealed class VisibilityRuleTests
         Assert.Contains(rule.Id.ToString(), text, StringComparison.Ordinal);
         Assert.Contains(_organizationId.ToString(), text, StringComparison.Ordinal);
         Assert.Contains(_workspaceId.ToString(), text, StringComparison.Ordinal);
+        Assert.Contains(_sessionId.ToString(), text, StringComparison.Ordinal);
         Assert.Contains("Entity", text, StringComparison.Ordinal);
         Assert.Contains(_resourceId.ToString(), text, StringComparison.Ordinal);
         Assert.Contains("Visible", text, StringComparison.Ordinal);
@@ -213,7 +235,7 @@ public sealed class VisibilityRuleTests
         var participantId = Guid.NewGuid();
 
         var rule = VisibilityRule.CreateForParticipant(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, participantId,
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, participantId,
             VisibilityState.Visible, _createdAt);
 
         Assert.Equal(participantId, rule.TargetParticipantId);
@@ -226,7 +248,7 @@ public sealed class VisibilityRuleTests
     public void CreateForParticipant_rejects_an_empty_participant_id()
     {
         var exception = Assert.Throws<ArgumentException>(() => VisibilityRule.CreateForParticipant(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, Guid.Empty,
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, Guid.Empty,
             VisibilityState.Visible, _createdAt));
         Assert.Equal("targetParticipantId", exception.ParamName);
     }
@@ -244,14 +266,14 @@ public sealed class VisibilityRuleTests
 
         // A participant-scoped visible rule is visible ONLY to its target.
         var targeted = VisibilityRule.CreateForParticipant(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, selected,
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, selected,
             VisibilityState.Visible, _createdAt);
         Assert.True(targeted.IsVisibleTo(selected));
         Assert.False(targeted.IsVisibleTo(other));
 
         // A hidden rule is visible to no one, regardless of target.
         var hidden = VisibilityRule.CreateForParticipant(
-            _organizationId, _workspaceId, VisibilityResourceType.Entity, _resourceId, selected,
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, selected,
             VisibilityState.Hidden, _createdAt);
         Assert.False(hidden.IsVisibleTo(selected));
     }
