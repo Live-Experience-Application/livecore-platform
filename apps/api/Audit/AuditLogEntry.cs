@@ -236,6 +236,35 @@ public sealed class AuditLogEntry
     public DateTimeOffset CreatedAt { get; }
 
     /// <summary>
+    /// The per-tenant APPEND sequence number of this entry — a gap-free, strictly monotonic value handed out by
+    /// the <c>audit_log_sequences</c> allocator when the entry is appended (CORE-SEC-003), and the spine the
+    /// tamper-evident hash chain is linked along. It is distinct from <see cref="Id"/> (which orders by EVENT
+    /// time and may be recorded out of append order); the chain follows append order, so it follows this
+    /// sequence. Set once by <see cref="Seal"/> at append time (its default zero means an unsealed, not-yet-
+    /// appended entry); the unique index <c>audit_logs(organization_id, sequence)</c> is the integrity backstop
+    /// guaranteeing no two entries of a tenant ever share a sequence.
+    /// </summary>
+    public long Sequence { get; private set; }
+
+    /// <summary>
+    /// The chain hash of the entry that PRECEDES this one in its tenant's append-only chain
+    /// (<see cref="EntryHash"/> of the entry at <see cref="Sequence"/> − 1), or <see langword="null"/> for the
+    /// chain's genesis entry (CORE-SEC-003). This is the prev-hash link that makes the log tamper-evident: a
+    /// deletion or reordering breaks the linkage <see cref="AuditLogChain.Verify"/> checks. Set once by
+    /// <see cref="Seal"/> at append time.
+    /// </summary>
+    public string? PreviousHash { get; private set; }
+
+    /// <summary>
+    /// This entry's own chain hash — a SHA-256 over its recorded fields and its <see cref="PreviousHash"/>
+    /// (<see cref="AuditLogChain.ComputeEntryHash"/>), so altering any persisted field is detectable
+    /// (CORE-SEC-003). It is <see langword="null"/> ONLY for a legacy entry written before this hardening landed
+    /// (such entries predate the chain and are not verified); every entry appended through
+    /// <see cref="Seal"/> carries a non-null hash. Set once by <see cref="Seal"/> at append time.
+    /// </summary>
+    public string? EntryHash { get; private set; }
+
+    /// <summary>
     /// Records a generic security-relevant action as an append-only audit fact — the generic creation API
     /// of the append-only audit log (CORE-AUD-001). Any module records a security event through this one
     /// factory (then <see cref="IAuditLogRepository.AppendAsync"/>); <see cref="ForVisibilityRuleChange"/>
@@ -987,6 +1016,43 @@ public sealed class AuditLogEntry
             previousState,
             newState,
             createdAt);
+
+    /// <summary>
+    /// SEALS the entry into its tenant's tamper-evident hash chain at append time (CORE-SEC-003): stamps the
+    /// per-tenant append <see cref="Sequence"/> the allocator handed out, records the
+    /// <paramref name="previousHash"/> link to the preceding entry (<see langword="null"/> for the genesis
+    /// entry) and computes this entry's <see cref="EntryHash"/> over its recorded fields and that link. Called
+    /// ONCE by <see cref="AuditLogRepository.AppendAsync"/> immediately before the insert; the entry stays
+    /// otherwise immutable (every recorded fact was fixed at construction), so sealing only adds the chain
+    /// linkage and never alters an audited value. It is idempotent-guarded: a second call throws, because an
+    /// already-chained entry must never be re-linked.
+    /// </summary>
+    /// <param name="sequence">The per-tenant append sequence number (strictly positive).</param>
+    /// <param name="previousHash">The preceding entry's hash, or <see langword="null"/> for the genesis entry.</param>
+    /// <exception cref="ArgumentOutOfRangeException">The sequence is not strictly positive.</exception>
+    /// <exception cref="ArgumentException">The previous hash is not a well-formed chain hash.</exception>
+    /// <exception cref="InvalidOperationException">The entry has already been sealed.</exception>
+    internal void Seal(long sequence, string? previousHash)
+    {
+        if (sequence < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sequence), sequence, "The append sequence must be strictly positive.");
+        }
+
+        if (previousHash is not null && previousHash.Length != AuditLogChain.HashHexLength)
+        {
+            throw new ArgumentException("The previous hash is not a well-formed chain hash.", nameof(previousHash));
+        }
+
+        if (EntryHash is not null)
+        {
+            throw new InvalidOperationException("The audit log entry has already been sealed into the chain.");
+        }
+
+        Sequence = sequence;
+        PreviousHash = previousHash;
+        EntryHash = AuditLogChain.ComputeEntryHash(this, previousHash);
+    }
 
     /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,

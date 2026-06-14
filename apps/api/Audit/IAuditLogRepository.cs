@@ -69,4 +69,21 @@ public interface IAuditLogRepository
         int skip,
         int take,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every audit entry of the given organization in APPEND (per-tenant <see cref="AuditLogEntry.Sequence"/>)
+    /// order — the order the tamper-evident hash chain is linked along (CORE-SEC-003), for
+    /// <see cref="AuditLogChainVerifier"/>. It differs from <see cref="ListByOrganizationAsync"/> ONLY in the
+    /// ordering key: that read orders by the event-time-ordered surrogate id (the chronological read contract,
+    /// unchanged), whereas the chain must be walked in the order entries were appended, which the gap-free
+    /// sequence captures even when a producer records an action out of event-time order. Tenant scope is
+    /// identical — the predicate matches <c>organization_id</c>, so a foreign tenant's records are NEVER returned
+    /// (threat T5) and a break in one tenant never implicates another.
+    /// </summary>
+    /// <param name="organizationId">The tenant whose chain is read (required, non-empty).</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <exception cref="ArgumentException">The organization id is empty.</exception>
+    Task<IReadOnlyList<AuditLogEntry>> ListChainByOrganizationAsync(
+        Guid organizationId,
+        CancellationToken cancellationToken);
 }

@@ -145,6 +145,41 @@ gates on every change:
   entity mapping without a matching migration fails CI instead of shipping a schema
   that the model and the migrations disagree on.
 
+### Audit-log tamper-evidence: REVOKE UPDATE/DELETE on `audit_logs` (CORE-SEC-003)
+
+The append-only `audit_logs` table is **tamper-evident** at the application level: every entry is sealed into a
+per-tenant SHA-256 **hash chain** (`sequence` + `previous_hash` + `entry_hash`, see
+`docs/10_DATABASE_SCHEMA.md`), and the `AuditLogChainVerifier` routine **detects** any altered, deleted,
+reordered or inserted row. Detection is the in-app control; a deployment should add the matching **prevention**
+at the database role so the audit trail cannot be rewritten silently in the first place.
+
+Run the application against a database role that holds only the privileges it needs, and **REVOKE `UPDATE` and
+`DELETE` on `audit_logs`** from that role (the application only ever appends to and reads the table — it never
+updates or deletes a row):
+
+```sql
+-- Run once, as the database owner/superuser, against the role the application connects as
+-- (replace livecore_app with your application role).
+REVOKE UPDATE, DELETE ON TABLE audit_logs FROM livecore_app;
+-- The application still needs INSERT (append) and SELECT (read); keep those:
+GRANT  INSERT, SELECT ON TABLE audit_logs TO livecore_app;
+```
+
+This is a defence-in-depth pairing:
+
+- The **hash chain** (in Core) detects tampering, including a deletion or an out-of-band edit, and pinpoints the
+  first broken entry — useful even if the REVOKE is ever forgotten or a more-privileged role is used.
+- The **REVOKE** (in deployment) prevents the application role from altering history at all, which also blunts
+  the one weakness of an *unsigned* hash chain: a privileged actor who can write the table directly could
+  otherwise recompute the whole chain after a change. Keeping the migrations/owner role (which legitimately
+  needs `DELETE` for a tenant teardown cascade) separate from the runtime application role is what makes the
+  REVOKE safe to apply.
+
+Schema migrations are applied by the separate, more-privileged **migration runner** role (see above), not the
+runtime application role, so the REVOKE on the application role does not interfere with applying migrations or
+with a tenant-teardown cascade. Cryptographically **signing** or externally **anchoring** the chain (to defend
+against a fully privileged actor) is a documented follow-up beyond Core's scope.
+
 ## Edge posture: CORS, forwarded headers and HTTPS (CORE-OPS-003)
 
 The Core API is meant to sit **behind a reverse proxy / load balancer that

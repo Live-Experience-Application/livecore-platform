@@ -1379,6 +1379,37 @@ generic state names only, never a display name, email, token, storage coordinate
 resolved content (threat T7) — with the deny-by-default empty-set backstop kept in one
 place.
 
+#### Tamper-evident audit log
+
+CORE-SEC-003 (the `Security Hardening` epic) makes the append-only log **tamper-evident**, so a DB-level actor
+or a future regression that alters or deletes a persisted row directly — not through the immutable append API —
+is **detectable**. The application-level append-only guarantee was real but had no defence below it; the hash
+chain closes that gap.
+
+Every entry is sealed into a **per-tenant SHA-256 hash chain** at append time. Three columns on `audit_logs`
+carry it: a `sequence` (a per-tenant, gap-free, strictly monotonic **append** number — the chain's spine,
+distinct from the event-time-ordered surrogate id), a `previous_hash` (the link to the preceding entry's hash,
+`null` for a tenant's genesis entry) and an `entry_hash` (a SHA-256 over the entry's recorded fields plus the
+previous hash). Changing, deleting, inserting or reordering a row breaks the chain. The sequence numbers come
+from an `audit_log_sequences` counter the append path increments with a single atomic
+`INSERT ... ON CONFLICT DO UPDATE`, whose row lock **serializes** concurrent same-tenant appends so the chain
+never forks — the audit analogue of the per-session event sequence (CORE-RTC-001), scoped to the tenant. The
+increment runs inside the command's unit-of-work transaction (CORE-CONC-002), so a rollback reclaims the number
+and the chain stays gap-free; the unique `audit_logs(organization_id, sequence)` index is the integrity
+backstop.
+
+The **verification routine** (`AuditLogChainVerifier`) reads a tenant's chain in append order and reports
+whether it is intact, pinpointing the first altered/deleted/reordered entry. It is **tenant-scoped** (a break in
+one tenant never implicates another) and content-free (identifiers and counts only, threat T7). The **read
+contract is unchanged**: the existing append + tenant-scoped reads keep their shape; verification is a separate
+routine.
+
+The chain is an **unsigned** SHA-256 chain (no secret key): it detects accidental corruption, an isolated row
+edit/deletion and a bypass of the append path. As **defence in depth**, a deployment also REVOKEs `UPDATE` and
+`DELETE` on `audit_logs` from the runtime application role (the app only appends and reads) so history cannot be
+rewritten at all — see `docs/13_SELF_HOSTING_REQUIREMENTS.md`. Cryptographic signing or external anchoring
+against a fully privileged actor is a documented follow-up.
+
 ### Participant visible feed
 
 The Visibility module's by-participant route returns a single participant's visible feed:

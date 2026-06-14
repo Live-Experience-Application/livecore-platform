@@ -82,10 +82,36 @@ internal sealed class AuditLogConfiguration : IEntityTypeConfiguration<AuditLogE
             .HasColumnName("created_at")
             .IsRequired();
 
+        // TAMPER-EVIDENT HASH CHAIN (CORE-SEC-003). The per-tenant append sequence is the spine the chain is
+        // linked along: gap-free and strictly monotonic per tenant, handed out by the audit_log_sequences
+        // allocator. It is REQUIRED — every appended entry is sealed with one — and distinct from the
+        // event-time-ordered id (the chain follows append order, not event time).
+        builder.Property(entry => entry.Sequence)
+            .HasColumnName("sequence")
+            .IsRequired();
+
+        // The link to the preceding entry's hash; null only for a tenant's genesis entry.
+        builder.Property(entry => entry.PreviousHash)
+            .HasColumnName("previous_hash")
+            .HasMaxLength(AuditLogChain.HashHexLength);
+
+        // This entry's own hash. Nullable so a legacy row written before this hardening (with no hash) round-
+        // trips; every entry appended through the sealed append path carries a non-null hash.
+        builder.Property(entry => entry.EntryHash)
+            .HasColumnName("entry_hash")
+            .HasMaxLength(AuditLogChain.HashHexLength);
+
         // Documented critical index audit_logs(organization_id, created_at): reads lead with the
         // tenant column and then the timestamp (docs/10_DATABASE_SCHEMA.md). NON-unique.
         builder.HasIndex(entry => new { entry.OrganizationId, entry.CreatedAt })
             .HasDatabaseName("ix_audit_logs_organization_id_created_at");
+
+        // Integrity backstop for the hash chain (CORE-SEC-003): the per-tenant append sequence is UNIQUE, so no
+        // two entries of a tenant can ever share a sequence and the chain stays a single linear spine
+        // (mirrors session_events(session_id, sequence) unique, CORE-RTC-001).
+        builder.HasIndex(entry => new { entry.OrganizationId, entry.Sequence })
+            .HasDatabaseName("ix_audit_logs_organization_id_sequence")
+            .IsUnique();
 
         // Tenant foreign key: every audit entry hangs off exactly one organization. Cascade delete
         // removes a tenant's audit log only with the tenant itself; no finer-grained reference cascades

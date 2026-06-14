@@ -121,6 +121,23 @@ Controls:
 - a hard request-body-size cap on the anonymous webhooks beyond the application-level payload cap
 - all limits configurable; `429` Problem Details carry no tenant/principal/resource detail (T7)
 
+## Audit log integrity (CORE-SEC-003)
+
+The audit log is the security record of who did what; if it can be altered silently it cannot be trusted. The
+log is append-only at the application level (an immutable aggregate, an append + read repository with no
+update/delete path), and it is additionally **tamper-evident**: every entry is sealed into a per-tenant
+SHA-256 **hash chain** (`sequence` + `previous_hash` + `entry_hash`), so altering, deleting, inserting or
+reordering a persisted row breaks the chain and the `AuditLogChainVerifier` routine detects it and pinpoints the
+first broken entry (tenant-scoped — a break in one tenant never implicates another).
+
+Controls:
+
+- a per-tenant hash chain over `audit_logs` and a verification routine (detection)
+- a deployment step that REVOKEs `UPDATE`/`DELETE` on `audit_logs` from the runtime application role
+  (prevention; `docs/13_SELF_HOSTING_REQUIREMENTS.md`)
+- the chain is unsigned (no secret), so cryptographic signing/external anchoring against a fully privileged
+  actor is a documented follow-up
+
 ## Required test categories
 
 - foreign workspace ID denial

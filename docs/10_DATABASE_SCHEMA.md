@@ -49,6 +49,7 @@ visibility_rules
 session_events
 session_event_sequences
 audit_logs
+audit_log_sequences
 templates
 export_jobs
 export_manifests
@@ -91,6 +92,8 @@ assets(workspace_id, id)
 asset_links(workspace_id, asset_id)
 asset_links(workspace_id, asset_id, target_type, target_id) unique
 audit_logs(organization_id, created_at)
+audit_logs(organization_id, sequence) unique
+audit_log_sequences(organization_id)
 export_jobs(workspace_id, id)
 export_manifests(workspace_id, id)
 export_manifests(export_job_id) unique
@@ -244,6 +247,52 @@ never changes; re-binding to a different subject is exactly what the uniqueness 
 append-only tables it carries no optimistic-concurrency token. The Apple and Google verification endpoints
 record the purchase and link the buyer in **one transaction** (CORE-CONC-002), so the buyer linkage is durably
 atomic with the recording.
+
+## Tamper-evident audit log (CORE-SEC-003)
+
+`audit_logs` is **tamper-evident**: each entry is cryptographically chained to the previous entry of the same
+tenant, so altering, deleting or reordering a persisted row is **detectable**. The log was already
+application-level append-only (an immutable aggregate, an append + read repository with no update/delete path),
+but nothing detected a **DB-level** actor or a future regression that wrote to the table directly. The hash
+chain closes that gap, layered **under** the deployment step that REVOKEs `UPDATE`/`DELETE` on `audit_logs`
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`): the REVOKE prevents tampering, the chain detects it if the database
+role is ever bypassed or misconfigured.
+
+Each `audit_logs` row carries three columns added for this:
+
+- `sequence` — a per-tenant, **gap-free, strictly monotonic APPEND** number; the spine the chain is linked
+  along. It is distinct from the surrogate `id`, which is time-ordered by the **event** time and may be recorded
+  out of append order; the chain follows append order, so it follows the sequence.
+- `previous_hash` — the `entry_hash` of the entry that precedes this one in the tenant's chain; `NULL` only for
+  the tenant's genesis entry (and for legacy rows, below).
+- `entry_hash` — a **SHA-256** over the entry's recorded fields (every column, the `sequence` and the
+  `previous_hash`), so altering any field changes it. Nullable only so **legacy** rows written before this
+  hardening (whose hash cannot be computed in portable migration SQL) round-trip; every entry appended through
+  the sealed append path carries a non-null hash, and the verifier treats hash-less rows as unverified legacy.
+
+The numbers are handed out by an `audit_log_sequences` counter table — one row per tenant,
+`audit_log_sequences(organization_id)` the primary key with an `organizations(id)` foreign key that **CASCADES**
+on delete (the counter is removed with the tenant, like the audit log it sequences), plus a `last_sequence`
+column. The append path allocates the next number with a single atomic
+`INSERT ... ON CONFLICT (organization_id) DO UPDATE SET last_sequence = last_sequence + 1`: the conflict-path
+UPDATE takes a row lock that **serializes** concurrent appends to the same tenant, so the sequence stays
+gap-free and the chain never **forks** even under a race. Because the increment runs in the command's
+unit-of-work transaction (CORE-CONC-002) together with the audit insert, a rollback reclaims the number — there
+is no gap. This is the audit analogue of the per-session event sequence (CORE-RTC-001), scoped to the tenant.
+The unique `audit_logs(organization_id, sequence)` index is the integrity backstop guaranteeing no two entries
+of a tenant ever share a sequence, so the chain stays a single linear spine.
+
+The **verification routine** (`AuditLogChainVerifier`) reads a tenant's entries in append (sequence) order and
+checks, for every chained entry: its stored `entry_hash` recomputes from its content (detecting an edit), its
+`previous_hash` links to the prior entry's `entry_hash` (detecting an insertion/removal/reorder), and its
+`sequence` is contiguous with the prior entry's (detecting a deletion). It is tenant-scoped — a break in one
+tenant never implicates another — and content-free.
+
+The chain is an **unsigned** SHA-256 chain (no secret key), so it detects accidental corruption, an isolated
+row edit/deletion and a bypass of the append path; a privileged actor with full write access who knows the
+algorithm could in principle rewrite the whole chain, which is what the REVOKE deployment step (and, beyond
+Core, external anchoring/signing — a documented follow-up) defends against. The read contract is unchanged:
+the existing append + tenant-scoped reads (CORE-SEC-002) keep their shape; verification is a separate routine.
 
 ## JSONB use
 

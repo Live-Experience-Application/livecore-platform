@@ -433,11 +433,16 @@ internal static class TestData
 
     /// <summary>
     /// Creates and persists a generic append-only audit log entry for the given tenant, driving the real
-    /// <see cref="AuditLogEntry.Create"/> factory so the seeded row has exactly the invariants production would
-    /// produce. Used to arrange a tenant's audit trail for the view-audit-log read tests (CORE-SEC-002). The
-    /// surrogate id is a UUIDv7 derived from <paramref name="createdAt"/>, so seeding entries with increasing
-    /// times yields a deterministic chronological read order. Every value is a generic identifier/enum/state
-    /// name — never PII or content (threat T7; AGENTS.md).
+    /// <see cref="AuditLogEntry.Create"/> factory AND the real <see cref="AuditLogRepository.AppendAsync"/>
+    /// append path so the seeded row has exactly the invariants production would produce — including being
+    /// sealed into the tenant's tamper-evident hash chain (CORE-SEC-003: a per-tenant append sequence plus the
+    /// previous-hash/entry-hash link, allocated from <c>audit_log_sequences</c>). Seeding through the repository
+    /// (rather than a bare <c>context.AuditLogs.Add</c>) is what keeps each tenant's seeded entries on a single,
+    /// gap-free chain instead of colliding on the unique <c>audit_logs(organization_id, sequence)</c> index.
+    /// Used to arrange a tenant's audit trail for the view-audit-log read tests (CORE-SEC-002). The surrogate id
+    /// is a UUIDv7 derived from <paramref name="createdAt"/>, so seeding entries with increasing times yields a
+    /// deterministic chronological read order. Every value is a generic identifier/enum/state name — never PII or
+    /// content (threat T7; AGENTS.md).
     /// </summary>
     public static async Task<AuditLogEntry> AddAuditLogEntryAsync(
         this LiveCoreDbContext context,
@@ -458,8 +463,7 @@ internal static class TestData
             previousState: null,
             newState: null,
             createdAt ?? SeedTime);
-        context.AuditLogs.Add(entry);
-        await context.SaveChangesAsync();
+        await new AuditLogRepository(context).AppendAsync(entry, CancellationToken.None);
         return entry;
     }
 

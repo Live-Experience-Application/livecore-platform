@@ -23,8 +23,75 @@ internal sealed class AuditLogRepository : IAuditLogRepository
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // TAMPER-EVIDENT CHAIN (CORE-SEC-003). Allocate the per-tenant, gap-free, strictly monotonic APPEND
+        // sequence and seal the entry into the tenant's hash chain BEFORE the insert. The allocation takes a row
+        // lock on the tenant's audit_log_sequences counter, so two concurrent appends to the SAME tenant
+        // serialize — the second blocks until the first commits and then chains off the just-committed entry
+        // rather than forking the chain. Because the allocation and the insert run on the same context, for the
+        // transactional commands (CORE-CONC-002) they commit or roll back atomically: a rollback reclaims the
+        // number and the chain stays gap-free.
+        var sequence = await AllocateNextSequenceAsync(entry.OrganizationId, cancellationToken).ConfigureAwait(false);
+        var previousHash = await ReadPreviousHashAsync(entry.OrganizationId, sequence, cancellationToken)
+            .ConfigureAwait(false);
+        entry.Seal(sequence, previousHash);
+
         _dbContext.AuditLogs.Add(entry);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Allocates the next per-tenant append sequence number from the <c>audit_log_sequences</c> counter
+    /// (CORE-SEC-003). The increment is a SINGLE atomic <c>INSERT ... ON CONFLICT DO UPDATE</c>: it creates the
+    /// counter at 1 on a tenant's first audit entry, or increments it by exactly one otherwise. The conflict-path
+    /// UPDATE takes a row lock on the counter, so two concurrent appends to the SAME tenant serialize — the
+    /// second blocks until the first commits and then increments from the committed value rather than colliding —
+    /// yielding a gap-free, strictly monotonic sequence (and so a non-forking hash chain) even under a race. The
+    /// just-allocated value is read back on the same context/transaction (it sees its own write). Mirrors the
+    /// Realtime per-session sequence allocator (CORE-RTC-001).
+    /// </summary>
+    private async Task<long> AllocateNextSequenceAsync(Guid organizationId, CancellationToken cancellationToken)
+    {
+        // The same provider-portable upsert pattern the per-session sequence and the atomic quota consume use
+        // (works on PostgreSQL and on the SQLite test provider); every value is a parameter. organization_id is
+        // the counter's primary key, so it is the conflict target.
+        await _dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $@"INSERT INTO audit_log_sequences (organization_id, last_sequence)
+               VALUES ({organizationId}, 1)
+               ON CONFLICT (organization_id)
+               DO UPDATE SET last_sequence = audit_log_sequences.last_sequence + 1",
+            cancellationToken).ConfigureAwait(false);
+
+        return await _dbContext.AuditLogSequences
+            .AsNoTracking()
+            .Where(counter => counter.OrganizationId == organizationId)
+            .Select(counter => counter.LastSequence)
+            .FirstAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the chain hash of the entry that precedes the one being appended — the <c>entry_hash</c> of the
+    /// tenant's entry at <paramref name="sequence"/> − 1 (CORE-SEC-003). Returns <see langword="null"/> for the
+    /// genesis entry (sequence 1) and when the predecessor carries no hash (a legacy row written before this
+    /// hardening), so the first chained entry after a legacy history correctly starts a fresh genesis. The
+    /// allocator already serialized this append after the predecessor committed, so the predecessor is visible.
+    /// </summary>
+    private async Task<string?> ReadPreviousHashAsync(
+        Guid organizationId,
+        long sequence,
+        CancellationToken cancellationToken)
+    {
+        if (sequence <= 1)
+        {
+            return null;
+        }
+
+        return await _dbContext.AuditLogs
+            .AsNoTracking()
+            .Where(entry => entry.OrganizationId == organizationId && entry.Sequence == sequence - 1)
+            .Select(entry => entry.EntryHash)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -89,6 +156,30 @@ internal sealed class AuditLogRepository : IAuditLogRepository
             .OrderBy(entry => entry.Id)
             .Skip(skip)
             .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<AuditLogEntry>> ListChainByOrganizationAsync(
+        Guid organizationId,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored tenant's records, so the lookup fails fast (mirrors the other
+        // reads).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        // Tenant-scoped exactly like the other reads (predicate matches organization_id, threat T5), but ordered
+        // by the per-tenant APPEND sequence (CORE-SEC-003) rather than the event-time-ordered id, because the
+        // hash chain is linked in append order: a producer may record an action with an out-of-append-order
+        // event time, so only the gap-free sequence walks the chain correctly. The unique
+        // audit_logs(organization_id, sequence) index backs this ordering.
+        return await _dbContext.AuditLogs
+            .Where(entry => entry.OrganizationId == organizationId)
+            .OrderBy(entry => entry.Sequence)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }

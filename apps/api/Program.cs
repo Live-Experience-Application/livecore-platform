@@ -534,6 +534,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // audit HTTP route (csv/api_routes.csv defines none).
     builder.Services.AddScoped<IAuditLogRepository, AuditLogRepository>();
 
+    // Audit-log tamper-evidence verifier (CORE-SEC-003, the "Security Hardening" epic). The append path now
+    // seals every audit entry into a per-tenant hash chain (an audit_log_sequences-allocated append sequence
+    // plus a previous-hash/entry-hash link), so a DB-level actor or a future regression that alters or deletes a
+    // persisted row is DETECTABLE. AuditLogChainVerifier is the read-side verification routine an operator runs
+    // to check a tenant's chain is intact; registered here because it depends on the audit log repository above.
+    // It is tenant-scoped and content-free (threats T5/T7); there is no HTTP verification route (csv/api_routes.csv
+    // defines none). The complementary deployment control — REVOKE UPDATE/DELETE on audit_logs — is documented in
+    // docs/13_SELF_HOSTING_REQUIREMENTS.md.
+    builder.Services.AddScoped<AuditLogChainVerifier>();
+
     // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent
     // reveal — makes a resource VISIBLE to the audience (reusing the CORE-VIS-001
     // VisibilityRule.ChangeVisibility primitive) exactly once per client Idempotency-Key. Registered

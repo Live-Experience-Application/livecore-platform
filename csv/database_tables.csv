@@ -17,7 +17,8 @@ asset_links,Assets,workspace,Asset-to-content/entity links
 visibility_rules,Visibility,session,Session-scoped audience rules (reveals)
 session_events,Realtime,session,Append-only event stream
 session_event_sequences,Realtime,session,Per-session monotonic event sequence allocator counter
-audit_logs,Audit,organization,Append-only audit
+audit_logs,Audit,organization,Append-only audit (tamper-evident per-tenant hash chain: sequence + previous_hash + entry_hash)
+audit_log_sequences,Audit,organization,Per-tenant audit-log append-sequence allocator counter (tamper-evident hash chain spine)
 templates,Templates,global/organization,Template registry
 export_jobs,Exports,workspace,Async exports
 export_manifests,Exports,workspace,Produced workspace export table-of-contents

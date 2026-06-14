@@ -1,3 +1,4 @@
+using System.Data.Common;
 using LiveCore.Api.Audit;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
@@ -200,14 +201,62 @@ public sealed class AuditLogRepositoryTests : IDisposable
     public async Task Append_for_a_nonexistent_tenant_is_rejected_by_the_foreign_key()
     {
         // The organization_id foreign key is the row-level tenant boundary: an entry cannot be written
-        // for a tenant that does not exist (threat T5).
+        // for a tenant that does not exist (threat T5). Since CORE-SEC-003 the append path first allocates the
+        // per-tenant chain sequence from audit_log_sequences (whose organization_id also foreign-keys into
+        // organizations), so the orphan tenant is rejected by THAT foreign key at the allocation step — the
+        // provider surfaces it as a DbException (SqliteException/PostgresException) rather than EF's
+        // DbUpdateException. Either way an entry can never be written for a tenant that does not exist.
         var orphan = GenericEntry(Guid.NewGuid(), AuditAction.SessionStarted);
 
         await using var context = CreateContext();
         var repository = new AuditLogRepository(context);
 
-        await Assert.ThrowsAsync<DbUpdateException>(
+        await Assert.ThrowsAnyAsync<DbException>(
             () => repository.AppendAsync(orphan, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Append_seals_each_entry_into_the_per_tenant_chain()
+    {
+        // CORE-SEC-003: every appended entry is stamped with a gap-free per-tenant append sequence and chained —
+        // the first entry is the genesis (null previous hash) and each later entry links to the prior entry's
+        // hash. Append out of event-time order to prove the chain follows APPEND order, not the event-time id.
+        var organization = await SeedOrganizationAsync(_slugA);
+        var second = GenericEntry(organization.Id, AuditAction.SessionEnded, _now.AddSeconds(1));
+        var first = GenericEntry(organization.Id, AuditAction.SessionStarted, _now);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new AuditLogRepository(context);
+            await repository.AppendAsync(second, CancellationToken.None);
+            await repository.AppendAsync(first, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            // Read in append (sequence) order via the chain read.
+            var chain = await new AuditLogRepository(context)
+                .ListChainByOrganizationAsync(organization.Id, CancellationToken.None);
+
+            Assert.Collection(
+                chain,
+                genesis =>
+                {
+                    Assert.Equal(second.Id, genesis.Id);
+                    Assert.Equal(1, genesis.Sequence);
+                    Assert.Null(genesis.PreviousHash);
+                    Assert.NotNull(genesis.EntryHash);
+                    Assert.Equal(64, genesis.EntryHash!.Length);
+                },
+                linked =>
+                {
+                    Assert.Equal(first.Id, linked.Id);
+                    Assert.Equal(2, linked.Sequence);
+                    // The second-appended entry links to the genesis entry's hash.
+                    Assert.Equal(chain[0].EntryHash, linked.PreviousHash);
+                    Assert.NotNull(linked.EntryHash);
+                });
+        }
     }
 
     [Fact]

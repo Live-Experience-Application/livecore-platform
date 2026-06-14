@@ -34,7 +34,7 @@ namespace LiveCore.Api.Persistence;
 /// Scenes <c>scenes</c> table, the Content <c>content_blocks</c> table, the
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
-/// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
+/// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> and <c>audit_log_sequences</c> tables, the
 /// Realtime <c>session_events</c> and <c>session_event_sequences</c> tables, the Assets <c>assets</c> and
 /// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
 /// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
@@ -105,6 +105,14 @@ public sealed class LiveCoreDbContext : DbContext
 
     /// <summary>Append-only audit log entries owned by the Audit module.</summary>
     public DbSet<AuditLogEntry> AuditLogs => Set<AuditLogEntry>();
+
+    /// <summary>
+    /// Per-tenant audit-log append-sequence allocator counters owned by the Audit module. Internal
+    /// infrastructure (the counter is not part of the public domain surface); the Audit repository advances it
+    /// via an atomic upsert in the append path to seal each entry into the tenant's tamper-evident hash chain
+    /// (CORE-SEC-003).
+    /// </summary>
+    internal DbSet<AuditLogSequence> AuditLogSequences => Set<AuditLogSequence>();
 
     /// <summary>Append-only session events owned by the Realtime module.</summary>
     public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
@@ -183,6 +191,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new VisibilityRuleConfiguration());
         modelBuilder.ApplyConfiguration(new IdempotencyKeyConfiguration());
         modelBuilder.ApplyConfiguration(new AuditLogConfiguration());
+        modelBuilder.ApplyConfiguration(new AuditLogSequenceConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventSequenceConfiguration());
         modelBuilder.ApplyConfiguration(new AssetConfiguration());
