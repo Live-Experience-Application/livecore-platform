@@ -1,5 +1,6 @@
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Workspaces;
@@ -123,6 +124,7 @@ public sealed class RecapGenerationConcurrencyTests : IDisposable
         var service = new RecapGenerationService(
             new RecapEligibleSessionReader(context),
             new RecapRepository(context),
+            new SessionEventRepository(context),
             _options,
             _time,
             NullLogger<RecapGenerationService>.Instance);

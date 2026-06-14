@@ -1,4 +1,5 @@
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Realtime;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -66,6 +67,13 @@ public static class RecapGenerationServiceCollectionExtensions
         // so each sweep runs in its own DbContext scope (the background service creates a scope per run).
         services.AddScoped<IRecapRepository, RecapRepository>();
         services.AddScoped<IRecapEligibleSessionReader, RecapEligibleSessionReader>();
+
+        // The Realtime module's append-only session-event read (CORE-RCP-002): the generation service composes
+        // each recap from the session's own event stream. Registered with TryAdd so it composes safely if the
+        // worker also wires another module that registers the same repository. The append-only contract exposes
+        // only an append and a tenant-/session-scoped read, so this read can never widen an event's audience.
+        services.TryAddScoped<ISessionEventRepository, SessionEventRepository>();
+
         services.AddScoped<RecapGenerationService>();
 
         return true;

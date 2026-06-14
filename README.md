@@ -2028,8 +2028,23 @@ produces a recap for every session that **needs** one — a session that has **e
 recap yet — so the durable `Recap` record (CORE-AUD-004) is produced asynchronously rather than only
 through a synchronous host path (`docs/00_START_HERE.md`: a Host can "produce Recaps"). Each recap is
 **system-produced** (no user; `docs/09_EVENT_CATALOG.md` `RecapGenerated` source "System/Host") with a
-generic, product-neutral body composed from the session's own live-timeline facts only — never the
-session title or any content (threat T7) — and is appended through the existing `IRecapRepository`.
+generic, product-neutral body that **reflects what actually happened** in the session and is appended
+through the existing `IRecapRepository`.
+
+The recap body is **composed from the session's own append-only event stream** (CORE-RCP-002), not just
+the start/end timestamps: the generation service reads the durable `session_events` through the existing
+`ISessionEventRepository` (the same tenant- and session-scoped read reconnect replay uses) and
+`RecapSummaryComposer` summarizes them into the UTC live timeline plus a fixed-order tally of the generic
+event kinds the session recorded (scene activations, content reveals/hides, visibility changes,
+participant joins/departures, …). The composition is **deterministic** (a pure function of the timeline
+timestamps and the multiset of event-type names; non-UTC/edge timestamps are normalized to UTC) and **safe
+on empty/partial streams** (a zero-event session yields a non-blank "no activity recorded" body). It is
+**visibility-safe**: the recap body is host content that `RecapProjection` already keeps from the audience
+until a separate reveal (it fails closed), and to keep even that host-only body free of resolved content
+the composer reads **only each event's generic type name** — never the payload, the visibility subject, the
+actor or the target — so the body carries aggregate counts and the timeline but never a session title, a
+resource id or any free-form content (threats T2/T7). Core's automatic recap stays a generic continuation
+record; a vertical that wants a richer narrative produces its own host recap through `IRecapRepository`.
 
 It is **idempotent** and **tenant-scoped** (the acceptance criteria). Eligibility is read by
 `IRecapEligibleSessionReader` as an anti-join — ended sessions with no recap — so a session that

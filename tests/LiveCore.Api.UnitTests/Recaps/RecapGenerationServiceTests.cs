@@ -1,3 +1,4 @@
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Recaps;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -104,7 +105,7 @@ public sealed class RecapGenerationServiceTests
         var store = new FakeRecapStore();
         var options = new RecapGenerationOptions(TimeSpan.FromHours(1), batchSize: 17);
         var service = new RecapGenerationService(
-            store, store, options, new FixedTimeProvider(_now),
+            store, store, store, options, new FixedTimeProvider(_now),
             NullLogger<RecapGenerationService>.Instance);
 
         await service.GenerateDueRecapsAsync(CancellationToken.None);
@@ -123,6 +124,66 @@ public sealed class RecapGenerationServiceTests
         Assert.Equal(0, result.Examined);
         Assert.Equal(0, result.Generated);
         Assert.Empty(store.Appended);
+    }
+
+    [Fact]
+    public async Task Composes_the_recap_from_the_sessions_event_stream()
+    {
+        // CORE-RCP-002: the recap reflects what actually happened — reveals and scene activations — derived from
+        // the session's own event stream, not just the start/end timestamps.
+        var session = EndedSession();
+        var store = new FakeRecapStore(session);
+        store.SeedEvents(
+            Event(session, SessionEventTypes.SceneActivated),
+            Event(session, SessionEventTypes.SceneActivated),
+            Event(session, SessionEventTypes.ContentRevealed),
+            Event(session, SessionEventTypes.ParticipantJoined));
+        var service = CreateService(store);
+
+        await service.GenerateDueRecapsAsync(CancellationToken.None);
+
+        var recap = Assert.Single(store.Appended);
+        Assert.Contains("recorded 4 events", recap.Summary);
+        Assert.Contains("2 scene activations", recap.Summary);
+        Assert.Contains("1 content reveal", recap.Summary);
+        Assert.Contains("1 participant join", recap.Summary);
+    }
+
+    [Fact]
+    public async Task A_zero_event_session_produces_a_safe_empty_recap()
+    {
+        // CORE-RCP-002: an ended session whose stream is empty still produces a valid, deterministic recap that
+        // safely reports no activity (never an exception or a blank body).
+        var session = EndedSession();
+        var store = new FakeRecapStore(session);
+        var service = CreateService(store);
+
+        var result = await service.GenerateDueRecapsAsync(CancellationToken.None);
+
+        Assert.Equal(1, result.Generated);
+        var recap = Assert.Single(store.Appended);
+        Assert.Contains("No session activity was recorded", recap.Summary);
+        Assert.True(Recap.IsValidSummary(recap.Summary));
+    }
+
+    [Fact]
+    public async Task Composes_each_recap_from_only_its_own_sessions_events()
+    {
+        // Tenant/session scoping (threat T5): the event read is scoped to each session's own organization and
+        // session, so one session's activity never bleeds into another session's recap.
+        var withActivity = EndedSession();
+        var withoutActivity = EndedSession();
+        var store = new FakeRecapStore(withActivity, withoutActivity);
+        store.SeedEvents(Event(withActivity, SessionEventTypes.ContentRevealed));
+        var service = CreateService(store);
+
+        await service.GenerateDueRecapsAsync(CancellationToken.None);
+
+        var active = Assert.Single(store.Appended, recap => recap.SessionId == withActivity.SessionId);
+        Assert.Contains("1 content reveal", active.Summary);
+
+        var quiet = Assert.Single(store.Appended, recap => recap.SessionId == withoutActivity.SessionId);
+        Assert.Contains("No session activity was recorded", quiet.Summary);
     }
 
     [Fact]
@@ -159,6 +220,7 @@ public sealed class RecapGenerationServiceTests
         => new(
             store,
             store,
+            store,
             _options,
             new FixedTimeProvider(_now),
             NullLogger<RecapGenerationService>.Instance);
@@ -171,15 +233,29 @@ public sealed class RecapGenerationServiceTests
             _now - TimeSpan.FromHours(2),
             _now - TimeSpan.FromHours(1));
 
+    /// <summary>Builds a generic session event in the given session's tenant/workspace for the recap stream.</summary>
+    private static SessionEvent Event(RecapEligibleSession session, string eventType)
+        => SessionEvent.Create(
+            session.OrganizationId,
+            session.WorkspaceId,
+            session.SessionId,
+            eventType,
+            createdBy: null,
+            targetParticipantId: null,
+            payload: "{}",
+            schemaVersion: 1,
+            createdAt: _now);
+
     /// <summary>
     /// A stateful in-memory fake that plays both the eligibility reader and the recap repository. Its
     /// eligibility read returns the configured ended sessions MINUS any that already have an appended recap —
     /// modeling the real anti-join, so the idempotency property emerges from the data exactly as it does in
     /// production. Only the members the generation service uses are implemented; the rest throw.
     /// </summary>
-    private sealed class FakeRecapStore : IRecapEligibleSessionReader, IRecapRepository
+    private sealed class FakeRecapStore : IRecapEligibleSessionReader, IRecapRepository, ISessionEventRepository
     {
         private readonly List<RecapEligibleSession> _endedSessions;
+        private readonly List<SessionEvent> _sessionEvents = [];
 
         public FakeRecapStore(params RecapEligibleSession[] endedSessions) => _endedSessions = [.. endedSessions];
 
@@ -188,6 +264,9 @@ public sealed class RecapGenerationServiceTests
         public HashSet<Guid> FailAppendFor { get; } = [];
 
         public int? LastMaxCount { get; private set; }
+
+        /// <summary>Seeds the durable event stream the recap body is composed from (CORE-RCP-002).</summary>
+        public void SeedEvents(params SessionEvent[] events) => _sessionEvents.AddRange(events);
 
         public Task<IReadOnlyList<RecapEligibleSession>> ListSessionsNeedingRecapAsync(
             int maxCount, CancellationToken cancellationToken)
@@ -246,6 +325,21 @@ public sealed class RecapGenerationServiceTests
 
         public Task<IReadOnlyList<Recap>> ListBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        // ISessionEventRepository — the recap body's source (CORE-RCP-002). Only the tenant- and session-scoped
+        // read is exercised; the append is the Realtime module's path, not the generation job's.
+        public Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAsync(Guid organizationId, Guid sessionId, CancellationToken cancellationToken)
+        {
+            // Faithful to the real repository: tenant- AND session-scoped, leading with the organization id, so a
+            // session's events are never returned through another tenant's or session's id (threat T5/T1).
+            IReadOnlyList<SessionEvent> events = _sessionEvents
+                .Where(sessionEvent => sessionEvent.OrganizationId == organizationId && sessionEvent.SessionId == sessionId)
+                .ToList();
+            return Task.FromResult(events);
+        }
     }
 
     /// <summary>A fixed <see cref="TimeProvider"/> so each produced recap's timestamp is deterministic.</summary>

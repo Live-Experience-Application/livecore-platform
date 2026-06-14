@@ -1,4 +1,4 @@
-using System.Globalization;
+using LiveCore.Api.Realtime;
 using Microsoft.EntityFrameworkCore;
 
 namespace LiveCore.Api.Recaps;
@@ -11,6 +11,16 @@ namespace LiveCore.Api.Recaps;
 /// that need them, on a configurable cadence, idempotently"). The scheduling host — the background worker —
 /// invokes this service on an interval (docs/02_ARCHITECTURE.md: the worker owns async jobs), exactly as it
 /// invokes the asset cleanup service; the service itself is host-agnostic and fully unit-testable.
+///
+/// <para>
+/// RECAP CONTENT FROM THE EVENT STREAM (CORE-RCP-002). Each recap REFLECTS WHAT ACTUALLY HAPPENED in the
+/// session — it is composed from the session's own append-only event stream (read through the existing
+/// <see cref="ISessionEventRepository"/>), not just the start/end timestamps. The composition
+/// (<see cref="RecapSummaryComposer"/>) is deterministic, safe on empty/partial streams and visibility-safe: it
+/// reads only each event's generic type name, so the host-only body (gated from the audience by
+/// <see cref="RecapProjection"/>, which fails closed) carries aggregate counts and the UTC timeline but no
+/// resolved content (threats T2/T7).
+/// </para>
 ///
 /// <para>
 /// It reuses the existing Recap aggregate and its repository (the story note: "Reuse the Recap
@@ -51,26 +61,33 @@ public sealed class RecapGenerationService
 {
     private readonly IRecapEligibleSessionReader _eligibleSessions;
     private readonly IRecapRepository _recaps;
+    private readonly ISessionEventRepository _sessionEvents;
     private readonly RecapGenerationOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RecapGenerationService> _logger;
 
-    /// <summary>Creates the generation service over the eligibility reader, the recap repository and the policy.</summary>
+    /// <summary>
+    /// Creates the generation service over the eligibility reader, the recap repository, the session event
+    /// stream (CORE-RCP-002, the source the recap body is composed from), the policy and the clock.
+    /// </summary>
     public RecapGenerationService(
         IRecapEligibleSessionReader eligibleSessions,
         IRecapRepository recaps,
+        ISessionEventRepository sessionEvents,
         RecapGenerationOptions options,
         TimeProvider timeProvider,
         ILogger<RecapGenerationService> logger)
     {
         ArgumentNullException.ThrowIfNull(eligibleSessions);
         ArgumentNullException.ThrowIfNull(recaps);
+        ArgumentNullException.ThrowIfNull(sessionEvents);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
 
         _eligibleSessions = eligibleSessions;
         _recaps = recaps;
+        _sessionEvents = sessionEvents;
         _options = options;
         _timeProvider = timeProvider;
         _logger = logger;
@@ -115,14 +132,23 @@ public sealed class RecapGenerationService
 
             try
             {
+                // Read the session's own append-only event stream so the recap REFLECTS WHAT ACTUALLY HAPPENED
+                // (CORE-RCP-002), not just the start/end timestamps. The read is tenant- AND session-scoped (it
+                // leads with the session's own organization id; threat T5) and returns the stream in append
+                // order; RecapSummaryComposer reads only each event's generic type name to compose a
+                // deterministic, content-free body (threat T7).
+                var stream = await _sessionEvents
+                    .ListBySessionAsync(session.OrganizationId, session.SessionId, cancellationToken)
+                    .ConfigureAwait(false);
+
                 // SYSTEM-produced recap (no user): the platform, not a host, generated it
                 // (docs/09_EVENT_CATALOG.md RecapGenerated source "System/Host"). The summary is a generic,
-                // product-neutral body composed from the session's own live-timeline facts only (AGENTS.md).
+                // product-neutral body composed from the session's live timeline and its event stream (AGENTS.md).
                 var recap = Recap.GenerateBySystem(
                     session.OrganizationId,
                     session.WorkspaceId,
                     session.SessionId,
-                    ComposeSummary(session),
+                    RecapSummaryComposer.Compose(session, stream),
                     generatedAt);
 
                 // Idempotent append (CORE-RCP-001): the partial unique index recaps(session_id) WHERE
@@ -168,30 +194,4 @@ public sealed class RecapGenerationService
 
         return new RecapGenerationResult(Examined: examined, Generated: generated, Deduplicated: deduplicated, Failed: failed);
     }
-
-    /// <summary>
-    /// Composes the generic, product-neutral system recap body from a session's own live-timeline facts. It is
-    /// deterministic (driven only by the eligible session's timestamps), never carries vertical domain language
-    /// (AGENTS.md) and never echoes the session title or any free-form content (threat T7). A vertical produces
-    /// richer recaps through its own synchronous host path; Core's automatic recap is a minimal generic
-    /// continuation record.
-    /// </summary>
-    private static string ComposeSummary(RecapEligibleSession session)
-    {
-        var startedAt = session.StartedAt?.ToUniversalTime();
-        var endedAt = session.EndedAt?.ToUniversalTime();
-
-        var timeline = (startedAt, endedAt) switch
-        {
-            ({ } start, { } end) =>
-                $"Live timeline ran from {Format(start)} to {Format(end)}.",
-            (null, { } end) =>
-                $"Session ended at {Format(end)}.",
-            _ => "The session has concluded.",
-        };
-
-        return $"Automated recap for a concluded session. {timeline}";
-    }
-
-    private static string Format(DateTimeOffset value) => value.ToString("O", CultureInfo.InvariantCulture);
 }
