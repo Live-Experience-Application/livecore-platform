@@ -20,17 +20,19 @@ namespace LiveCore.Worker;
 /// </para>
 ///
 /// <para>
-/// Liveness heartbeat (CORE-OPS-005): the loop writes a <see cref="WorkerHeartbeat"/> on startup and after
-/// every sweep tick, so orchestration can detect a WEDGED loop. A resilient sweep survives transient
-/// failures, but a sweep that HANGS (a stuck database or storage call that never returns or throws) would
-/// otherwise leave the worker process alive yet doing no work — invisible to a process-liveness check. Because
-/// the heartbeat is refreshed only by the loop making progress, a hung sweep stops refreshing it and its file
-/// goes stale, which is the signal orchestration uses to restart the stalled worker.
+/// Liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003): the loop writes its OWN
+/// <see cref="WorkerHeartbeat"/> (obtained from <see cref="WorkerJobHeartbeats"/>) on startup and after every
+/// sweep tick, so orchestration can detect a WEDGED loop. A resilient sweep survives transient failures, but a
+/// sweep that HANGS (a stuck database or storage call that never returns or throws) would otherwise leave the
+/// worker process alive yet doing no work — invisible to a process-liveness check. Because the heartbeat is
+/// refreshed only by the loop making progress, a hung sweep stops refreshing its file (while the other loops
+/// keep beating theirs) and the worker's <c>/health/live</c> endpoint reports not-live, which is the signal
+/// orchestration uses to restart the stalled worker.
 /// </para>
 /// </summary>
 internal sealed class AssetCleanupBackgroundService : BackgroundService
 {
-    private const string _jobName = "asset-cleanup";
+    private const string _jobName = WorkerJobNames.AssetCleanup;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly AssetCleanupOptions _options;
@@ -41,19 +43,19 @@ internal sealed class AssetCleanupBackgroundService : BackgroundService
     public AssetCleanupBackgroundService(
         IServiceScopeFactory scopeFactory,
         AssetCleanupOptions options,
-        WorkerHeartbeat heartbeat,
+        WorkerJobHeartbeats heartbeats,
         LiveCoreMetrics metrics,
         ILogger<AssetCleanupBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(heartbeat);
+        ArgumentNullException.ThrowIfNull(heartbeats);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
-        _heartbeat = heartbeat;
+        _heartbeat = heartbeats.ForJob(_jobName);
         _metrics = metrics;
         _logger = logger;
     }

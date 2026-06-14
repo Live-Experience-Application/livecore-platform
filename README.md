@@ -418,8 +418,34 @@ The error counter counts only server errors (5xx); the fail-closed `401`/`403`/`
 the authorization model returns by design are not counted as errors. Two new
 dependencies are added to `apps/api`: `OpenTelemetry.Extensions.Hosting` (the SDK +
 host integration) and `OpenTelemetry.Exporter.Prometheus.AspNetCore` (the scrape
-endpoint). The background worker records job failures onto the same meter; surfacing
-the worker's own metrics over a scrape/OTLP endpoint is a follow-up.
+endpoint). The background worker records job failures onto the same meter and now
+exposes its **own** Prometheus scrape endpoint too (see "Worker metrics and per-loop
+liveness" below).
+
+### Worker metrics and per-loop liveness
+
+The background worker is the host doing **irreversible** work, so it must not be a
+monitoring blind spot (CORE-DR-003). It now serves a small HTTP surface — reusing the
+ASP.NET Core shared framework the referenced API project already brings, so **no new
+dependency** — bound to a configurable listen URL (`Worker:Metrics:Url`, default
+`http://0.0.0.0:9464`):
+
+| Endpoint       | Purpose                                                                                                                                                                                                                                                                        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/metrics`     | The Prometheus scrape endpoint, wired exactly as the API's (`AddLiveCorePrometheusMetrics`). It exposes the same `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on failure is scrapeable (it was recorded onto an unobserved meter before). |
+| `/health/live` | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                    |
+
+Each of the four loops (asset cleanup, recap generation, export processing, and the
+billing-gated store-notification reconciliation) writes the current UTC timestamp to
+its **own** heartbeat file each tick; `/health/live` is healthy only when every active
+loop's file is fresh (within `Worker:Heartbeat:StaleAfter`, default 2 hours). Before
+this, all loops shared **one** file, so a single healthy loop kept it fresh and
+**masked** the others hanging; per-loop files plus the aggregating endpoint make a
+**single** hung loop detectable, and orchestration restarts the wedged worker. Like the
+API's `/metrics` and `/health/*`, both worker endpoints are **unauthenticated by
+convention** and restricted at the network edge, carrying only low-cardinality
+aggregates and an overall status — never content (threat T7). See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` and `docs/15_OBSERVABILITY.md`.
 
 ### Structured logging
 
@@ -2153,7 +2179,8 @@ database connection string** (no database -> the worker starts but runs no clean
 storage credentials live in Core; the concrete S3-compatible adapter is supplied by the
 deployment (`docs/13_SELF_HOSTING_REQUIREMENTS.md`; ADR 0006; threat T7). Because the worker now
 reuses the Core domain assembly, its runtime image uses the ASP.NET base (see
-`apps/worker/Dockerfile`); it still serves no HTTP traffic and exposes no port.
+`apps/worker/Dockerfile`); at the time it served no HTTP traffic and exposed no port (CORE-DR-003 later
+added the worker's `/metrics` + `/health/live` surface on port 9464).
 
 ### Recap generation job
 
@@ -2305,13 +2332,19 @@ and exposes no port, the heartbeat is a **file**, not a health port: every job l
 recap generation, export processing and the billing-gated store-notification reconciliation) writes the
 current UTC timestamp to `Worker:Heartbeat:FilePath` (default
 `<temp>/livecore-worker.heartbeat`) on startup and after **every** completed sweep tick. The file is
-the worker process's liveness signal, refreshed whenever a loop makes progress, so a worker whose loops
-all hang stops refreshing it and the file goes stale — the signal orchestration uses to restart the
-stalled worker (a Kubernetes liveness probe or a Compose healthcheck that checks the file's age). The
+the worker process's liveness signal, refreshed whenever a loop makes progress. The
 heartbeat is wired **alongside** the jobs, so with no database there is no loop and no heartbeat
 (nothing to stall). A heartbeat write never crashes the worker: a transient filesystem error is logged
 and swallowed, and a persistent failure just makes the file go stale (fail-safe). It carries only a
 timestamp — no identifiers, no secrets (threat T7).
+
+CORE-DR-003 makes this **per-loop** and adds an HTTP surface. A single shared file let one healthy loop
+keep the file fresh and **mask** three hung ones; now each loop beats its **own** file
+(`<base>.<job>`), the worker serves a small HTTP surface (`Worker:Metrics:Url`, default port 9464), and a
+new **`GET /health/live`** endpoint reports healthy only when **every** active loop's file is fresh
+(within `Worker:Heartbeat:StaleAfter`, default 2 hours) — so a single hung loop is detectable over one
+httpGet probe. The same surface serves the worker's Prometheus **`GET /metrics`** (see "Worker metrics and
+per-loop liveness" above).
 
 ### Asset deletion
 
@@ -3088,12 +3121,14 @@ curl http://localhost:8080/health/live
 docker stop livecore-api
 ```
 
-Run the worker container (no ports; runs the asset cleanup, recap generation and export processing jobs
-when a database is configured — plus the store-notification reconciliation job when billing enables it —
-otherwise idles):
+Run the worker container (exposes its metrics/health port 9464; runs the asset cleanup, recap generation
+and export processing jobs when a database is configured — plus the store-notification reconciliation job
+when billing enables it — otherwise idles):
 
 ```bash
-docker run --rm livecore-worker
+docker run --rm -p 9464:9464 livecore-worker
+curl http://localhost:9464/health/live
+curl http://localhost:9464/metrics
 ```
 
 Image baseline:
@@ -3103,13 +3138,13 @@ Image baseline:
   verify it).
 - The runtime images contain only the published output: no SDK, no package
   caches, no build tooling.
-- Only the API image exposes a port (8080, unprivileged); the worker serves
-  no HTTP traffic.
+- Both images expose an unprivileged port: the API on 8080, and the worker on
+  9464 for its `/metrics` + per-loop `/health/live` surface (CORE-DR-003).
 - The images define no `HEALTHCHECK` instruction on purpose: the .NET runtime
   images ship no HTTP client tooling, and none is installed just for probing.
   Orchestration platforms (Compose, Kubernetes, load balancers) probe
   `GET /health/live` (liveness) and `GET /health/ready` (readiness) over HTTP
-  instead; the worker's liveness is the process itself.
+  instead; the worker's liveness is its per-loop `GET /health/live`.
 - Configuration is supplied at runtime through environment variables
   (for example `ASPNETCORE_ENVIRONMENT` and logging levels); no secrets are
   baked into the images.

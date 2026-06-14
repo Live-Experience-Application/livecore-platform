@@ -13,7 +13,9 @@ public class WorkerSmokeTests
     public async Task WorkerHost_builds_starts_and_stops()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        using var host = WorkerHostFactory.Create([]).Build();
+        // The worker now binds a small HTTP surface for its metrics/health (CORE-DR-003); bind it to a dynamic
+        // loopback port so this test never conflicts with another test (or anything else) on a fixed port.
+        using var host = WorkerHostFactory.Create(["--Worker:Metrics:Url=http://127.0.0.1:0"]);
         var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
 
         await host.StartAsync(timeout.Token);
@@ -30,8 +32,7 @@ public class WorkerSmokeTests
         // connection string is supplied through configuration only (no connection is opened by building the
         // host), exactly as the API host reads it.
         using var host = WorkerHostFactory.Create(
-            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
-            .Build();
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 
@@ -43,7 +44,7 @@ public class WorkerSmokeTests
     {
         // Persistence-gated, fail-safe: with no database configured the worker still starts but schedules no
         // cleanup loop (mirroring how the API host runs without persistence).
-        using var host = WorkerHostFactory.Create([]).Build();
+        using var host = WorkerHostFactory.Create([]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 
@@ -57,8 +58,7 @@ public class WorkerSmokeTests
         // cleanup job. The connection string is supplied through configuration only (no connection is opened by
         // building the host), exactly as the API host reads it.
         using var host = WorkerHostFactory.Create(
-            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
-            .Build();
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 
@@ -70,7 +70,7 @@ public class WorkerSmokeTests
     {
         // Persistence-gated, fail-safe: with no database configured the worker schedules no recap generation
         // loop (mirroring the cleanup job's gating).
-        using var host = WorkerHostFactory.Create([]).Build();
+        using var host = WorkerHostFactory.Create([]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 
@@ -84,8 +84,7 @@ public class WorkerSmokeTests
         // other jobs. The connection string is supplied through configuration only (no connection is opened by
         // building the host), exactly as the API host reads it.
         using var host = WorkerHostFactory.Create(
-            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"])
-            .Build();
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 
@@ -97,7 +96,7 @@ public class WorkerSmokeTests
     {
         // Persistence-gated, fail-safe: with no database configured the worker schedules no export processing
         // loop (mirroring the other jobs' gating).
-        using var host = WorkerHostFactory.Create([]).Build();
+        using var host = WorkerHostFactory.Create([]);
 
         var hostedServices = host.Services.GetServices<IHostedService>();
 

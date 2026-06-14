@@ -30,15 +30,15 @@ namespace LiveCore.Worker;
 /// </para>
 ///
 /// <para>
-/// Liveness heartbeat (CORE-OPS-005): like the other worker loops, this loop writes a <see cref="WorkerHeartbeat"/>
-/// on startup and after every sweep tick, so orchestration can detect a WEDGED loop (its heartbeat file goes stale
-/// when a sweep hangs). The loops share the one worker-process heartbeat (the heartbeat is the process's liveness
-/// signal, refreshed whenever any loop makes progress).
+/// Liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003): like the other worker loops, this loop writes
+/// its OWN <see cref="WorkerHeartbeat"/> on startup and after every sweep tick, so orchestration can detect a
+/// WEDGED loop (this loop's heartbeat file goes stale when its sweep hangs, even while the other loops keep
+/// beating their own files, so a single hung loop is detectable rather than masked).
 /// </para>
 /// </summary>
 internal sealed class StoreNotificationReconciliationBackgroundService : BackgroundService
 {
-    private const string _jobName = "store-notification-reconciliation";
+    private const string _jobName = WorkerJobNames.StoreNotificationReconciliation;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly StoreNotificationReconciliationOptions _options;
@@ -49,19 +49,19 @@ internal sealed class StoreNotificationReconciliationBackgroundService : Backgro
     public StoreNotificationReconciliationBackgroundService(
         IServiceScopeFactory scopeFactory,
         StoreNotificationReconciliationOptions options,
-        WorkerHeartbeat heartbeat,
+        WorkerJobHeartbeats heartbeats,
         LiveCoreMetrics metrics,
         ILogger<StoreNotificationReconciliationBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(heartbeat);
+        ArgumentNullException.ThrowIfNull(heartbeats);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
-        _heartbeat = heartbeat;
+        _heartbeat = heartbeats.ForJob(_jobName);
         _metrics = metrics;
         _logger = logger;
     }

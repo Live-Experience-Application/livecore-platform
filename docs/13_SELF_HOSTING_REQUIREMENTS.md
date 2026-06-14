@@ -351,33 +351,58 @@ the OIDC audience guard grants (CORE-OPS-004). The readiness response stays
 endpoint (threat T7). (Audience is separately mandatory in production — a
 configured `Authority` with a blank `Audience` refuses to start, see above.)
 
-### Worker liveness heartbeat
+### Worker metrics and per-loop liveness (CORE-DR-003)
 
-The worker host serves no HTTP traffic and exposes no port, so its liveness signal
-is a **heartbeat file** rather than a health port. Each job loop — the asset cleanup
-loop (`AssetCleanupBackgroundService`) and the recap generation loop
-(`RecapGenerationBackgroundService`, CORE-JOB-001) — writes the current UTC timestamp
-to the heartbeat file on startup and after **every completed sweep tick**. A loop is
-resilient to a sweep that _throws_, but a sweep that **hangs** (a stuck database or
-storage call) would leave the process alive yet doing no work; the file is the worker
-process's liveness signal, refreshed whenever a loop makes progress, so a worker whose
-loops all hang stops refreshing it and the file goes **stale** — the signal
-orchestration uses to restart the wedged worker.
+The worker is the host doing **irreversible** work, so it must not be a monitoring
+blind spot. It exposes a small HTTP surface (the ASP.NET Core shared framework the
+referenced API project already brings — no new dependency), bound to a configurable
+listen URL (`Worker:Metrics:Url` / `Worker__Metrics__Url`, default `http://0.0.0.0:9464`):
 
-- Configure the path with `Worker:Heartbeat:FilePath`
+- **`GET /metrics`** — the Prometheus scrape endpoint, wired exactly as the API host's
+  `/metrics` (`docs/15_OBSERVABILITY.md`). It serves the OpenTelemetry-collected
+  `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on
+  failure (tagged by the coarse `job` name) is actually scrapeable. Like the API's
+  `/metrics`, it is **unauthenticated by convention** — a Prometheus server scrapes it
+  from inside the deployment network — and a deployment **restricts it at the
+  reverse-proxy/network edge**. It carries only low-cardinality aggregates, never
+  content (threat T7).
+- **`GET /health/live`** — the worker's **per-loop** liveness endpoint. Wire it to the
+  orchestrator's liveness probe (restart on failure), exactly as for the API.
+
+The worker runs up to **four** job loops — asset cleanup (`AssetCleanupBackgroundService`),
+recap generation (`RecapGenerationBackgroundService`, CORE-JOB-001), export processing
+(`ExportProcessingBackgroundService`, CORE-JOB-002) and the billing-gated
+store-notification reconciliation (`StoreNotificationReconciliationBackgroundService`,
+CORE-JOB-003). A loop is resilient to a sweep that _throws_, but a sweep that **hangs**
+(a stuck database or storage call) would leave the process alive yet doing no work.
+
+Each loop writes the current UTC timestamp to its **own** heartbeat file on startup and
+after **every completed sweep tick**, and `/health/live` is healthy **only when every
+active loop's file is fresh**. Before this, all loops shared **one** file, so a single
+healthy loop kept it fresh and **masked** the others hanging; per-loop files plus the
+aggregating endpoint make a **single** hung loop detectable.
+
+- Configure the base path with `Worker:Heartbeat:FilePath`
   (`Worker__Heartbeat__FilePath`); the default is `<temp>/livecore-worker.heartbeat`.
-  Point it at a path the orchestration probe can also read (for example a mounted
-  volume, or simply the container's own filesystem for an `exec` probe).
-- Check **freshness**, not just existence. A liveness probe should restart the
-  worker when the file's age exceeds a few sweep intervals
-  (`Assets:Cleanup:SweepInterval` / `Recaps:Generation:SweepInterval`, both default 1
-  hour) — for example a Kubernetes `livenessProbe` running
-  `exec: ["sh","-c","test $(( $(date +%s) - $(stat -c %Y /var/run/livecore/worker.heartbeat) )) -lt 7200"]`.
-- The heartbeat is wired **alongside** the jobs, so with **no** database there is no
-  loop and no heartbeat (there is nothing to stall). A heartbeat write never crashes
-  the worker (a transient error is logged and swallowed; a persistent failure just
-  makes the file go stale, which is fail-safe). It carries only a timestamp — no
-  identifiers, no secrets (threat T7).
+  Each loop's file is that base suffixed with the loop name (e.g.
+  `…/livecore-worker.heartbeat.asset-cleanup`).
+- Configure the staleness threshold with `Worker:Heartbeat:StaleAfter`
+  (`Worker__Heartbeat__StaleAfter`, a `TimeSpan`); the default is **2 hours**, a few of
+  every loop's default 1-hour sweep interval (`Assets:Cleanup:SweepInterval` /
+  `Recaps:Generation:SweepInterval` / `Exports:Processing:SweepInterval` /
+  `Store:Reconciliation:SweepInterval`). A loop whose file is older than this — or
+  missing — reads as **stalled** (fail-closed), and the worker reports not-live so
+  orchestration restarts it.
+- Prefer the HTTP probe (`httpGet: /health/live`), which aggregates all loops in one
+  check. An `exec` probe checking a single file's age still works but only covers the
+  loop whose file it reads, so it cannot see another loop hanging.
+- The liveness check is wired **alongside** the jobs: with **no** database there is no
+  loop and liveness is **vacuously healthy** (there is nothing to stall), while
+  `/health/live` and `/metrics` still respond — exactly as the API's `/metrics` and
+  `/health/*` respond without persistence. A heartbeat write never crashes the worker
+  (a transient error is logged and swallowed; a persistent failure makes that loop's
+  file go stale, which is fail-safe). It carries only a timestamp — no identifiers, no
+  secrets (threat T7).
 
 ## Object storage (CORE-OPS-006)
 
@@ -533,7 +558,9 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Realtime:Backplane:ConnectionString` | `Realtime__Backplane__ConnectionString` | yes | for multi-instance   | API         | In-process backplane (single instance only, CORE-OPS-007) |
 | `Tracing:Otlp:Endpoint`             | `Tracing__Otlp__Endpoint`          |   no   | for trace export        | API         | Spans produced but not exported (no collector, CORE-OBS-003) |
-| `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat`                      |
+| `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat` (per-loop base path, CORE-DR-003) |
+| `Worker:Heartbeat:StaleAfter`       | `Worker__Heartbeat__StaleAfter`    |   no   | no                      | worker      | `02:00:00`; a loop idle longer reads as hung -> worker not-live (CORE-DR-003) |
+| `Worker:Metrics:Url`                | `Worker__Metrics__Url`             |   no   | no                      | worker      | `http://0.0.0.0:9464` (worker `/metrics` + `/health/live`, CORE-DR-003) |
 | `Recaps:Generation:SweepInterval`   | `Recaps__Generation__SweepInterval` |  no   | no                      | worker      | `01:00:00` (recap generation cadence, CORE-JOB-001)     |
 | `Backup:Encryption:Passphrase`      | `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`) | yes | for any backup/restore | backup scripts | Backup/restore refuse to run; nothing is written as plaintext (CORE-DR-001) |
 

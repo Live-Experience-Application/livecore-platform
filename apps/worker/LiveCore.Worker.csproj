@@ -13,7 +13,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.2" />
+    <!-- The worker now exposes a small HTTP surface for its observability (CORE-DR-003): the Prometheus
+         /metrics scrape endpoint and the per-loop /health/live endpoint. That needs the ASP.NET Core shared
+         framework's compile-time reference assemblies (WebApplication, endpoint routing, health checks), which
+         also supersede the Microsoft.Extensions.Hosting package the worker used before (the shared framework
+         includes it - NU1510). The framework is ALREADY present at runtime - the referenced API project brings
+         it and the worker's Dockerfile already runs on the aspnet base image - so this is NOT a new dependency;
+         it only makes the reference assemblies available to this project's compilation (the implicit Web-SDK
+         framework reference does not flow transitively through the ProjectReference). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>

@@ -25,15 +25,15 @@ namespace LiveCore.Worker;
 /// </para>
 ///
 /// <para>
-/// Liveness heartbeat (CORE-OPS-005): like the asset cleanup loop, this loop writes a
-/// <see cref="WorkerHeartbeat"/> on startup and after every sweep tick, so orchestration can detect a WEDGED
-/// loop (its heartbeat file goes stale when a sweep hangs). The two loops share the one worker-process
-/// heartbeat (the heartbeat is the process's liveness signal, refreshed whenever either loop makes progress).
+/// Liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003): like the asset cleanup loop, this loop
+/// writes its OWN <see cref="WorkerHeartbeat"/> on startup and after every sweep tick, so orchestration can
+/// detect a WEDGED loop (this loop's heartbeat file goes stale when its sweep hangs, even while the other
+/// loops keep beating their own files, so a single hung loop is detectable rather than masked).
 /// </para>
 /// </summary>
 internal sealed class RecapGenerationBackgroundService : BackgroundService
 {
-    private const string _jobName = "recap-generation";
+    private const string _jobName = WorkerJobNames.RecapGeneration;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly RecapGenerationOptions _options;
@@ -44,19 +44,19 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
     public RecapGenerationBackgroundService(
         IServiceScopeFactory scopeFactory,
         RecapGenerationOptions options,
-        WorkerHeartbeat heartbeat,
+        WorkerJobHeartbeats heartbeats,
         LiveCoreMetrics metrics,
         ILogger<RecapGenerationBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(heartbeat);
+        ArgumentNullException.ThrowIfNull(heartbeats);
         ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
-        _heartbeat = heartbeat;
+        _heartbeat = heartbeats.ForJob(_jobName);
         _metrics = metrics;
         _logger = logger;
     }

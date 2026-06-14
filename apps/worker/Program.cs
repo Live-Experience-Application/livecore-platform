@@ -9,7 +9,7 @@ internal static class WorkerEntryPoint
 {
     private static void Main(string[] args)
     {
-        var host = WorkerHostFactory.Create(args).Build();
-        host.Run();
+        var app = WorkerHostFactory.Create(args);
+        app.Run();
     }
 }
