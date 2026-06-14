@@ -1115,6 +1115,19 @@ app.MapLiveCoreHealthEndpoints();
 // unconditionally; it needs no database.
 app.MapLiveCoreMetricsEndpoint();
 
+// AGPL section 13 source-offer endpoint (CORE-CMP-001): GET /source, the anonymous surface that OFFERS
+// remote users access to the Corresponding Source of the running build (its license, build version and the
+// repository the source can be obtained from). The platform is AGPL-3.0-or-later (LICENSE; docs/16_LICENSING.md)
+// and network-interactive (the SignalR hub + /api/v1), so section 13 obliges a hosted deployment to make this
+// offer to every remote user it interacts with; the endpoint discharges that obligation. It is anonymous by
+// design (the offer is owed to every remote user) and a top-level infrastructure route, not part of the
+// versioned /api/v1 product surface, exactly like /health/* and /metrics. It needs no database, so it is
+// mapped unconditionally, and it exposes only the license, a build version and a public repository URL — never
+// a token, tenant identifier, configuration value or resource content (threat T7). A deployment that ships
+// modified source overrides the offered location with SourceOffer:RepositoryUrl so the offer points at the
+// source actually running there.
+app.MapLiveCoreSourceOfferEndpoint();
+
 // Current-principal endpoint (CORE-API-002): GET /api/v1/me, the IdentityAccess
 // module's read of the authenticated caller's principal context (their user
 // profile + organization memberships + roles). It lives in an authenticated route
