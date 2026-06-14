@@ -311,6 +311,76 @@ public sealed class HideServiceTests : IDisposable
         Assert.Contains(rules, rule => rule.IsAudienceWide && rule.IsVisibleToAudience());
     }
 
+    // --- Ghost-reveal prevention (CORE-SVIS-002) -------------------------------
+
+    [Fact]
+    public async Task Reveal_then_hide_leaves_the_resource_hidden_even_under_a_racing_second_reveal()
+    {
+        // The headline CORE-SVIS-002 scenario: two first-reveals race, then a hide. Before the fix the two
+        // reveals created TWO visible rules and the hide flipped only one, leaving the other Visible as an
+        // un-hideable ghost. Now the unique index lets only ONE rule exist, so the hide fully reverses it —
+        // no resource stays visible after a successful hide.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        // Drive the SECOND reveal through a race-injecting repository: just before it inserts, the first
+        // reveal commits its rule, so the second loses the create race and converges onto the one rule.
+        async Task InjectWinningRevealAsync()
+        {
+            await using var winnerContext = CreateContext();
+            var winner = VisibilityRule.Create(
+                org, ws, sessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, _now);
+            Assert.Equal(
+                VisibilityRuleAddResult.Added,
+                await new VisibilityRuleRepository(winnerContext).AddAsync(winner, CancellationToken.None));
+        }
+
+        await using (var context = CreateContext())
+        {
+            var racingRules = new RaceInjectingVisibilityRuleRepository(
+                new VisibilityRuleRepository(context), InjectWinningRevealAsync);
+            var service = new RevealService(racingRules, new IdempotencyKeyStore(context), new AuditLogRepository(context));
+            await service.RevealAsync(
+                org, ws, sessionId, VisibilityResourceType.Entity, resourceId, null, _actor, "key-loser", _now, CancellationToken.None);
+        }
+
+        // Exactly one rule survived the racing first-reveals.
+        Assert.Single(await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId));
+
+        // The hide flips the one rule to hidden; with no second (ghost) rule, NO rule stays visible.
+        var hide = await HideAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-hide");
+        Assert.Equal(HideOutcome.Applied, hide.Outcome);
+        Assert.True(hide.VisibilityChanged);
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+        Assert.False(rules[0].IsVisibleToAudience());
+    }
+
+    [Fact]
+    public async Task A_second_hide_with_a_different_key_is_a_no_op_and_leaves_the_resource_hidden()
+    {
+        // Idempotent double-hide across DIFFERENT keys (state-level idempotence, not just the key
+        // short-circuit): once hidden, a second hide changes nothing and the resource stays hidden.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+
+        var first = await HideAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-hide-1");
+        var second = await HideAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-hide-2");
+
+        // The first hide changed visibility (emit the event); the second was a no-op (already hidden).
+        Assert.Equal(HideOutcome.Applied, first.Outcome);
+        Assert.True(first.VisibilityChanged);
+        Assert.Equal(HideOutcome.Applied, second.Outcome);
+        Assert.False(second.VisibilityChanged);
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+        Assert.False(rules[0].IsVisibleToAudience());
+        // The no-op second hide audited nothing: only the first hide's real change is recorded.
+        Assert.Single(await ListAuditAsync(org));
+    }
+
     // --- Idempotency -----------------------------------------------------------
 
     [Fact]

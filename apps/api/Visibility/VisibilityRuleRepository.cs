@@ -181,11 +181,41 @@ internal sealed class VisibilityRuleRepository : IVisibilityRuleRepository
 
         _dbContext.VisibilityRules.Add(rule);
 
-        // The critical index is non-unique, so there is no duplicate outcome to translate here; a
-        // foreign-key violation (a non-existent workspace or tenant) propagates as a
-        // DbUpdateException.
-        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        return VisibilityRuleAddResult.Added;
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return VisibilityRuleAddResult.Added;
+        }
+        catch (DbUpdateException)
+        {
+            // Keep the context usable: the failed insert must not be retried by a later SaveChanges on
+            // the same scope (and, inside the reveal command's transaction, EF rolls back to the
+            // SaveChanges savepoint, leaving the transaction alive — the same pattern as
+            // QuotaUsageRepository.AddAsync).
+            _dbContext.Entry(rule).State = EntityState.Detached;
+
+            // Provider-neutral duplicate detection (CORE-SVIS-002): if a rule already exists in the SAME
+            // (session, resource, dimension), the filtered unique index rejected this insert as a
+            // duplicate — a concurrent first-reveal that lost the create race. The dimension is matched on
+            // target_participant_id (null == audience-wide). Any other failure (for example a session,
+            // workspace or tenant foreign key that does not exist) is rethrown unchanged, so the
+            // repository's documented foreign-key behavior is preserved.
+            var duplicateExists = await _dbContext.VisibilityRules
+                .AsNoTracking()
+                .AnyAsync(
+                    existing => existing.SessionId == rule.SessionId
+                        && existing.ResourceType == rule.ResourceType
+                        && existing.ResourceId == rule.ResourceId
+                        && existing.TargetParticipantId == rule.TargetParticipantId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (duplicateExists)
+            {
+                return VisibilityRuleAddResult.Duplicate;
+            }
+
+            throw;
+        }
     }
 
     /// <inheritdoc />

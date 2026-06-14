@@ -344,20 +344,16 @@ internal sealed class RevealService
     /// changed) so the caller can audit exactly the real changes (CORE-VIS-006). The target dimension is
     /// either audience-wide (<paramref name="targetParticipantId"/> is <see langword="null"/>) or one
     /// selected participant; the two are independent — a change in one never touches the other, so hiding
-    /// a participant's private reveal never affects the audience-wide rule and vice versa. Within the
-    /// matching dimension:
-    /// <list type="bullet">
-    ///   <item>If the resource is already in the target state, does nothing and returns
-    ///   <see langword="null"/> (no change to audit). For <see cref="VisibilityState.Visible"/> that means
-    ///   a visible rule already exists; for <see cref="VisibilityState.Hidden"/> that means NO visible
-    ///   rule exists (an absent rule already means hidden).</item>
-    ///   <item>Otherwise it flips the rule standing in the way to the target state (a hidden rule for a
-    ///   reveal, the visible rule for a hide) via the CORE-VIS-001 primitive, recording the prior state.</item>
-    ///   <item>When no rule exists yet it CREATES one only for a reveal (target Visible); a hide needs no
-    ///   rule because absence already means hidden, so the "already hidden" branch above returns
-    ///   <see langword="null"/> first.</item>
-    /// </list>
-    /// All reads/writes are tenant- and workspace-scoped.
+    /// a participant's private reveal never affects the audience-wide rule and vice versa.
+    ///
+    /// SINGLE RULE PER DIMENSION (CORE-SVIS-002). The filtered unique index allows at most one rule per
+    /// (session, resource, dimension), so a create that races a CONCURRENT first-reveal is rejected as a
+    /// <see cref="VisibilityRuleAddResult.Duplicate"/>. When that happens this method re-resolves ONCE
+    /// against the now-committed rule (<see cref="ResolveTargetStateAsync"/> reports the lost race), so the
+    /// two reveals converge on ONE rule instead of creating a second, un-hideable ghost. The second pass
+    /// finds the existing rule and flips it or no-ops, so it can never reach the create branch again — the
+    /// retry is bounded to one. A hide then has exactly one rule to flip, so it fully reverses the reveal
+    /// (no resource stays visible after a successful hide).
     /// </summary>
     private async Task<VisibilityChange?> EnsureStateAsync(
         Guid organizationId,
@@ -370,9 +366,56 @@ internal sealed class RevealService
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        // Session-scoped (CORE-SVIS-001): only the rules of THIS session are relevant, so a reveal/hide
-        // never reads or flips a rule of a concurrent session of the same workspace (the cross-session
-        // leak; threat T5/T3).
+        var resolution = await ResolveTargetStateAsync(
+                organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, targetState, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        // A first-create that lost the single-rule-per-(session, resource, dimension) race (CORE-SVIS-002):
+        // a concurrent first-reveal already inserted the dimension's row, so the unique index rejected this
+        // insert. Re-resolve once against the now-committed rule so the reveals converge on one rule; the
+        // second pass finds the existing rule and cannot reach the create branch again (bounded retry).
+        if (resolution.LostCreateRace)
+        {
+            resolution = await ResolveTargetStateAsync(
+                    organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, targetState, now, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return resolution.Change;
+    }
+
+    /// <summary>
+    /// Resolves the resource to <paramref name="targetState"/> in the target dimension ONCE and reports the
+    /// outcome (the change to audit, or that a create lost the uniqueness race). Within the matching
+    /// dimension:
+    /// <list type="bullet">
+    ///   <item>If the resource is already in the target state, does nothing (no change to audit). For
+    ///   <see cref="VisibilityState.Visible"/> that means a visible rule already exists; for
+    ///   <see cref="VisibilityState.Hidden"/> that means NO visible rule exists (an absent rule already
+    ///   means hidden).</item>
+    ///   <item>A reveal flips the dimension's single hidden rule to visible, or — when none exists — CREATES
+    ///   a visible rule; if a concurrent first-reveal already created it the unique index rejects the
+    ///   insert and this returns <see cref="StateResolution.LostRace"/> so the caller re-resolves.</item>
+    ///   <item>A hide flips EVERY visible rule in the dimension to hidden, so no resource stays visible
+    ///   after a successful hide (CORE-SVIS-002). Under the uniqueness constraint there is at most one such
+    ///   rule, so this normally flips exactly one; flipping all also reverses any rule rows that predate the
+    ///   constraint.</item>
+    /// </list>
+    /// All reads/writes are tenant-, workspace- and session-scoped (CORE-SVIS-001), so a reveal/hide never
+    /// reads or flips a rule of a concurrent session of the same workspace (the cross-session leak; threat
+    /// T5/T3).
+    /// </summary>
+    private async Task<StateResolution> ResolveTargetStateAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId,
+        VisibilityState targetState,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
         var rules = await _rules
             .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
@@ -383,44 +426,85 @@ internal sealed class RevealService
             .Where(rule => rule.TargetParticipantId == targetParticipantId)
             .ToArray();
 
-        var isVisibleNow = inDimension.Any(rule => rule.IsVisibleToAudience());
+        var visibleRules = inDimension
+            .Where(rule => rule.IsVisibleToAudience())
+            .ToArray();
 
-        // Already in the target state in this dimension: nothing to do (state-level idempotence), nothing
-        // to audit. Visible target -> a visible rule already exists; Hidden target -> no visible rule does.
-        var alreadyInTargetState = targetState == VisibilityState.Visible ? isVisibleNow : !isVisibleNow;
-        if (alreadyInTargetState)
+        if (targetState == VisibilityState.Visible)
         {
-            return null;
+            // Already visible in this dimension: nothing to do (state-level idempotence), nothing to audit.
+            if (visibleRules.Length > 0)
+            {
+                return StateResolution.NoChange;
+            }
+
+            // A hidden rule stands in the way: flip it to visible (the CORE-VIS-001 primitive) rather than
+            // accumulating a second rule. Under the uniqueness constraint there is at most one.
+            if (inDimension.Length > 0)
+            {
+                var ruleToChange = inDimension[0];
+                var previousVisibility = ruleToChange.Visibility;
+                ruleToChange.ChangeVisibility(VisibilityState.Visible, now);
+                await _rules.UpdateAsync(ruleToChange, cancellationToken).ConfigureAwait(false);
+                return StateResolution.Changed(previousVisibility, VisibilityState.Visible);
+            }
+
+            // No rule in this dimension yet: create a visible rule — audience-wide or scoped to the
+            // participant, per the target. A concurrent first-reveal may have created it already, in which
+            // case the unique index rejects this insert (Duplicate) -> signal the lost create race so the
+            // caller re-resolves onto the existing rule (no ghost duplicate). There is no prior state.
+            var created = targetParticipantId is { } participantId
+                ? VisibilityRule.CreateForParticipant(
+                    organizationId, workspaceId, sessionId, resourceType, resourceId, participantId, VisibilityState.Visible, now)
+                : VisibilityRule.Create(
+                    organizationId, workspaceId, sessionId, resourceType, resourceId, VisibilityState.Visible, now);
+            var addResult = await _rules.AddAsync(created, cancellationToken).ConfigureAwait(false);
+            return addResult == VisibilityRuleAddResult.Duplicate
+                ? StateResolution.LostRace
+                : StateResolution.Changed(previousVisibility: null, VisibilityState.Visible);
         }
 
-        // A rule stands in the way: flip it to the target state (the CORE-VIS-001 primitive) rather than
-        // accumulating a second rule. For a reveal that is a hidden rule (the first in the dimension); for
-        // a hide it is the visible rule. Capture the prior state BEFORE the change for the audit.
-        var ruleToChange = targetState == VisibilityState.Visible
-            ? (inDimension.Length > 0 ? inDimension[0] : null)
-            : inDimension.FirstOrDefault(rule => rule.IsVisibleToAudience());
-        if (ruleToChange is not null)
+        // A hide. Already hidden (no visible rule, including the no-rule case — absence already means
+        // hidden): nothing to do, nothing to audit. A hide never creates a rule.
+        if (visibleRules.Length == 0)
         {
-            var previousVisibility = ruleToChange.Visibility;
-            ruleToChange.ChangeVisibility(targetState, now);
-            await _rules.UpdateAsync(ruleToChange, cancellationToken).ConfigureAwait(false);
-            return new VisibilityChange(previousVisibility, targetState);
+            return StateResolution.NoChange;
         }
 
-        // No rule in this dimension yet. This is reached ONLY for a reveal (a hide with no rule is already
-        // hidden and returned null above): create a visible rule — audience-wide or scoped to the
-        // participant, per the target. There is no prior state.
-        var created = targetParticipantId is { } participantId
-            ? VisibilityRule.CreateForParticipant(
-                organizationId, workspaceId, sessionId, resourceType, resourceId, participantId, targetState, now)
-            : VisibilityRule.Create(
-                organizationId, workspaceId, sessionId, resourceType, resourceId, targetState, now);
-        await _rules.AddAsync(created, cancellationToken).ConfigureAwait(false);
-        return new VisibilityChange(PreviousVisibility: null, NewVisibility: targetState);
+        // Flip EVERY visible rule in the dimension to hidden, so NO rule stays visible after a successful
+        // hide (the CORE-SVIS-002 "a hide always fully reverses a prior reveal" acceptance criterion). The
+        // prior state is captured from the first visible rule for the audit.
+        var previousState = visibleRules[0].Visibility;
+        foreach (var rule in visibleRules)
+        {
+            rule.ChangeVisibility(VisibilityState.Hidden, now);
+            await _rules.UpdateAsync(rule, cancellationToken).ConfigureAwait(false);
+        }
+
+        return StateResolution.Changed(previousState, VisibilityState.Hidden);
     }
 
     /// <summary>
-    /// A visibility change applied by <see cref="EnsureStateAsync"/>: the state BEFORE the change
+    /// The outcome of a single <see cref="ResolveTargetStateAsync"/> pass: the visibility
+    /// <see cref="Change"/> it applied (<see langword="null"/> when nothing changed), and whether a create
+    /// LOST the single-rule-per-dimension race (<see cref="LostCreateRace"/>) so the caller re-resolves once
+    /// against the now-committed rule (CORE-SVIS-002).
+    /// </summary>
+    private readonly record struct StateResolution(VisibilityChange? Change, bool LostCreateRace)
+    {
+        /// <summary>Nothing changed (already in the target state); nothing to audit.</summary>
+        public static StateResolution NoChange => new(null, LostCreateRace: false);
+
+        /// <summary>A concurrent first-reveal won the create race; re-resolve onto the existing rule.</summary>
+        public static StateResolution LostRace => new(null, LostCreateRace: true);
+
+        /// <summary>A real visibility change was applied (audit it).</summary>
+        public static StateResolution Changed(VisibilityState? previousVisibility, VisibilityState newVisibility)
+            => new(new VisibilityChange(previousVisibility, newVisibility), LostCreateRace: false);
+    }
+
+    /// <summary>
+    /// A visibility change applied by <see cref="ResolveTargetStateAsync"/>: the state BEFORE the change
     /// (<see langword="null"/> when no rule existed) and the state AFTER. Used to write the audit record.
     /// </summary>
     private readonly record struct VisibilityChange(

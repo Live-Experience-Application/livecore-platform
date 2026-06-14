@@ -1,4 +1,5 @@
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
@@ -133,6 +134,44 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         return rule;
     }
 
+    private async Task<Participant> SeedParticipantAsync(Guid organizationId, Guid workspaceId)
+    {
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId: null, "Participant", _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(ParticipantAddResult.Added, await new ParticipantRepository(context).AddAsync(participant, CancellationToken.None));
+        return participant;
+    }
+
+    private async Task<VisibilityRule> SeedParticipantRuleAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid targetParticipantId,
+        VisibilityState visibility = VisibilityState.Visible,
+        Guid? sessionId = null)
+    {
+        var session = sessionId ?? await SessionIdAsync(organizationId, workspaceId);
+        var rule = VisibilityRule.CreateForParticipant(
+            organizationId, workspaceId, session, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+        Assert.Equal(VisibilityRuleAddResult.Added, await repository.AddAsync(rule, CancellationToken.None));
+        return rule;
+    }
+
+    private async Task<IReadOnlyList<VisibilityRule>> ListRulesAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        VisibilityResourceType resourceType,
+        Guid resourceId)
+    {
+        await using var context = CreateContext();
+        return await new VisibilityRuleRepository(context)
+            .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, CancellationToken.None);
+    }
+
     private async Task<(Guid OrganizationId, Guid WorkspaceId)> SeedWorkspaceAsync(
         string organizationSlug = _organizationSlugA,
         string workspaceSlug = _workspaceSlugA)
@@ -252,9 +291,14 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
     {
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
-        // Two rules for the same resource (the non-unique index permits this).
+        // Two rules for the same resource in two DIFFERENT dimensions (the single-rule-per-dimension
+        // constraint, CORE-SVIS-002, allows the audience-wide rule plus one per participant): an
+        // audience-wide rule and a participant-scoped rule. The read returns the whole rule set for the
+        // resource regardless of dimension.
         var ruleA = await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
-        var ruleB = await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+        var participant = await SeedParticipantAsync(org, ws);
+        var ruleB = await SeedParticipantRuleAsync(
+            org, ws, VisibilityResourceType.Entity, resourceId, participant.Id, VisibilityState.Visible);
         // Same id but a different resource TYPE -> excluded.
         await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId);
         // Same type but a different id -> excluded.
@@ -268,6 +312,102 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         Assert.Equal(2, listed.Count);
         Assert.Contains(listed, rule => rule.Id == ruleA.Id);
         Assert.Contains(listed, rule => rule.Id == ruleB.Id);
+    }
+
+    // --- Single-rule-per-dimension uniqueness (CORE-SVIS-002) ------------------
+
+    [Fact]
+    public async Task A_second_audience_wide_rule_for_one_resource_in_a_session_is_rejected_as_a_duplicate()
+    {
+        // THE CONCURRENCY GUARANTEE at the persistence boundary: two first-reveals of one resource each
+        // reach AddAsync; the filtered unique index lets only the FIRST audience-wide rule in, so the
+        // second is reported as a Duplicate (a lost create race) and the dimension holds exactly ONE rule
+        // — never two, so a later hide cannot leave an un-hideable ghost (CORE-SVIS-002; threats T5/T3).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+        var first = VisibilityRule.Create(org, ws, sessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, _createdAt);
+        var second = VisibilityRule.Create(org, ws, sessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, _createdAt);
+
+        await using var contextA = CreateContext();
+        await using var contextB = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(contextA).AddAsync(first, CancellationToken.None));
+        // The second writer (a different context on the same database) is rejected as a duplicate.
+        Assert.Equal(VisibilityRuleAddResult.Duplicate, await new VisibilityRuleRepository(contextB).AddAsync(second, CancellationToken.None));
+
+        var rules = await ListRulesAsync(org, ws, sessionId, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+    }
+
+    [Fact]
+    public async Task A_second_rule_for_the_same_selected_participant_is_rejected_as_a_duplicate()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, participant.Id, VisibilityState.Visible);
+
+        var duplicate = VisibilityRule.CreateForParticipant(
+            org, ws, sessionId, VisibilityResourceType.Entity, resourceId, participant.Id, VisibilityState.Visible, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Duplicate, await new VisibilityRuleRepository(context).AddAsync(duplicate, CancellationToken.None));
+
+        var rules = await ListRulesAsync(org, ws, sessionId, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+    }
+
+    [Fact]
+    public async Task An_audience_wide_rule_and_a_participant_rule_for_the_same_resource_coexist()
+    {
+        // The two dimensions are independent: an audience-wide rule and a participant-scoped rule for the
+        // same resource are NOT duplicates of each other (the audience partial index excludes the
+        // participant row and vice versa).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, participant.Id, VisibilityState.Visible);
+
+        var rules = await ListRulesAsync(org, ws, sessionId, VisibilityResourceType.Entity, resourceId);
+        Assert.Equal(2, rules.Count);
+    }
+
+    [Fact]
+    public async Task Rules_for_two_different_participants_on_one_resource_coexist()
+    {
+        // Different participants are different dimensions, so each may hold its own rule.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var first = await SeedParticipantAsync(org, ws);
+        var second = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, first.Id, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, second.Id, VisibilityState.Visible);
+
+        var rules = await ListRulesAsync(org, ws, sessionId, VisibilityResourceType.Entity, resourceId);
+        Assert.Equal(2, rules.Count);
+    }
+
+    [Fact]
+    public async Task Uniqueness_is_per_session_so_the_same_resource_in_two_sessions_each_holds_one_rule()
+    {
+        // The constraint is scoped to the session (CORE-SVIS-001 + CORE-SVIS-002): the same resource may
+        // carry one audience-wide rule in EACH session of the workspace.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        var resourceId = Guid.NewGuid();
+
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionA.Id);
+        // Not a duplicate: a different session is a different scope.
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionB.Id);
+
+        Assert.Single(await ListRulesAsync(org, ws, sessionA.Id, VisibilityResourceType.Entity, resourceId));
+        Assert.Single(await ListRulesAsync(org, ws, sessionB.Id, VisibilityResourceType.Entity, resourceId));
     }
 
     [Fact]

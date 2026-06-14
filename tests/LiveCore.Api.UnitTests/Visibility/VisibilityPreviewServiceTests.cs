@@ -288,10 +288,12 @@ public sealed class VisibilityPreviewServiceTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var participant = (await SeedParticipantAsync(org, ws)).Id;
         var resourceId = Guid.NewGuid();
-        // Same resource, three rules (the non-unique index permits this): two hidden, one visible.
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+        // Same resource, two rules in DIFFERENT dimensions that BOTH make it visible to this participant
+        // (the single-rule-per-dimension constraint, CORE-SVIS-002, allows the audience-wide rule plus one
+        // per participant): an audience-wide visible rule and a visible rule scoped to this participant.
+        // The resource still appears EXACTLY ONCE in the visible set (the projection dedups).
         await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, participant, VisibilityState.Visible);
 
         var visible = await GetVisibleAsync(org, ws, participant);
 

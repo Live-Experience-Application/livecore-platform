@@ -251,6 +251,78 @@ public sealed class RevealServiceTests : IDisposable
         Assert.Single(rules);
     }
 
+    // --- Concurrent first-reveals: one rule, not two (CORE-SVIS-002) -----------
+
+    [Fact]
+    public async Task Two_concurrent_first_reveals_of_one_resource_produce_one_rule_not_two()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        // When THIS reveal goes to insert its new rule (having read "no rule"), a racing first-reveal has
+        // already committed the audience-wide visible rule, so the filtered unique index rejects this
+        // insert. The command must converge onto the one rule rather than create a second (the ghost).
+        async Task InjectWinningRevealAsync()
+        {
+            await using var winnerContext = CreateContext();
+            var winner = VisibilityRule.Create(
+                org, ws, sessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, _now);
+            Assert.Equal(
+                VisibilityRuleAddResult.Added,
+                await new VisibilityRuleRepository(winnerContext).AddAsync(winner, CancellationToken.None));
+        }
+
+        await using var context = CreateContext();
+        var racingRules = new RaceInjectingVisibilityRuleRepository(
+            new VisibilityRuleRepository(context), InjectWinningRevealAsync);
+        var service = new RevealService(racingRules, new IdempotencyKeyStore(context), new AuditLogRepository(context));
+
+        var result = await service.RevealAsync(
+            org, ws, sessionId, VisibilityResourceType.Entity, resourceId, null, _actor, "key-loser", _now, CancellationToken.None);
+
+        // The losing reveal still succeeds (the resource IS visible) but reports NO change — the racing
+        // writer already made it visible and emitted the event — so the endpoint emits no duplicate event.
+        Assert.Equal(RevealOutcome.Applied, result.Outcome);
+        Assert.False(result.VisibilityChanged);
+        // Exactly ONE rule: the concurrent first-reveals did not create two.
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        Assert.Single(rules);
+        Assert.True(rules[0].IsVisibleToAudience());
+    }
+
+    [Fact]
+    public async Task A_lost_create_race_writes_no_second_audit_record()
+    {
+        // The converging (losing) reveal made no real change, so it audits nothing — only the winner's
+        // reveal is audited (the audit is written exactly once per real visibility change, CORE-VIS-006).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+
+        async Task InjectWinningRevealAsync()
+        {
+            await using var winnerContext = CreateContext();
+            var winner = VisibilityRule.Create(
+                org, ws, sessionId, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, _now);
+            Assert.Equal(
+                VisibilityRuleAddResult.Added,
+                await new VisibilityRuleRepository(winnerContext).AddAsync(winner, CancellationToken.None));
+        }
+
+        await using var context = CreateContext();
+        var racingRules = new RaceInjectingVisibilityRuleRepository(
+            new VisibilityRuleRepository(context), InjectWinningRevealAsync);
+        var service = new RevealService(racingRules, new IdempotencyKeyStore(context), new AuditLogRepository(context));
+
+        await service.RevealAsync(
+            org, ws, sessionId, VisibilityResourceType.Entity, resourceId, null, _actor, "key-loser", _now, CancellationToken.None);
+
+        // The winner's rule was inserted directly (no reveal command), so there is NO audit from it, and the
+        // losing reveal converged with no change -> zero audit records.
+        Assert.Empty(await ListAuditAsync(org));
+    }
+
     // --- Selected-participant reveal (CORE-VIS-005) ----------------------------
 
     [Fact]

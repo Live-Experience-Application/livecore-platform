@@ -1088,6 +1088,19 @@ rule becomes `Visible`) and returns `Applied`; a repeat with the same key return
 `idempotency_keys` table records processed keys, and the visibility change is
 itself idempotent).
 
+There is at most **one active rule per `(session, resource, dimension)`**
+(CORE-SVIS-002): the `visibility_rules` table carries two filtered unique indexes
+(one for the audience-wide dimension where `target_participant_id IS NULL`, one per
+selected participant where it `IS NOT NULL`), and the command inserts-on-conflict.
+So two **concurrent first-reveals** of one resource — which carry **different**
+idempotency keys and so do not short-circuit each other — cannot create two rules:
+the loser of the create race is reported as a duplicate and converges onto the one
+rule (it returns `Applied` but signals no change, so no duplicate event is emitted).
+This closes the **ghost-reveal** hole where two rules were created and a later hide
+flipped only one, leaving the other `Visible` as an un-hideable ghost; with one rule
+per dimension a hide always **fully reverses** the reveal (no resource stays visible
+after a successful hide; threats T5/T3). See `docs/10_DATABASE_SCHEMA.md`.
+
 By default the reveal is **audience-wide** (visible to the whole audience). An
 optional `participantId` in the body makes it a **selected-participant** reveal —
 the resource becomes visible only to that participant, and a non-selected

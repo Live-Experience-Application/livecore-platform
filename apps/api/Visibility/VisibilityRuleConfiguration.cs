@@ -46,10 +46,29 @@ namespace LiveCore.Api.Visibility;
 ///   <c>visibility_rules(session_id, resource_type, resource_id)</c>
 ///   (docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped (CORE-SVIS-001), so "find the rule(s) for
 ///   this resource in this session" leads with the session column — the lookup the session-scoped
-///   policy and the reveal command perform. It is NON-unique on purpose — a resource may accumulate
-///   more than one rule within a session (the base audience rule plus per-participant scoped rules,
-///   CORE-VIS-005) — so this story does not impose a uniqueness a later story (the
-///   single-rule-per-(session, resource, dimension) constraint, CORE-SVIS-002) would have to widen.
+///   policy and the reveal command perform. It is NON-unique because it spans BOTH dimensions: a
+///   resource carries at most the audience-wide rule plus one rule per selected participant within a
+///   session (CORE-VIS-005), so this read index returns the whole rule set for a resource regardless of
+///   dimension.
+///   </item>
+///   <item>
+///   Two FILTERED (partial) UNIQUE indexes enforce the single-rule-per-(session, resource, dimension)
+///   constraint (CORE-SVIS-002), so a resource can never accumulate two rules in the same dimension —
+///   the ghost-reveal race where two concurrent first-reveals each insert a visible rule and a later hide
+///   flips only one, leaving the other Visible as an un-hideable ghost (threats T5/T3). The dimension is
+///   either AUDIENCE-WIDE (<c>target_participant_id IS NULL</c>) or one SELECTED participant
+///   (<c>target_participant_id IS NOT NULL</c>). Because <c>target_participant_id</c> is nullable and
+///   BOTH PostgreSQL and SQLite treat NULLs as DISTINCT in a unique index, a single unique index over
+///   (<c>session_id</c>, <c>resource_type</c>, <c>resource_id</c>, <c>target_participant_id</c>) would
+///   NOT reject a second audience-wide rule (two NULL targets compare distinct). So uniqueness is
+///   expressed as two partial indexes — the same nullable-uniqueness pattern as
+///   <c>templates(organization_id IS NULL / IS NOT NULL)</c>: one over (<c>session_id</c>,
+///   <c>resource_type</c>, <c>resource_id</c>) filtered to <c>target_participant_id IS NULL</c> (at most
+///   one audience-wide rule), and one over the four columns filtered to
+///   <c>target_participant_id IS NOT NULL</c> (at most one rule per selected participant; two reveals to
+///   DIFFERENT participants stay independent dimensions). The reveal command relies on these via
+///   insert-on-conflict (a losing concurrent first-create is reported as a duplicate and converges onto
+///   the one rule rather than creating a second; <see cref="RevealService"/>).
 ///   </item>
 ///   <item>
 ///   The non-unique composite index on (<c>organization_id</c>, <c>workspace_id</c>) keeps the
@@ -131,12 +150,40 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
         // Documented critical index visibility_rules(session_id, resource_type, resource_id)
         // (CORE-SVIS-001; docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped, so "find the rule(s)
         // for this resource in this session" leads with the session column — the lookup the
-        // session-scoped policy and the reveal command perform. NON-unique on purpose (a resource may
-        // accumulate the audience-wide rule plus per-participant scoped rules within a session; the
-        // single-rule-per-(session, resource, dimension) uniqueness is the later CORE-SVIS-002 concern,
-        // so this story does not impose a uniqueness a later story would have to widen).
+        // session-scoped policy and the reveal command perform. NON-unique because it spans BOTH
+        // dimensions (a resource carries at most the audience-wide rule plus one rule per selected
+        // participant within a session, CORE-VIS-005), so this read returns the whole rule set for a
+        // resource regardless of dimension. The single-rule-per-dimension UNIQUENESS is enforced by the
+        // two filtered indexes below (CORE-SVIS-002).
         builder.HasIndex(rule => new { rule.SessionId, rule.ResourceType, rule.ResourceId })
             .HasDatabaseName("ix_visibility_rules_session_id_resource_type_resource_id");
+
+        // SINGLE-RULE-PER-DIMENSION uniqueness (CORE-SVIS-002): at most ONE active visibility rule per
+        // (session, resource, dimension). The dimension is audience-wide (target_participant_id IS NULL)
+        // or one selected participant (target_participant_id IS NOT NULL). target_participant_id is
+        // nullable and both PostgreSQL and SQLite treat NULLs as DISTINCT in a unique index, so a single
+        // unique index on the four columns would not reject a second audience-wide rule (two NULL targets
+        // compare distinct) — exactly the ghost-reveal race this story closes. Express it as two FILTERED
+        // unique indexes (the templates(organization_id IS NULL / IS NOT NULL) pattern). The filter SQL is
+        // portable across both providers (plain column name + IS [NOT] NULL), so EnsureCreated builds it
+        // for the SQLite test schema and the migration builds it for PostgreSQL identically.
+
+        // Audience-wide dimension: at most one rule per (session, resource) with NO participant target.
+        // The named-index overload keeps this DISTINCT from the non-unique read index above (same columns):
+        // without a distinguishing name EF would merge the two HasIndex calls into one and drop the
+        // documented critical read index.
+        builder.HasIndex(
+                rule => new { rule.SessionId, rule.ResourceType, rule.ResourceId },
+                "ix_visibility_rules_session_resource_audience_dimension")
+            .IsUnique()
+            .HasFilter("\"target_participant_id\" IS NULL");
+
+        // Selected-participant dimension: at most one rule per (session, resource, participant). Two
+        // reveals to DIFFERENT participants are different dimensions and remain independent.
+        builder.HasIndex(rule => new { rule.SessionId, rule.ResourceType, rule.ResourceId, rule.TargetParticipantId })
+            .IsUnique()
+            .HasFilter("\"target_participant_id\" IS NOT NULL")
+            .HasDatabaseName("ix_visibility_rules_session_resource_participant_dimension");
 
         // Tenant-scoped composite index leading with organization_id: keeps the organization
         // boundary check (checked before the workspace boundary) and tenant-scoped reads efficient

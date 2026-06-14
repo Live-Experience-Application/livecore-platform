@@ -78,6 +78,8 @@ sessions(workspace_id, id)
 scenes(workspace_id, id)
 content_blocks(workspace_id, scene_id)
 visibility_rules(session_id, resource_type, resource_id)
+visibility_rules(session_id, resource_type, resource_id) unique where target_participant_id is null
+visibility_rules(session_id, resource_type, resource_id, target_participant_id) unique where target_participant_id is not null
 session_events(session_id, created_at, event_id)
 assets(workspace_id, id)
 asset_links(workspace_id, asset_id)
@@ -137,9 +139,32 @@ it (the cross-session leak; threats T5/T3 in `docs/07_SECURITY_THREAT_MODEL.md`)
 therefore led by the session: `visibility_rules(session_id, resource_type, resource_id)`. Every
 session-scoped visibility surface (the reveal/hide command, the participant-visible feed, the realtime
 recipient gate and reconnect replay) is bounded by `session_id`; the role-level, session-agnostic
-asset-download and entity-search reads remain workspace-wide. The index is **non-unique** (a resource may
-carry the audience-wide rule plus per-participant rules within a session); the single-rule-per-`(session,
-resource, dimension)` constraint is a follow-up (CORE-SVIS-002).
+asset-download and entity-search reads remain workspace-wide. The lead index is **non-unique** because it
+spans both dimensions (a resource carries at most the audience-wide rule plus one rule per selected
+participant within a session); it backs the "all rules for this resource in this session" read.
+
+## Single rule per dimension (CORE-SVIS-002)
+
+A resource has **at most one active visibility rule per `(session, resource, dimension)`**. The dimension is
+either audience-wide (`target_participant_id IS NULL`) or one selected participant
+(`target_participant_id IS NOT NULL`). Before this, two concurrent first-reveals of one resource each
+inserted a visible rule and a later hide flipped only one, leaving the other Visible as an **un-hideable
+ghost reveal** (threats T5/T3 in `docs/07_SECURITY_THREAT_MODEL.md`).
+
+Because `target_participant_id` is nullable and both PostgreSQL and SQLite treat NULLs as **distinct** in a
+unique index, a single unique index over the four columns would not reject a second audience-wide rule (two
+NULL targets compare distinct). The constraint is therefore expressed as **two filtered (partial) unique
+indexes** — the same nullable-uniqueness pattern as `templates(organization_id IS NULL / IS NOT NULL)`:
+
+- `visibility_rules(session_id, resource_type, resource_id)` **unique** where `target_participant_id IS NULL`
+  — at most one audience-wide rule.
+- `visibility_rules(session_id, resource_type, resource_id, target_participant_id)` **unique** where
+  `target_participant_id IS NOT NULL` — at most one rule per selected participant (reveals to **different**
+  participants stay independent dimensions).
+
+The reveal command relies on these via **insert-on-conflict**: a first-create that loses the race against a
+concurrent first-reveal is reported as a duplicate and converges onto the one rule rather than creating a
+second, so concurrent first-reveals never produce two rules and a hide always fully reverses a reveal.
 
 ## JSONB use
 

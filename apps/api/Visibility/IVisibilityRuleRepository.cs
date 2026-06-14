@@ -108,10 +108,12 @@ public interface IVisibilityRuleRepository
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Persists a new visibility rule. The critical index is non-unique, so there is no uniqueness
-    /// outcome to report; the result is always <see cref="VisibilityRuleAddResult.Added"/> on
-    /// success. Foreign-key violations (a non-existent workspace or tenant) surface as a
-    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
+    /// Persists a new visibility rule. Returns <see cref="VisibilityRuleAddResult.Added"/> on success, or
+    /// <see cref="VisibilityRuleAddResult.Duplicate"/> when a rule already exists for the same (session,
+    /// resource, DIMENSION) and the filtered unique index (CORE-SVIS-002) rejected the insert — typically
+    /// a concurrent first-reveal that lost the create race, which the caller converges onto the existing
+    /// rule rather than creating a second one. Foreign-key violations (a non-existent session, workspace
+    /// or tenant) still surface as a <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
     /// </summary>
     Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken);
 

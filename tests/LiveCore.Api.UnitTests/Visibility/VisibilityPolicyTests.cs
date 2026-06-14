@@ -259,10 +259,14 @@ public sealed class VisibilityPolicyTests : IDisposable
     {
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
-        // Two rules for the same resource (the non-unique index permits this): one hidden, one
-        // visible. Any visible rule grants visibility.
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+        // The same resource carries one audience-wide rule in EACH of two concurrent sessions of the
+        // workspace (the single-rule-per-(session, resource, dimension) constraint, CORE-SVIS-002, allows
+        // one per session): hidden in session A, visible in session B. The workspace-wide, session-agnostic
+        // overload folds across sessions, so any visible rule grants visibility.
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden, sessionA.Id);
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionB.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
