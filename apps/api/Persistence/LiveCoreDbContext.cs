@@ -35,7 +35,7 @@ namespace LiveCore.Api.Persistence;
 /// Entities <c>entity_types</c>, <c>entities</c> and <c>entity_relationships</c> tables, the
 /// Templates <c>templates</c> table, the Visibility <c>visibility_rules</c> table, the
 /// System <c>idempotency_keys</c> table, the Audit <c>audit_logs</c> table, the
-/// Realtime <c>session_events</c> table, the Assets <c>assets</c> and
+/// Realtime <c>session_events</c> and <c>session_event_sequences</c> tables, the Assets <c>assets</c> and
 /// <c>asset_links</c> tables, the Exports <c>export_jobs</c>, <c>export_manifests</c> and
 /// <c>export_manifest_entries</c> tables, the Recaps <c>recaps</c> table and the
 /// Entitlements <c>entitlement_definitions</c>, <c>plan_definitions</c>,
@@ -109,6 +109,13 @@ public sealed class LiveCoreDbContext : DbContext
     /// <summary>Append-only session events owned by the Realtime module.</summary>
     public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
 
+    /// <summary>
+    /// Per-session event sequence allocator counters owned by the Realtime module. Internal infrastructure
+    /// (the counter is not part of the public domain surface); the Realtime repository advances it via an
+    /// atomic upsert in the append path (CORE-RTC-001).
+    /// </summary>
+    internal DbSet<SessionEventSequence> SessionEventSequences => Set<SessionEventSequence>();
+
     /// <summary>Asset metadata records owned by the Assets module.</summary>
     public DbSet<Asset> Assets => Set<Asset>();
 
@@ -174,6 +181,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new IdempotencyKeyConfiguration());
         modelBuilder.ApplyConfiguration(new AuditLogConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
+        modelBuilder.ApplyConfiguration(new SessionEventSequenceConfiguration());
         modelBuilder.ApplyConfiguration(new AssetConfiguration());
         modelBuilder.ApplyConfiguration(new AssetLinkConfiguration());
         modelBuilder.ApplyConfiguration(new ExportJobConfiguration());

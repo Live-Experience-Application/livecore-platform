@@ -75,7 +75,7 @@ public sealed class SessionEventRepositoryTests : IDisposable
         => SessionEvent.Create(org, ws, session, SessionEventTypes.ContentRevealed, Guid.NewGuid(), target, "{}", 1, _now);
 
     [Fact]
-    public async Task Append_then_list_returns_all_events_in_a_deterministic_order()
+    public async Task Append_then_list_returns_all_events_in_append_order()
     {
         var (org, ws, session) = await SeedSessionAsync();
         var first = Event(org, ws, session);
@@ -86,14 +86,83 @@ public sealed class SessionEventRepositoryTests : IDisposable
 
         var events = await ListAsync(org, session);
         Assert.Equal(2, events.Count);
-        Assert.Contains(first.Id, events.Select(e => e.Id));
-        Assert.Contains(second.Id, events.Select(e => e.Id));
+        // The order is the per-session sequence (CORE-RTC-001), which is append order — no longer the
+        // "stable but unspecified" id order. The first appended event reads back first.
+        Assert.Equal(new[] { first.Id, second.Id }, events.Select(e => e.Id));
+        Assert.Equal(new long[] { 1, 2 }, events.Select(e => e.Sequence));
+    }
 
-        // The order is deterministic — a second identical query returns the same sequence (ordered by
-        // the time-ordered surrogate id; two events created within one millisecond have a stable but
-        // unspecified relative order, so the test asserts stability, not a specific pair order).
-        var again = await ListAsync(org, session);
-        Assert.Equal(events.Select(e => e.Id), again.Select(e => e.Id));
+    [Fact]
+    public async Task Events_appended_within_one_millisecond_read_back_in_append_order()
+    {
+        // The required test: several events appended at the SAME created_at (_now). The UUIDv7 id is only
+        // monotonic at millisecond resolution, so ordering by id could reorder these; the per-session
+        // sequence preserves append order exactly (CORE-RTC-001).
+        var (org, ws, session) = await SeedSessionAsync();
+        var appended = new List<SessionEvent>();
+        for (var i = 0; i < 8; i++)
+        {
+            var sessionEvent = Event(org, ws, session);
+            await AppendAsync(sessionEvent);
+            appended.Add(sessionEvent);
+        }
+
+        var events = await ListAsync(org, session);
+        // Read-back order equals append order, and the sequence is the gap-free 1..N run.
+        Assert.Equal(appended.Select(e => e.Id), events.Select(e => e.Id));
+        Assert.Equal(Enumerable.Range(1, 8).Select(i => (long)i), events.Select(e => e.Sequence));
+    }
+
+    [Fact]
+    public async Task The_sequence_is_per_session_gap_free_and_starts_at_one()
+    {
+        // Each session's sequence is independent and starts at 1: appending to session A then B then A
+        // again yields A=[1,2], B=[1] — the counter is per session, not global.
+        var (org, ws, sessionA) = await SeedSessionAsync();
+        var sessionB = Session.Create(org, ws, "Other", _now);
+        await using (var context = CreateContext())
+        {
+            context.Sessions.Add(sessionB);
+            await context.SaveChangesAsync();
+        }
+
+        await AppendAsync(Event(org, ws, sessionA));
+        await AppendAsync(Event(org, ws, sessionB.Id));
+        await AppendAsync(Event(org, ws, sessionA));
+
+        Assert.Equal(new long[] { 1, 2 }, (await ListAsync(org, sessionA)).Select(e => e.Sequence));
+        Assert.Equal(new long[] { 1 }, (await ListAsync(org, sessionB.Id)).Select(e => e.Sequence));
+    }
+
+    [Fact]
+    public async Task A_missing_event_is_detectable_as_a_sequence_gap()
+    {
+        // Because the server emits a contiguous per-session run, a client that received only some of the
+        // events detects a missed one purely from the gap in the sequence (CORE-RTC-001).
+        var (org, ws, session) = await SeedSessionAsync();
+        await AppendAsync(Event(org, ws, session));
+        await AppendAsync(Event(org, ws, session));
+        await AppendAsync(Event(org, ws, session));
+
+        var sequences = (await ListAsync(org, session)).Select(e => e.Sequence).ToList();
+
+        // The full stream is contiguous (no gap).
+        Assert.True(IsContiguous(sequences));
+        // A client that dropped the middle event sees a non-contiguous run — the gap reveals the loss.
+        Assert.False(IsContiguous(new[] { sequences[0], sequences[2] }));
+    }
+
+    private static bool IsContiguous(IReadOnlyList<long> sequences)
+    {
+        for (var index = 1; index < sequences.Count; index++)
+        {
+            if (sequences[index] != sequences[index - 1] + 1)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     [Fact]

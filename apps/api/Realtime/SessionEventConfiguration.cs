@@ -46,6 +46,13 @@ internal sealed class SessionEventConfiguration : IEntityTypeConfiguration<Sessi
             .HasColumnName("event_id")
             .ValueGeneratedNever();
 
+        // The per-session monotonic sequence (CORE-RTC-001): the authoritative ordering/replay key, allocated
+        // by the append path and never database-generated.
+        builder.Property(sessionEvent => sessionEvent.Sequence)
+            .HasColumnName("sequence")
+            .ValueGeneratedNever()
+            .IsRequired();
+
         builder.Property(sessionEvent => sessionEvent.OrganizationId)
             .HasColumnName("organization_id")
             .IsRequired();
@@ -94,8 +101,16 @@ internal sealed class SessionEventConfiguration : IEntityTypeConfiguration<Sessi
             .HasColumnName("created_at")
             .IsRequired();
 
-        // Documented critical index session_events(session_id, created_at, event_id): the stream is
-        // read per session in append order (docs/10_DATABASE_SCHEMA.md). NON-unique.
+        // Authoritative ordering/replay index session_events(session_id, sequence) UNIQUE (CORE-RTC-001):
+        // the stream is read and replayed per session by the gap-free monotonic sequence, not the
+        // millisecond-resolution event id. UNIQUE is the integrity backstop that guarantees no two events of
+        // a session ever share a sequence (no duplicate, no silent gap), independent of the allocator.
+        builder.HasIndex(sessionEvent => new { sessionEvent.SessionId, sessionEvent.Sequence })
+            .IsUnique()
+            .HasDatabaseName("ix_session_events_session_id_sequence");
+
+        // Retained critical index session_events(session_id, created_at, event_id): created_at still backs
+        // the documented time-range replay (docs/10_DATABASE_SCHEMA.md). NON-unique.
         builder.HasIndex(sessionEvent => new { sessionEvent.SessionId, sessionEvent.CreatedAt, sessionEvent.Id })
             .HasDatabaseName("ix_session_events_session_id_created_at_event_id");
 

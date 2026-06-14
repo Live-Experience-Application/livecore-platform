@@ -7,6 +7,7 @@ Session events are append-only and drive live state reconstruction.
 Each event has:
 
 - `eventId`
+- `sequence` (per-session, gap-free, strictly monotonic; the ordering/replay key — CORE-RTC-001)
 - `organizationId`
 - `workspaceId`
 - `sessionId`
@@ -76,9 +77,13 @@ On reconnect:
 1. authenticate connection
 2. resolve organization/workspace/session context
 3. resolve participant identity if applicable
-4. query events after last acknowledged event
+4. query events after the last acknowledged **sequence** (the cursor is the per-session sequence number,
+   not the event id — CORE-RTC-001): a cursor of N returns N+1.. with no skips or duplicates
 5. filter each event through Visibility module
 6. send only projected recipient-safe event payloads
+
+Because the per-session sequence is gap-free and strictly monotonic, a client orders the stream by it and
+detects a missed event as a gap in the sequence.
 
 ## Event schema versioning
 

@@ -25,12 +25,14 @@ namespace LiveCore.Api.Realtime;
 /// private events targeted at THEM, and NEVER a private event targeted at another participant (a
 /// non-selected participant is in neither that event's recipient groups — the crown jewel, threat T3).
 ///
-/// THE CURSOR is the caller's "last acknowledged event id" (docs/11_REALTIME_SYNC.md). Events are replayed
-/// strictly AFTER it in append order (the stream is read in the time-ordered surrogate-id order the
-/// repository already guarantees). An unknown cursor replays the whole stream — every event is still
-/// re-filtered per recipient (so nothing leaks) and the client deduplicates already-seen events
-/// (docs/11_REALTIME_SYNC.md requires client-side "duplicate event handling"), so a stale or garbage
-/// cursor is fail-safe and never silently drops unacknowledged events.
+/// THE CURSOR is the caller's last acknowledged per-session SEQUENCE number (CORE-RTC-001;
+/// docs/11_REALTIME_SYNC.md). Events are replayed strictly AFTER it in append (sequence) order — the stream
+/// is read by the gap-free monotonic sequence the repository orders by, NOT the millisecond-resolution
+/// UUIDv7 id — so a cursor of N returns exactly N+1.. with no skips or duplicates. A cursor below the first
+/// sequence replays the whole stream — every event is still re-filtered per recipient (so nothing leaks)
+/// and the client deduplicates already-seen events (docs/11_REALTIME_SYNC.md requires client-side
+/// "duplicate event handling"), so a stale or out-of-range cursor is fail-safe and never silently drops
+/// unacknowledged events.
 ///
 /// This is a plain decision service over already-resolved ids (mirroring <c>RevealService</c> and
 /// <c>VisibilityPolicy</c>): the tenant boundary, session existence and the caller's relationship are
@@ -55,10 +57,11 @@ internal sealed class SessionReplayService
 
     /// <summary>
     /// Replays, for the caller identified by their server-managed <paramref name="recipientGroups"/>, the
-    /// recipient-safe events of the given session (owned by the given tenant) that occur after
-    /// <paramref name="afterEventId"/>. Only deliveries addressed to one of the caller's groups are kept,
-    /// each carrying the projection (host vs audience) that group's recipients may see, so the result
-    /// never contains an event the caller may not receive (threat T3).
+    /// recipient-safe events of the given session (owned by the given tenant) whose per-session
+    /// <see cref="SessionEvent.Sequence"/> is strictly greater than <paramref name="afterSequence"/>. Only
+    /// deliveries addressed to one of the caller's groups are kept, each carrying the projection (host vs
+    /// audience) that group's recipients may see, so the result never contains an event the caller may not
+    /// receive (threat T3).
     /// </summary>
     /// <param name="organizationId">The tenant that owns the session (the read leads with this; threat T5).</param>
     /// <param name="sessionId">The session whose append-only stream is replayed.</param>
@@ -66,16 +69,20 @@ internal sealed class SessionReplayService
     /// The caller's server-computed groups for this session (from <see cref="RealtimeConnectionResolver"/>);
     /// the client never supplies group names.
     /// </param>
-    /// <param name="afterEventId">The caller's last acknowledged event id, or <see langword="null"/> to replay from the start.</param>
+    /// <param name="afterSequence">
+    /// The caller's last acknowledged sequence number, or <see langword="null"/> to replay from the start.
+    /// Events with a greater sequence are returned, so the cursor is gap-aware: a client that has processed
+    /// up to sequence N receives N+1.. with no skips or duplicates (CORE-RTC-001).
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The recipient-safe envelopes the caller is entitled to, in append order.</returns>
+    /// <returns>The recipient-safe envelopes the caller is entitled to, in append (sequence) order.</returns>
     /// <exception cref="ArgumentNullException">The group set is null.</exception>
     /// <exception cref="ArgumentException">The organization id or session id is empty.</exception>
     public async Task<IReadOnlyList<SessionEventEnvelope>> ReplayAsync(
         Guid organizationId,
         Guid sessionId,
         IReadOnlyCollection<string> recipientGroups,
-        Guid? afterEventId,
+        long? afterSequence,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(recipientGroups);
@@ -107,7 +114,7 @@ internal sealed class SessionReplayService
             .ListBySessionAsync(organizationId, sessionId, cancellationToken)
             .ConfigureAwait(false);
 
-        var pending = SliceAfter(stream, afterEventId);
+        var pending = SliceAfter(stream, afterSequence);
 
         var replay = new List<SessionEventEnvelope>();
         foreach (var sessionEvent in pending)
@@ -136,33 +143,29 @@ internal sealed class SessionReplayService
     }
 
     /// <summary>
-    /// Returns the suffix of <paramref name="ordered"/> strictly AFTER the acknowledged
-    /// <paramref name="afterEventId"/>, in append order. With no cursor the whole stream is returned; with
-    /// a cursor not present in the stream the whole stream is returned too (fail-safe — see the type
-    /// summary). The slice is positional within the already-ordered stream, so it is provider-independent
-    /// and consistent with the repository's append ordering.
+    /// Returns the events of <paramref name="ordered"/> whose per-session <see cref="SessionEvent.Sequence"/>
+    /// is strictly greater than the acknowledged <paramref name="afterSequence"/>, in append (sequence)
+    /// order (CORE-RTC-001). With no cursor the whole stream is returned. Because the sequence is gap-free
+    /// and monotonic, a cursor of N returns exactly N+1.. with no skips or duplicates; a cursor at or beyond
+    /// the last sequence returns nothing (the caller has acknowledged everything), and a cursor below the
+    /// first returns the whole stream — both fail-safe (the client also deduplicates, docs/11).
     /// </summary>
-    private static IReadOnlyList<SessionEvent> SliceAfter(IReadOnlyList<SessionEvent> ordered, Guid? afterEventId)
+    private static IReadOnlyList<SessionEvent> SliceAfter(IReadOnlyList<SessionEvent> ordered, long? afterSequence)
     {
-        if (afterEventId is not { } cursor)
+        if (afterSequence is not { } cursor)
         {
             return ordered;
         }
 
-        for (var index = 0; index < ordered.Count; index++)
+        var tail = new List<SessionEvent>();
+        foreach (var sessionEvent in ordered)
         {
-            if (ordered[index].Id == cursor)
+            if (sessionEvent.Sequence > cursor)
             {
-                var tail = new List<SessionEvent>(ordered.Count - index - 1);
-                for (var next = index + 1; next < ordered.Count; next++)
-                {
-                    tail.Add(ordered[next]);
-                }
-
-                return tail;
+                tail.Add(sessionEvent);
             }
         }
 
-        return ordered;
+        return tail;
     }
 }

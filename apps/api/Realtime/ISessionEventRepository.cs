@@ -16,19 +16,22 @@ namespace LiveCore.Api.Realtime;
 public interface ISessionEventRepository
 {
     /// <summary>
-    /// Appends an event to its session's stream. The event is immutable; this is the only write path. A
-    /// foreign-key violation (a non-existent tenant/workspace/session) surfaces as a
-    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
+    /// Appends an event to its session's stream. The append allocates and stamps the event's per-session,
+    /// gap-free, strictly monotonic <see cref="SessionEvent.Sequence"/> (CORE-RTC-001) before persisting it,
+    /// so ordering and replay use the sequence rather than the millisecond-resolution id. The event is
+    /// immutable; this is the only write path. A foreign-key violation (a non-existent
+    /// tenant/workspace/session) surfaces as a <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
     /// </summary>
     Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken);
 
     /// <summary>
     /// Lists every event of the given session (owned by the given organization) in deterministic append
-    /// order — by the time-ordered surrogate id (UUIDv7), which is chronological and provider-independent
-    /// (SQLite cannot ORDER BY a DateTimeOffset). The list is tenant- AND session-scoped: the predicate
-    /// leads with <c>organization_id</c> and matches <c>session_id</c>, so a foreign tenant's or session's
-    /// events are NEVER returned even when their ids would otherwise be addressable (threat T5/T1). The
-    /// <c>created_at</c> column still backs the documented critical index for time-range replay
+    /// order — by the per-session, gap-free, strictly monotonic <see cref="SessionEvent.Sequence"/>
+    /// (CORE-RTC-001), which preserves the append order of events created within the same millisecond
+    /// (unlike the millisecond-resolution UUIDv7 id) and is provider-independent. The list is tenant- AND
+    /// session-scoped: the predicate leads with <c>organization_id</c> and matches <c>session_id</c>, so a
+    /// foreign tenant's or session's events are NEVER returned even when their ids would otherwise be
+    /// addressable (threat T5/T1). The <c>created_at</c> column still backs the time-range replay index
     /// (CORE-RT-005).
     /// </summary>
     /// <exception cref="ArgumentException">The organization id or session id is empty.</exception>

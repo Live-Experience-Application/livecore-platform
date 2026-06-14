@@ -142,12 +142,15 @@ public sealed class SessionEventReplayEndpointTests
         // append four events.
         Assert.Equal(4, full.Events.Count);
 
-        // Acknowledge the first event (whichever sorts first in append order) and replay after it: only the
-        // three later events come back, in order.
-        var cursor = full.Events[0].EventId;
-        var tail = await ReplayAsync(host, scenario.SessionId, afterEventId: cursor);
+        // The stream carries a gap-free 1..4 sequence in append order (CORE-RTC-001).
+        Assert.Equal(new long[] { 1, 2, 3, 4 }, full.Events.Select(item => item.Sequence));
+
+        // Acknowledge sequence 1 and replay after it: only sequences 2..4 come back, in order, no skips.
+        var cursor = full.Events[0].Sequence;
+        var tail = await ReplayAsync(host, scenario.SessionId, afterSequence: cursor);
 
         Assert.Equal(3, tail.Events.Count);
+        Assert.Equal(new long[] { 2, 3, 4 }, tail.Events.Select(item => item.Sequence));
         Assert.Equal(full.Events[1].EventId, tail.Events[0].EventId);
     }
 
@@ -277,18 +280,43 @@ public sealed class SessionEventReplayEndpointTests
     }
 
     [Fact]
-    public async Task A_malformed_after_event_id_is_400_for_an_authorized_caller()
+    public async Task A_malformed_after_sequence_is_400_for_an_authorized_caller()
     {
         // The cursor is validated only AFTER authorization (so an unauthorized caller gets 404, not 400):
-        // an authorized host with a malformed afterEventId gets 400.
+        // an authorized host with a malformed afterSequence gets 400.
         await using var factory = new WorkspaceApiFactory();
         var scenario = await SeedScenarioAsync(factory);
 
         using var host = factory.CreateClientFor(_hostSubject, _issuer, _orgA);
         var response = await host.GetAsync(
-            $"/api/v1/sessions/{scenario.SessionId}/events?organizationSlug={_orgA}&afterEventId=not-a-guid");
+            $"/api/v1/sessions/{scenario.SessionId}/events?organizationSlug={_orgA}&afterSequence=not-a-number");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_single_reveal_preserves_append_order_of_its_same_instant_events()
+    {
+        // One reveal publishes ContentRevealed and VisibilityRuleChanged at the SAME server instant. The
+        // per-session sequence (CORE-RTC-001) preserves their append order — ContentRevealed (appended
+        // first) carries the lower, immediately-preceding sequence — where ordering by the
+        // millisecond-resolution event id could not.
+        await using var factory = new WorkspaceApiFactory();
+        var scenario = await SeedScenarioAsync(factory);
+        var resource = Guid.CreateVersion7();
+
+        using var host = factory.CreateClientFor(_hostSubject, _issuer, _orgA);
+        await RevealToAudienceAsync(host, scenario.SessionId, resource, "k-1");
+
+        var replay = await ReplayAsync(host, scenario.SessionId);
+
+        Assert.Equal(2, replay.Events.Count);
+        var revealed = replay.Events.Single(item => item.EventType == SessionEventTypes.ContentRevealed);
+        var ruleChanged = replay.Events.Single(item => item.EventType == SessionEventTypes.VisibilityRuleChanged);
+        Assert.Equal(1, revealed.Sequence);
+        Assert.Equal(2, ruleChanged.Sequence);
+        // Read-back order equals append order, and the sequence is gap-free.
+        Assert.Equal(new long[] { 1, 2 }, replay.Events.Select(item => item.Sequence));
     }
 
     // =====================================================================
@@ -362,7 +390,7 @@ public sealed class SessionEventReplayEndpointTests
         HttpClient client,
         Guid sessionId,
         Guid? participantId = null,
-        Guid? afterEventId = null)
+        long? afterSequence = null)
     {
         var url = $"/api/v1/sessions/{sessionId}/events?organizationSlug={_orgA}";
         if (participantId is { } participant)
@@ -370,9 +398,9 @@ public sealed class SessionEventReplayEndpointTests
             url += $"&participantId={participant}";
         }
 
-        if (afterEventId is { } cursor)
+        if (afterSequence is { } cursor)
         {
-            url += $"&afterEventId={cursor}";
+            url += $"&afterSequence={cursor}";
         }
 
         var response = await client.GetAsync(url);
@@ -399,6 +427,7 @@ public sealed class SessionEventReplayEndpointTests
 
     private sealed record ReplayItemDto(
         Guid EventId,
+        long Sequence,
         string EventType,
         Guid SessionId,
         string Payload,

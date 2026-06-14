@@ -185,6 +185,18 @@ public sealed class SessionEvent
     /// <summary>Surrogate key of the event row (eventId; UUID version 7, time-ordered per docs/10).</summary>
     public Guid Id { get; }
 
+    /// <summary>
+    /// The per-session, gap-free, strictly monotonic event sequence number (CORE-RTC-001). It is the
+    /// AUTHORITATIVE ordering and replay key for the session stream — NOT the UUIDv7 <see cref="Id"/>, which
+    /// is only monotonic at millisecond resolution and so reorders events appended within the same
+    /// millisecond. The number is allocated per session at APPEND time (by the repository, inside the
+    /// command's unit-of-work transaction; <see cref="SessionEventRepository"/>), starting at 1 and
+    /// incrementing by exactly one per appended event, so events appended in the same millisecond preserve
+    /// their append order and a client detects a missed event by a gap in the sequence. It is 0 (unassigned)
+    /// on a freshly <see cref="Create"/>d event until the append path assigns it.
+    /// </summary>
+    public long Sequence { get; private set; }
+
     /// <summary>Tenant boundary of the event (the <c>organization_id</c> foreign key to <c>organizations</c>).</summary>
     public Guid OrganizationId { get; }
 
@@ -297,6 +309,31 @@ public sealed class SessionEvent
             createdAt);
 
     /// <summary>
+    /// Assigns the per-session monotonic <see cref="Sequence"/> at APPEND time (CORE-RTC-001). The append
+    /// path (<see cref="SessionEventRepository.AppendAsync"/>) allocates the next gap-free number for the
+    /// event's session and stamps it here just before the row is persisted, so ordering and replay use the
+    /// sequence rather than the millisecond-resolution UUIDv7 id. The sequence is assigned exactly once: a
+    /// re-assignment or a non-positive value is rejected, since an event is an immutable historical fact and
+    /// its sequence must be a real per-session position (at least 1).
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The sequence is below 1.</exception>
+    /// <exception cref="InvalidOperationException">A sequence was already assigned.</exception>
+    internal void AssignSequence(long sequence)
+    {
+        if (sequence < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sequence), sequence, "A session event sequence must be at least 1.");
+        }
+
+        if (Sequence != 0)
+        {
+            throw new InvalidOperationException("The session event sequence has already been assigned.");
+        }
+
+        Sequence = sequence;
+    }
+
+    /// <summary>
     /// Whether the given value is a valid event type: non-blank, within the length bound and free of
     /// control characters.
     /// </summary>
@@ -329,7 +366,7 @@ public sealed class SessionEvent
     /// identifiers only.
     /// </summary>
     public override string ToString()
-        => $"SessionEvent {Id} type={EventType} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
+        => $"SessionEvent {Id} seq={Sequence} type={EventType} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
             + $"by={(CreatedBy is { } actor ? actor.ToString() : "system")} "
             + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")} "
             + $"subject={(HasVisibilitySubject ? $"{VisibilitySubjectType}:{VisibilitySubjectId}" : "none")} v={SchemaVersion}";

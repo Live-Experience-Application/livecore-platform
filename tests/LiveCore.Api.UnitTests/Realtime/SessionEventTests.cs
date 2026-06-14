@@ -41,7 +41,37 @@ public sealed class SessionEventTests
         Assert.True(sessionEvent.IsForSelectedParticipant);
         Assert.Equal("{\"a\":1}", sessionEvent.Payload);
         Assert.Equal(2, sessionEvent.SchemaVersion);
+        // The per-session sequence (CORE-RTC-001) is unassigned (0) until the append path stamps it.
+        Assert.Equal(0, sessionEvent.Sequence);
     }
+
+    // --- Per-session sequence (CORE-RTC-001) -----------------------------------
+
+    [Fact]
+    public void AssignSequence_stamps_the_per_session_sequence_once()
+    {
+        var sessionEvent = CreateAudienceWide();
+
+        sessionEvent.AssignSequence(7);
+
+        Assert.Equal(7, sessionEvent.Sequence);
+    }
+
+    [Fact]
+    public void AssignSequence_rejects_a_second_assignment()
+    {
+        // The sequence is an immutable per-session position assigned exactly once at append time.
+        var sessionEvent = CreateAudienceWide();
+        sessionEvent.AssignSequence(1);
+
+        Assert.Throws<InvalidOperationException>(() => sessionEvent.AssignSequence(2));
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    public void AssignSequence_rejects_a_non_positive_sequence(long sequence)
+        => Assert.Throws<ArgumentOutOfRangeException>(() => CreateAudienceWide().AssignSequence(sequence));
 
     [Fact]
     public void An_audience_wide_event_has_no_target_participant()

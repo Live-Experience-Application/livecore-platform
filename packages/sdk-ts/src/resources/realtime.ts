@@ -21,10 +21,12 @@ export interface SessionEventReplayParams {
    */
   participantId?: Uuid;
   /**
-   * The caller's last acknowledged event id; events strictly after it are
-   * replayed. Omit to replay the whole stream (the client deduplicates).
+   * The caller's last acknowledged per-session sequence number (CORE-RTC-001);
+   * events with a greater sequence are replayed, so a cursor of N returns N+1..
+   * with no skips or duplicates. Omit to replay the whole stream (the client
+   * deduplicates).
    */
-  afterEventId?: Uuid;
+  afterSequence?: number;
 }
 
 export class RealtimeClient {
@@ -32,7 +34,7 @@ export class RealtimeClient {
 
   /**
    * `GET /api/v1/sessions/{sessionId}/events` — the recipient-safe events the
-   * caller is entitled to, in append order.
+   * caller is entitled to, in append (sequence) order.
    */
   getSessionEvents(
     sessionId: Uuid,
@@ -44,7 +46,7 @@ export class RealtimeClient {
       query: {
         organizationSlug: params.organizationSlug,
         participantId: params.participantId,
-        afterEventId: params.afterEventId,
+        afterSequence: params.afterSequence?.toString(),
       },
     });
   }

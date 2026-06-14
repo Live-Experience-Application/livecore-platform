@@ -45,6 +45,7 @@ assets
 asset_links
 visibility_rules
 session_events
+session_event_sequences
 audit_logs
 templates
 export_jobs
@@ -80,7 +81,9 @@ content_blocks(workspace_id, scene_id)
 visibility_rules(session_id, resource_type, resource_id)
 visibility_rules(session_id, resource_type, resource_id) unique where target_participant_id is null
 visibility_rules(session_id, resource_type, resource_id, target_participant_id) unique where target_participant_id is not null
+session_events(session_id, sequence) unique
 session_events(session_id, created_at, event_id)
+session_event_sequences(session_id)
 assets(workspace_id, id)
 asset_links(workspace_id, asset_id)
 asset_links(workspace_id, asset_id, target_type, target_id) unique
@@ -165,6 +168,27 @@ indexes** — the same nullable-uniqueness pattern as `templates(organization_id
 The reveal command relies on these via **insert-on-conflict**: a first-create that loses the race against a
 concurrent first-reveal is reported as a duplicate and converges onto the one rule rather than creating a
 second, so concurrent first-reveals never produce two rules and a hide always fully reverses a reveal.
+
+## Per-session event sequence (CORE-RTC-001)
+
+Every `session_events` row carries a `sequence` column: a **per-session, gap-free, strictly monotonic**
+number that is the authoritative ordering and replay key for the session stream. The stream is read and
+replayed by `session_events(session_id, sequence)` (a **unique** index) rather than by the UUIDv7
+`event_id`, which is only monotonic at **millisecond** resolution and so reorders events appended within one
+millisecond — a single reveal publishes `ContentRevealed`, `VisibilityRuleChanged` and (for a scene)
+`SceneActivated` at the same instant, whose order would otherwise be undefined. Ordering by the sequence
+preserves their append order, and a client detects a missed event as a **gap** in the sequence.
+
+The numbers are handed out by a `session_event_sequences` counter table — one row per session,
+`session_event_sequences(session_id)` the primary key and a `sessions(id)` foreign key that **CASCADES** on
+delete (the counter is removed with its session, like the stream it feeds), plus a `last_sequence` column.
+The append path allocates the next number with a single atomic `INSERT ... ON CONFLICT (session_id) DO
+UPDATE SET last_sequence = last_sequence + 1`: the conflict-path UPDATE takes a row lock that **serializes**
+concurrent appends to the same session (the second blocks and then increments from the committed value
+rather than colliding), so the sequence stays gap-free and strictly monotonic even under a race. Because the
+increment runs in the command's unit-of-work transaction (CORE-CONC-002) together with the event insert, a
+rollback reclaims the number — there is no gap. The unique `(session_id, sequence)` index is the integrity
+backstop that guarantees no two events of a session ever share a sequence.
 
 ## JSONB use
 

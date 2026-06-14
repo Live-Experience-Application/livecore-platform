@@ -39,7 +39,7 @@ namespace LiveCore.Api.Realtime;
 ///   as 404 — never distinguishable, never 403 — so a probe learns nothing about what exists
 ///   (threats T1/T5; docs/08 "404 = not found or intentionally hidden").</item>
 ///   <item>Only AFTER authorization is the optional replay cursor validated, so an unauthorized caller
-///   never receives request-shape feedback: a present-but-malformed <c>afterEventId</c> is 400.</item>
+///   never receives request-shape feedback: a present-but-malformed <c>afterSequence</c> is 400.</item>
 /// </list>
 ///
 /// Persistence dependency: like the session/reveal endpoints, this uses the tenant context resolver, the
@@ -54,8 +54,8 @@ internal static class SessionEventReplayEndpoints
     /// <summary>Optional query parameter identifying the participant viewpoint (a participant replaying its own feed).</summary>
     private const string _participantIdQuery = "participantId";
 
-    /// <summary>Optional query parameter carrying the caller's last acknowledged event id (the replay cursor).</summary>
-    private const string _afterEventIdQuery = "afterEventId";
+    /// <summary>Optional query parameter carrying the caller's last acknowledged sequence number (the replay cursor).</summary>
+    private const string _afterSequenceQuery = "afterSequence";
 
     public static IEndpointRouteBuilder MapSessionEventReplayEndpoints(this IEndpointRouteBuilder endpoints)
     {
@@ -70,13 +70,13 @@ internal static class SessionEventReplayEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/sessions/{sessionId}/events?organizationSlug={slug}&participantId={pid}&afterEventId={eventId}
+    // GET /api/v1/sessions/{sessionId}/events?organizationSlug={slug}&participantId={pid}&afterSequence={seq}
     private static async Task<IResult> ReplaySessionEventsAsync(
         HttpContext httpContext,
         string sessionId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
         [FromQuery(Name = _participantIdQuery)] string? participantId,
-        [FromQuery(Name = _afterEventIdQuery)] string? afterEventId,
+        [FromQuery(Name = _afterSequenceQuery)] string? afterSequence,
         TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
@@ -141,17 +141,18 @@ internal static class SessionEventReplayEndpoints
         }
 
         // Authorized. Only now validate the optional replay cursor, so an unauthorized caller never
-        // receives request-shape feedback (mirrors the reveal command). A present-but-malformed cursor is
-        // a 400; an absent cursor replays from the start.
-        Guid? afterEventGuid = null;
-        if (!string.IsNullOrWhiteSpace(afterEventId))
+        // receives request-shape feedback (mirrors the reveal command). The cursor is the caller's last
+        // acknowledged per-session SEQUENCE number (CORE-RTC-001): a present-but-malformed or negative value
+        // is a 400; an absent cursor replays from the start.
+        long? afterSequenceValue = null;
+        if (!string.IsNullOrWhiteSpace(afterSequence))
         {
-            if (!Guid.TryParse(afterEventId, out var parsedCursor) || parsedCursor == Guid.Empty)
+            if (!long.TryParse(afterSequence, out var parsedCursor) || parsedCursor < 0)
             {
-                return ValidationError($"The '{_afterEventIdQuery}' value is not a valid event id.");
+                return ValidationError($"The '{_afterSequenceQuery}' value is not a valid sequence number.");
             }
 
-            afterEventGuid = parsedCursor;
+            afterSequenceValue = parsedCursor;
         }
 
         var envelopes = await deps.Replay
@@ -159,7 +160,7 @@ internal static class SessionEventReplayEndpoints
                 resolution.Context.OrganizationId,
                 sessionGuid,
                 admission.Groups,
-                afterEventGuid,
+                afterSequenceValue,
                 cancellationToken)
             .ConfigureAwait(false);
 

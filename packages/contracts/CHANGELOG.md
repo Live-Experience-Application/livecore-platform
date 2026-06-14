@@ -8,6 +8,20 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+### Added
+
+- `SessionEventReplayItem.sequence`: the per-session, gap-free, strictly
+  monotonic event sequence number a client orders the stream by and uses to
+  detect a missed event as a gap (CORE-RTC-001).
+
+### Changed
+
+- The reconnect-replay cursor is now the per-session `sequence` number rather
+  than the event id; `SessionEventReplayResponse.events` are in append (sequence)
+  order.
+
 ## [0.1.0] - 2026-06-13
 
 First stable, documented release of the typed Core contract surface that

@@ -4,8 +4,10 @@ namespace LiveCore.Api.Realtime;
 /// The recipient-safe envelope delivered to a connected client when a session event is published — the
 /// "project payload" step of the documented delivery flow ("...-> project payload -> send to recipient
 /// groups", docs/11_REALTIME_SYNC.md). It carries only what a recipient may see: the event id, the
-/// generic event type, the session it belongs to, the server-composed payload (resource IDENTIFIERS
-/// only) and the schema version + timestamp. It deliberately EXCLUDES the internal addressing fields of
+/// per-session monotonic <see cref="Sequence"/> (CORE-RTC-001) by which the recipient orders the stream
+/// and detects a missed event as a gap, the generic event type, the session it belongs to, the
+/// server-composed payload (resource IDENTIFIERS only) and the schema version + timestamp. It deliberately
+/// EXCLUDES the internal addressing fields of
 /// the stored <see cref="SessionEvent"/> — the organization and workspace ids, the <c>createdBy</c>
 /// actor and the <c>visibilitySubject</c> gating fields — so a recipient response never carries internal
 /// authorization rationale (docs/08_API_CONTRACTS.md; threats T2/T7).
@@ -28,6 +30,7 @@ namespace LiveCore.Api.Realtime;
 /// </summary>
 internal sealed record SessionEventEnvelope(
     Guid EventId,
+    long Sequence,
     string EventType,
     Guid SessionId,
     string Payload,
@@ -51,6 +54,7 @@ internal sealed record SessionEventEnvelope(
 
         return new SessionEventEnvelope(
             sessionEvent.Id,
+            sessionEvent.Sequence,
             sessionEvent.EventType,
             sessionEvent.SessionId,
             sessionEvent.Payload,
@@ -70,6 +74,7 @@ internal sealed record SessionEventEnvelope(
 
         return new SessionEventEnvelope(
             sessionEvent.Id,
+            sessionEvent.Sequence,
             sessionEvent.EventType,
             sessionEvent.SessionId,
             sessionEvent.Payload,

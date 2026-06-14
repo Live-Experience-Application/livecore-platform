@@ -16,8 +16,14 @@ import type { IsoDateTimeString, Uuid } from "./scalars.js";
  * targeted (threats T2/T7).
  */
 export interface SessionEventReplayItem {
-  /** Surrogate id of the event; the client acknowledges the latest it processes. */
+  /** Surrogate id of the event. */
   eventId: Uuid;
+  /**
+   * The per-session, gap-free, strictly monotonic sequence number (CORE-RTC-001).
+   * The client orders the stream by it, acknowledges replay by it (the cursor is
+   * `afterSequence`), and detects a missed event as a gap in the sequence.
+   */
+  sequence: number;
   /**
    * The generic, product-neutral event type name (docs/09_EVENT_CATALOG.md). A
    * plain string for forward compatibility; the names known today are exported as
@@ -44,8 +50,9 @@ export interface SessionEventReplayResponse {
   /** The session whose stream was replayed. */
   sessionId: Uuid;
   /**
-   * The recipient-safe events the caller is entitled to, in append order — only
-   * those after the acknowledged cursor when one was supplied.
+   * The recipient-safe events the caller is entitled to, in append (sequence)
+   * order — only those after the acknowledged sequence cursor when one was
+   * supplied.
    */
   events: SessionEventReplayItem[];
   /** Server timestamp (UTC) at which the replay was computed. */

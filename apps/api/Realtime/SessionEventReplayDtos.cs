@@ -69,7 +69,12 @@ public sealed record SessionEventReplayResponse(
 /// routing confirmation); the audience projection leaves it <see langword="null"/>, so an audience
 /// recipient never learns who else was targeted (threats T2/T7).
 /// </summary>
-/// <param name="EventId">Surrogate id of the event (UUIDv7); the client acknowledges the latest it processes.</param>
+/// <param name="EventId">Surrogate id of the event (UUIDv7).</param>
+/// <param name="Sequence">
+/// The per-session, gap-free, strictly monotonic sequence number (CORE-RTC-001). The client orders the
+/// stream and acknowledges replay by this number (the replay cursor is <c>afterSequence</c>) and detects a
+/// missed event as a gap in the sequence.
+/// </param>
 /// <param name="EventType">The generic, product-neutral event type (docs/09_EVENT_CATALOG.md).</param>
 /// <param name="SessionId">The session the event belongs to.</param>
 /// <param name="Payload">The server-composed payload — resource identifiers only, never resolved content (threat T7).</param>
@@ -81,6 +86,7 @@ public sealed record SessionEventReplayResponse(
 /// </param>
 public sealed record SessionEventReplayItem(
     Guid EventId,
+    long Sequence,
     string EventType,
     Guid SessionId,
     string Payload,
@@ -99,6 +105,7 @@ public sealed record SessionEventReplayItem(
 
         return new SessionEventReplayItem(
             envelope.EventId,
+            envelope.Sequence,
             envelope.EventType,
             envelope.SessionId,
             envelope.Payload,

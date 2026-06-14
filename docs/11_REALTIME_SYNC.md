@@ -57,13 +57,26 @@ the Presence epic), so the audience fan-out still enumerates the workspace's act
 candidate set; the session boundary is enforced by the session-keyed groups and the session-scoped gate
 above, not by a roster.
 
+## Per-session event sequence (CORE-RTC-001)
+
+Every session event carries a **per-session, gap-free, strictly monotonic** `sequence` number, and both live
+ordering and reconnect replay use **that sequence** — `(session_id, sequence)` — not the UUIDv7 `eventId`.
+The id is only monotonic at millisecond resolution, so events appended within one millisecond (a single
+reveal publishes `ContentRevealed` + `VisibilityRuleChanged` + `SceneActivated` at the same instant) would
+reorder under an id-ordered read; ordering by the sequence preserves their append order. The number is
+allocated at append time from a per-session counter inside the command's unit-of-work transaction
+(CORE-CONC-002), so the stream is gap-free even under concurrent appends (see
+`docs/10_DATABASE_SCHEMA.md`). The sequence travels in every delivered envelope and every replay item, so a
+**client detects a missed event as a gap** in the sequence.
+
 ## Offline/reconnect
 
 The initial production-ready version supports reconnect replay and local read cache. It does not support full peer-to-peer offline multiplayer.
 
 Reconnect requires:
 
-- last acknowledged event ID
+- last acknowledged **sequence** number (the `afterSequence` cursor; a cursor of N replays N+1.. with no
+  skips or duplicates — CORE-RTC-001)
 - server-side replay filter
 - duplicate event handling
 

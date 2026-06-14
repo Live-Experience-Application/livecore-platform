@@ -156,11 +156,11 @@ test("session event replay forwards optional query params and omits them when un
   await client.realtime.getSessionEvents("sess-1", {
     organizationSlug: "acme",
     participantId: "p-1",
-    afterEventId: "e-9",
+    afterSequence: 9,
   });
   assert.equal(
     calls[0].url,
-    "https://core.example.test/api/v1/sessions/sess-1/events?organizationSlug=acme&participantId=p-1&afterEventId=e-9",
+    "https://core.example.test/api/v1/sessions/sess-1/events?organizationSlug=acme&participantId=p-1&afterSequence=9",
   );
 
   await client.realtime.getSessionEvents("sess-1", {

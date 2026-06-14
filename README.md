@@ -1634,12 +1634,31 @@ never replay another participant's feed). The replay then re-runs the **live** r
 computation (CORE-RT-004) for each event after the acknowledged cursor and keeps only the
 deliveries addressed to the caller's own groups, with the same host-vs-audience projection
 live delivery uses — so a replayed item is the projection the recipient would have received
-live, and a hidden event is never replayed. The optional `?afterEventId=` is the caller's
-last acknowledged event id; events strictly after it are replayed (an unknown cursor
-replays the whole stream, which the client deduplicates per `docs/11_REALTIME_SYNC.md`).
+live, and a hidden event is never replayed. The optional `?afterSequence=` is the caller's
+last acknowledged per-session **sequence** number; events with a greater sequence are replayed,
+so a cursor of N returns N+1.. with no skips or duplicates (a cursor below the first replays the
+whole stream, which the client deduplicates per `docs/11_REALTIME_SYNC.md`).
 Like the participant-visible feed, the stream is private: every denial — a foreign tenant,
 an unknown session, a caller with no legitimate relationship, or a `participantId` the
 caller does not own — is hidden as `404` (never `403`).
+
+**Per-session monotonic event sequence (CORE-RTC-001).** Every session event carries a
+`sequence` column — a **per-session, gap-free, strictly monotonic** number — and both live
+ordering and reconnect replay use **that sequence** (`session_events(session_id, sequence)`,
+a unique index) rather than the UUIDv7 `eventId`. The id is only monotonic at **millisecond**
+resolution, so events appended within one millisecond reorder under an id-ordered read — and a
+single reveal publishes `ContentRevealed` + `VisibilityRuleChanged` + (for a scene) `SceneActivated`
+at the **same** instant — whereas ordering by the sequence preserves their append order. The
+numbers are handed out by a per-session `session_event_sequences` counter the append path
+increments with a single atomic `INSERT … ON CONFLICT … DO UPDATE`, whose row lock **serializes**
+concurrent appends to a session (the second blocks and increments from the committed value rather
+than colliding); the increment runs **inside** the command's unit-of-work transaction
+(CORE-CONC-002) with the event insert, so a rollback reclaims the number and the stream stays
+gap-free. The sequence travels in every delivered envelope and every replay item, so a **client
+detects a missed event as a gap** in the sequence (`docs/10_DATABASE_SCHEMA.md`,
+`docs/11_REALTIME_SYNC.md`). This supersedes the earlier read that ordered the stream by
+`event_id` — the previously documented critical index `session_events(session_id, created_at,
+event_id)` is retained only for time-range queries.
 
 **Scale-out abstraction (CORE-RT-006).** `docs/11_REALTIME_SYNC.md` ("Scale-out") calls for a
 "Valkey/Redis-compatible backplane later when multiple API instances run". The Realtime module now defines

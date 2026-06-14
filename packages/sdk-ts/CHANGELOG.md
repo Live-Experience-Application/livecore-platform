@@ -8,6 +8,16 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+### Changed
+
+- `RealtimeClient.getSessionEvents` reconnect cursor is now the per-session
+  monotonic sequence number: `SessionEventReplayParams.afterEventId` (a UUID) is
+  replaced by `afterSequence` (a number), sent as the `?afterSequence=` query
+  parameter. A cursor of N replays N+1.. with no skips or duplicates
+  (CORE-RTC-001).
+
 ## [0.1.0] - 2026-06-13
 
 First stable, documented release of the typed Core API client that vertical
