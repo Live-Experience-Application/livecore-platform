@@ -659,6 +659,28 @@ no Redis/Valkey server is needed locally. No credentials live in the repository:
 the connection string points at the ephemeral CI service container only (threat
 T7).
 
+The **unit and smoke suites** now also run against real PostgreSQL
+(CORE-TST-004). The `.NET` `dotnet` job's whole-solution test step runs the unit +
+smoke + integration projects on in-memory SQLite (that step used to be mislabeled
+"Run smoke tests" although it runs the whole solution; it is now named to match
+what it runs). Because the unit/repository tests construct SQLite directly, their
+**provider-specific** behavior — collation, case-sensitivity, JSON and the
+Npgsql-only `xmin` optimistic-concurrency token — was never exercised at the unit
+level on real PostgreSQL; only the separate `integration-postgres` job used real
+PostgreSQL, and only for the integration project. The new `unit-smoke-postgres` job
+runs the **unit and smoke** suites against a real PostgreSQL service with
+`LIVECORE_TEST_DB_PROVIDER=Postgres` set, so a provider-divergent repository test
+(`ProviderDivergentConcurrencyTests`) runs on real PostgreSQL and proves the
+cross-context concurrency conflict the SQLite path cannot — it passes on **both**
+providers (a `DbUpdateConcurrencyException` on PostgreSQL, last-write-wins on
+SQLite). Such tests opt into the real database through the unit suite's
+`ProviderTestDatabase` helper, which provisions a throwaway, migration-schema
+PostgreSQL database when the environment selects PostgreSQL and falls back to
+in-memory SQLite otherwise — so a default `dotnet test` still needs no database
+server, and no credential is committed (the connection string points at the
+ephemeral CI service container only, threat T7). See
+`docs/14_TESTING_STRATEGY.md` ("Which provider the tests run against").
+
 Migrations are **roll-forward-only** (CORE-DR-004): the runner applies `Up()`
 only and a `Down()` is never run in production, because every `Down()` is
 destructive (it drops the table/column its `Up()` added). The backward path for a

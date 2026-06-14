@@ -10,6 +10,15 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <!-- Same PostgreSQL provider the API host depends on (apps/api, 10.0.2), pinned to
+         the version the integration suite already uses. It lets a provider-divergent
+         unit/repository test run against a real PostgreSQL database in CI (the
+         unit-smoke-postgres job, CORE-TST-004), so provider-specific behavior — the
+         Npgsql-only xmin optimistic-concurrency token — is exercised at the unit level
+         and not only on SQLite. The default local run still uses the in-memory SQLite
+         provider and needs no database server. This is a test-only reference; it adds
+         no runtime dependency to the product. -->
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />

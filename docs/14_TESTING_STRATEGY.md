@@ -36,6 +36,40 @@ Participant_cannot_read_content_block_when_visibility_rule_excludes_participant
 
 A story that changes behavior is incomplete without tests.
 
+## Which provider the tests run against (SQLite vs PostgreSQL)
+
+The test projects run by default against an in-memory SQLite database
+(repository tests open their own `SqliteConnection`; the integration suite's
+`WorkspaceApiFactory` swaps the production Npgsql registration for SQLite). That
+keeps a default `dotnet test` and every developer machine free of any database
+server, and it exercises the real model mapping and SQL translation for the
+relational semantics SQLite and PostgreSQL share.
+
+A few behaviors are **provider-specific** and genuinely diverge from SQLite —
+collation, case-sensitivity, JSON, and the optimistic-concurrency token (the
+PostgreSQL system column `xmin`, mapped **only** on the Npgsql provider, see
+`docs/10_DATABASE_SCHEMA.md` and CORE-CONC-001). Those must be exercised on real
+PostgreSQL, not only SQLite, so two CI legs run the suites against a real
+PostgreSQL service container, selected through the
+`LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment variables (unset
+locally, so a default run stays on SQLite):
+
+- the **`integration-postgres`** job runs the integration project against real
+  PostgreSQL, where each test's schema is applied by the real, checked-in
+  migrations (CORE-OPS-002); and
+- the **`unit-smoke-postgres`** job runs the **unit and smoke** suites against
+  real PostgreSQL (CORE-TST-004). Before it, the `dotnet` job's whole-solution
+  step ran every unit + smoke test on SQLite only — that step was also mislabeled
+  "Run smoke tests" though it runs the whole solution, now renamed to match what
+  it runs. Unit/repository tests that assert provider-divergent behavior opt into
+  the real database through the `ProviderTestDatabase` helper (it provisions a
+  throwaway, migration-schema PostgreSQL database when the environment selects
+  PostgreSQL and falls back to in-memory SQLite otherwise); the
+  `ProviderDivergentConcurrencyTests` repository test proves the `xmin`
+  cross-context concurrency conflict on PostgreSQL and the last-write-wins absence
+  of the token on SQLite, so it passes on **both** providers while exercising the
+  PostgreSQL-only semantics on the PostgreSQL leg.
+
 ## Coverage measurement and the CI gate
 
 "No feature without tests" is enforced, not just expected (CORE-TST-001). CI

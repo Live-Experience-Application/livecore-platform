@@ -1,7 +1,7 @@
 # CI pipeline for livecore-platform (CORE-FND-003, docker job: CORE-FND-005).
 #
 # Runs the commands documented in README.md verbatim. Independent jobs:
-#   dotnet               - build, smoke tests, format/code-style verification
+#   dotnet               - build, the whole test suite on SQLite, format/code-style verification
 #   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
 #   typescript           - pnpm install, lint, format check, package builds/tests
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
@@ -15,6 +15,7 @@
 #   publish-dry-run      - verify image tags + image-scan gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
+#   unit-smoke-postgres  - run the unit + smoke suites against real Postgres so provider-specific behavior is exercised (CORE-TST-004)
 #   publish              - SBOM + CVE scan (fail on critical) then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
 #
 # Every push and pull request runs the quality gates only. The publish job runs
@@ -54,7 +55,12 @@ jobs:
       - name: Build solution
         run: dotnet build LiveCore.slnx
 
-      - name: Run smoke tests
+      - name: Run the test suite (unit, smoke and integration on SQLite)
+        # dotnet test on the whole solution runs the unit AND smoke AND integration
+        # test projects; with no Postgres service and LIVECORE_TEST_DB_PROVIDER unset
+        # they all run on in-memory SQLite. This step used to be mislabeled "Run smoke
+        # tests" (CORE-TST-004); the matching real-Postgres leg is the
+        # unit-smoke-postgres and integration-postgres jobs below.
         run: dotnet test LiveCore.slnx
 
       - name: Verify formatting and code style
@@ -649,6 +655,56 @@ jobs:
       - name: Run integration suite against PostgreSQL
         run: dotnet test tests/LiveCore.Api.IntegrationTests/LiveCore.Api.IntegrationTests.csproj
 
+  unit-smoke-postgres:
+    name: Unit and smoke tests against PostgreSQL
+    runs-on: ubuntu-latest
+    # CORE-TST-004: the .NET `dotnet` job runs the whole solution on in-memory SQLite,
+    # so the unit + smoke suites never exercised provider-specific behavior (collation,
+    # case-sensitivity, JSON, the Npgsql-only xmin optimistic-concurrency token) on real
+    # PostgreSQL — only the separate integration-postgres job used real Postgres, and
+    # only for the integration project. This leg runs the unit and smoke suites against a
+    # real PostgreSQL service with LIVECORE_TEST_DB_PROVIDER=Postgres set, so a
+    # provider-divergent repository test (ProviderDivergentConcurrencyTests) runs on real
+    # PostgreSQL and proves the cross-context concurrency conflict the SQLite path cannot.
+    # The bulk of the SQLite-only unit tests still run here too (provider-agnostic
+    # relational semantics), so nothing is lost; the Postgres-backed tests opt in through
+    # the ProviderTestDatabase helper.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Select the PostgreSQL provider for the unit/smoke suites and point it at the
+      # ephemeral service container. No credential is committed: this is a throwaway CI
+      # database whose password exists only for this service container, and the suite
+      # creates and drops its own per-test databases against it (threat T7).
+      LIVECORE_TEST_DB_PROVIDER: Postgres
+      LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run the unit suite against PostgreSQL
+        run: dotnet test tests/LiveCore.Api.UnitTests/LiveCore.Api.UnitTests.csproj
+
+      - name: Run the smoke suite against PostgreSQL
+        run: dotnet test tests/LiveCore.SmokeTests/LiveCore.SmokeTests.csproj
+
   publish:
     name: Publish versioned container images
     runs-on: ubuntu-latest
@@ -671,6 +727,7 @@ jobs:
       - publish-dry-run
       - migrations
       - integration-postgres
+      - unit-smoke-postgres
     permissions:
       # Least privilege: only this job may write packages; everything else keeps
       # the read-only top-level token. The GITHUB_TOKEN pushes to this repo's
