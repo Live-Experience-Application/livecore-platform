@@ -26,12 +26,21 @@
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
+    The dump and the locally mirrored asset binaries are encrypted at rest with an
+    AES-256-CBC + HMAC-SHA256 sink keyed by an operator-supplied passphrase
+    (CORE-DR-001); the script refuses to run when no passphrase is configured, so
+    the audit trail, purchase ledger and tenant data never land as plaintext. The
+    passphrase is read from configuration (Backup__Encryption__Passphrase) or a
+    file, never from source. The companion restore decrypts and round-trips.
+
 .EXAMPLE
     pwsh -File scripts/backup-livecore.ps1 -OutputDirectory ./backups `
         -ConnectionString "Host=db;Port=5432;Database=livecore;Username=livecore;Password=$env:DB_PASSWORD" `
         -StorageBucket livecore-assets `
         -StorageMirrorProgram aws -StorageMirrorArgument @('s3','sync','s3://livecore-assets','./backups/assets') `
-        -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+        -AssetMirrorDirectory ./backups/assets `
+        -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text') `
+        -EncryptionPassphrase $env:Backup__Encryption__Passphrase
 #>
 
 [CmdletBinding()]
@@ -60,6 +69,21 @@ param(
     [string]$StorageInventoryProgram,
     [string[]]$StorageInventoryArgument = @(),
 
+    # Backup-at-rest encryption passphrase (CORE-DR-001). The dump and any locally
+    # mirrored asset binaries are encrypted at rest with this; the script refuses
+    # to run without one (fail-closed), so the audit trail, purchase ledger and
+    # tenant data never land as plaintext. Read from configuration, never
+    # committed (threat T7); supply -EncryptionPassphraseFile to read it from a
+    # file instead.
+    [string]$EncryptionPassphrase = $env:Backup__Encryption__Passphrase,
+    [string]$EncryptionPassphraseFile = $env:Backup__Encryption__PassphraseFile,
+
+    # Local directory the asset mirror tool writes into (typically under
+    # -OutputDirectory). Required when -StorageMirrorProgram mirrors assets
+    # locally, so the mirrored binaries can be encrypted at rest after the sync
+    # (CORE-DR-001).
+    [string]$AssetMirrorDirectory,
+
     # Backup timestamp recorded in the manifest (UTC ISO-8601).
     [string]$CreatedAtUtc = [System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [System.Globalization.CultureInfo]::InvariantCulture)
 )
@@ -81,6 +105,14 @@ $OutputDirectory = (Resolve-Path -Path $OutputDirectory).Path
 
 if (-not $StorageInventoryProgram) {
     throw 'Object-storage coverage is required: supply -StorageInventoryProgram (and its -StorageInventoryArgument) so the asset bucket is inventoried into the manifest. A backup must cover the asset object store, not just PostgreSQL (CORE-OPS-010).'
+}
+
+# Resolve the encryption sink FIRST, before any plaintext dump is produced, so an
+# unconfigured backup fails closed instead of writing tenant data as plaintext.
+$encryptionPassphrase = Get-LiveCoreBackupEncryptionSecret -Passphrase $EncryptionPassphrase -PassphraseFile $EncryptionPassphraseFile
+
+if ($StorageMirrorProgram -and [string]::IsNullOrWhiteSpace($AssetMirrorDirectory)) {
+    throw 'When -StorageMirrorProgram mirrors assets to a local directory you must also pass -AssetMirrorDirectory (the directory it writes into) so the mirrored asset binaries are encrypted at rest. A backup must not leave tenant asset content as plaintext (CORE-DR-001).'
 }
 
 function Invoke-PsqlValue {
@@ -112,7 +144,10 @@ function Invoke-PsqlValue {
 
 $previousPgPassword = $env:PGPASSWORD
 $dumpFileName = "livecore-postgres-$($CreatedAtUtc -replace '[:]', '').dump"
-$dumpPath = Join-Path $OutputDirectory $dumpFileName
+$plaintextDumpPath = Join-Path $OutputDirectory $dumpFileName
+# The artifact left at rest is the encrypted dump; the plaintext .dump is removed
+# the moment it has been encrypted (CORE-DR-001).
+$dumpPath = $plaintextDumpPath + '.enc'
 
 try {
     if (-not [string]::IsNullOrWhiteSpace($connection.Password)) {
@@ -126,7 +161,7 @@ try {
         '--dbname', $connection.Database,
         '--no-password',
         '--format=custom',
-        '--file', $dumpPath
+        '--file', $plaintextDumpPath
     )
     if (-not [string]::IsNullOrWhiteSpace($connection.Username)) {
         $pgDumpArgs = @('--username', $connection.Username) + $pgDumpArgs
@@ -136,12 +171,19 @@ try {
         throw "pg_dump failed with exit code $LASTEXITCODE."
     }
 
+    Write-Host "Encrypting the database dump at rest -> $dumpPath"
+    [void](Protect-LiveCoreBackupFile -Path $plaintextDumpPath -Destination $dumpPath -Passphrase $encryptionPassphrase -RemoveSource)
+
     if ($StorageMirrorProgram) {
         Write-Host "Mirroring object storage with: $StorageMirrorProgram $($StorageMirrorArgument -join ' ')"
         & $StorageMirrorProgram @StorageMirrorArgument
         if ($LASTEXITCODE -ne 0) {
             throw "Object-storage mirror command failed with exit code $LASTEXITCODE."
         }
+
+        Write-Host "Encrypting mirrored asset binaries at rest under: $AssetMirrorDirectory"
+        $encryptedAssetCount = Protect-LiveCoreBackupDirectory -Path $AssetMirrorDirectory -Passphrase $encryptionPassphrase
+        Write-Host ("  encrypted {0} mirrored asset file(s)" -f $encryptedAssetCount)
     }
 
     $measurement = @{}
@@ -165,19 +207,33 @@ try {
         Write-Host ("  {0,-26} {1,8} record(s)" -f $item.Name, $measurement[$item.Name].RowCount)
     }
 
+    $encryptionInfo = @{
+        algorithm       = 'AES-256-CBC'
+        mac             = 'HMAC-SHA256'
+        kdf             = 'PBKDF2-HMAC-SHA256'
+        dumpEncrypted   = $true
+        assetsEncrypted = [bool]$StorageMirrorProgram
+    }
+
     $manifest = Get-LiveCoreBackupManifest `
         -SystemOfRecord $measurement `
         -CreatedAtUtc $CreatedAtUtc `
         -Database $connection.Database `
-        -StorageBucket $StorageBucket
+        -StorageBucket $StorageBucket `
+        -Encryption $encryptionInfo
 
     $manifestPath = Join-Path $OutputDirectory 'livecore-backup-manifest.json'
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
 
     Write-Host ''
-    Write-Host "Backup complete. Dump: $dumpPath" -ForegroundColor Green
+    Write-Host "Backup complete. Encrypted dump: $dumpPath" -ForegroundColor Green
     Write-Host "Coverage manifest: $manifestPath" -ForegroundColor Green
 }
 finally {
+    # Never leave a plaintext dump at rest: if encryption did not run (an error
+    # between pg_dump and the encrypt step), remove the plaintext file (CORE-DR-001).
+    if ((Test-Path -Path $plaintextDumpPath)) {
+        Remove-Item -Path $plaintextDumpPath -Force -ErrorAction SilentlyContinue
+    }
     $env:PGPASSWORD = $previousPgPassword
 }

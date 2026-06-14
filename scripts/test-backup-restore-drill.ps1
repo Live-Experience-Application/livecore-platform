@@ -230,6 +230,85 @@ try {
     AssertThrows { Get-LiveCoreConnectionSetting -ConnectionString '' } 'an empty connection string fails closed'
     AssertThrows { Get-LiveCoreConnectionSetting -ConnectionString 'Port=5432;Username=svc' } 'a connection string with no host/database fails closed'
 
+    # --- Backup-at-rest encryption sink (CORE-DR-001): fail-closed + round-trip. ---
+    $passphrase = 'drill-correct-horse-battery-staple'
+
+    # Fail closed: with no passphrase configured the backup refuses to run, so the
+    # audit/purchase/tenant data is never written as plaintext.
+    AssertThrows { Get-LiveCoreBackupEncryptionSecret -Passphrase '' -PassphraseFile '' } 'the backup encryption sink fails closed when no passphrase is configured'
+    AssertTrue ((Get-LiveCoreBackupEncryptionSecret -Passphrase $passphrase -PassphraseFile '') -eq $passphrase) 'an explicit passphrase resolves the encryption secret'
+
+    # A passphrase can also come from a file (read raw, trailing newline trimmed).
+    $passphraseFile = Join-Path $tempRoot 'backup.passphrase'
+    [System.IO.File]::WriteAllText($passphraseFile, $passphrase)
+    AssertTrue ((Get-LiveCoreBackupEncryptionSecret -Passphrase '' -PassphraseFile $passphraseFile) -eq $passphrase) 'a passphrase file resolves the encryption secret'
+    AssertThrows { Get-LiveCoreBackupEncryptionSecret -Passphrase '' -PassphraseFile (Join-Path $tempRoot 'no-such.passphrase') } 'a missing passphrase file fails closed'
+
+    # A dump-like plaintext artifact holding the most sensitive data.
+    $plaintextDump = Join-Path $tempRoot 'plaintext.dump'
+    $secretMarker = 'PURCHASE-LEDGER-usr-2-A-1001'
+    $dumpBody = ($source['audit_logs'] + $source['purchase_transactions'] + @($secretMarker)) -join "`n"
+    [System.IO.File]::WriteAllText($plaintextDump, $dumpBody)
+
+    $encryptedDump = $plaintextDump + '.enc'
+    [void](Protect-LiveCoreBackupFile -Path $plaintextDump -Destination $encryptedDump -Passphrase $passphrase)
+    AssertTrue (Test-Path $encryptedDump) 'the backup produces an encrypted dump artifact'
+
+    # The encrypted artifact is not plaintext: the sensitive marker is absent from
+    # its bytes, and it carries the LiveCore encrypted-backup header.
+    $encBytes = [System.IO.File]::ReadAllBytes($encryptedDump)
+    $encText = [System.Text.Encoding]::UTF8.GetString($encBytes)
+    AssertFalse ($encText.Contains($secretMarker)) 'the sensitive ledger data does not appear as plaintext in the encrypted artifact'
+    AssertTrue ($encBytes.Length -ge 8 -and $encBytes[0] -eq 0x4C -and $encBytes[1] -eq 0x43 -and $encBytes[2] -eq 0x42 -and $encBytes[3] -eq 0x4B) 'the encrypted artifact carries the LiveCore encrypted-backup header'
+
+    # Restore decrypts and round-trips to the exact original bytes.
+    $roundTripDump = Join-Path $tempRoot 'roundtrip.dump'
+    [void](Unprotect-LiveCoreBackupFile -Path $encryptedDump -Destination $roundTripDump -Passphrase $passphrase)
+    $originalBytes = [System.IO.File]::ReadAllBytes($plaintextDump)
+    $restoredBytes = [System.IO.File]::ReadAllBytes($roundTripDump)
+    AssertTrue ([Convert]::ToBase64String($originalBytes) -eq [Convert]::ToBase64String($restoredBytes)) 'restore decrypts the dump back to the exact original bytes (round-trip)'
+
+    # Fail closed: a wrong passphrase cannot decrypt the backup (confidentiality).
+    AssertThrows { Unprotect-LiveCoreBackupFile -Path $encryptedDump -Destination (Join-Path $tempRoot 'wrong.out') -Passphrase 'not-the-passphrase' } 'a wrong passphrase fails closed on decrypt (the backup cannot be read without the key)'
+
+    # Fail closed: a tampered ciphertext is rejected by the HMAC (integrity).
+    $tamperedDump = Join-Path $tempRoot 'tampered.dump.enc'
+    $tamperBytes = [System.IO.File]::ReadAllBytes($encryptedDump)
+    $flipIndex = [int]($tamperBytes.Length / 2)
+    $tamperBytes[$flipIndex] = $tamperBytes[$flipIndex] -bxor 0xFF
+    [System.IO.File]::WriteAllBytes($tamperedDump, $tamperBytes)
+    AssertThrows { Unprotect-LiveCoreBackupFile -Path $tamperedDump -Destination (Join-Path $tempRoot 'tampered.out') -Passphrase $passphrase } 'a tampered encrypted backup is rejected fail-closed by the integrity check'
+
+    # Fail closed: a legacy plaintext dump is refused, never silently restored.
+    AssertThrows { Unprotect-LiveCoreBackupFile -Path $plaintextDump -Destination (Join-Path $tempRoot 'legacy.out') -Passphrase $passphrase } 'a non-encrypted artifact is refused fail-closed (no silent plaintext restore)'
+
+    # Mirrored assets: the directory sink encrypts every binary at rest and
+    # round-trips, leaving no plaintext behind.
+    $assetDir = Join-Path $tempRoot 'assets'
+    New-Item -ItemType Directory -Path (Join-Path $assetDir 'org-1/ws-1') -Force | Out-Null
+    $assetFile = Join-Path $assetDir 'org-1/ws-1/a1b2'
+    $assetContent = 'BINARY-ASSET-CONTENT-secret-tenant-bytes'
+    [System.IO.File]::WriteAllText($assetFile, $assetContent)
+    $encryptedAssetCount = Protect-LiveCoreBackupDirectory -Path $assetDir -Passphrase $passphrase
+    AssertTrue ($encryptedAssetCount -eq 1) 'the asset mirror sink encrypts each mirrored binary'
+    AssertTrue (Test-Path ($assetFile + '.enc')) 'the mirrored asset is written as an encrypted .enc artifact'
+    AssertFalse (Test-Path $assetFile) 'the plaintext mirrored asset no longer exists at rest'
+    $decryptedAssetCount = Unprotect-LiveCoreBackupDirectory -Path $assetDir -Passphrase $passphrase
+    AssertTrue ($decryptedAssetCount -eq 1) 'the asset mirror sink decrypts each binary on restore'
+    AssertTrue ([System.IO.File]::ReadAllText($assetFile) -eq $assetContent) 'the mirrored asset round-trips to its original content'
+
+    # The manifest can record the at-rest encryption applied, without weakening the
+    # fail-closed coverage check.
+    $encryptedManifest = Get-LiveCoreBackupManifest `
+        -SystemOfRecord $sourceMeasure `
+        -CreatedAtUtc '2026-06-13T00:00:00Z' `
+        -Database 'livecore' `
+        -StorageBucket 'livecore-assets' `
+        -Encryption @{ algorithm = 'AES-256-CBC'; mac = 'HMAC-SHA256'; kdf = 'PBKDF2-HMAC-SHA256'; dumpEncrypted = $true; assetsEncrypted = $true }
+    AssertTrue ($encryptedManifest.encryption.dumpEncrypted -eq $true) 'the manifest records that the dump was encrypted at rest'
+    $encryptedManifestVerdict = Test-LiveCoreRestoreIntegrity -SourceManifest $encryptedManifest -RestoredSystemOfRecord $sourceMeasure
+    AssertTrue $encryptedManifestVerdict.IsFaithful 'an encryption-annotated manifest still verifies a faithful restore'
+
     # --- The backup and restore orchestrators are valid, parseable PowerShell. ---
     foreach ($orchestrator in @('backup-livecore.ps1', 'restore-livecore.ps1')) {
         $orchestratorPath = Join-Path $scriptDir $orchestrator

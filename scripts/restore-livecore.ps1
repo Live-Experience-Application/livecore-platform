@@ -24,18 +24,27 @@
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
+    The dump is decrypted (and integrity-verified) to a temporary plaintext file
+    before pg_restore, and the locally mirrored asset binaries are decrypted before
+    the restore tool runs and re-encrypted afterwards, using the same passphrase the
+    backup used (CORE-DR-001). The restore refuses to run without the passphrase and
+    fails closed on a wrong passphrase or a tampered artifact.
+
 .EXAMPLE
     pwsh -File scripts/restore-livecore.ps1 `
-        -DumpPath ./backups/livecore-postgres-20260613T000000Z.dump `
+        -DumpPath ./backups/livecore-postgres-20260613T000000Z.dump.enc `
         -ManifestPath ./backups/livecore-backup-manifest.json `
         -ConnectionString "Host=db;Port=5432;Database=livecore_restore;Username=livecore;Password=$env:DB_PASSWORD" `
         -StorageRestoreProgram aws -StorageRestoreArgument @('s3','sync','./backups/assets','s3://livecore-assets') `
-        -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+        -AssetMirrorDirectory ./backups/assets `
+        -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text') `
+        -EncryptionPassphrase $env:Backup__Encryption__Passphrase
 #>
 
 [CmdletBinding()]
 param(
-    # The pg_dump custom-format file produced by backup-livecore.ps1.
+    # The encrypted (.dump.enc) pg_dump custom-format file produced by
+    # backup-livecore.ps1. It is decrypted and integrity-verified before restore.
     [Parameter(Mandatory = $true)]
     [string]$DumpPath,
 
@@ -61,7 +70,23 @@ param(
     # Object-storage inventory tool: prints one line per object (key/etag/size),
     # identical to the one used by the backup. Required to re-measure the bucket.
     [string]$StorageInventoryProgram,
-    [string[]]$StorageInventoryArgument = @()
+    [string[]]$StorageInventoryArgument = @(),
+
+    # Backup-at-rest encryption passphrase (CORE-DR-001). The same passphrase the
+    # backup used: the encrypted dump is decrypted (and integrity-verified) before
+    # pg_restore, and any locally mirrored asset binaries are decrypted before the
+    # restore tool runs. The restore refuses to run without it (fail-closed) and
+    # fails closed on a wrong passphrase or a tampered artifact. Read from
+    # configuration, never committed (threat T7); supply -EncryptionPassphraseFile
+    # to read it from a file instead.
+    [string]$EncryptionPassphrase = $env:Backup__Encryption__Passphrase,
+    [string]$EncryptionPassphraseFile = $env:Backup__Encryption__PassphraseFile,
+
+    # Local directory the encrypted asset mirror lives in (the same directory the
+    # backup encrypted). Required when -StorageRestoreProgram restores assets from
+    # a local mirror, so the binaries can be decrypted for the restore and
+    # re-encrypted afterwards (CORE-DR-001).
+    [string]$AssetMirrorDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,8 +107,17 @@ if (-not $StorageInventoryProgram) {
     throw 'Object-storage verification is required: supply -StorageInventoryProgram (and its -StorageInventoryArgument) so the restored asset bucket is re-measured against the manifest (CORE-OPS-010).'
 }
 
+# Resolve the encryption sink up front: a restore cannot read an encrypted backup
+# without the passphrase, so an unconfigured restore fails closed (CORE-DR-001).
+$encryptionPassphrase = Get-LiveCoreBackupEncryptionSecret -Passphrase $EncryptionPassphrase -PassphraseFile $EncryptionPassphraseFile
+
+if ($StorageRestoreProgram -and [string]::IsNullOrWhiteSpace($AssetMirrorDirectory)) {
+    throw 'When -StorageRestoreProgram restores assets from a local mirror you must also pass -AssetMirrorDirectory (the directory holding the encrypted mirror) so the binaries can be decrypted for the restore (CORE-DR-001).'
+}
+
 $manifest = Get-Content -Path $ManifestPath -Raw | ConvertFrom-Json
 $connection = Get-LiveCoreConnectionSetting -ConnectionString $ConnectionString
+$dumpDirectory = Split-Path -Parent (Resolve-Path -Path $DumpPath).Path
 
 function Invoke-PsqlValue {
     param(
@@ -113,10 +147,19 @@ function Invoke-PsqlValue {
 }
 
 $previousPgPassword = $env:PGPASSWORD
+$decryptedDumpPath = $null
+$assetsDecrypted = $false
 try {
     if (-not [string]::IsNullOrWhiteSpace($connection.Password)) {
         $env:PGPASSWORD = $connection.Password
     }
+
+    # Decrypt the dump to a temporary plaintext file for pg_restore; this verifies
+    # the artifact's integrity and fails closed on a wrong passphrase or tampering
+    # (CORE-DR-001). The plaintext copy is removed in the finally block.
+    $decryptedDumpPath = Join-Path $dumpDirectory ('livecore-restore-' + [System.Guid]::NewGuid().ToString('n') + '.dump')
+    Write-Host "Decrypting and verifying the backup dump for restore -> (temporary plaintext)"
+    [void](Unprotect-LiveCoreBackupFile -Path $DumpPath -Destination $decryptedDumpPath -Passphrase $encryptionPassphrase)
 
     Write-Host "Restoring database '$($connection.Database)' on $($connection.Host):$($connection.Port) from $DumpPath"
     $pgRestoreArgs = @(
@@ -132,7 +175,7 @@ try {
     if ($Clean) {
         $pgRestoreArgs += @('--clean', '--if-exists')
     }
-    $pgRestoreArgs += $DumpPath
+    $pgRestoreArgs += $decryptedDumpPath
 
     & $PgRestorePath @pgRestoreArgs
     if ($LASTEXITCODE -ne 0) {
@@ -140,6 +183,13 @@ try {
     }
 
     if ($StorageRestoreProgram) {
+        # Decrypt the encrypted mirror to plaintext just for the restore sync; the
+        # finally block re-encrypts it so the local backup is left encrypted at
+        # rest as it arrived (CORE-DR-001).
+        $assetsDecrypted = $true
+        Write-Host "Decrypting mirrored asset binaries for restore under: $AssetMirrorDirectory"
+        [void](Unprotect-LiveCoreBackupDirectory -Path $AssetMirrorDirectory -Passphrase $encryptionPassphrase)
+
         Write-Host "Restoring object storage with: $StorageRestoreProgram $($StorageRestoreArgument -join ' ')"
         & $StorageRestoreProgram @StorageRestoreArgument
         if ($LASTEXITCODE -ne 0) {
@@ -183,5 +233,14 @@ try {
     }
 }
 finally {
+    # Remove the temporary plaintext dump so it never lingers at rest (CORE-DR-001).
+    if ($decryptedDumpPath -and (Test-Path -Path $decryptedDumpPath)) {
+        Remove-Item -Path $decryptedDumpPath -Force -ErrorAction SilentlyContinue
+    }
+    # Re-encrypt the local asset mirror so the backup copy is left encrypted at
+    # rest exactly as it arrived; the plaintext existed only during the sync.
+    if ($assetsDecrypted -and -not [string]::IsNullOrWhiteSpace($AssetMirrorDirectory) -and (Test-Path -Path $AssetMirrorDirectory -PathType Container)) {
+        [void](Protect-LiveCoreBackupDirectory -Path $AssetMirrorDirectory -Passphrase $encryptionPassphrase)
+    }
     $env:PGPASSWORD = $previousPgPassword
 }

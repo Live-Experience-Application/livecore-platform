@@ -535,6 +535,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Tracing:Otlp:Endpoint`             | `Tracing__Otlp__Endpoint`          |   no   | for trace export        | API         | Spans produced but not exported (no collector, CORE-OBS-003) |
 | `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat`                      |
 | `Recaps:Generation:SweepInterval`   | `Recaps__Generation__SweepInterval` |  no   | no                      | worker      | `01:00:00` (recap generation cadence, CORE-JOB-001)     |
+| `Backup:Encryption:Passphrase`      | `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`) | yes | for any backup/restore | backup scripts | Backup/restore refuse to run; nothing is written as plaintext (CORE-DR-001) |
 
 The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`),
 `Realtime:Backplane:ChannelPrefix` and the background-job batch sizes (`Assets:Cleanup:BatchSize`,
@@ -698,6 +699,36 @@ nothing, and any system of record that comes back with a different row count or 
 (a dropped record, or a tampered append-only row) makes the restore **FAIL** with a non-zero exit code rather
 than be silently accepted.
 
+### Backup encryption at rest (CORE-DR-001)
+
+The dump and the locally mirrored asset binaries hold the audit trail, the purchase ledger and **all** tenant
+data, so the tooling **encrypts them at rest** and **refuses to run without an encryption sink** — it never
+writes the most sensitive data as plaintext by default (threats T4/T5/T7). The sink is a self-contained,
+dependency-free **AES-256-CBC + HMAC-SHA256** (encrypt-then-MAC) file format keyed by a **PBKDF2-HMAC-SHA256**
+derivation of an operator-supplied passphrase; it uses only the .NET base class library, so it runs unchanged on
+Windows PowerShell 5.1 and PowerShell 7+ and round-trips in the restore drill with no external tool.
+
+- **Configure the passphrase** from configuration, never from source (threat T7): set
+  `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`, a file whose contents are the
+  passphrase), or pass `-EncryptionPassphrase` / `-EncryptionPassphraseFile`. With none configured the backup and
+  the restore both **fail closed** and do no work.
+- **What is encrypted.** The PostgreSQL dump is always encrypted — the artifact left at rest is
+  `livecore-postgres-<ts>.dump.enc`, and the plaintext dump is removed the moment it is encrypted. When assets are
+  mirrored to a local directory (`-StorageMirrorProgram` with `-AssetMirrorDirectory`), every mirrored binary is
+  encrypted in place to a sibling `*.enc` file and the plaintext removed; `-AssetMirrorDirectory` is **required**
+  in that case so no tenant asset content is left as plaintext.
+- **The manifest stays plaintext.** `livecore-backup-manifest.json` records only row counts and content
+  checksums (no tenant content), plus an `encryption` block naming the algorithm applied, so an operator can
+  confirm the artifacts were encrypted.
+- **Restore decrypts and round-trips.** The restore decrypts the dump to a temporary plaintext file (removed
+  immediately after `pg_restore`), decrypts the local mirror only for the duration of the asset sync and
+  re-encrypts it afterwards, and **fails closed** on a wrong passphrase or a tampered artifact (the HMAC is
+  verified before a single byte is decrypted). A legacy plaintext dump is refused rather than silently restored.
+- **Key management.** Keep the passphrase in your secret store (a Railway/host environment variable or a mounted
+  secret file), back it up **separately** from the backups, and rotate it by taking a fresh backup under the new
+  passphrase — an artifact can only be restored with the passphrase it was written with. A lost passphrase means
+  the backup cannot be restored, so protect it as carefully as the database password.
+
 ### Backing up
 
 ```powershell
@@ -706,13 +737,17 @@ pwsh -NoProfile -File scripts/backup-livecore.ps1 `
   -ConnectionString "Host=$env:DB_HOST;Port=5432;Database=livecore;Username=livecore;Password=$env:DB_PASSWORD" `
   -StorageBucket livecore-assets `
   -StorageMirrorProgram aws -StorageMirrorArgument @('s3','sync','s3://livecore-assets','./backups/assets','--delete') `
-  -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+  -AssetMirrorDirectory ./backups/assets `
+  -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text') `
+  -EncryptionPassphrase $env:Backup__Encryption__Passphrase
 ```
 
-The script requires object-storage coverage (it fails closed without an inventory command), runs `pg_dump`,
-mirrors and inventories the bucket, and writes the dump plus `livecore-backup-manifest.json` to
-`-OutputDirectory`. Store the whole output directory — dump, mirrored assets and manifest together — on durable,
-private, encrypted storage.
+The script requires object-storage coverage (it fails closed without an inventory command) and an encryption
+passphrase (it fails closed without one, CORE-DR-001), runs `pg_dump`, encrypts the dump, mirrors and inventories
+the bucket, encrypts the local asset mirror, and writes the encrypted dump (`*.dump.enc`) plus
+`livecore-backup-manifest.json` to `-OutputDirectory`. Store the whole output directory — encrypted dump, encrypted
+mirrored assets and manifest together — on durable, private storage; the most sensitive data is already encrypted
+at rest before it leaves the host.
 
 ### Restore runbook (tested)
 
@@ -728,12 +763,18 @@ throwaway database, not only during a real incident, so the procedure stays prov
 
    ```powershell
    pwsh -NoProfile -File scripts/restore-livecore.ps1 `
-     -DumpPath ./backups/livecore-postgres-20260613T000000Z.dump `
+     -DumpPath ./backups/livecore-postgres-20260613T000000Z.dump.enc `
      -ManifestPath ./backups/livecore-backup-manifest.json `
      -ConnectionString "Host=$env:DB_HOST;Port=5432;Database=livecore_restore;Username=livecore;Password=$env:DB_PASSWORD" `
      -StorageRestoreProgram aws -StorageRestoreArgument @('s3','sync','./backups/assets','s3://livecore-assets-restore') `
-     -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets-restore','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text')
+     -AssetMirrorDirectory ./backups/assets `
+     -StorageInventoryProgram aws -StorageInventoryArgument @('s3api','list-objects-v2','--bucket','livecore-assets-restore','--query','Contents[].{k:Key,e:ETag,s:Size}','--output','text') `
+     -EncryptionPassphrase $env:Backup__Encryption__Passphrase
    ```
+
+   The restore needs the **same passphrase** the backup was written with: it decrypts and integrity-verifies the
+   `*.dump.enc` dump before `pg_restore` and decrypts the local asset mirror for the sync, failing closed on a
+   wrong passphrase or a tampered artifact (CORE-DR-001).
 
    A green run prints `Restore verified: every system of record matches the backup manifest`. A non-zero exit
    means the restore is **invalid** — do not cut over to it.
@@ -776,8 +817,11 @@ container) and a scratch bucket; a successful `restore-livecore.ps1` run is the 
 Backups contain tenant data and the audit/purchase systems of record, so they are as sensitive as the live
 database (threats T5/T7):
 
-- **Encrypt** backups at rest and in transit, and keep the mirror destination **private** (no public access, no
-  public listing) like the source bucket (threat T4).
+- **Encrypt** backups at rest and in transit. At rest is enforced by the tooling itself (CORE-DR-001): the dump
+  and the local asset mirror are encrypted with AES-256-CBC + HMAC-SHA256 and the scripts refuse to run without a
+  passphrase (see "Backup encryption at rest" above), so the audit, purchase-ledger and tenant data never land as
+  plaintext. In transit, keep the mirror destination **private** (no public access, no public listing) like the
+  source bucket and move backups only over TLS (threat T4).
 - **Restrict access** to the backup store to the operators who need it; a leaked backup is a tenant-data breach.
 - **No secrets in the repository:** the scripts read the database password from configuration and pass it via
   `PGPASSWORD`; object-storage credentials belong to the mirror tool's own environment. Nothing here is

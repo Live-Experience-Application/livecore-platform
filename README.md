@@ -84,10 +84,10 @@ tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (Ident
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 scripts/boundary-scan.ps1  forbidden-term boundary scan for Core source
 scripts/spec-consistency.ps1  doc/csv route/table/event/epic consistency check (CORE-DOC-001)
-scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic for the systems of record (CORE-OPS-010)
-scripts/backup-livecore.ps1  backs up PostgreSQL + object storage and writes a coverage manifest
-scripts/restore-livecore.ps1 restores PostgreSQL + object storage and verifies the systems of record
-scripts/test-backup-restore-drill.ps1  runnable restore drill (round-trip + fail-closed checks)
+scripts/LiveCoreBackup.psm1  backup/restore coverage + integrity logic and the at-rest encryption sink for the systems of record (CORE-OPS-010, CORE-DR-001)
+scripts/backup-livecore.ps1  backs up PostgreSQL + object storage, encrypts the dump and mirrored assets at rest, and writes a coverage manifest (fail-closed without an encryption passphrase)
+scripts/restore-livecore.ps1 decrypts, restores PostgreSQL + object storage and verifies the systems of record
+scripts/test-backup-restore-drill.ps1  runnable restore drill (round-trip + fail-closed checks, including the encryption sink)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -3162,26 +3162,34 @@ and the store purchase ledger (`purchase_transactions`, `purchase_events`,
 binaries. A documented, **tested** backup/restore procedure covers all of them.
 
 - `scripts/backup-livecore.ps1` runs a `pg_dump` (custom format) of the Core
-  database and mirrors the private asset bucket, then writes a
-  `livecore-backup-manifest.json` recording a row count and an order-independent
-  content checksum for every system of record. It is fail-closed: it refuses to
-  write a manifest that does not cover them all.
-- `scripts/restore-livecore.ps1` restores the dump with `pg_restore` and the
-  bucket from its mirror, then re-measures and verifies every system of record
-  against the manifest, failing with a non-zero exit code if a record was
-  dropped, altered or lost.
+  database and mirrors the private asset bucket, **encrypts the dump and the local
+  asset mirror at rest** (CORE-DR-001), then writes a `livecore-backup-manifest.json`
+  recording a row count and an order-independent content checksum for every system
+  of record. It is fail-closed twice over: it refuses to run without an encryption
+  passphrase (the audit, purchase-ledger and tenant data never land as plaintext),
+  and it refuses to write a manifest that does not cover every system of record.
+- `scripts/restore-livecore.ps1` decrypts and integrity-verifies the dump (failing
+  closed on a wrong passphrase or a tampered artifact), restores it with
+  `pg_restore` and the bucket from its decrypted mirror, then re-measures and
+  verifies every system of record against the manifest, failing with a non-zero
+  exit code if a record was dropped, altered or lost.
 - `scripts/test-backup-restore-drill.ps1` is the runnable restore drill: a
   self-contained backup → restore → verify round-trip over a fixture modeling the
-  systems of record, exercising the same coverage/integrity logic
-  (`scripts/LiveCoreBackup.psm1`) and proving a faithful restore is accepted while
-  a lossy or tampered one is rejected. It needs no database or object store and
-  runs as the `backup-restore-drill` CI gate.
+  systems of record, exercising the same coverage/integrity logic and the same
+  encryption sink (`scripts/LiveCoreBackup.psm1`) and proving a faithful restore is
+  accepted while a lossy, tampered or wrong-key one is rejected. It needs no
+  database or object store and runs as the `backup-restore-drill` CI gate.
 
 No credential is committed: the database password is read from the same
-`ConnectionStrings:Database` value the API uses and passed via `PGPASSWORD`. The
-full runbook (PostgreSQL `pg_dump` cadence and PITR, object-storage mirroring,
-the step-by-step restore drill, cadence/RPO/RTO and security) lives in
-`docs/13_SELF_HOSTING_REQUIREMENTS.md`.
+`ConnectionStrings:Database` value the API uses and passed via `PGPASSWORD`, and
+the backup encryption passphrase is read from configuration
+(`Backup__Encryption__Passphrase` or a file), never from source. The at-rest
+encryption is a self-contained AES-256-CBC + HMAC-SHA256 sink (PBKDF2-HMAC-SHA256
+key derivation) that uses only the .NET base class library, so it adds no
+dependency and runs on both Windows PowerShell 5.1 and PowerShell 7+. The full
+runbook (PostgreSQL `pg_dump` cadence and PITR, object-storage mirroring, backup
+encryption and key management, the step-by-step restore drill, cadence/RPO/RTO and
+security) lives in `docs/13_SELF_HOSTING_REQUIREMENTS.md`.
 
 ## Continuous integration
 
