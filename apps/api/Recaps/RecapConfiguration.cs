@@ -40,9 +40,17 @@ namespace LiveCore.Api.Recaps;
 ///   <item>The non-unique composite index on (<c>organization_id</c>, <c>workspace_id</c>) keeps the tenant
 ///   boundary check (checked before the workspace boundary) and the organization foreign-key check efficient
 ///   (threat T5).</item>
+///   <item>The PARTIAL UNIQUE index on (<c>session_id</c>) filtered to <c>generated_by IS NULL</c> enforces AT
+///   MOST ONE SYSTEM recap per session (CORE-RCP-001): the background generation job can run in any number of
+///   worker replicas with overlapping sweeps, each minting a fresh UUIDv7 primary key, so without this index
+///   two concurrent sweeps would both insert and a session would carry duplicate system recaps. The filter is
+///   what keeps HOST recaps unconstrained — a session may still have many host recaps — so the constraint is
+///   expressed as a filtered index exactly like the <c>visibility_rules</c> per-dimension uniqueness
+///   (CORE-SVIS-002) and the <c>templates(organization_id)</c> nullable uniqueness.</item>
 /// </list>
-/// There is deliberately NO unique natural-key index: a recap is identified only by its surrogate id (a
-/// session may have many recaps).
+/// There is deliberately no unique index over the SURROGATE id beyond the primary key, and host recaps carry
+/// no natural-key uniqueness (a session may have many host recaps); only the at-most-one-SYSTEM-recap rule
+/// above is enforced (CORE-RCP-001).
 ///
 /// FOREIGN KEYS / CASCADE. <c>organization_id</c>, <c>workspace_id</c> and <c>session_id</c> are foreign keys
 /// into <c>organizations(id)</c>, <c>workspaces(id)</c> and <c>sessions(id)</c> that CASCADE on delete (a
@@ -114,6 +122,22 @@ internal sealed class RecapConfiguration : IEntityTypeConfiguration<Recap>
         // (checked before the workspace boundary) and tenant-scoped reads efficient (threat T5).
         builder.HasIndex(recap => new { recap.OrganizationId, recap.WorkspaceId })
             .HasDatabaseName("ix_recaps_organization_id_workspace_id");
+
+        // AT MOST ONE SYSTEM recap per session (CORE-RCP-001): a PARTIAL UNIQUE index on session_id filtered to
+        // the system recaps (generated_by IS NULL). The background generation job can run in any number of
+        // worker replicas with overlapping sweeps — eligibility is a NOT EXISTS read decoupled from the insert,
+        // and each GenerateBySystem mints a fresh UUIDv7 primary key — so without this index two concurrent
+        // sweeps would both insert, leaving a session with duplicate system recaps. The unique index makes the
+        // losing insert fail, which RecapRepository.TryAppendSystemRecapAsync converges onto the existing recap
+        // (insert-on-conflict), so "a second concurrent sweep produces no duplicate". The filter leaves HOST
+        // recaps (generated_by IS NOT NULL) unconstrained (a session may have many). The filter SQL is portable
+        // across both providers (plain column name + IS NULL), so EnsureCreated builds it for the SQLite test
+        // schema and the migration builds it for PostgreSQL identically — the same pattern as the
+        // visibility_rules per-dimension uniqueness (CORE-SVIS-002).
+        builder.HasIndex(recap => recap.SessionId)
+            .IsUnique()
+            .HasFilter("\"generated_by\" IS NULL")
+            .HasDatabaseName("ix_recaps_session_id_system_recap");
 
         // Tenant foreign key: every recap hangs off exactly one organization (the owner of its workspace).
         // Cascade delete removes recaps with their tenant (a recap has no meaning without its tenant).

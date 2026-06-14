@@ -43,6 +43,7 @@ public sealed class RecapGenerationServiceTests
 
         Assert.Equal(2, result.Examined);
         Assert.Equal(2, result.Generated);
+        Assert.Equal(0, result.Deduplicated);
         Assert.Equal(0, result.Failed);
         Assert.Equal(
             new[] { first.SessionId, second.SessionId }.OrderBy(id => id),
@@ -139,6 +140,7 @@ public sealed class RecapGenerationServiceTests
 
         Assert.Equal(2, result.Examined);
         Assert.Equal(1, result.Generated);
+        Assert.Equal(0, result.Deduplicated);
         Assert.Equal(1, result.Failed);
         // Only the succeeding session is recapped; the failing one wrote no recap, so it stays eligible.
         Assert.Equal(new[] { succeeding.SessionId }, store.Appended.Select(recap => recap.SessionId));
@@ -210,6 +212,33 @@ public sealed class RecapGenerationServiceTests
 
             Appended.Add(recap);
             return Task.CompletedTask;
+        }
+
+        public Task<RecapAppendResult> TryAppendSystemRecapAsync(Recap recap, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(recap);
+            if (recap.GeneratedByUserProfileId is not null)
+            {
+                throw new ArgumentException("Expected a system recap.", nameof(recap));
+            }
+
+            // A genuine persistence failure (e.g. an FK violation because the session was deleted) surfaces as a
+            // DbUpdateException — the same contract the real repository rethrows when no duplicate exists.
+            if (FailAppendFor.Contains(recap.SessionId))
+            {
+                throw new DbUpdateException($"simulated persistence failure for session {recap.SessionId}");
+            }
+
+            // Model the partial unique index recaps(session_id) WHERE generated_by IS NULL: a second system
+            // recap for a session already recapped by the system is rejected and converges onto the existing
+            // one (CORE-RCP-001), exactly as the real DB rejects the losing concurrent insert.
+            if (Appended.Any(existing => existing.SessionId == recap.SessionId && existing.GeneratedByUserProfileId is null))
+            {
+                return Task.FromResult(RecapAppendResult.AlreadyExists);
+            }
+
+            Appended.Add(recap);
+            return Task.FromResult(RecapAppendResult.Appended);
         }
 
         public Task<Recap?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)

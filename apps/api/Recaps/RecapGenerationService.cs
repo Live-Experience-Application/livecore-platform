@@ -16,10 +16,20 @@ namespace LiveCore.Api.Recaps;
 /// It reuses the existing Recap aggregate and its repository (the story note: "Reuse the Recap
 /// aggregate/repository"): each recap is produced through <see cref="Recap.GenerateBySystem"/> — a
 /// SYSTEM-produced recap with no user (docs/09_EVENT_CATALOG.md: <c>RecapGenerated</c> source "System/Host")
-/// — and appended through <see cref="IRecapRepository.AppendAsync"/>. The eligible sessions come from
-/// <see cref="IRecapEligibleSessionReader"/>, which is also the idempotency mechanism: it never returns a
-/// session that already has a recap, so a recap is produced AT MOST ONCE per session no matter how many sweeps
-/// run.
+/// — and appended through <see cref="IRecapRepository.TryAppendSystemRecapAsync"/>. The eligible sessions come
+/// from <see cref="IRecapEligibleSessionReader"/>, which is the first idempotency layer: it never returns a
+/// session that already has a recap, so a recap is produced AT MOST ONCE per session across sequential sweeps.
+/// </para>
+///
+/// <para>
+/// MULTI-WORKER CORRECTNESS (CORE-RCP-001). The eligibility read is a NOT EXISTS read decoupled from the
+/// append, so two overlapping sweeps — in the same process or across worker replicas, none of which has a
+/// single-instance guard — can both observe the same session as eligible and both try to append. The
+/// database is the authoritative second layer: a partial unique index <c>recaps(session_id) WHERE generated_by
+/// IS NULL</c> permits only one system recap per session, so the losing append is rejected and reported as
+/// <see cref="RecapAppendResult.AlreadyExists"/> — a benign no-op, counted as
+/// <see cref="RecapGenerationResult.Deduplicated"/>, never a duplicate and never a failure. So at most one
+/// system recap exists per session regardless of how many replicas or overlapping sweeps run.
 /// </para>
 ///
 /// <para>
@@ -68,14 +78,16 @@ public sealed class RecapGenerationService
 
     /// <summary>
     /// Runs one generation sweep: finds up to <see cref="RecapGenerationOptions.BatchSize"/> sessions that
-    /// need a recap (ended, not yet recapped), produces a system recap for each and persists it, and returns
-    /// the run's count-only summary. Idempotent (a session with a recap is never eligible, so it is never
-    /// recapped twice) and tenant-scoped (each recap carries its own session's tenant/workspace/session). The
-    /// sweep is resilient: a per-session failure is logged and that session is left for the next sweep to
-    /// retry, rather than aborting the run.
+    /// need a recap (ended, not yet recapped), produces a system recap for each and appends it idempotently,
+    /// and returns the run's count-only summary. Idempotent across sequential sweeps (a session with a recap is
+    /// never eligible) AND under concurrent sweeps/replicas (the partial unique index permits one system recap
+    /// per session, so a losing race converges onto the existing recap, counted as deduplicated — CORE-RCP-001),
+    /// and tenant-scoped (each recap carries its own session's tenant/workspace/session). The sweep is
+    /// resilient: a per-session failure is logged and that session is left for the next sweep to retry, rather
+    /// than aborting the run.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token (the worker passes its stopping token).</param>
-    /// <returns>A summary of how many sessions were examined, recapped and failed.</returns>
+    /// <returns>A summary of how many sessions were examined, recapped, deduplicated and failed.</returns>
     public async Task<RecapGenerationResult> GenerateDueRecapsAsync(CancellationToken cancellationToken)
     {
         var candidates = await _eligibleSessions
@@ -84,7 +96,7 @@ public sealed class RecapGenerationService
 
         if (candidates.Count == 0)
         {
-            return new RecapGenerationResult(Examined: 0, Generated: 0, Failed: 0);
+            return new RecapGenerationResult(Examined: 0, Generated: 0, Deduplicated: 0, Failed: 0);
         }
 
         // One produced timestamp for the whole sweep, taken from the injected clock so the behavior is
@@ -93,6 +105,7 @@ public sealed class RecapGenerationService
 
         var examined = 0;
         var generated = 0;
+        var deduplicated = 0;
         var failed = 0;
 
         foreach (var session in candidates)
@@ -112,13 +125,27 @@ public sealed class RecapGenerationService
                     ComposeSummary(session),
                     generatedAt);
 
-                await _recaps.AppendAsync(recap, cancellationToken).ConfigureAwait(false);
+                // Idempotent append (CORE-RCP-001): the partial unique index recaps(session_id) WHERE
+                // generated_by IS NULL guarantees at most one system recap per session, so a concurrent sweep
+                // or another worker replica that already produced this session's recap makes this a no-op
+                // (AlreadyExists) rather than a duplicate or an error.
+                var outcome = await _recaps.TryAppendSystemRecapAsync(recap, cancellationToken).ConfigureAwait(false);
 
-                generated++;
-                _logger.LogInformation(
-                    "Generated system recap {RecapId} for ended session {SessionId}.",
-                    recap.Id,
-                    session.SessionId);
+                if (outcome == RecapAppendResult.Appended)
+                {
+                    generated++;
+                    _logger.LogInformation(
+                        "Generated system recap {RecapId} for ended session {SessionId}.",
+                        recap.Id,
+                        session.SessionId);
+                }
+                else
+                {
+                    deduplicated++;
+                    _logger.LogInformation(
+                        "A system recap already existed for ended session {SessionId} (produced by a concurrent sweep or another worker replica); skipping to avoid a duplicate.",
+                        session.SessionId);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -139,7 +166,7 @@ public sealed class RecapGenerationService
             }
         }
 
-        return new RecapGenerationResult(Examined: examined, Generated: generated, Failed: failed);
+        return new RecapGenerationResult(Examined: examined, Generated: generated, Deduplicated: deduplicated, Failed: failed);
     }
 
     /// <summary>

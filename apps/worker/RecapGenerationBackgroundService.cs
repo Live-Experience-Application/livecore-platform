@@ -17,8 +17,11 @@ namespace LiveCore.Worker;
 /// RESILIENT: a sweep that throws is logged and the loop continues to the next tick, so one transient database
 /// failure never tears the worker down. Cancellation (host shutdown) ends the loop cleanly. This service is
 /// only registered when persistence is configured (see <see cref="WorkerHostFactory"/>), so it always has a
-/// database to sweep. The job is idempotent at the data layer (a session that already has a recap is never
-/// eligible), so a sweep retried after a crash never double-produces a recap.
+/// database to sweep. The job is idempotent at the data layer: a session that already has a recap is never
+/// eligible, so a sweep retried after a crash never double-produces a recap, and the partial unique index
+/// <c>recaps(session_id) WHERE generated_by IS NULL</c> (CORE-RCP-001) makes overlapping sweeps and multiple
+/// worker replicas safe — a losing race converges onto the existing recap rather than producing a duplicate,
+/// so this loop needs NO single-instance guard.
 /// </para>
 ///
 /// <para>
@@ -99,9 +102,10 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
             if (result.Examined > 0)
             {
                 _logger.LogInformation(
-                    "Recap generation sweep complete: examined {Examined}, generated {Generated}, failed {Failed}.",
+                    "Recap generation sweep complete: examined {Examined}, generated {Generated}, deduplicated {Deduplicated}, failed {Failed}.",
                     result.Examined,
                     result.Generated,
+                    result.Deduplicated,
                     result.Failed);
             }
         }

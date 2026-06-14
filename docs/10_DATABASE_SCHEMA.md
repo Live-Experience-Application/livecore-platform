@@ -97,6 +97,7 @@ export_manifests(export_job_id) unique
 export_manifest_entries(export_manifest_id, kind) unique
 recaps(workspace_id, id)
 recaps(session_id, id)
+recaps(session_id) unique where generated_by is null
 entitlement_definitions(key) unique
 plan_definitions(key) unique
 plan_entitlements(plan_definition_id, entitlement_definition_id) unique
@@ -193,6 +194,31 @@ rather than colliding), so the sequence stays gap-free and strictly monotonic ev
 increment runs in the command's unit-of-work transaction (CORE-CONC-002) together with the event insert, a
 rollback reclaims the number — there is no gap. The unique `(session_id, sequence)` index is the integrity
 backstop that guarantees no two events of a session ever share a sequence.
+
+## One system recap per session (CORE-RCP-001)
+
+A session has **at most one SYSTEM recap** regardless of how many worker replicas or overlapping sweeps run.
+The background recap generation job decides eligibility with a `NOT EXISTS` read (ended sessions with no
+recap) that is **decoupled** from the bare insert, has no single-instance guard, and mints a **fresh UUIDv7**
+primary key per recap — so before this, two concurrent sweeps both read the session as eligible and both
+inserted, leaving the session with **duplicate** system recaps (the other `recaps` indexes are non-unique).
+
+Because `generated_by` is nullable and a recap may be produced by the **system** (`generated_by IS NULL`) or by
+a **host** (`generated_by IS NOT NULL`, of which a session may legitimately have many), the at-most-one rule
+applies only to system recaps. It is enforced by a single **filtered (partial) unique index** — the same
+nullable-uniqueness pattern as the visibility per-dimension rule (CORE-SVIS-002) and
+`templates(organization_id)`:
+
+- `recaps(session_id)` **unique** where `generated_by IS NULL` — at most one system recap per session; host
+  recaps stay unconstrained.
+
+The generation job relies on this via **insert-on-conflict** (`RecapRepository.TryAppendSystemRecapAsync`): a
+losing concurrent append is rejected by the index and converges onto the recap that already exists — reported
+as a deduplicated no-op, never a duplicate and never a failure — so "a second concurrent sweep produces no
+duplicate" and the worker loop needs **no single-instance guard**. A genuine persistence error (the
+session/workspace/tenant was deleted between the eligibility read and the append) still surfaces, so the sweep
+leaves that session eligible and retries it. The filter SQL is portable across PostgreSQL and SQLite, so the
+test schema and the migration build it identically.
 
 ## Buyer linkage for verified purchases (CORE-MON-002)
 

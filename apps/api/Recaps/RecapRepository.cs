@@ -28,6 +28,54 @@ internal sealed class RecapRepository : IRecapRepository
     }
 
     /// <inheritdoc />
+    public async Task<RecapAppendResult> TryAppendSystemRecapAsync(Recap recap, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(recap);
+
+        if (recap.GeneratedByUserProfileId is not null)
+        {
+            // The at-most-one rule is a SYSTEM-recap invariant (the partial unique index filters on
+            // generated_by IS NULL); a host recap is unconstrained and must use the plain AppendAsync. Reject a
+            // misuse loudly rather than silently writing it through a path whose dedup would never apply.
+            throw new ArgumentException(
+                "TryAppendSystemRecapAsync accepts only a system recap (GeneratedByUserProfileId must be null).",
+                nameof(recap));
+        }
+
+        _dbContext.Recaps.Add(recap);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return RecapAppendResult.Appended;
+        }
+        catch (DbUpdateException)
+        {
+            // Keep the context usable: the failed insert must not be retried by a later SaveChanges on the same
+            // scope (the sweep reuses one DbContext across the batch). Mirrors QuotaUsageRepository.AddAsync.
+            _dbContext.Entry(recap).State = EntityState.Detached;
+
+            // Provider-neutral duplicate detection: if a system recap already exists for this session, the
+            // partial unique index recaps(session_id) WHERE generated_by IS NULL rejected the insert as a
+            // duplicate (a lost race against a concurrent sweep or another worker replica) — converge onto the
+            // one recap instead of failing. The predicate matches the index filter exactly. Any OTHER failure
+            // (for example the session was deleted between the eligibility read and the append, a foreign-key
+            // violation) is rethrown unchanged so the sweep counts it as a failure and retries the session.
+            var systemRecapExists = await _dbContext.Recaps
+                .AsNoTracking()
+                .AnyAsync(
+                    existing => existing.SessionId == recap.SessionId && existing.GeneratedByUserProfileId == null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (systemRecapExists)
+            {
+                return RecapAppendResult.AlreadyExists;
+            }
+
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<Recap?> FindByIdAsync(
         Guid organizationId,
         Guid workspaceId,

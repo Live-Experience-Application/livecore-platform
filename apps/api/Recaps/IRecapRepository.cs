@@ -26,8 +26,35 @@ public interface IRecapRepository
     /// non-empty by the aggregate, so an insert simply persists the row. Foreign-key violations (a
     /// non-existent session, workspace or tenant) surface as a
     /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/>.
+    ///
+    /// <para>
+    /// This is the unconditional append used for a HOST-produced recap, of which a session may have more than
+    /// one. A SYSTEM recap (no producing user) must instead go through <see cref="TryAppendSystemRecapAsync"/>,
+    /// which enforces the at-most-one-system-recap-per-session rule (CORE-RCP-001).
+    /// </para>
     /// </summary>
     Task AppendAsync(Recap recap, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Appends a SYSTEM-produced recap idempotently (CORE-RCP-001): at most one system recap can exist per
+    /// session, so a second concurrent sweep — from an overlapping run or another worker replica — produces no
+    /// duplicate. The guarantee is the partial unique index <c>recaps(session_id) WHERE generated_by IS NULL</c>:
+    /// when a system recap already exists for the session the insert is rejected and this returns
+    /// <see cref="RecapAppendResult.AlreadyExists"/> (a no-op), otherwise the recap is written and this returns
+    /// <see cref="RecapAppendResult.Appended"/>. The duplicate is NOT surfaced as a fault — only a genuine
+    /// persistence error (for example the session/workspace/tenant was deleted between the eligibility read and
+    /// the append, a foreign-key violation) still surfaces as a
+    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateException"/> so the sweep can leave the session eligible
+    /// and retry it.
+    /// </summary>
+    /// <param name="recap">
+    /// The system recap to append. It must be a system recap (<see cref="Recap.GeneratedByUserProfileId"/> is
+    /// <see langword="null"/>); the at-most-one rule applies only to system recaps.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token (the worker passes its stopping token).</param>
+    /// <exception cref="System.ArgumentNullException">The recap is null.</exception>
+    /// <exception cref="System.ArgumentException">The recap carries a producing user (it is not a system recap).</exception>
+    Task<RecapAppendResult> TryAppendSystemRecapAsync(Recap recap, CancellationToken cancellationToken);
 
     /// <summary>
     /// Finds the recap with exactly the given id WITHIN the given organization and workspace, or

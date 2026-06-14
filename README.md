@@ -2033,12 +2033,24 @@ session title or any content (threat T7) — and is appended through the existin
 
 It is **idempotent** and **tenant-scoped** (the acceptance criteria). Eligibility is read by
 `IRecapEligibleSessionReader` as an anti-join — ended sessions with no recap — so a session that
-already has a recap is never eligible and is recapped **at most once** across any number of sweeps;
+already has a recap is never eligible and is recapped **at most once** across sequential sweeps;
 the read spans all tenants (a system sweep) but each produced recap carries its own session's
 organization, workspace and id, so a session in one tenant only ever receives a recap attributed to
 that same tenant (threat T5). The eligibility read lives in the Recaps module because it already
 depends on the Sessions module (a recap has a foreign key into `sessions`); it only **reads** session
 coordinates, never writes the sessions table.
+
+Idempotency holds **under concurrent workers** too (CORE-RCP-001). The eligibility read is a `NOT EXISTS`
+read **decoupled** from the insert and the worker loop has no single-instance guard, so two overlapping
+sweeps — in one process or across replicas — can both observe the same session as eligible and both try to
+append. The authoritative guard is the partial unique index `recaps(session_id)` **where**
+`generated_by IS NULL` (system recaps only; host recaps stay unconstrained): it permits exactly one system
+recap per session, so the losing append is rejected and `RecapRepository.TryAppendSystemRecapAsync`
+**converges onto the existing recap** (insert-on-conflict) — reported as a deduplicated no-op, never a
+duplicate and never a failure. So **at most one system recap exists per session regardless of how many
+replicas or overlapping sweeps run**, and the worker loop needs no single-instance guard. A genuine
+persistence error (the session/workspace/tenant was deleted between the read and the append) still surfaces,
+so the sweep leaves that session eligible and retries it.
 
 The generation logic lives in the Recaps module (`RecapGenerationService`); the worker only schedules
 it (`RecapGenerationBackgroundService`, every `Recaps:Generation:SweepInterval`, in bounded

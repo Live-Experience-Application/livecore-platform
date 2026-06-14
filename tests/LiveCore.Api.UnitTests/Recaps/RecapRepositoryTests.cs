@@ -352,6 +352,121 @@ public sealed class RecapRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task TryAppendSystemRecap_appends_the_first_and_rejects_a_second_for_the_same_session()
+    {
+        // CORE-RCP-001 core invariant, deterministic: two overlapping sweeps each observe the session as
+        // eligible and each mint a SYSTEM recap with a fresh UUIDv7 primary key for the SAME session, then both
+        // attempt the append (modeled here as two appends on two separate contexts/DbContext scopes). The
+        // partial unique index recaps(session_id) WHERE generated_by IS NULL lets exactly the first through and
+        // converges the second onto it (AlreadyExists), so the session carries exactly one system recap.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Opening night");
+
+        var first = Recap.GenerateBySystem(organization.Id, workspace.Id, session.Id, _summary, _generatedAt);
+        var second = Recap.GenerateBySystem(organization.Id, workspace.Id, session.Id, _summary, _generatedAt.AddSeconds(1));
+        Assert.NotEqual(first.Id, second.Id); // distinct primary keys: the PK alone never deduplicates
+
+        RecapAppendResult firstResult;
+        await using (var contextA = CreateContext())
+        {
+            firstResult = await new RecapRepository(contextA).TryAppendSystemRecapAsync(first, CancellationToken.None);
+        }
+
+        RecapAppendResult secondResult;
+        await using (var contextB = CreateContext())
+        {
+            secondResult = await new RecapRepository(contextB).TryAppendSystemRecapAsync(second, CancellationToken.None);
+        }
+
+        Assert.Equal(RecapAppendResult.Appended, firstResult);
+        Assert.Equal(RecapAppendResult.AlreadyExists, secondResult);
+
+        await using var context = CreateContext();
+        var recaps = await new RecapRepository(context)
+            .ListBySessionAsync(organization.Id, workspace.Id, session.Id, CancellationToken.None);
+        var only = Assert.Single(recaps);
+        Assert.Equal(first.Id, only.Id);
+        Assert.Null(only.GeneratedByUserProfileId);
+    }
+
+    [Fact]
+    public async Task TryAppendSystemRecap_rejects_a_host_recap()
+    {
+        // The at-most-one rule is a SYSTEM-recap invariant; the idempotent path must refuse a host recap rather
+        // than write it through a path whose dedup filter (generated_by IS NULL) would never apply to it.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Opening night");
+        var user = await SeedUserAsync(_issuer, _subject);
+        var hostRecap = Recap.GenerateByHost(organization.Id, workspace.Id, session.Id, user.Id, _summary, _generatedAt);
+
+        await using var context = CreateContext();
+        var repository = new RecapRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.TryAppendSystemRecapAsync(hostRecap, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task TryAppendSystemRecap_for_a_nonexistent_session_throws_rather_than_reporting_a_duplicate()
+    {
+        // A genuine persistence failure (the session was deleted between the eligibility read and the append, a
+        // foreign-key violation) must surface as a DbUpdateException — NOT be swallowed as AlreadyExists — so the
+        // sweep counts it as a failure and leaves the session eligible to retry. The organization and workspace
+        // are real to isolate the session FK; the session is not persisted.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var ghost = Recap.GenerateBySystem(organization.Id, workspace.Id, Guid.CreateVersion7(), _summary, _generatedAt);
+
+        await using var context = CreateContext();
+        var repository = new RecapRepository(context);
+
+        await Assert.ThrowsAsync<DbUpdateException>(
+            () => repository.TryAppendSystemRecapAsync(ghost, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task The_system_recap_uniqueness_does_not_constrain_host_recaps()
+    {
+        // The filtered index covers only system recaps (generated_by IS NULL), so a session may still carry many
+        // HOST recaps, and a host recap and a system recap coexist; only a SECOND system recap is rejected.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var session = await SeedSessionAsync(organization.Id, workspace.Id, "Opening night");
+        var user = await SeedUserAsync(_issuer, _subject);
+
+        // Two host recaps for the one session both persist (unconstrained).
+        await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id, _generatedAt);
+        await SeedHostRecapAsync(organization.Id, workspace.Id, session.Id, user.Id, _generatedAt.AddSeconds(1));
+
+        await using (var systemContext = CreateContext())
+        {
+            var first = await new RecapRepository(systemContext).TryAppendSystemRecapAsync(
+                Recap.GenerateBySystem(organization.Id, workspace.Id, session.Id, _summary, _generatedAt.AddSeconds(2)),
+                CancellationToken.None);
+            Assert.Equal(RecapAppendResult.Appended, first);
+        }
+
+        await using (var duplicateContext = CreateContext())
+        {
+            var second = await new RecapRepository(duplicateContext).TryAppendSystemRecapAsync(
+                Recap.GenerateBySystem(organization.Id, workspace.Id, session.Id, _summary, _generatedAt.AddSeconds(3)),
+                CancellationToken.None);
+            Assert.Equal(RecapAppendResult.AlreadyExists, second);
+        }
+
+        await using var context = CreateContext();
+        var recaps = await new RecapRepository(context)
+            .ListBySessionAsync(organization.Id, workspace.Id, session.Id, CancellationToken.None);
+
+        // Two host recaps + exactly one system recap = three; the second system recap was deduplicated.
+        Assert.Equal(3, recaps.Count);
+        Assert.Equal(2, recaps.Count(recap => recap.GeneratedByUserProfileId is not null));
+        Assert.Equal(1, recaps.Count(recap => recap.GeneratedByUserProfileId is null));
+    }
+
+    [Fact]
     public async Task Deleting_the_producing_user_anonymizes_the_recap()
     {
         // The generated_by foreign key SETS NULL on delete: the record of a recap is retained when its producer

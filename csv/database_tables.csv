@@ -22,7 +22,7 @@ templates,Templates,global/organization,Template registry
 export_jobs,Exports,workspace,Async exports
 export_manifests,Exports,workspace,Produced workspace export table-of-contents
 export_manifest_entries,Exports,workspace,Per-kind export manifest inventory line
-recaps,Recaps,session,Produced session recap
+recaps,Recaps,session,Produced session recap (at most one system recap per session; unique on session_id where generated_by is null)
 entitlement_definitions,Entitlements,global,Generic entitlement catalog entry
 plan_definitions,Entitlements,global,Generic plan catalog entry
 plan_entitlements,Entitlements,global,Plan-to-entitlement grant
