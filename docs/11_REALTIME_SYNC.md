@@ -158,6 +158,16 @@ group the server placed it in (groups are server-managed, never client-chosen). 
 stays the single send path and enabling scale-out never leaks a hidden event (threat T3), whether or not a
 backplane is configured.
 
+**Cross-instance propagation is behaviorally tested (CORE-TST-003).** The DI wiring (that
+`AddStackExchangeRedis` is selected when a connection string is configured) is unit-tested, but the
+production HA path itself is exercised end-to-end by `RedisBackplanePropagationTests`: it boots multiple API
+instances sharing one PostgreSQL system of record and the **real** Redis/Valkey SignalR backplane, then proves
+an event revealed on one instance reaches a client whose live hub connection is held by a **different**
+instance, and that a deployment configured with a different `ChannelPrefix` receives nothing (the prefix
+namespaces the deployment's pub/sub channels and does not leak). The test runs only when a backplane server is
+configured (the CI `integration-postgres` job's Redis/Valkey service, `LIVECORE_TEST_REDIS`); a default local
+run skips it. It reuses the unchanged backplane registration and never widens the audience.
+
 ## Tests
 
 - selected participant receives reveal

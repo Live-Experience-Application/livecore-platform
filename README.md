@@ -647,6 +647,18 @@ through the `LIVECORE_TEST_DB_PROVIDER`/`LIVECORE_TEST_POSTGRES` environment
 variables; with them unset it stays on in-memory SQLite, so local runs need no
 database server.
 
+The same `integration-postgres` job also runs the **cross-instance realtime
+backplane propagation test** (CORE-TST-003): it adds a Redis/Valkey service
+container and a `LIVECORE_TEST_REDIS` connection string, so
+`RedisBackplanePropagationTests` boots multiple API instances sharing one
+PostgreSQL system of record and the **real** Redis/Valkey SignalR backplane
+(CORE-OPS-007) and proves an event published on one instance reaches a client
+connected to another instance, while a different `ChannelPrefix` does not leak.
+With `LIVECORE_TEST_REDIS` unset (a default `dotnet test`) the test is skipped, so
+no Redis/Valkey server is needed locally. No credentials live in the repository:
+the connection string points at the ephemeral CI service container only (threat
+T7).
+
 Migrations are **roll-forward-only** (CORE-DR-004): the runner applies `Up()`
 only and a `Down()` is never run in production, because every `Down()` is
 destructive (it drops the table/column its `Up()` added). The backward path for a

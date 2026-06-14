@@ -14,7 +14,7 @@
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   publish-dry-run      - verify image tags + image-scan gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
-#   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002)
+#   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
 #   publish              - SBOM + CVE scan (fail on critical) then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
 #
 # Every push and pull request runs the quality gates only. The publish job runs
@@ -595,6 +595,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Redis/Valkey backplane for the cross-instance realtime propagation test (CORE-TST-003). The
+      # documented production HA path makes the SignalR HubLifetimeManager Redis/Valkey-backed (CORE-OPS-007)
+      # so a group send fans out to connections on every API instance; that was config-tested only. With this
+      # service present, RedisBackplanePropagationTests boots multiple API instances against a real backplane
+      # and proves cross-instance delivery and channel-prefix isolation. Valkey is the Redis-compatible
+      # backplane docs/02_ARCHITECTURE.md names; StackExchange.Redis speaks the same protocol to either.
+      redis:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Select the PostgreSQL provider for the integration suite and point it at the
       # ephemeral service container. No credential is committed: this is a throwaway
@@ -602,6 +617,10 @@ jobs:
       # suite creates and drops its own per-test databases against it.
       LIVECORE_TEST_DB_PROVIDER: Postgres
       LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
+      # The Redis/Valkey backplane the cross-instance propagation test runs against (CORE-TST-003). Absent
+      # locally, so a default dotnet test skips that test; present here, so CI exercises real cross-instance
+      # pub/sub. No credential committed: it points at the ephemeral service container above.
+      LIVECORE_TEST_REDIS: "localhost:6379"
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
