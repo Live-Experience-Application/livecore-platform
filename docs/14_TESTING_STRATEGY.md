@@ -95,6 +95,23 @@ inserts truly collide and abort the loser's transaction) — but the persisted r
 is always one billing link and one buyer's worth of entitlements, never a
 double-grant.
 
+The store-notification unit of work also has **revoke-failure rollback** coverage
+(CORE-TST-008, `StoreNotificationRevokeFailureRollbackTests`). On a revoking
+notification (a refund) `StoreNotificationService.HandleAsync` revokes the granted
+entitlement BEFORE the purchase status change and the dedup-ledger write, all inside
+one `TransactionalUnitOfWork` (CORE-MON-010 / CORE-MON-004) — but until then the
+atomic-rollback claim for that revoke + status change + ledger trio was asserted in
+prose only, never exercised by a failing revoke. The new tests swap the
+`ISubjectEntitlementRepository` the revoke writes through for a decorator that throws
+on its `UpdateAsync`, so the failure lands squarely in the revoke step, and assert
+that **nothing** persists: the purchase stays `Active` (no downgrade), no ledger row
+is written, no downgrade purchase event is appended, and the buyer keeps every
+entitlement. A second test grants a plan with **two** entitlements and fails the
+**second** revoke write, so an earlier revoke has already committed inside the
+transaction — proving even a partially-persisted revoke is rolled back, so a
+re-delivery replays the whole effect from scratch rather than finding a half-revoked
+subject.
+
 ## Coverage measurement and the CI gate
 
 "No feature without tests" is enforced, not just expected (CORE-TST-001). CI
