@@ -54,4 +54,19 @@ public interface IWorkspaceInvitationRepository
         Guid workspaceId,
         string tokenHash,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Persists changes to an invitation previously loaded through this repository
+    /// (CORE-WS-006). The tenant, workspace, invited email, role, token hash and
+    /// expiry of an invitation are immutable (<see cref="WorkspaceInvitation"/>);
+    /// the only change an update ever applies is the single-use lifecycle
+    /// transition (Pending -> Accepted on redemption, or Pending -> Revoked), so an
+    /// update can never move the invitation to another tenant or workspace
+    /// (threat T5) nor re-open a consumed token. The caller is responsible for
+    /// having loaded the invitation through a tenant-scoped lookup and for running
+    /// the update inside the redeem command's transaction (CORE-CONC-002), so the
+    /// status change and the membership create commit together or not at all.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The invitation is null.</exception>
+    Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken);
 }

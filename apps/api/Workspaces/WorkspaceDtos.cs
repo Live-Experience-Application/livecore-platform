@@ -176,3 +176,75 @@ public sealed record WorkspaceInvitationResponse(
             plaintextToken);
     }
 }
+
+/// <summary>
+/// Request body for redeeming a workspace invitation (CORE-WS-006,
+/// <c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c>).
+///
+/// The scoped invite token is a BEARER grant (the DECIDED model, threat T6): whoever
+/// presents a valid token becomes the member, so the authenticated caller's OIDC subject
+/// — never the invited email — is the one granted membership. The plaintext token is
+/// carried in the request BODY, never in the URL path or a query string, because a token
+/// in a URL leaks into access logs, proxies and browser history (threat T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md). The server hashes the presented token and resolves
+/// the invitation by its hash WITHIN the route's workspace and the resolved tenant, so a
+/// token minted for another workspace or tenant resolves to nothing (a hidden 404).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> (the route
+/// carries no organization in its path), matched against the caller's token organization
+/// claim and a persisted organization membership by the tenant context resolver
+/// (CORE-ID-005), exactly like the other workspace by-id routes. The workspace is taken
+/// from the route. The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md).
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to resolve the
+/// tenant context.
+/// </param>
+/// <param name="Token">
+/// The one-time plaintext scoped invite token the inviter handed to the invitee. Carried
+/// in the body only; the server stores and matches only its SHA-256 hash, never the
+/// plaintext (threats T6/T7).
+/// </param>
+public sealed record AcceptWorkspaceInvitationRequest(string? OrganizationSlug, string? Token);
+
+/// <summary>
+/// Response projection of a workspace membership (CORE-WS-006). Returned when an
+/// invitation is redeemed into a new <see cref="WorkspaceMember"/>. Generic and
+/// product-neutral (docs/04_PRODUCT_BOUNDARIES.md, docs/08_API_CONTRACTS.md): identifiers,
+/// the granted generic role and server timestamps only. It carries no invited email, no
+/// token and no internal authorization rationale (data minimization; threats T6/T7).
+/// </summary>
+/// <param name="Id">Surrogate id of the membership (UUIDv7).</param>
+/// <param name="OrganizationId">Tenant the membership belongs to.</param>
+/// <param name="WorkspaceId">Workspace the membership grants standing in.</param>
+/// <param name="UserProfileId">Subject (the caller who redeemed the token) the membership is for.</param>
+/// <param name="Role">Generic role the membership grants.</param>
+/// <param name="CreatedAt">When the membership was created (UTC).</param>
+/// <param name="UpdatedAt">When the membership was last updated (UTC).</param>
+public sealed record WorkspaceMemberResponse(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid UserProfileId,
+    string Role,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// Projects a <see cref="WorkspaceMember"/> aggregate into its response DTO. Only the
+    /// generic, non-sensitive fields are copied; the role is emitted by its stable name.
+    /// </summary>
+    public static WorkspaceMemberResponse From(WorkspaceMember member)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        return new WorkspaceMemberResponse(
+            member.Id,
+            member.OrganizationId,
+            member.WorkspaceId,
+            member.UserProfileId,
+            member.Role.ToString(),
+            member.CreatedAt,
+            member.UpdatedAt);
+    }
+}

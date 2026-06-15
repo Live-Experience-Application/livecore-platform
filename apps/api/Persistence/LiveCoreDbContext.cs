@@ -289,6 +289,13 @@ public sealed class LiveCoreDbContext : DbContext
             typeof(SubjectEntitlement),
             typeof(ExportJob),
             typeof(UserProfile),
+
+            // CORE-WS-006 makes the invitation an in-place-updated aggregate for the first time: the
+            // accept/redeem command transitions it Pending -> Accepted. Without a token two concurrent
+            // redemptions of one scoped token could each read Pending and each grant a membership, defeating
+            // the single-use guarantee; the xmin token makes the second redeem's UPDATE conflict (409) so the
+            // token is honoured at most once even under a race (threat T6).
+            typeof(WorkspaceInvitation),
         ];
 
         foreach (var aggregate in mutableAggregates)

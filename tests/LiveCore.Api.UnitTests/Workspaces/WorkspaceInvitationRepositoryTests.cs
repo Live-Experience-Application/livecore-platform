@@ -253,6 +253,56 @@ public sealed class WorkspaceInvitationRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task Update_persists_the_redeemed_status_transition()
+    {
+        // CORE-WS-006: the redeem command transitions the invitation Pending -> Accepted and persists it
+        // through UpdateAsync. The stored row must reflect the new single-use status, so a later read can never
+        // see the consumed token as still Pending (the single-use guarantee at rest).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var invitation = WorkspaceInvitation.Create(
+            organization.Id, workspace.Id, _email, MembershipRole.Host, _createdAt, out var token);
+
+        await using (var context = CreateContext())
+        {
+            await new WorkspaceInvitationRepository(context).AddAsync(invitation, CancellationToken.None);
+        }
+
+        // Load, redeem and persist through the repository, exactly as the accept handler does inside its unit
+        // of work.
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceInvitationRepository(context);
+            var loaded = await repository.FindByTokenHashAsync(
+                organization.Id, workspace.Id, WorkspaceInvitationToken.Hash(token), CancellationToken.None);
+            Assert.NotNull(loaded);
+
+            loaded.Redeem(_createdAt.AddMinutes(1));
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var stored = await context.WorkspaceInvitations.SingleAsync(i => i.Id == invitation.Id);
+            Assert.Equal(WorkspaceInvitationStatus.Accepted, stored.Status);
+            // The immutable scope is untouched by the update.
+            Assert.Equal(organization.Id, stored.OrganizationId);
+            Assert.Equal(workspace.Id, stored.WorkspaceId);
+            Assert.Equal(MembershipRole.Host, stored.Role);
+            // A redeemed invitation is no longer redeemable, so the single-use token can never be reused.
+            Assert.False(stored.IsRedeemable(_createdAt.AddMinutes(2)));
+        }
+    }
+
+    [Fact]
+    public async Task Update_rejects_a_null_invitation()
+    {
+        await using var context = CreateContext();
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => new WorkspaceInvitationRepository(context).UpdateAsync(null!, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task An_invitation_cannot_reference_a_workspace_that_does_not_exist()
     {
         // The workspace_id foreign key is enforced: an invitation for a

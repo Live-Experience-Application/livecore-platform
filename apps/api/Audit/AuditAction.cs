@@ -91,6 +91,22 @@ public enum AuditAction
     MemberRemoved = 5,
 
     /// <summary>
+    /// A user redeemed a scoped workspace invitation and gained the granted workspace membership — the
+    /// invitation accept/redeem command (CORE-WS-006). It is the counterpart of <see cref="MemberInvited"/>
+    /// (the invite half, CORE-WS-004) and the inverse of <see cref="MemberRemoved"/>: where a removal
+    /// records the role that was REVOKED, a join records the role that was GRANTED. Auditing the redemption
+    /// is the threat model's stated control against invite abuse (threat T6 in
+    /// docs/07_SECURITY_THREAT_MODEL.md lists "audit logs" among the invite-token controls): it records that
+    /// a presented scoped token was redeemed and by whom (the bearer grant — whoever presented a valid token
+    /// becomes the member). A generic, workspace-scoped audit fact whose actor is the authenticated caller
+    /// who redeemed the token (NOT necessarily the invited email, which is data only), whose resource is the
+    /// created membership (its generic kind name and surrogate id) and whose NEW state records the granted
+    /// role — the access conferred. The invite TOKEN itself is never recorded (threats T6/T7), only the fact
+    /// that a membership was granted by redemption (<see cref="AuditLogEntry.ForMemberJoined"/>).
+    /// </summary>
+    MemberJoined = 20,
+
+    /// <summary>
     /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
     /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
     /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that

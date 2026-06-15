@@ -645,6 +645,79 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a workspace invitation redemption (<see cref="AuditAction.MemberJoined"/>) — the audit fact
+    /// written when an authenticated caller redeems a scoped invitation and gains the granted workspace
+    /// membership (CORE-WS-006). It is the inverse of <see cref="ForMemberRemoval"/>: a thin specialization
+    /// of <see cref="Create"/> that pins the action and applies the redemption producer's stricter contract —
+    /// the tenant, the workspace the membership was granted in, the authenticated actor (the caller who
+    /// redeemed the token and BECAME the member, the bearer grant) and the created membership resource (its
+    /// generic kind name and surrogate id) are all REQUIRED, where the generic factory leaves them optional. A
+    /// redemption GRANTS access, so — symmetrically to a removal recording the revoked role as the previous
+    /// state — it records the granted role as the NEW state, with no previous state (the subject held no
+    /// membership before). The role is passed as a generic NAME string so the Audit module does not depend on
+    /// the Workspaces role enum. Every value is an identifier or a generic name — never the invited email, the
+    /// token or any free-form content (threats T6/T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the redemption happened in (required).</param>
+    /// <param name="workspaceId">The workspace the membership was granted in (required for this action).</param>
+    /// <param name="actorUserProfileId">The caller who redeemed the token and became the member (required; the audited actor).</param>
+    /// <param name="memberResourceType">The created membership's generic kind name (e.g. WorkspaceMember).</param>
+    /// <param name="memberId">The created membership's surrogate id.</param>
+    /// <param name="grantedRole">The generic role NAME the new member was granted — the access conferred (required).</param>
+    /// <param name="createdAt">When the redemption happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the member resource type / granted role is blank.
+    /// </exception>
+    public static AuditLogEntry ForMemberJoined(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string memberResourceType,
+        Guid memberId,
+        string grantedRole,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(memberResourceType))
+        {
+            throw new ArgumentException("Member resource type must not be empty.", nameof(memberResourceType));
+        }
+
+        if (memberId == Guid.Empty)
+        {
+            throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+        }
+
+        // A real redemption always grants a known role, so the producer requires it (recorded as the new
+        // state) even though the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(grantedRole))
+        {
+            throw new ArgumentException("Granted role must not be empty.", nameof(grantedRole));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.MemberJoined,
+            actorUserProfileId,
+            memberResourceType,
+            memberId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: grantedRole,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an entity deletion (<see cref="AuditAction.EntityDeleted"/>) — the audit fact written when
     /// an authorized host deletes an entity, removing it and its dependent edges, visibility rules and
     /// asset links (CORE-LIFE-003). A thin specialization of <see cref="Create"/> that pins the action and

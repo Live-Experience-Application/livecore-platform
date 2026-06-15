@@ -3,6 +3,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Persistence;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LiveCore.Api.Workspaces;
@@ -36,9 +37,21 @@ namespace LiveCore.Api.Workspaces;
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/members</c> — invite a
 ///   member (CORE-WS-004), "Manage members" (Owner or Admin). Creates a scoped,
 ///   single-use invite token and returns the plaintext token exactly once; only
-///   its hash is stored (threats T6/T7). This is the invite PLACEHOLDER: there
-///   is no acceptance/redeem route, no email delivery and no UI in this
-///   story.</item>
+///   its hash is stored (threats T6/T7). The matching acceptance/redeem route is
+///   CORE-WS-006 below; email delivery and UI remain out of scope.</item>
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c> —
+///   redeem a workspace invitation (CORE-WS-006). The scoped token is a BEARER
+///   grant (threat T6): the AUTHENTICATED CALLER who presents a valid token in the
+///   request BODY (never the URL, threat T7) becomes the workspace member with the
+///   invitation's role; the invited email is data, never an identity check. The
+///   redeem is single-use, expiry- and revocation-aware and tenant/workspace-scoped,
+///   and it is ATOMIC (CORE-CONC-002): the invitation is marked Accepted, the
+///   <see cref="WorkspaceMember"/> is created and the join is audited
+///   (<see cref="AuditAction.MemberJoined"/>) in one transaction. An invalid,
+///   expired, revoked, already-redeemed or foreign token grants nothing and is an
+///   indistinguishable hidden 404 (fail-closed). Open to any authenticated org
+///   member (the token, not a role, is the grant); a caller already a member of the
+///   workspace is a 409 that does not consume the token.</item>
 ///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
 ///   remove a workspace member (CORE-LIFE-001), "Manage members" (Owner or
 ///   Admin). Hard-deletes the membership, revoking the subject's access on their
@@ -96,6 +109,7 @@ internal static class WorkspaceEndpoints
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
         group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
+        group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
         return endpoints;
@@ -685,6 +699,175 @@ internal static class WorkspaceEndpoints
         return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
     }
 
+    // POST /api/v1/workspaces/{workspaceId}/invitations/accept
+    //
+    // Redeems a workspace invitation (CORE-WS-006), the acceptance half of the invite flow (CORE-WS-004 shipped
+    // only the invite). The scoped token is a BEARER grant (the decided model, threat T6): whoever presents a
+    // valid token becomes the member, so the AUTHENTICATED CALLER's OIDC subject — never the invited email,
+    // which is data only — is the one granted membership. The token travels in the request BODY, never the URL
+    // path or query (a token in a URL leaks to logs/proxies/history; threat T7). The redeem is single-use,
+    // expiry- and revocation-aware and tenant/workspace-scoped, and the invitation-accept + member-create +
+    // audit are ATOMIC in one CORE-CONC-002 transaction. Fail-closed: an unknown, expired, revoked,
+    // already-redeemed or foreign token is an indistinguishable hidden 404.
+    private static async Task<IResult> AcceptWorkspaceInvitationAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromBody] AcceptWorkspaceInvitationRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // The token is the bearer grant and MUST be present: a missing/blank token is a malformed request
+        // (400), distinct from a well-formed-but-invalid token, which is a hidden 404 below. The token is read
+        // from the body only and is never echoed back or logged (threats T6/T7).
+        if (string.IsNullOrWhiteSpace(request.Token))
+        {
+            return ValidationError("An invitation token is required.");
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404), never
+        // echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 so a foreign or non-existent tenant is indistinguishable
+            // from a missing invitation (threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // Reduce the presented plaintext to its stored hash for the scoped lookup. Hashing is pure, so it runs
+        // before the transaction; the plaintext is never persisted, compared in SQL or logged (threats T6/T7).
+        var tokenHash = WorkspaceInvitationToken.Hash(request.Token);
+        var now = timeProvider.GetUtcNow();
+
+        // ONE unit of work (CORE-CONC-002): the single-use status transition (Pending -> Accepted), the
+        // membership create and the append-only audit record commit together in a single database transaction,
+        // so the WorkspaceMember is created and the invitation marked Accepted ATOMICALLY (a part-way failure
+        // rolls BOTH back — never a consumed token without a membership, nor a membership without a consumed
+        // token). The invitation is loaded INSIDE the unit of work so a retry re-reads fresh state
+        // (CORE-CONC-005) and the redeem decision is made against the row the writes commit on. On PostgreSQL
+        // the invitation carries an xmin concurrency token, so two concurrent redemptions of one token make the
+        // second write conflict (409) rather than granting a second membership — the single-use guarantee holds
+        // even under a race (threat T6).
+        var outcome = await deps.UnitOfWork
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    // Resolve the invitation by its token hash WITHIN the resolved tenant and the route's
+                    // workspace, so a token minted for another workspace or tenant resolves to nothing here: a
+                    // foreign token is an indistinguishable rejection (threats T5/T6).
+                    var invitation = await deps.WorkspaceInvitations
+                        .FindByTokenHashAsync(context.OrganizationId, workspaceGuid, tokenHash, transactionCancellationToken)
+                        .ConfigureAwait(false);
+
+                    // Fail closed: an unknown, expired, revoked or already-redeemed token grants nothing and is
+                    // reported identically (a hidden 404), so a probe cannot tell them apart (threat T6). The
+                    // status+expiry gate is IsRedeemable; the exact hash match is implicit in the scoped lookup.
+                    if (invitation is null || !invitation.IsRedeemable(now))
+                    {
+                        return AcceptInvitationOutcome.Rejected();
+                    }
+
+                    // BEARER grant: the AUTHENTICATED CALLER (context.UserProfileId), never the invited email,
+                    // becomes the member. A caller who already holds a membership in this workspace does not
+                    // consume the token — nothing is mutated, so the (empty) transaction commits cleanly and the
+                    // command is a 409 whose reason is the existing standing, not the token.
+                    var alreadyMember = await deps.WorkspaceMembers
+                        .IsMemberAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, transactionCancellationToken)
+                        .ConfigureAwait(false);
+                    if (alreadyMember)
+                    {
+                        return AcceptInvitationOutcome.AlreadyMember();
+                    }
+
+                    // Create the membership for the caller's subject FIRST, before consuming the token: the
+                    // invitation grants exactly its own role and no other (threat T6 role limitation). Adding
+                    // before redeeming means a lost create race (a concurrent first-time create that won) returns
+                    // DuplicateMembership here and is handled as a 409 WITHOUT the token having been consumed —
+                    // no rollback gymnastics, the invitation is simply left Pending.
+                    var member = WorkspaceMember.Create(
+                        context.OrganizationId, workspaceGuid, context.UserProfileId, invitation.Role, now);
+                    var addResult = await deps.WorkspaceMembers
+                        .AddAsync(member, transactionCancellationToken)
+                        .ConfigureAwait(false);
+                    if (addResult == WorkspaceMemberAddResult.DuplicateMembership)
+                    {
+                        return AcceptInvitationOutcome.AlreadyMember();
+                    }
+
+                    // Mark the single-use token redeemed (Pending -> Accepted). IsRedeemable was just checked, so
+                    // this never throws; persisting it through the shared context enrols it in this transaction.
+                    invitation.Redeem(now);
+                    await deps.WorkspaceInvitations
+                        .UpdateAsync(invitation, transactionCancellationToken)
+                        .ConfigureAwait(false);
+
+                    // AUDIT: a redemption grants access, so append an append-only audit record capturing the
+                    // actor (the caller who redeemed), the created membership and the granted role (threat T6
+                    // invite control). The invite token is never recorded — only the fact of the grant (T6/T7).
+                    await deps.AuditLog
+                        .AppendAsync(
+                            AuditLogEntry.ForMemberJoined(
+                                context.OrganizationId,
+                                workspaceGuid,
+                                context.UserProfileId,
+                                nameof(WorkspaceMember),
+                                member.Id,
+                                invitation.Role.ToString(),
+                                now),
+                            transactionCancellationToken)
+                        .ConfigureAwait(false);
+
+                    return AcceptInvitationOutcome.Redeemed(member);
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return outcome.Kind switch
+        {
+            // The membership IS the access grant, so a successful redemption created a new resource: 201 with a
+            // Location to the new member and the generic membership DTO (no token, no invited email; T6/T7).
+            AcceptInvitationOutcomeKind.Redeemed => Results.Created(
+                $"/api/v1/workspaces/{workspaceGuid}/members/{outcome.Member!.Id}",
+                WorkspaceMemberResponse.From(outcome.Member!)),
+
+            // The caller already had standing in the workspace; the token was not consumed.
+            AcceptInvitationOutcomeKind.AlreadyMember => AlreadyMemberConflict(),
+
+            // Fail-closed: an unknown, expired, revoked, already-redeemed or foreign token is an
+            // indistinguishable hidden 404 (threat T6).
+            _ => HiddenWorkspace(),
+        };
+    }
+
     // DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
     private static async Task<IResult> RemoveWorkspaceMemberAsync(
         HttpContext httpContext,
@@ -845,20 +1028,22 @@ internal static class WorkspaceEndpoints
         var workspaceInvitations = services.GetService<IWorkspaceInvitationRepository>();
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
         var auditLog = services.GetService<IAuditLogRepository>();
+        var unitOfWork = services.GetService<TransactionalUnitOfWork>();
 
         if (resolver is null
             || workspaces is null
             || workspaceMembers is null
             || workspaceInvitations is null
             || quotaEnforcement is null
-            || auditLog is null)
+            || auditLog is null
+            || unitOfWork is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new WorkspaceEndpointDependencies(
-            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog);
+            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork);
         return true;
     }
 
@@ -920,6 +1105,16 @@ internal static class WorkspaceEndpoints
             title: "Conflict",
             detail: "The last Owner of the workspace cannot be removed.");
 
+    // The caller is already a member of the workspace, so redeeming an invitation grants nothing new and does
+    // NOT consume the token. The caller is authorized (they hold a valid token for their own workspace); the
+    // pre-existing standing, not the token, is the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md).
+    // The detail names only the generic condition and leaks no tenant data (threat T7).
+    private static IResult AlreadyMemberConflict()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "You are already a member of this workspace.");
+
     // The workspace is archived and therefore read-only (CORE-LIFE-009), so an authoring mutation (rename,
     // member invite) is refused. The caller is authorized; the lifecycle state, not the caller, is the
     // reason, so this is a 409 Conflict. The detail names only the generic state and leaks no tenant data
@@ -967,5 +1162,39 @@ internal static class WorkspaceEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         IWorkspaceInvitationRepository WorkspaceInvitations,
         QuotaEnforcementService QuotaEnforcement,
-        IAuditLogRepository AuditLog);
+        IAuditLogRepository AuditLog,
+        TransactionalUnitOfWork UnitOfWork);
+
+    /// <summary>
+    /// The kind of outcome the atomic invitation-redeem unit of work produced (CORE-WS-006), mapped to an
+    /// HTTP result by the accept handler. A struct discriminated by <see cref="AcceptInvitationOutcomeKind"/>
+    /// rather than a thrown exception, so the transaction commits/rolls back on its own value and the handler
+    /// stays free of control-flow exceptions.
+    /// </summary>
+    private enum AcceptInvitationOutcomeKind
+    {
+        /// <summary>Fail-closed: an unknown, expired, revoked, already-redeemed or foreign token (hidden 404).</summary>
+        Rejected,
+
+        /// <summary>The caller already held a membership in the workspace; the token was not consumed (409).</summary>
+        AlreadyMember,
+
+        /// <summary>The token was redeemed and the caller became a member (201).</summary>
+        Redeemed,
+    }
+
+    /// <summary>
+    /// Result of the atomic invitation-redeem unit of work (CORE-WS-006): a <see cref="AcceptInvitationOutcomeKind"/>
+    /// plus, for a successful redemption, the created <see cref="WorkspaceMember"/>. The member is non-null
+    /// only for <see cref="AcceptInvitationOutcomeKind.Redeemed"/>.
+    /// </summary>
+    private readonly record struct AcceptInvitationOutcome(AcceptInvitationOutcomeKind Kind, WorkspaceMember? Member)
+    {
+        public static AcceptInvitationOutcome Rejected() => new(AcceptInvitationOutcomeKind.Rejected, null);
+
+        public static AcceptInvitationOutcome AlreadyMember() => new(AcceptInvitationOutcomeKind.AlreadyMember, null);
+
+        public static AcceptInvitationOutcome Redeemed(WorkspaceMember member)
+            => new(AcceptInvitationOutcomeKind.Redeemed, member);
+    }
 }

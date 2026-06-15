@@ -102,6 +102,46 @@ internal static class TestData
     }
 
     /// <summary>
+    /// Creates and persists a workspace invitation through the real <see cref="WorkspaceInvitation.Create"/>
+    /// aggregate factory and returns it together with its ONE-TIME plaintext token — the only place the
+    /// plaintext exists, captured here so a redeem test can present the real token (CORE-WS-006). By default a
+    /// Pending invitation with a far-future expiry (a decade), so it is redeemable at the real wall-clock the
+    /// endpoint stamps; pass <paramref name="validity"/>/<paramref name="createdAt"/> to arrange a
+    /// deterministically EXPIRED invitation (a past <paramref name="createdAt"/> with a short validity), or
+    /// <paramref name="revoked"/> to arrange a revoked one. The invited email is generic data, never a
+    /// credential (AGENTS.md; docs/adr/0005).
+    /// </summary>
+    public static async Task<(WorkspaceInvitation Invitation, string Token)> AddWorkspaceInvitationAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        MembershipRole role,
+        string invitedEmail = "invitee@example.test",
+        bool revoked = false,
+        DateTimeOffset? createdAt = null,
+        TimeSpan? validity = null)
+    {
+        var now = createdAt ?? SeedTime;
+        var invitation = WorkspaceInvitation.Create(
+            organizationId,
+            workspaceId,
+            invitedEmail,
+            role,
+            now,
+            out var token,
+            validity ?? TimeSpan.FromDays(3650));
+
+        if (revoked)
+        {
+            invitation.Revoke(now);
+        }
+
+        context.WorkspaceInvitations.Add(invitation);
+        await context.SaveChangesAsync();
+        return (invitation, token);
+    }
+
+    /// <summary>
     /// Creates and persists a participant in the given workspace, optionally linked
     /// to a user (pass <paramref name="userProfileId"/> as <see langword="null"/> for
     /// an anonymous participant). The participant is created Active by the real

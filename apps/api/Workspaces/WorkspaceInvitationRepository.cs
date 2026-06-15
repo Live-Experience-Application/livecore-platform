@@ -96,4 +96,20 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+
+        // The invitation was loaded and mutated within this scope's change tracker; only the lifecycle
+        // status and the update timestamp change. The tenant, workspace, role, token hash and expiry are
+        // immutable on the aggregate, so an update can never move the row to another tenant or workspace
+        // (threat T5) nor re-open a consumed token. On PostgreSQL the row carries an xmin optimistic-
+        // concurrency token (LiveCoreDbContext), so two concurrent redemptions of one scoped token make the
+        // second SaveChanges fail loudly (a DbUpdateConcurrencyException -> 409) instead of silently granting
+        // a second membership: the single-use guarantee holds even under a race (threat T6).
+        _dbContext.WorkspaceInvitations.Update(invitation);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

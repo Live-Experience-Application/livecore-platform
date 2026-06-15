@@ -669,4 +669,73 @@ public sealed class AuditLogEntryTests
         Assert.Contains("target=audience", text, StringComparison.Ordinal);
         Assert.Contains("none->none", text, StringComparison.Ordinal);
     }
+
+    // --- Member joined / invitation redemption factory (CORE-WS-006) -----------
+
+    [Fact]
+    public void ForMemberJoined_sets_the_action_resource_and_granted_role_as_the_new_state()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var member = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForMemberJoined(
+            org, ws, actor, "WorkspaceMember", member, grantedRole: "Host", createdAt: _now);
+
+        Assert.Equal(AuditAction.MemberJoined, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        // The actor is the caller who redeemed the token and became the member (the bearer grant).
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        Assert.Equal("WorkspaceMember", entry.ResourceType);
+        Assert.Equal(member, entry.ResourceId);
+        // A redemption GRANTS access, so — unlike a removal recording the revoked role as the previous state —
+        // it records the granted role as the NEW state, with no previous state.
+        Assert.Null(entry.PreviousState);
+        Assert.Equal("Host", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForMemberJoined_rejects_an_empty_workspace()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(), "Host", _now));
+
+    [Fact]
+    public void ForMemberJoined_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, "WorkspaceMember", Guid.NewGuid(), "Host", _now));
+
+    [Fact]
+    public void ForMemberJoined_rejects_an_empty_member_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.Empty, "Host", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberJoined_rejects_a_blank_resource_type(string resourceType)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), resourceType, Guid.NewGuid(), "Host", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberJoined_rejects_a_blank_granted_role(string grantedRole)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(), grantedRole, _now));
+
+    [Fact]
+    public void ForMemberJoined_normalizes_created_at_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        var entry = AuditLogEntry.ForMemberJoined(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(), "Host", local);
+
+        Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
+    }
 }

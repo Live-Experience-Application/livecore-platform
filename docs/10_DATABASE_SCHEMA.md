@@ -111,7 +111,7 @@ billing_account_links(subject_type, subject_id)
 idempotency_keys(scope, key)
 ```
 
-## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006)
+## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006, CORE-WS-006)
 
 The mutable aggregates carry an optimistic-concurrency token so a concurrent
 read-modify-write fails loudly instead of silently losing an update. The token is the
@@ -127,7 +127,9 @@ affects zero rows, raising a conflict that the API surfaces as `409`
 The token is applied to exactly the aggregates that are updated in place. CORE-CONC-001
 mapped the first six; CORE-CONC-006 extended it to the remaining eight that were still
 doing a bare `Update`/`SaveChanges` with no token (and so silently lost a concurrent
-update under last-write-wins):
+update under last-write-wins); CORE-WS-006 added `workspace_invitations`, which becomes
+in-place-updated when an invitation is redeemed (`Pending -> Accepted`), so two
+concurrent redemptions of one single-use token cannot both grant a membership:
 
 ```text
 sessions
@@ -144,6 +146,7 @@ assets
 subject_entitlements
 export_jobs
 users
+workspace_invitations
 ```
 
 Append-only tables (`session_events`, `audit_logs`, `purchase_events`,

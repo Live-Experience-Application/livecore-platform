@@ -10,6 +10,7 @@ POST,/api/v1/workspaces,Workspaces,"Owner,Admin",Creates generic workspace; enfo
 GET,/api/v1/workspaces/{workspaceId},Workspaces,workspace members,Projection depends on role
 PUT,/api/v1/workspaces/{workspaceId},Workspaces,"Owner,Admin",Rename workspace; rejected when archived (409); hidden-404
 POST,/api/v1/workspaces/{workspaceId}/members,Workspaces,"Owner,Admin",Invite/add member
+POST,/api/v1/workspaces/{workspaceId}/invitations/accept,Workspaces,authenticated,Redeem a workspace invitation; scoped token is a bearer grant (the authenticated caller becomes the member with the invited role) presented in the body never the URL (T7); single-use and expiry/revocation-aware and tenant/workspace-scoped; atomic invitation-accept + member-create + MemberJoined audit in one transaction; fail-closed indistinguishable hidden-404 for an invalid/expired/revoked/already-redeemed/foreign token; already-a-member 409
 DELETE,/api/v1/workspaces/{workspaceId}/members/{memberId},Workspaces,"Owner,Admin",Remove workspace member; revokes access; last Owner cannot be removed; audited; hidden-404
 POST,/api/v1/workspaces/{workspaceId}/archive,Workspaces,Owner,Archive workspace; soft terminal status transition (Active->Archived); read-only (rejects rename/invite/session/scene create) and excluded from active lists; preserves child sessions/scenes/audit; Owner-only; audited; hidden-404
 GET,/api/v1/workspaces/{workspaceId}/sessions,Sessions,workspace members,Filtered

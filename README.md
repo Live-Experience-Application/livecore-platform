@@ -1316,15 +1316,16 @@ boundary the `TenantContextResolver` enforces:
 
 The workspace routes implemented so far:
 
-| Method   | Route                                                 | Authorized callers                                                  |
-| -------- | ----------------------------------------------------- | ------------------------------------------------------------------- |
-| `GET`    | `/api/v1/workspaces`                                  | any workspace member (results filtered to the caller's memberships) |
-| `POST`   | `/api/v1/workspaces`                                  | organization `Owner` or `Admin`                                     |
-| `GET`    | `/api/v1/workspaces/{workspaceId}`                    | members of that workspace                                           |
-| `PUT`    | `/api/v1/workspaces/{workspaceId}`                    | organization `Owner` or `Admin` (rename)                            |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`            | organization `Owner` (archive — see below)                          |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/members`            | organization `Owner` or `Admin` (create invite)                     |
-| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)         |
+| Method   | Route                                                 | Authorized callers                                                        |
+| -------- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| `GET`    | `/api/v1/workspaces`                                  | any workspace member (results filtered to the caller's memberships)       |
+| `POST`   | `/api/v1/workspaces`                                  | organization `Owner` or `Admin`                                           |
+| `GET`    | `/api/v1/workspaces/{workspaceId}`                    | members of that workspace                                                 |
+| `PUT`    | `/api/v1/workspaces/{workspaceId}`                    | organization `Owner` or `Admin` (rename)                                  |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`            | organization `Owner` (archive — see below)                                |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/members`            | organization `Owner` or `Admin` (create invite)                           |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept` | any authenticated org member who holds a valid token (redeem — see below) |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)               |
 
 ### Workspace member invites (scoped tokens)
 
@@ -1334,8 +1335,32 @@ secure RNG and is returned **once** in the creation response; only its SHA-256
 hash is stored, and the token is never logged or returned again. Each token is
 bound to one organization, one workspace, one role and an expiry, and is
 single-use. It is a one-time join grant, not an authentication credential and
-not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Invite acceptance,
-delivery and revocation endpoints are follow-up stories.
+not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Delivery and revocation
+endpoints are follow-up stories.
+
+### Workspace invitation acceptance (CORE-WS-006)
+
+`POST /api/v1/workspaces/{workspaceId}/invitations/accept` redeems an invitation
+into a workspace membership — the acceptance half of the invite flow, which makes
+membership reachable over the public API for the first time. The scoped token is a
+**bearer grant** (the decided model, threat T6): whoever presents a valid token
+**becomes the member**, so the **authenticated caller's** OIDC subject — never the
+invited email, which is data only — is granted the membership with the invitation's
+role. The plaintext token is presented in the request **body**, never the URL path
+or query string (a token in a URL leaks into access logs, proxies and history,
+threat T7); the server hashes it and resolves the invitation by hash **within** the
+route's workspace and the caller's resolved tenant, so a token minted for another
+workspace or tenant resolves to nothing.
+
+Redemption is **single-use, expiry- and revocation-aware and tenant/workspace-scoped**,
+and it is **atomic** (`CORE-CONC-002`): the invitation is marked `Accepted`, the
+`WorkspaceMember` is created and the join is audited (`MemberJoined`) in one
+transaction, so a part-way failure rolls all three back. It is **fail-closed**: an
+invalid, expired, revoked, already-redeemed or foreign token grants nothing and is
+an **indistinguishable hidden `404`**. A caller who is already a member of the
+workspace gets a `409` and does **not** consume the token. On PostgreSQL the
+invitation carries the `xmin` concurrency token, so two concurrent redemptions of one
+token cannot both grant a membership (the second conflicts with a `409`).
 
 ### Member removal (revoking access)
 

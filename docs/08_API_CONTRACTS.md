@@ -48,6 +48,7 @@ POST   /api/v1/workspaces
 GET    /api/v1/workspaces/{workspaceId}
 POST   /api/v1/workspaces/{workspaceId}/archive
 POST   /api/v1/workspaces/{workspaceId}/members
+POST   /api/v1/workspaces/{workspaceId}/invitations/accept
 GET    /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/sessions/{sessionId}/start
@@ -85,14 +86,17 @@ Reveal and hide (un-reveal) execution must be idempotent for client retry.
 A repeated reveal or hide request with the same idempotency key must not create duplicate events.
 Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.
 
-## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006)
+## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006, CORE-WS-006)
 
 The mutable aggregates carry a server-side optimistic-concurrency token (the PostgreSQL
 `xmin` row version; see `docs/10_DATABASE_SCHEMA.md`). CORE-CONC-001 covered `Session`,
 `VisibilityRule`, `Workspace`, `Participant`, `PurchaseTransaction` and quota usage;
 CORE-CONC-006 extended the token to every other in-place-updated aggregate —
 `ContentBlock`, `Entity`, `EntityType`, `Scene`, `Asset`, `SubjectEntitlement`,
-`ExportJob` and the `UserProfile` reference. When two read-modify-write commands
+`ExportJob` and the `UserProfile` reference; CORE-WS-006 added `WorkspaceInvitation`,
+which becomes in-place-updated when an invitation is redeemed (`Pending -> Accepted`),
+so two concurrent redemptions of one single-use token cannot both grant a membership.
+When two read-modify-write commands
 interleave on the same row, the second write fails the row version check and the API
 returns **`409 Conflict`** instead of silently overwriting (losing) the first writer's
 update. The caller's correct response is to reload the resource and retry the command
