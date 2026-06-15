@@ -1,7 +1,11 @@
 using LiveCore.Api.IdentityAccess;
+using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Sessions;
+using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace LiveCore.Api.UnitTests.Persistence;
 
@@ -105,6 +109,68 @@ public sealed class TransactionalUnitOfWorkTests : IDisposable
             () => unitOfWork.ExecuteAsync<int>(null!, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task ExecuteAsync_retries_against_fresh_entity_state_after_a_transient_failure()
+    {
+        // CORE-CONC-005: under a RETRYING execution strategy (the production EnableRetryOnFailure posture), a
+        // transient failure mid-delegate on the first attempt must roll back and re-run the whole unit of work
+        // against FRESH entity state — not the first attempt's stale, tracked in-memory mutations. This pins the
+        // story's failure mode: a session that started (Prepared -> Live) and an entity that was added on
+        // attempt 1 must NOT survive into attempt 2 to throw InvalidSessionStateTransitionException or double-add.
+        var sessionId = await SeedPreparedSessionAsync();
+
+        // A context whose execution strategy retries the test's injected transient failure, exactly as the real
+        // Npgsql retrying strategy retries a transient database disruption. Both the unit of work and the
+        // verifying reader share the one open SQLite connection, so the rollback/retry round-trips the database.
+        await using var context = CreateRetryingContext();
+        var unitOfWork = new TransactionalUnitOfWork(context);
+        const string addedSubject = "retry-added-subject";
+
+        var attempts = 0;
+        var finalStatus = await unitOfWork.ExecuteAsync(
+            async cancellationToken =>
+            {
+                attempts++;
+
+                // RELOAD inside the delegate — the retry-safe pattern the session command now follows. On the
+                // retry the unit of work has cleared the change tracker, so this query reads the rolled-back
+                // Prepared row instead of returning attempt 1's already-Live tracked instance.
+                var session = await context.Sessions
+                    .FirstAsync(s => s.Id == sessionId, cancellationToken);
+
+                // Would throw InvalidSessionStateTransitionException on the retry if attempt 1's Live mutation
+                // had survived on the change tracker. The session is tracked (loaded just above), so the
+                // mutation is persisted by SaveChanges without an explicit Update call.
+                session.Start(_now);
+
+                // A fresh row added inside the delegate — re-running the unit of work must NOT double-add it
+                // (without the fix, attempt 2's Add collides with attempt 1's still-tracked Added instance).
+                context.UserProfiles.Add(NewUserProfile(addedSubject));
+                await context.SaveChangesAsync(cancellationToken);
+
+                // Inject ONE transient failure, on the first attempt only, AFTER the writes (mid-delegate), so
+                // the execution strategy rolls the attempt back and retries the whole unit of work once.
+                if (attempts == 1)
+                {
+                    throw new TransientRetryTestException();
+                }
+
+                return session.Status;
+            },
+            CancellationToken.None);
+
+        // The unit of work ran exactly twice (one retry) and ultimately SUCCEEDED with the correct state: the
+        // session reached Live once, with no InvalidSessionStateTransitionException from a stale transition.
+        Assert.Equal(2, attempts);
+        Assert.Equal(SessionStatus.Live, finalStatus);
+
+        // The committed database state is correct end-to-end: the session is Live, and the row added inside the
+        // delegate exists EXACTLY ONCE — the rolled-back first attempt did not double-add it.
+        await using var verify = CreateContext();
+        Assert.Equal(SessionStatus.Live, (await verify.Sessions.SingleAsync(s => s.Id == sessionId)).Status);
+        Assert.Equal(1, await verify.UserProfiles.CountAsync(u => u.SubjectId == addedSubject));
+    }
+
     private LiveCoreDbContext CreateContext()
     {
         var context = new LiveCoreDbContext(_contextOptions);
@@ -112,8 +178,68 @@ public sealed class TransactionalUnitOfWorkTests : IDisposable
         return context;
     }
 
+    // A context configured with a RETRYING execution strategy (over the same shared SQLite connection) so the
+    // execution-strategy retry path TransactionalUnitOfWork relies on is genuinely exercised. The production
+    // suites otherwise use a plain non-retrying provider, so the delegate is never re-run there (the bug was
+    // latent for exactly that reason).
+    private LiveCoreDbContext CreateRetryingContext()
+    {
+        var options = new DbContextOptionsBuilder<LiveCoreDbContext>()
+            .UseSqlite(_connection, sqlite => sqlite.ExecutionStrategy(
+                dependencies => new TransientRetryingExecutionStrategy(dependencies)))
+            .Options;
+        var context = new LiveCoreDbContext(options);
+        context.Database.ExecuteSqlRaw("PRAGMA foreign_keys = ON;");
+        return context;
+    }
+
+    // Seeds a Prepared session (with the organization and workspace its foreign keys require) and returns its
+    // id, so the retry test can start it through the real Session state machine.
+    private async Task<Guid> SeedPreparedSessionAsync()
+    {
+        await using var context = CreateContext();
+        var organization = Organization.Create("retry-org", "Retry Org", _now);
+        var workspace = Workspace.Create(organization.Id, "retry-ws", "Retry Workspace", _now);
+        var session = Session.Create(organization.Id, workspace.Id, "Retry Session", _now);
+        context.Organizations.Add(organization);
+        context.Workspaces.Add(workspace);
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        return session.Id;
+    }
+
     // The root identity aggregate (keyed by OIDC issuer + subject) — no foreign keys, so it inserts without
     // seeding anything else. Each subject is unique so two profiles can be inserted in one unit of work.
     private static UserProfile NewUserProfile(string subject)
         => UserProfile.CreateFromPrincipal(new OidcPrincipal(PrincipalType.User, "https://issuer.test", subject), _now);
+
+    /// <summary>
+    /// The transient failure the retry test injects mid-delegate. It models a routine, transient database
+    /// disruption (a failover/restart/partition) — the kind the production retrying strategy retries — so the
+    /// test exercises the same execution-strategy re-run path without needing a real PostgreSQL outage.
+    /// </summary>
+    private sealed class TransientRetryTestException : Exception
+    {
+        public TransientRetryTestException()
+            : base("Injected transient failure (retried by the test execution strategy).")
+        {
+        }
+    }
+
+    /// <summary>
+    /// A retrying <see cref="ExecutionStrategy"/> that retries ONLY the test's
+    /// <see cref="TransientRetryTestException"/> — the test analogue of the production Npgsql
+    /// <c>EnableRetryOnFailure</c> strategy (CORE-CONC-003). The first retry incurs no back-off delay (the EF
+    /// Core formula yields zero for the first retry), and the test injects exactly one failure, so the retry is
+    /// immediate and deterministic.
+    /// </summary>
+    private sealed class TransientRetryingExecutionStrategy : ExecutionStrategy
+    {
+        public TransientRetryingExecutionStrategy(ExecutionStrategyDependencies dependencies)
+            : base(dependencies, maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(1))
+        {
+        }
+
+        protected override bool ShouldRetryOn(Exception exception) => exception is TransientRetryTestException;
+    }
 }

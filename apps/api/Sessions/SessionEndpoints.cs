@@ -593,6 +593,19 @@ internal static class SessionEndpoints
             .ExecuteAsync(
                 async transactionCancellationToken =>
                 {
+                    // CORE-CONC-005: RELOAD the session inside the unit of work so a RETRY (after a transient
+                    // failure rolled the prior attempt back and the unit of work cleared the change tracker)
+                    // re-applies the transition to FRESH persisted state — not the prior attempt's in-memory
+                    // Prepared->Live mutation, which would otherwise throw InvalidSessionStateTransitionException
+                    // on the second attempt. On the FIRST attempt the change tracker is untouched, so this returns
+                    // the same row already loaded and authorized above (no behavior change). The session was
+                    // authorized above and is never hard-deleted (cancel is a soft transition), so a null here is
+                    // a genuine anomaly: fail closed rather than silently no-op.
+                    var current = await deps.Sessions
+                        .FindByIdInOrganizationAsync(context.OrganizationId, sessionGuid, transactionCancellationToken)
+                        .ConfigureAwait(false)
+                        ?? throw new InvalidOperationException("The authorized session was not found inside the unit of work.");
+
                     var events = new List<SessionEvent>();
                     switch (command)
                     {
@@ -607,22 +620,22 @@ internal static class SessionEndpoints
                             var startDecision = await deps.QuotaEnforcement
                                 .TryConsumeAsync(
                                     EntitlementSubjectType.Workspace,
-                                    session.WorkspaceId,
+                                    current.WorkspaceId,
                                     QuotaEntitlementKeys.SessionActiveMax,
                                     amount: 1,
                                     transactionCancellationToken)
                                 .ConfigureAwait(false);
                             if (!startDecision.IsAllowed)
                             {
-                                return new SessionLifecycleOutcome(startDecision, events);
+                                return new SessionLifecycleOutcome(startDecision, current, events);
                             }
 
                             // Capture the previous status name BEFORE the transition for the audit record, so
                             // the audited "before" state is independent of the mutation below.
-                            var startPreviousStatus = session.Status.ToString();
+                            var startPreviousStatus = current.Status.ToString();
 
-                            session.Start(now);
-                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+                            current.Start(now);
+                            await deps.Sessions.UpdateAsync(current, transactionCancellationToken).ConfigureAwait(false);
 
                             // AUDIT + EVENT (CORE-EVT-001): record the Prepared -> Live transition as an
                             // append-only audit fact and APPEND the durable SessionStarted session event.
@@ -630,33 +643,33 @@ internal static class SessionEndpoints
                                 .AppendAsync(
                                     AuditLogEntry.ForSessionStart(
                                         context.OrganizationId,
-                                        session.WorkspaceId,
+                                        current.WorkspaceId,
                                         context.UserProfileId,
                                         nameof(Session),
-                                        session.Id,
+                                        current.Id,
                                         startPreviousStatus,
-                                        session.Status.ToString(),
+                                        current.Status.ToString(),
                                         now),
                                     transactionCancellationToken)
                                 .ConfigureAwait(false);
                             events.Add(await AppendSessionLifecycleEventAsync(
-                                deps, context, session, SessionEventTypes.SessionStarted, now, transactionCancellationToken)
+                                deps, context, current, SessionEventTypes.SessionStarted, now, transactionCancellationToken)
                                 .ConfigureAwait(false));
                             break;
 
                         case SessionLifecycleCommand.End:
                             // Capture the previous status name BEFORE the transition for the audit record.
-                            var endPreviousStatus = session.Status.ToString();
+                            var endPreviousStatus = current.Status.ToString();
 
-                            session.End(now);
-                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+                            current.End(now);
+                            await deps.Sessions.UpdateAsync(current, transactionCancellationToken).ConfigureAwait(false);
 
                             // Ending a live session frees the workspace's active-session slot, so release the
                             // unit consumed at start (clamped at zero; a no-op when nothing was recorded).
                             await deps.QuotaEnforcement
                                 .ReleaseAsync(
                                     EntitlementSubjectType.Workspace,
-                                    session.WorkspaceId,
+                                    current.WorkspaceId,
                                     QuotaEntitlementKeys.SessionActiveMax,
                                     amount: 1,
                                     transactionCancellationToken)
@@ -668,17 +681,17 @@ internal static class SessionEndpoints
                                 .AppendAsync(
                                     AuditLogEntry.ForSessionEnd(
                                         context.OrganizationId,
-                                        session.WorkspaceId,
+                                        current.WorkspaceId,
                                         context.UserProfileId,
                                         nameof(Session),
-                                        session.Id,
+                                        current.Id,
                                         endPreviousStatus,
-                                        session.Status.ToString(),
+                                        current.Status.ToString(),
                                         now),
                                     transactionCancellationToken)
                                 .ConfigureAwait(false);
                             events.Add(await AppendSessionLifecycleEventAsync(
-                                deps, context, session, SessionEventTypes.SessionEnded, now, transactionCancellationToken)
+                                deps, context, current, SessionEventTypes.SessionEnded, now, transactionCancellationToken)
                                 .ConfigureAwait(false));
                             break;
 
@@ -687,10 +700,10 @@ internal static class SessionEndpoints
                             // sessions, and a Prepared session has consumed none (start consumes, end
                             // releases), so cancelling one releases nothing — unlike end, cancel never touches
                             // the quota. Capture the previous status BEFORE the transition for the audit record.
-                            var previousStatus = session.Status.ToString();
+                            var previousStatus = current.Status.ToString();
 
-                            session.Cancel(now);
-                            await deps.Sessions.UpdateAsync(session, transactionCancellationToken).ConfigureAwait(false);
+                            current.Cancel(now);
+                            await deps.Sessions.UpdateAsync(current, transactionCancellationToken).ConfigureAwait(false);
 
                             // AUDIT: a cancel is a security-relevant lifecycle change, so append an append-only
                             // audit record capturing the actor (the host who cancelled it), the cancelled
@@ -701,12 +714,12 @@ internal static class SessionEndpoints
                             // durable catalog event, so it appends nothing to deliver.
                             var entry = AuditLogEntry.ForSessionCancellation(
                                 context.OrganizationId,
-                                session.WorkspaceId,
+                                current.WorkspaceId,
                                 context.UserProfileId,
                                 nameof(Session),
-                                session.Id,
+                                current.Id,
                                 previousStatus,
-                                session.Status.ToString(),
+                                current.Status.ToString(),
                                 now);
                             await deps.AuditLog.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
                             break;
@@ -716,7 +729,7 @@ internal static class SessionEndpoints
                             throw new InvalidOperationException("Unsupported session lifecycle command.");
                     }
 
-                    return new SessionLifecycleOutcome(QuotaDenial: null, events);
+                    return new SessionLifecycleOutcome(QuotaDenial: null, current, events);
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -752,7 +765,9 @@ internal static class SessionEndpoints
             await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         }
 
-        return Results.Ok(SessionResponse.From(session));
+        // Build the response from the session the unit of work RELOADED and transitioned (CORE-CONC-005), so
+        // it reflects the committed state even when the command was retried after a transient failure.
+        return Results.Ok(SessionResponse.From(outcome.Session));
     }
 
     /// <summary>
@@ -813,10 +828,13 @@ internal static class SessionEndpoints
     /// The result of the lifecycle unit of work. Carries either a quota <see cref="QuotaDenial"/> (an over-quota
     /// start that applied no transition, so the committed transaction was empty and the endpoint returns 409) or
     /// the durable <see cref="Events"/> appended inside the transaction to deliver after the commit
-    /// (commit-then-publish). The two are mutually exclusive: a denial carries no events.
+    /// (commit-then-publish). The two are mutually exclusive: a denial carries no events. <see cref="Session"/>
+    /// is the session instance the unit of work RELOADED and transitioned (CORE-CONC-005), so the response is
+    /// built from the committed state rather than the instance loaded before the (possibly retried) transaction.
     /// </summary>
     private sealed record SessionLifecycleOutcome(
         QuotaEnforcementDecision? QuotaDenial,
+        Session Session,
         IReadOnlyList<SessionEvent> Events);
 
     /// <summary>

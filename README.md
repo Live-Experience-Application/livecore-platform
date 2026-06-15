@@ -830,6 +830,23 @@ resource-deletion commands), never a bare user-initiated `BeginTransaction` — 
 strategy rejects the latter because it could not re-run the work after a transient
 failure. See `docs/02_ARCHITECTURE.md`.
 
+When the strategy actually **retries**, the unit of work first **clears the EF change
+tracker** before the re-run (CORE-CONC-005). A retry re-runs the whole delegate, but the
+failed attempt's transaction has only rolled back in the **database** — its tracked
+in-memory mutations (a `Prepared`→`Live` session transition, a flipped visibility rule, an
+added idempotency-key/audit/event row) survive on the shared `LiveCoreDbContext`. Left in
+place they would make the retry act on **stale** state: re-running `session.Start` on an
+already-`Live` tracked entity throws `InvalidSessionStateTransitionException`, and a
+re-added entity double-adds — turning a retryable blip into a hard `5xx`. `ChangeTracker.Clear()`
+before the retry detaches them, so the retried work reloads the rolled-back database state;
+each command therefore reads its entities **inside** the delegate (the reveal command, and
+the session start/end/cancel command which now reloads the session inside its unit of work),
+so a retried command runs against fresh state and succeeds. The **first** attempt is left
+untouched, so the default non-retrying path is unchanged. This was latent until now because
+the test suites used a plain non-retrying provider, so the delegate was never re-run; a
+focused unit test and the `CommandRetryResilienceTests` HTTP tests now enable a retrying
+strategy and inject a transient failure mid-delegate to pin the behavior.
+
 ### Atomic quota check-and-consume (no TOCTOU race)
 
 A protected command that consumes a server-side quota does its check **and** its consume in

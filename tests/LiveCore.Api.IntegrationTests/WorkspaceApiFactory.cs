@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -118,7 +119,7 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
                     .BuildServiceProvider();
 
                 services.AddDbContext<LiveCoreDbContext>(options => options
-                    .UseSqlite(_connection!)
+                    .UseSqlite(_connection!, ConfigureSqlite)
                     .UseInternalServiceProvider(sqliteInternalServices));
             }
 
@@ -158,6 +159,17 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
     /// startup-migration guard asserts the host never creates the schema itself).
     /// </summary>
     protected virtual string CreatePostgresDatabase() => PostgresTestDatabase.CreateMigratedDatabase();
+
+    /// <summary>
+    /// Configures the SQLite provider options for the swapped-in test DbContext. The default does nothing, so
+    /// the test host uses a plain non-retrying provider exactly like production-on-SQLite. A derived factory can
+    /// override this seam to add, for example, a RETRYING execution strategy so the execution-strategy retry
+    /// path (the production <c>EnableRetryOnFailure</c> posture) can be exercised over real HTTP (CORE-CONC-005).
+    /// It is not called when the suite runs against PostgreSQL.
+    /// </summary>
+    protected virtual void ConfigureSqlite(SqliteDbContextOptionsBuilder sqlite)
+    {
+    }
 
     /// <summary>
     /// Prepares the swapped-in SQLite database for the test host. The default
