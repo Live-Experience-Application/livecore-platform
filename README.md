@@ -750,13 +750,18 @@ without being reviewed and acknowledged in `csv/migration_destructive_down_revie
 
 ### Optimistic concurrency
 
-The mutable aggregates (`Session`, `VisibilityRule`, `Workspace`, `Participant`,
-`PurchaseTransaction` and quota usage) carry an optimistic-concurrency token so a
-concurrent read-modify-write fails loudly instead of silently losing an update
-(CORE-CONC-001). The token is the PostgreSQL system column `xmin`, mapped as an EF Core
+The mutable aggregates carry an optimistic-concurrency token so a concurrent
+read-modify-write fails loudly instead of silently losing an update. CORE-CONC-001
+covered the first six (`Session`, `VisibilityRule`, `Workspace`, `Participant`,
+`PurchaseTransaction` and quota usage); CORE-CONC-006 extended the token to every other
+in-place-updated aggregate (`ContentBlock`, `Entity`, `EntityType`, `Scene`, `Asset`,
+`SubjectEntitlement`, `ExportJob` and the `UserProfile` reference), which had still been
+doing a bare `Update`/`SaveChanges` and so silently lost concurrent updates. The token is
+the PostgreSQL system column `xmin`, mapped as an EF Core
 row-version concurrency token, so PostgreSQL bumps it on every UPDATE and EF appends
 `WHERE ... AND xmin = @original` to a write. When two commands interleave on one row —
-for example a session `start` racing a session `end`, or a reveal racing a hide — the
+for example a session `start` racing a session `end`, a reveal racing a hide, or two
+`Scene.Reorder` writes racing — the
 second writer's stale write is rejected with a `DbUpdateConcurrencyException`, which the
 `ConcurrencyConflictMiddleware` translates into a fail-closed `409 Conflict` (reload and
 retry) rather than overwriting the first writer's change. The in-memory state-machine
@@ -765,8 +770,9 @@ guards (`Session.CanStart`/`CanEnd`, `VisibilityRule.ChangeVisibility`) run per
 cross-context guarantee.
 
 `xmin` is a system column every PostgreSQL row already carries, so the token needs **no
-data migration** and adds no real column (the `AddOptimisticConcurrencyTokens` migration
-is a deliberate schema-level no-op; the token lives in the EF model only). Because `xmin`
+data migration** and adds no real column (the `AddOptimisticConcurrencyTokens` and
+`AddOptimisticConcurrencyTokensToRemainingAggregates` migrations are deliberate
+schema-level no-ops; the token lives in the EF model only). Because `xmin`
 is PostgreSQL-specific, the mapping is applied only on the Npgsql provider — the default
 in-memory SQLite test provider has no such column and is left untouched; the real
 cross-context conflict is exercised by the integration suite's PostgreSQL job. See

@@ -216,7 +216,8 @@ public sealed class LiveCoreDbContext : DbContext
 
     /// <summary>
     /// Maps the PostgreSQL system column <c>xmin</c> as an EF Core optimistic
-    /// concurrency token on every MUTABLE aggregate (CORE-CONC-001). With the token
+    /// concurrency token on every MUTABLE aggregate (CORE-CONC-001, extended to the
+    /// remaining mutable aggregates by CORE-CONC-006). With the token
     /// in place a concurrent read-modify-write fails LOUDLY with a
     /// <see cref="DbUpdateConcurrencyException"/> — which the
     /// <see cref="ConcurrencyConflictMiddleware"/> translates to a <c>409 Conflict</c>
@@ -257,12 +258,21 @@ public sealed class LiveCoreDbContext : DbContext
             return;
         }
 
-        // The mutable aggregates named by CORE-CONC-001: each is loaded and then
-        // re-saved by a read-modify-write command (Session start/end/cancel,
-        // VisibilityRule reveal/hide, Workspace rename/archive, Participant
-        // join/leave/rename, QuotaUsage record/release, PurchaseTransaction status
-        // change), so each needs the token. Append-only aggregates (audit logs,
-        // session events, purchase events) are never updated and so need none.
+        // The mutable aggregates: each is loaded and then re-saved by a
+        // read-modify-write command, so each needs the token. Append-only aggregates
+        // (audit logs, session events, purchase events, store notification events) are
+        // never updated and so need none.
+        //
+        // CORE-CONC-001 mapped the first six (Session start/end/cancel, VisibilityRule
+        // reveal/hide, Workspace rename/archive, Participant join/leave/rename,
+        // QuotaUsage record/release, PurchaseTransaction status change). CORE-CONC-006
+        // extends the token to the remaining eight aggregates that were still doing a
+        // bare Update+SaveChanges with no token (and so silently lost a concurrent
+        // update under last-write-wins): ContentBlock revise, Entity rename/redefine,
+        // EntityType redefine, Scene rename/reorder (Scene.Reorder is the read-modify-
+        // write the deletion re-pack runs), Asset mark-available/transition,
+        // SubjectEntitlement grant/revoke, ExportJob status transition and UserProfile
+        // reference touch.
         Type[] mutableAggregates =
         [
             typeof(Session),
@@ -271,6 +281,14 @@ public sealed class LiveCoreDbContext : DbContext
             typeof(Participant),
             typeof(QuotaUsage),
             typeof(PurchaseTransaction),
+            typeof(ContentBlock),
+            typeof(Entity),
+            typeof(EntityType),
+            typeof(Scene),
+            typeof(Asset),
+            typeof(SubjectEntitlement),
+            typeof(ExportJob),
+            typeof(UserProfile),
         ];
 
         foreach (var aggregate in mutableAggregates)

@@ -110,7 +110,7 @@ billing_account_links(purchase_transaction_id) unique
 idempotency_keys(scope, key)
 ```
 
-## Optimistic concurrency (CORE-CONC-001)
+## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006)
 
 The mutable aggregates carry an optimistic-concurrency token so a concurrent
 read-modify-write fails loudly instead of silently losing an update. The token is the
@@ -123,7 +123,10 @@ every UPDATE, so EF adds `WHERE ... AND xmin = @original` to a write and a stale
 affects zero rows, raising a conflict that the API surfaces as `409`
 (`docs/08_API_CONTRACTS.md`).
 
-The token is applied to exactly the aggregates that are updated in place:
+The token is applied to exactly the aggregates that are updated in place. CORE-CONC-001
+mapped the first six; CORE-CONC-006 extended it to the remaining eight that were still
+doing a bare `Update`/`SaveChanges` with no token (and so silently lost a concurrent
+update under last-write-wins):
 
 ```text
 sessions
@@ -132,6 +135,14 @@ workspaces
 participants
 quota_usage
 purchase_transactions
+content_blocks
+entities
+entity_types
+scenes
+assets
+subject_entitlements
+export_jobs
+users
 ```
 
 Append-only tables (`session_events`, `audit_logs`, `purchase_events`,

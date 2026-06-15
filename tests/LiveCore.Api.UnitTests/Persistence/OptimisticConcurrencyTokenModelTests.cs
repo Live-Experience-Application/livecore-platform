@@ -1,6 +1,12 @@
+using LiveCore.Api.Assets;
+using LiveCore.Api.Content;
+using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
+using LiveCore.Api.Exports;
+using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Store;
 using LiveCore.Api.Visibility;
@@ -11,7 +17,8 @@ using Microsoft.EntityFrameworkCore.Metadata;
 namespace LiveCore.Api.UnitTests.Persistence;
 
 /// <summary>
-/// Model-shape tests for the optimistic-concurrency tokens (CORE-CONC-001). They
+/// Model-shape tests for the optimistic-concurrency tokens (CORE-CONC-001, extended
+/// to the remaining mutable aggregates by CORE-CONC-006). They
 /// build the EF model offline (no connection is opened) and assert that every mutable
 /// aggregate carries the PostgreSQL <c>xmin</c> row-version concurrency token on the
 /// Npgsql provider — the mapping that makes a concurrent read-modify-write fail with a
@@ -23,12 +30,24 @@ public sealed class OptimisticConcurrencyTokenModelTests
 {
     private static readonly Type[] _mutableAggregates =
     [
+        // The first six carry the token from CORE-CONC-001.
         typeof(Session),
         typeof(VisibilityRule),
         typeof(Workspace),
         typeof(Participant),
         typeof(QuotaUsage),
         typeof(PurchaseTransaction),
+
+        // The remaining eight gained the token in CORE-CONC-006: every other aggregate
+        // that is updated in place by a read-modify-write command.
+        typeof(ContentBlock),
+        typeof(Entity),
+        typeof(EntityType),
+        typeof(Scene),
+        typeof(Asset),
+        typeof(SubjectEntitlement),
+        typeof(ExportJob),
+        typeof(UserProfile),
     ];
 
     [Fact]

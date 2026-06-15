@@ -85,15 +85,18 @@ Reveal and hide (un-reveal) execution must be idempotent for client retry.
 A repeated reveal or hide request with the same idempotency key must not create duplicate events.
 Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.
 
-## Optimistic concurrency (CORE-CONC-001)
+## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006)
 
-The mutable aggregates — `Session`, `VisibilityRule`, `Workspace`, `Participant`,
-`PurchaseTransaction` and quota usage — carry a server-side optimistic-concurrency
-token (the PostgreSQL `xmin` row version; see `docs/10_DATABASE_SCHEMA.md`). When two
-read-modify-write commands interleave on the same row, the second write fails the row
-version check and the API returns **`409 Conflict`** instead of silently overwriting
-(losing) the first writer's update. The caller's correct response is to reload the
-resource and retry the command against the fresh state.
+The mutable aggregates carry a server-side optimistic-concurrency token (the PostgreSQL
+`xmin` row version; see `docs/10_DATABASE_SCHEMA.md`). CORE-CONC-001 covered `Session`,
+`VisibilityRule`, `Workspace`, `Participant`, `PurchaseTransaction` and quota usage;
+CORE-CONC-006 extended the token to every other in-place-updated aggregate —
+`ContentBlock`, `Entity`, `EntityType`, `Scene`, `Asset`, `SubjectEntitlement`,
+`ExportJob` and the `UserProfile` reference. When two read-modify-write commands
+interleave on the same row, the second write fails the row version check and the API
+returns **`409 Conflict`** instead of silently overwriting (losing) the first writer's
+update. The caller's correct response is to reload the resource and retry the command
+against the fresh state.
 
 The token is enforced **server-side**; the client never has to send it. The `409`
 Problem Details carries only the generic "modified by a concurrent request" reason and
