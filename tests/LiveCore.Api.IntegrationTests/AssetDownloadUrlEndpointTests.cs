@@ -57,9 +57,10 @@ public sealed class AssetDownloadUrlEndpointTests
         MembershipRole.CoHost,
     ];
 
+    // The non-participant, non-host roles the role-level (workspace-wide) download decision still governs
+    // unchanged (CORE-SVIS-003 moves only the Participant role to the session-scoped per-participant path).
     public static TheoryData<MembershipRole> NonViewerRoles =>
     [
-        MembershipRole.Participant,
         MembershipRole.Observer,
         MembershipRole.Auditor,
     ];
@@ -115,7 +116,7 @@ public sealed class AssetDownloadUrlEndpointTests
     public async Task Download_url_is_403_for_a_non_viewer_workspace_role(MembershipRole role)
     {
         // The caller is a member of the asset's workspace but is NOT an authorized viewer: the asset is not
-        // linked to any visible content (CORE-AST-005), so audience/audit roles are denied fail-closed.
+        // linked to any visible content (CORE-AST-005), so the Observer/audit role is denied fail-closed.
         await using var factory = new FakeStorageApiFactory();
         var subject = $"member-{role}";
         var seed = await SeedWorkspaceWithAssetAsync(factory, subject, role, available: true);
@@ -127,12 +128,13 @@ public sealed class AssetDownloadUrlEndpointTests
     }
 
     [Theory]
-    [InlineData(MembershipRole.Participant)]
     [InlineData(MembershipRole.Observer)]
     public async Task Audience_role_downloads_an_asset_linked_to_a_visible_content_block(MembershipRole role)
     {
         // CORE-AST-005: an asset linked to a content block that is VISIBLE to the audience becomes
-        // audience-accessible — the audience role now gets a signed download URL (200).
+        // audience-accessible — the non-participant audience role (Observer) gets a signed download URL via
+        // the unchanged workspace-wide path (200). The Participant role is exercised by the session-scoped
+        // CORE-SVIS-003 tests below.
         await using var factory = new FakeStorageApiFactory();
         var subject = $"member-{role}";
         var seed = await SeedWorkspaceWithLinkedAssetAsync(factory, subject, role, VisibilityState.Visible);
@@ -147,7 +149,6 @@ public sealed class AssetDownloadUrlEndpointTests
     }
 
     [Theory]
-    [InlineData(MembershipRole.Participant)]
     [InlineData(MembershipRole.Observer)]
     public async Task Audience_role_is_403_for_an_asset_linked_to_a_hidden_content_block(MembershipRole role)
     {
@@ -175,6 +176,206 @@ public sealed class AssetDownloadUrlEndpointTests
         var response = await GetAsync(client, seed.AssetId, _orgA);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    // =====================================================================
+    // SESSION-SCOPED PARTICIPANT DOWNLOAD (CORE-SVIS-003). A participant's download is authorized against
+    // the SESSION-scoped visibility of the linked resource, not the workspace-wide one. A reveal is
+    // session-scoped (ADR 0013), so a participant cannot obtain a download URL for an asset tied to a
+    // resource revealed only in a sibling session of the same workspace; host/role-level access is
+    // unchanged. (threats T5/T3 cross-session leak; T4 asset leak; T2 visibility leak.)
+    // =====================================================================
+
+    [Fact]
+    public async Task Participant_downloads_an_asset_revealed_in_their_session()
+    {
+        // The linked content block is revealed (audience-wide visible) in session A. The participant supplies
+        // sessionId = A and gets a signed download URL (200) — the session-scoped allow.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(factory, subject, VisibilityState.Visible);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<DownloadDto>(_json);
+        Assert.NotNull(body);
+        Assert.True(Uri.TryCreate(body.DownloadUrl, UriKind.Absolute, out _));
+    }
+
+    [Fact]
+    public async Task Participant_in_a_sibling_session_is_denied_a_download_revealed_only_in_another_session()
+    {
+        // CROWN-JEWEL. The linked content block is revealed only in session A, but the participant supplies
+        // sessionId = B (a sibling session of the SAME workspace). A reveal is session-scoped, so it is NOT
+        // visible in B: the download is denied fail-closed (403). This is the residual CORE-SVIS-001 left.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(factory, subject, VisibilityState.Visible);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.SiblingSessionId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_is_403_for_an_asset_hidden_in_their_session()
+    {
+        // Linked, but the content block is HIDDEN from the audience in session A: the asset stays host-only,
+        // so even in the revealed session the participant is denied fail-closed (403).
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(factory, subject, VisibilityState.Hidden);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_downloads_an_asset_revealed_privately_to_them_in_their_session()
+    {
+        // The other half of session-scope: a reveal scoped to exactly THIS participant in session A makes the
+        // asset downloadable for them — proving the per-participant primitive (not just the audience-wide
+        // session check) is what authorizes the download.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithPrivatelyRevealedAssetAsync(factory, subject, revealToCaller: true);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_is_denied_a_download_revealed_only_to_another_participant()
+    {
+        // The selected-participant guarantee for assets: the linked resource is revealed privately to a
+        // DIFFERENT participant in session A. This participant, even in session A, is denied (403) — they
+        // never see (or download) content revealed only to another participant (threat T5).
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithPrivatelyRevealedAssetAsync(factory, subject, revealToCaller: false);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_download_without_a_session_id_is_400()
+    {
+        // A participant download is session-scoped (CORE-SVIS-003), so the participant MUST name the session.
+        // The caller is a known member of the asset's workspace, so omitting it is a request-shape 400 (not a
+        // 404), surfaced only after the membership gate.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(factory, subject, VisibilityState.Visible);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_with_a_malformed_session_id_is_400()
+    {
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(factory, subject, VisibilityState.Visible);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/assets/{seed.AssetId}/download-url?organizationSlug={_orgA}&sessionId=not-a-guid");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_role_member_with_no_participant_record_is_403()
+    {
+        // A Participant-role workspace member who has NO participant record in the asset's workspace holds no
+        // per-participant visibility to evaluate, so the session-scoped download is denied fail-closed (403)
+        // even with a valid session and a visible link.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(
+            factory, subject, VisibilityState.Visible, createParticipantRecord: false);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Removed_participant_is_403_even_in_the_revealed_session()
+    {
+        // A soft-removed participant holds no standing (ParticipantStatus.Removed), so its session-scoped
+        // download is denied fail-closed (403) even where the linked resource is revealed.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(
+            factory, subject, VisibilityState.Visible, removedParticipant: true);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA, seed.RevealedSessionId);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Host_is_unaffected_by_the_session_scope_and_downloads_without_a_session_id()
+    {
+        // Host/role-level access is UNCHANGED: a Host downloads the same asset (linked to a resource revealed
+        // only in session A) with NO sessionId at all — host content access is session-agnostic (200).
+        await using var factory = new FakeStorageApiFactory();
+        const string participantSubject = "participant-a";
+        const string hostSubject = "host-a";
+        var seed = await SeedParticipantWithLinkedAssetAsync(
+            factory, participantSubject, VisibilityState.Visible, additionalHostSubject: hostSubject);
+
+        using var client = factory.CreateClientFor(hostSubject, _issuer, _orgA);
+        var response = await GetAsync(client, seed.AssetId, _orgA);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Participant_download_for_an_asset_in_another_tenant_is_404()
+    {
+        // foreign-tenant 404: the tenant/asset boundary is enforced before the participant/session logic, so
+        // a participant addressing an org-B asset with organizationSlug = A is hidden as 404 — never a 403 or
+        // a participant-specific code that could leak the asset's existence.
+        await using var factory = new FakeStorageApiFactory();
+        const string subject = "participant-a";
+        SeedResult seedB = default;
+        Guid sessionInB = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var caller = await db.AddUserAsync(_issuer, subject);
+            var creatorInB = await db.AddUserAsync(_issuer, "creator-b");
+            var orgA = await db.AddOrganizationAsync(_orgA);
+            var orgB = await db.AddOrganizationAsync(_orgB);
+            await db.AddOrganizationMemberAsync(orgA.Id, caller.Id, MembershipRole.Participant);
+            var workspaceInB = await db.AddWorkspaceAsync(orgB.Id, "b-show", "B Show");
+            await db.AddWorkspaceMemberAsync(orgB.Id, workspaceInB.Id, creatorInB.Id, MembershipRole.Host);
+            var assetInB = await db.AddAssetAsync(orgB.Id, workspaceInB.Id, creatorInB.Id, available: true);
+            var sessionB = await db.AddSessionAsync(orgB.Id, workspaceInB.Id, "B Session", SessionStatus.Live);
+            seedB = new SeedResult(orgB.Id, workspaceInB.Id, assetInB.Id);
+            sessionInB = sessionB.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await GetAsync(client, seedB.AssetId, _orgA, sessionInB);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
@@ -312,6 +513,16 @@ public sealed class AssetDownloadUrlEndpointTests
         return await client.GetAsync(url);
     }
 
+    /// <summary>Issues the download request with both the organization slug and the session scope (CORE-SVIS-003).</summary>
+    private static async Task<HttpResponseMessage> GetAsync(
+        HttpClient client, Guid assetId, string organizationSlug, Guid sessionId)
+    {
+        var url = $"/api/v1/assets/{assetId}/download-url"
+            + $"?organizationSlug={Uri.EscapeDataString(organizationSlug)}"
+            + $"&sessionId={sessionId}";
+        return await client.GetAsync(url);
+    }
+
     /// <summary>
     /// Seeds an org + a caller with the given role in both the org and a workspace (all in org A) plus an
     /// asset in that workspace (created by the caller; the creator does not affect download authorization).
@@ -368,7 +579,111 @@ public sealed class AssetDownloadUrlEndpointTests
         return seed;
     }
 
+    /// <summary>
+    /// Seeds (in org A) a caller with the Participant role in the org and a workspace, an AVAILABLE asset
+    /// LINKED to a content block, and TWO sibling sessions of that workspace. The content block is revealed
+    /// (visible or hidden, per <paramref name="visibility"/>) audience-wide in the REVEALED session only; the
+    /// SIBLING session carries no rule for it. By default the caller also has an active participant record in
+    /// the workspace; set <paramref name="createParticipantRecord"/> false to omit it (a participant-role
+    /// member with no participant record), or <paramref name="removedParticipant"/> true to soft-remove it.
+    /// An optional <paramref name="additionalHostSubject"/> is also added as a Host of the workspace, to prove
+    /// host access is session-agnostic.
+    /// </summary>
+    private static async Task<ParticipantSeedResult> SeedParticipantWithLinkedAssetAsync(
+        WorkspaceApiFactory factory,
+        string subject,
+        VisibilityState visibility,
+        bool createParticipantRecord = true,
+        bool removedParticipant = false,
+        string? additionalHostSubject = null)
+    {
+        ParticipantSeedResult seed = default;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Participant);
+
+            if (createParticipantRecord)
+            {
+                await db.AddParticipantAsync(org.Id, workspace.Id, user.Id, removed: removedParticipant);
+            }
+
+            if (additionalHostSubject is not null)
+            {
+                var host = await db.AddUserAsync(_issuer, additionalHostSubject);
+                await db.AddOrganizationMemberAsync(org.Id, host.Id, MembershipRole.Host);
+                await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, host.Id, MembershipRole.Host);
+            }
+
+            var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id, available: true);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Scene", 1);
+            var block = await db.AddContentBlockAsync(org.Id, workspace.Id, scene.Id, ContentBlockType.Text, "Generic");
+            await db.AddAssetLinkAsync(org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, block.Id, user.Id);
+
+            var revealedSession = await db.AddSessionAsync(org.Id, workspace.Id, "Revealed Session", SessionStatus.Live);
+            var siblingSession = await db.AddSessionAsync(org.Id, workspace.Id, "Sibling Session", SessionStatus.Live);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, revealedSession.Id, VisibilityResourceType.ContentBlock, block.Id, visibility);
+
+            seed = new ParticipantSeedResult(org.Id, workspace.Id, asset.Id, revealedSession.Id, siblingSession.Id);
+        });
+        return seed;
+    }
+
+    /// <summary>
+    /// Like <see cref="SeedParticipantWithLinkedAssetAsync"/>, but the linked content block is revealed
+    /// PRIVATELY (a selected-participant reveal) in the revealed session — to the caller's own participant
+    /// when <paramref name="revealToCaller"/> is true, otherwise to a DIFFERENT participant in the same
+    /// workspace. Used to prove the per-participant primitive authorizes the download (the selected
+    /// participant may, a different one may not).
+    /// </summary>
+    private static async Task<ParticipantSeedResult> SeedParticipantWithPrivatelyRevealedAssetAsync(
+        WorkspaceApiFactory factory,
+        string subject,
+        bool revealToCaller)
+    {
+        ParticipantSeedResult seed = default;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Participant);
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id, displayName: "P");
+
+            // Another participant the reveal may be scoped to instead.
+            var otherUser = await db.AddUserAsync(_issuer, $"{subject}-other");
+            var otherParticipant = await db.AddParticipantAsync(org.Id, workspace.Id, otherUser.Id, displayName: "Q");
+
+            var asset = await db.AddAssetAsync(org.Id, workspace.Id, user.Id, available: true);
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Scene", 1);
+            var block = await db.AddContentBlockAsync(org.Id, workspace.Id, scene.Id, ContentBlockType.Text, "Generic");
+            await db.AddAssetLinkAsync(org.Id, workspace.Id, asset.Id, AssetLinkTargetType.ContentBlock, block.Id, user.Id);
+
+            var revealedSession = await db.AddSessionAsync(org.Id, workspace.Id, "Revealed Session", SessionStatus.Live);
+            var siblingSession = await db.AddSessionAsync(org.Id, workspace.Id, "Sibling Session", SessionStatus.Live);
+
+            var target = revealToCaller ? participant.Id : otherParticipant.Id;
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, revealedSession.Id, VisibilityResourceType.ContentBlock, block.Id, target, VisibilityState.Visible);
+
+            seed = new ParticipantSeedResult(org.Id, workspace.Id, asset.Id, revealedSession.Id, siblingSession.Id);
+        });
+        return seed;
+    }
+
     private readonly record struct SeedResult(Guid OrganizationId, Guid WorkspaceId, Guid AssetId);
+
+    private readonly record struct ParticipantSeedResult(
+        Guid OrganizationId,
+        Guid WorkspaceId,
+        Guid AssetId,
+        Guid RevealedSessionId,
+        Guid SiblingSessionId);
 
     private sealed record DownloadDto(
         Guid AssetId,

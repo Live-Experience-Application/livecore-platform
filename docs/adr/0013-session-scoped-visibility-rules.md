@@ -79,6 +79,18 @@ session-scoped default; it needs its own ADR and human approval.
   session. They keep using a **workspace-wide, session-agnostic** visibility check (an explicit
   `VisibilityPolicy` overload), preserving their pre-existing behavior. Making those surfaces
   session-scoped is a follow-up, not part of this decision.
+
+  **Update (CORE-SVIS-003):** the **participant** path of asset download is now **session-scoped**. The
+  signed download route accepts an optional `?sessionId=` query parameter (required for a `Participant`
+  caller), and a participant's download is authorized against the **session-scoped** per-participant
+  visibility of the linked resource (`AssetDownloadPolicy.CanParticipantDownloadAsync` over the
+  session-scoped `VisibilityPolicy.CanParticipantViewResource` — the same primitive the participant feed
+  uses, reused not forked), so a participant cannot obtain a download URL for an asset tied to a resource
+  revealed only in a sibling session. The **role-level** carve-out still stands for the non-participant
+  callers: host-content roles and the `Observer` audience role keep the workspace-wide, session-agnostic
+  `VisibilityPolicy.CanViewResource`, and **entity search** is still workspace-wide. Migrating entity search
+  and **removing** the workspace-wide overload (so a session-agnostic decision cannot be reintroduced) is
+  the follow-up CORE-SVIS-004.
 - There is still **no persisted session-participant roster** (a participant is workspace-scoped, and the
   participant connection metadata is deferred — see `SessionParticipantJoinService`). The realtime
   audience fan-out therefore still *enumerates* the workspace's active participants as the candidate set;

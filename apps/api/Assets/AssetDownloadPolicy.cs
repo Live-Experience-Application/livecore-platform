@@ -39,16 +39,23 @@ namespace LiveCore.Api.Assets;
 /// changes WHO may pass this check, never how the bytes are served — the endpoint still mints a single
 /// short-lived signed URL only after this allow (threat T4 "Asset leak").
 ///
-/// PARTICIPANT-LEVEL vs ROLE-LEVEL. This is a ROLE-level decision (the download route authorizes by the
-/// caller's workspace role, not a specific participant record), so it uses the audience-WIDE,
-/// SESSION-AGNOSTIC <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>:
-/// a selected-participant reveal (a rule scoped to one participant) does NOT grant a role-level audience
-/// download, exactly as the role-level visibility policy treats it. The download route carries no session,
-/// so this decision spans the workspace's sessions (a follow-up could make asset download session-scoped,
-/// CORE-SVIS-001). Per-participant asset access (a participant downloading an asset linked to a resource
-/// revealed only to them) would build on <c>CanParticipantViewResource</c> and a participant-identified
-/// download route; that route does not exist, so it is deferred and the role-level decision stays
-/// fail-closed.
+/// PARTICIPANT-LEVEL vs ROLE-LEVEL. The policy exposes TWO decisions, differing only in how the audience
+/// case is scoped:
+/// <list type="bullet">
+///   <item><see cref="CanDownloadAsync"/> is the ROLE-level, workspace-wide decision the endpoint applies
+///   to host-content roles and the NON-participant audience role (Observer). It allows an audience role iff
+///   an AUDIENCE-WIDE visible rule exists for a linked target in ANY session of the workspace, via the
+///   session-agnostic <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>.
+///   This is the ADR 0013 role-level carve-out (the download route carries no session for these callers);
+///   migrating entity-search and removing the workspace-wide overload is the follow-up CORE-SVIS-004.</item>
+///   <item><see cref="CanParticipantDownloadAsync"/> is the SESSION-scoped, per-PARTICIPANT decision the
+///   endpoint applies to a <see cref="MembershipRole.Participant"/> caller (CORE-SVIS-003). It threads the
+///   request's session and the caller's participant identity into the SAME per-participant primitive the
+///   participant-visible feed uses (<see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
+///   so a participant cannot obtain a download URL for an asset tied to a resource revealed only in a
+///   SIBLING session of the same workspace, and a selected-participant reveal grants a download only to the
+///   participant it names (the cross-session and selected-participant guarantees; threat T5/T3).</item>
+/// </list>
 /// </summary>
 internal sealed class AssetDownloadPolicy
 {
@@ -65,7 +72,10 @@ internal sealed class AssetDownloadPolicy
 
     /// <summary>
     /// Decides whether a viewer with the given workspace role may download the given asset, applying the
-    /// host-content vs audience-visible rules over the asset's links and the central Visibility engine.
+    /// host-content vs audience-visible rules over the asset's links and the central Visibility engine. This
+    /// is the ROLE-level, workspace-wide decision; the endpoint applies it to host-content roles and the
+    /// non-participant audience role (Observer). A <see cref="MembershipRole.Participant"/> caller is routed
+    /// to the SESSION-scoped <see cref="CanParticipantDownloadAsync"/> instead (CORE-SVIS-003).
     /// </summary>
     /// <param name="asset">The already-resolved, tenant- and workspace-scoped asset.</param>
     /// <param name="viewerRole">The caller's role in the asset's own workspace.</param>
@@ -113,6 +123,76 @@ internal sealed class AssetDownloadPolicy
                     cancellationToken)
                 .ConfigureAwait(false);
             if (decision.CanView)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Decides whether the given participant may download the given asset IN THE GIVEN SESSION
+    /// (CORE-SVIS-003) — the SESSION-scoped per-participant download the signed-download endpoint applies
+    /// for a <see cref="MembershipRole.Participant"/> caller. The asset is downloadable iff it is linked to
+    /// a content block or entity that is VISIBLE to THIS participant IN THIS session: an audience-wide
+    /// reveal of this session OR a reveal scoped to exactly this participant in this session. A resource
+    /// revealed only in a SIBLING session of the same workspace yields no visible rule here, so it never
+    /// grants a download (the cross-session leak this story closes; threat T5/T3 in
+    /// docs/07_SECURITY_THREAT_MODEL.md).
+    ///
+    /// It reuses the SAME central per-participant primitive the participant-visible feed and the realtime
+    /// recipient gate use (<see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
+    /// so an asset's per-participant download access can never diverge from its target's session-scoped
+    /// visibility (docs/05_MODULE_CONTRACTS.md: do not duplicate visibility logic; ADR 0013). The link
+    /// lookup and the delegated decision are both scoped to the asset's own organization THEN workspace THEN
+    /// the supplied session, so a link or rule in another tenant, workspace or session can never grant access
+    /// here. The policy never makes an asset public: a link only changes WHO may pass this check, never how
+    /// the bytes are served — the endpoint still mints a single short-lived signed URL only after this allow
+    /// (threat T4 "Asset leak"). The endpoint has resolved the participant from a verified, active
+    /// participant record in the asset's workspace and the session from the request.
+    /// </summary>
+    /// <param name="asset">The already-resolved, tenant- and workspace-scoped asset.</param>
+    /// <param name="sessionId">The session the download is scoped to (checked after the tenant/workspace).</param>
+    /// <param name="participantId">The downloading participant, resolved in the asset's workspace.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// <see langword="true"/> when the participant may download the asset in this session; otherwise
+    /// <see langword="false"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">The asset is null.</exception>
+    public async Task<bool> CanParticipantDownloadAsync(
+        Asset asset,
+        Guid sessionId,
+        Guid participantId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+
+        // ALLOW iff the asset is linked to a content block/entity this participant may see IN THIS session.
+        // The links are tenant- and workspace-scoped to the asset's own boundary, and each target's
+        // visibility is the central SESSION-SCOPED per-participant decision (reused, never duplicated): an
+        // audience-wide visible rule of this session, or a visible rule scoped to exactly this participant in
+        // this session. A target visible only in another session — or only to another participant — does not
+        // grant access. The asset becomes downloadable the moment ANY linked target is visible to this
+        // participant here.
+        var links = await _links
+            .ListByAssetAsync(asset.OrganizationId, asset.WorkspaceId, asset.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var link in links)
+        {
+            var canView = await _visibility
+                .CanParticipantViewResourceAsync(
+                    asset.OrganizationId,
+                    asset.WorkspaceId,
+                    sessionId,
+                    participantId,
+                    link.TargetType.ToVisibilityResourceType(),
+                    link.TargetId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (canView)
             {
                 return true;
             }

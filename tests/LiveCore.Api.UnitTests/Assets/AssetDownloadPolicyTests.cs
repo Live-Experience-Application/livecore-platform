@@ -1,6 +1,7 @@
 using LiveCore.Api.Assets;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
@@ -133,6 +134,43 @@ public sealed class AssetDownloadPolicyTests : IDisposable
     {
         var sessionId = await SessionIdAsync(organizationId, workspaceId);
         var rule = VisibilityRule.Create(organizationId, workspaceId, sessionId, resourceType, resourceId, visibility, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
+    // Creates a fresh, distinct session (NOT the per-workspace cached one), so the session-scoped tests can
+    // arrange a "revealed" session and a "sibling" session of the same workspace.
+    private async Task<Guid> SeedSessionAsync(Guid organizationId, Guid workspaceId, string title)
+    {
+        var session = Session.Create(organizationId, workspaceId, title, _createdAt);
+        await using var context = CreateContext();
+        context.Sessions.Add(session);
+        await context.SaveChangesAsync();
+        return session.Id;
+    }
+
+    private async Task<Guid> SeedParticipantAsync(Guid organizationId, Guid workspaceId)
+    {
+        var participant = Participant.Create(organizationId, workspaceId, userProfileId: null, "Participant", _createdAt);
+        await using var context = CreateContext();
+        context.Participants.Add(participant);
+        await context.SaveChangesAsync();
+        return participant.Id;
+    }
+
+    private async Task SeedRuleInSessionAsync(
+        Guid organizationId, Guid workspaceId, Guid sessionId, VisibilityResourceType resourceType, Guid resourceId, VisibilityState visibility)
+    {
+        var rule = VisibilityRule.Create(organizationId, workspaceId, sessionId, resourceType, resourceId, visibility, _createdAt);
+        await using var context = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
+    private async Task SeedParticipantRuleInSessionAsync(
+        Guid organizationId, Guid workspaceId, Guid sessionId, VisibilityResourceType resourceType, Guid resourceId, Guid targetParticipantId, VisibilityState visibility)
+    {
+        var rule = VisibilityRule.CreateForParticipant(
+            organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
         await using var context = CreateContext();
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
@@ -304,5 +342,149 @@ public sealed class AssetDownloadPolicyTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => policy.CanDownloadAsync(null!, MembershipRole.Owner, CancellationToken.None));
+    }
+
+    // =====================================================================
+    // Session-scoped per-participant download (CORE-SVIS-003). A participant may download iff the asset is
+    // linked to a resource VISIBLE to THEM IN THE GIVEN session — an audience-wide reveal of that session or
+    // a reveal scoped to exactly them. A resource revealed only in a sibling session (or only to another
+    // participant) never grants a download (threat T5/T3 cross-session leak; threat T2 visibility leak).
+    // =====================================================================
+
+    [Fact]
+    public async Task Participant_can_download_when_linked_to_a_resource_revealed_in_the_session()
+    {
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var contentBlockId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+        // Audience-wide visible reveal in session A.
+        await SeedRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.True(await policy.CanParticipantDownloadAsync(asset, sessionA, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Participant_cannot_download_a_resource_revealed_only_in_a_sibling_session()
+    {
+        // The asset is linked to a content block revealed (audience-wide) in session A only. A participant
+        // querying with session B (a sibling session of the SAME workspace) is denied — the reveal is
+        // session-scoped, so it is not visible in B (the residual the story closes).
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var contentBlockId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var sessionB = await SeedSessionAsync(org.Id, ws.Id, "Session B");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+        await SeedRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanParticipantDownloadAsync(asset, sessionB, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Participant_can_download_when_a_resource_is_revealed_privately_to_them_in_the_session()
+    {
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var entityId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+        // Revealed ONLY to this participant in session A.
+        await SeedParticipantRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.Entity, entityId, participantId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.True(await policy.CanParticipantDownloadAsync(asset, sessionA, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Participant_cannot_download_when_a_resource_is_revealed_only_to_another_participant()
+    {
+        // The selected-participant guarantee for assets: the linked entity is revealed privately to a
+        // DIFFERENT participant in session A. This participant, even in session A, is denied.
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var entityId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+        var otherParticipantId = await SeedParticipantAsync(org.Id, ws.Id);
+        await SeedParticipantRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.Entity, entityId, otherParticipantId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanParticipantDownloadAsync(asset, sessionA, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Participant_cannot_download_when_the_linked_target_is_hidden_in_the_session()
+    {
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var contentBlockId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+        await SeedRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Hidden);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanParticipantDownloadAsync(asset, sessionA, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Participant_cannot_download_an_unlinked_asset()
+    {
+        var (org, ws, _, asset) = await SeedBaseAsync();
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var participantId = await SeedParticipantAsync(org.Id, ws.Id);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        // No link at all -> host-only by default -> denied to a participant.
+        Assert.False(await policy.CanParticipantDownloadAsync(asset, sessionA, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_visible_rule_in_another_workspace_does_not_grant_participant_download()
+    {
+        // The asset is in workspace A and linked to target T; T is revealed visible in a session of workspace
+        // B only. A participant of A must NOT be able to download — both the link lookup and the session-scoped
+        // visibility decision are scoped to the asset's OWN workspace (threat T5).
+        var org = await SeedOrganizationAsync(_organizationSlugA);
+        var wsA = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
+        var wsB = await SeedWorkspaceAsync(org.Id, _workspaceSlugB);
+        var user = await SeedUserAsync(Guid.CreateVersion7().ToString());
+        var asset = await SeedAssetAsync(org.Id, wsA.Id, user.Id);
+        var targetId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, wsA.Id, asset.Id, AssetLinkTargetType.ContentBlock, targetId, user.Id);
+        var sessionInB = await SeedSessionAsync(org.Id, wsB.Id, "Session in B");
+        var participantId = await SeedParticipantAsync(org.Id, wsA.Id);
+        // The visible rule for the target is in a session of workspace B, not the asset's workspace A.
+        await SeedRuleInSessionAsync(org.Id, wsB.Id, sessionInB, VisibilityResourceType.ContentBlock, targetId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanParticipantDownloadAsync(asset, sessionInB, participantId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task CanParticipantDownload_rejects_a_null_asset()
+    {
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => policy.CanParticipantDownloadAsync(null!, Guid.CreateVersion7(), Guid.CreateVersion7(), CancellationToken.None));
     }
 }
