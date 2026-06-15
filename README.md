@@ -1818,6 +1818,37 @@ leakage of hidden resources** (threats T2/T3), and reconnect replay re-applies t
 The payloads are server-composed **identifiers and state names only**, never resolved content
 (threat T7).
 
+### Session-event catalog completeness
+
+The session-event catalog is a **contract, not aspirational** (CORE-EVT-004, the session-event
+analogue of CORE-SPEC-002): every event in `csv/event_catalog.csv` is now either **emitted** by a
+Core command or explicitly **deferred** (with a named owner) or **removed**, and the
+spec-consistency check (`scripts/spec-consistency.ps1`, **check 11**) validates the emitted set —
+the `public const string` members of `apps/api/Realtime/SessionEventTypes.cs` — against the
+**non-deferred** catalog, in both directions, so the catalog can no longer list a session event
+that no command emits.
+
+- **`SessionCreated`** — emitted **host-only** on session create (`POST /api/v1/workspaces/{workspaceId}/sessions`),
+  appended to the new session's stream **atomically with the session row** (one unit of work,
+  CORE-CONC-002) and delivered after the commit. The payload carries the session **id** and its
+  `Prepared` status only.
+- **`RecapGenerated`** — emitted **host-only** by the background recap worker when a recap is
+  produced for an ended session, appended to the recap's session stream as a **system** event (no
+  actor). The payload carries the recap and session **ids** only, never the recap body.
+
+Both are **host-only** events (`SessionEventTypes.IsHostOnly`): the recipient resolver delivers
+them to the session **hosts only** — never an observer or participant — both live and on reconnect
+replay, so a created session or a generated recap never leaks to the audience (the catalog's "not
+always participant-visible" / "participant recap requires separate reveal"; threats T2/T7). Unlike
+`SceneActivated`, whose audience tracks the scene's current visibility, this is a subject-independent
+host-facing routing class, so it **narrows** delivery and can never widen an audience.
+
+`SceneCreated` and `ContentBlockCreated` stay in the catalog marked **deferred**: a scene/content
+block is workspace-prepared and carries **no session**, so it cannot be a session-scoped event until
+a session binds it (the Sessions active-scene pointer, the named owner). The three vertical/future
+events `PrivateMessageSent`, `AssetRevealed` and `SessionNoteCreated` were **removed** (no Core
+command). See `docs/24_SPEC_CONSISTENCY.md`.
+
 ### Audit log
 
 The Audit module owns the tenant-scoped, append-only `audit_logs` table (the
@@ -2807,8 +2838,14 @@ it (`RecapGenerationBackgroundService`, every `Recaps:Generation:SweepInterval`,
 connection string** (no database -> the worker starts but runs no generation loop). The sweep is
 per-session **resilient**: a recap that fails to persist (for example because the session was deleted
 between the eligibility read and the append) is logged and counted, and that session stays eligible for
-the next sweep, without aborting the run. The `RecapGenerated` realtime event and audit fact, and any
-recap HTTP route, remain follow-up stories — this job produces and persists the durable recap only.
+the next sweep, without aborting the run. On a **freshly produced** recap (never a deduplicated race)
+the job also appends the durable, **host-only** `RecapGenerated` session event to the recap's session
+stream (CORE-EVT-004) — a system event with an identifier-only payload (the recap and session ids,
+never the body; threat T7) — so a host learns on reconnect/replay that a recap exists while the
+audience never does. The recap is the durable source of truth and is committed first; the event is
+appended in its own transaction (the recap's not-exists-then-append dedup cannot share an enclosing
+transaction without the partial-unique-index race aborting it), and a failed event append leaves the
+recap intact. The `RecapGenerated` **audit fact** and any recap HTTP route remain follow-up stories.
 
 ### Export processing job
 

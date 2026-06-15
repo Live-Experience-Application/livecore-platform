@@ -27,8 +27,10 @@ namespace LiveCore.Api.Sessions;
 ///   <c>session.active.max</c> quota is enforced on create via the existing
 ///   <see cref="Entitlements.QuotaEnforcementService"/> (see <c>CreateSessionAsync</c>
 ///   for why the create CHECKS the quota but does not RECORD consumption — start does).
-///   Rejected with 409 when the parent workspace is archived (read-only;
-///   CORE-LIFE-009).</item>
+///   Emits a durable HOST-ONLY <see cref="SessionEventTypes.SessionCreated"/> session
+///   event, appended to the new session's stream atomically with the session row and
+///   delivered to the hosts after the commit (CORE-EVT-004). Rejected with 409 when the
+///   parent workspace is archived (read-only; CORE-LIFE-009).</item>
 ///   <item><c>GET /api/v1/workspaces/{workspaceId}/sessions</c> (CORE-API-003) —
 ///   lists the route workspace's sessions (via
 ///   <see cref="ISessionRepository.ListByWorkspaceAsync"/>), authorized to "workspace
@@ -364,17 +366,35 @@ internal static class SessionEndpoints
 
         // The injected TimeProvider stamps the creation timestamp, exactly like the
         // scene create and the lifecycle handlers. The session is created Prepared with
-        // no live timeline (the state behind SessionCreated, docs/09_EVENT_CATALOG.md);
-        // the durable SessionCreated event and its delivery belong to the later Session
-        // Event Stream epic (CORE-EVT-001) and are deliberately NOT emitted here.
+        // no live timeline (the state behind SessionCreated, docs/09_EVENT_CATALOG.md).
         var now = timeProvider.GetUtcNow();
         var session = Session.Create(context.OrganizationId, workspaceGuid, request.Title!.Trim(), now);
 
-        // A session has no uniqueness constraint, so there is no 409 outcome to translate;
-        // AddAsync always returns Added on success (a foreign-key violation would surface
-        // as a DbUpdateException, which the membership check above already precludes for a
-        // resolved, existing workspace).
-        await deps.Sessions.AddAsync(session, cancellationToken).ConfigureAwait(false);
+        // ONE unit of work (CORE-CONC-002, CORE-EVT-004): the new session row and the APPEND of its durable
+        // SessionCreated session event commit together in a single database transaction, so a part-way failure
+        // rolls both back and the append-only event stream can never record a session the sessions table does
+        // not hold (or vice versa) — the same commit-then-publish shape the start/end commands use. A session
+        // has no uniqueness constraint, so AddAsync always returns Added on success (a foreign-key violation
+        // would surface as a DbUpdateException, which the membership check above already precludes for a
+        // resolved, existing workspace). Realtime DELIVERY is held until AFTER the commit (below), so a delivery
+        // failure cannot roll back the committed creation.
+        var sessionEvent = await deps.UnitOfWork
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    await deps.Sessions.AddAsync(session, transactionCancellationToken).ConfigureAwait(false);
+                    return await AppendSessionCreatedEventAsync(deps, context, session, now, transactionCancellationToken)
+                        .ConfigureAwait(false);
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction committed, so deliver the SessionCreated event
+        // OUTSIDE it. SessionCreated is a HOST-ONLY preparation event (SessionEventTypes.IsHostOnly), so the
+        // recipient resolver delivers it to the session hosts ONLY — never an observer or participant (the
+        // catalog's "not always participant-visible"; threats T2/T7) — and reconnect replay re-delivers it to a
+        // host later (CORE-RT-005). Delivery is best-effort: a failure cannot roll back the committed creation.
+        await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
 
         var response = SessionResponse.From(session);
         return Results.Created($"/api/v1/sessions/{session.Id}", response);
@@ -768,6 +788,44 @@ internal static class SessionEndpoints
         // Build the response from the session the unit of work RELOADED and transitioned (CORE-CONC-005), so
         // it reflects the committed state even when the command was retried after a transient failure.
         return Results.Ok(SessionResponse.From(outcome.Session));
+    }
+
+    /// <summary>
+    /// Composes the durable <c>SessionCreated</c> session event for a newly created session (CORE-EVT-004)
+    /// and APPENDS it to that session's append-only stream INSIDE the create command's unit-of-work
+    /// transaction, returning the appended event so the endpoint delivers it AFTER the commit
+    /// (commit-then-publish, CORE-CONC-002), matching the lifecycle commands' pattern
+    /// (<see cref="AppendSessionLifecycleEventAsync"/>). The event is a HOST-ONLY preparation event
+    /// (<see cref="SessionEventTypes.IsHostOnly"/>) — no visibility subject and no selected participant — so
+    /// the recipient resolver (reused, not duplicated) delivers it to the session hosts ONLY, never an
+    /// observer or participant (the catalog's "not always participant-visible"; threats T2/T7). The actor is
+    /// the authenticated host who created the session, and the payload carries session IDENTIFIERS only — the
+    /// session id and its Prepared status name — never any content (threat T7).
+    /// </summary>
+    private static async Task<SessionEvent> AppendSessionCreatedEventAsync(
+        SessionEndpointDependencies deps,
+        TenantContext context,
+        Session session,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new SessionLifecycleEventPayload(
+            session.Id,
+            session.Status.ToString()));
+
+        var sessionEvent = SessionEvent.Create(
+            context.OrganizationId,
+            session.WorkspaceId,
+            session.Id,
+            SessionEventTypes.SessionCreated,
+            context.UserProfileId,
+            targetParticipantId: null,
+            payload,
+            schemaVersion: 1,
+            now);
+
+        await deps.EventPublisher.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        return sessionEvent;
     }
 
     /// <summary>

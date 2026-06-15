@@ -27,7 +27,7 @@ drift, no dead/ill-formed store event and no schema/index drift slipped through.
 | --- | --- | --- |
 | API routes | `csv/api_routes.csv` (mounted `/api/v1` routes) | `docs/08_API_CONTRACTS.md` representative list; `csv/mobile_store_api_routes.csv` (mobile-facing `/v1` path shape of the store/entitlement routes) |
 | Database tables | `csv/database_tables.csv` (matches the EF Core model) | `docs/10_DATABASE_SCHEMA.md` table list; `csv/entitlement_database_tables.csv` (entitlement/store ownership view) |
-| Session events | `csv/event_catalog.csv` | `docs/09_EVENT_CATALOG.md` table; `apps/api/Realtime/SessionEventTypes.cs` (the emitted subset) |
+| Session events | `csv/event_catalog.csv` | `docs/09_EVENT_CATALOG.md` table; `apps/api/Realtime/SessionEventTypes.cs` (the emitted set, bound to the non-deferred catalog by check 11 — CORE-EVT-004) |
 | Store/entitlement domain events | `csv/entitlement_event_catalog.csv` | — |
 | Epics & stories | `csv/core_epics_stories.csv` (Phase 1) + `csv/core_phase2_epics_stories.csv` (Phase 2) | `docs/18_EPICS_AND_STORIES.md` |
 
@@ -291,6 +291,40 @@ check did not catch it. CORE-SPEC-002 closes that gap:
   or event** — only the nullable column — so the other spec-consistency checks are
   unchanged.
 
+## Session-event catalog-as-contract note (CORE-EVT-004 made the session-event catalog real)
+
+`csv/event_catalog.csv` and `docs/09` listed fifteen session events while only
+eight were emitted (the names in `apps/api/Realtime/SessionEventTypes.cs`): the
+catalog was **aspirational**, the session-event analogue of the entitlement/store
+gap CORE-SPEC-002 closed. CORE-EVT-004 makes it a **contract**:
+
+- the two formerly-unemitted events that tie to an existing Core command are now
+  **emitted** — `SessionCreated` host-only on session create (appended in the
+  create command's unit of work, CORE-CONC-002, and delivered after commit), and
+  `RecapGenerated` host-only by the background recap worker (appended to the
+  recap's session stream when a recap is produced). Both are **host-only** events
+  (`SessionEventTypes.IsHostOnly`): the recipient resolver delivers them to the
+  session hosts only — never an observer or participant — live and on reconnect
+  replay, so a created session or a generated recap never leaks to the audience
+  (the catalog's "not always participant-visible" / "participant recap requires
+  separate reveal"; threats T2/T7);
+- the two **workspace-prepared** events `SceneCreated`/`ContentBlockCreated` are
+  marked **deferred** in the catalog: they carry no session, so they cannot be
+  session-scoped events in the per-session `session_events` stream until a session
+  binds the scene/content block (the Sessions active-scene pointer, the named
+  owner), and making `session_events.session_id` optional would be an architecture
+  change (an ADR) out of scope here;
+- the three vertical/future events `PrivateMessageSent`, `AssetRevealed` and
+  `SessionNoteCreated` were **removed** from `csv/event_catalog.csv` and `docs/09`
+  (they tie to no Core command and belong to a vertical);
+- the spec-consistency **check 11** now binds the catalog to `SessionEventTypes`
+  (the emitted set equals the **non-deferred** catalog, both directions), so the
+  catalog can no longer drift back to aspirational without failing CI.
+
+It **adds no route, table or migration** — only the two new event-type constants,
+their emission and the host-only routing class — so the other spec-consistency
+checks are unchanged.
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented
@@ -300,11 +334,18 @@ in-scope-for-v1 items not yet built (noted per item).
 - **`purchase_providers`** — provider handling is in-code (the purchase-provider
   abstraction, CORE-STORE-001), not a database table. Marked DEFERRED in
   `csv/entitlement_database_tables.csv`.
-- **Planned-but-unemitted session events** — `SessionCreated`, `SceneCreated`,
-  `ContentBlockCreated`, `PrivateMessageSent`, `AssetRevealed`,
-  `SessionNoteCreated` and `RecapGenerated` are in the catalog but not yet
-  emitted by any command. The emitted set is the eight names in
-  `apps/api/Realtime/SessionEventTypes.cs`.
+- **Deferred session events** — `SceneCreated` and `ContentBlockCreated` are in
+  the catalog but **deferred** (CORE-EVT-004): a scene/content block is
+  workspace-prepared and carries no `session_id`, so it cannot be a session-scoped
+  event in the per-session `session_events` stream until a session binds it (the
+  **Sessions active-scene pointer**, a future story, is the named owner). They are
+  marked `DEFERRED` in `csv/event_catalog.csv` so the spec-consistency check
+  (check 11) excludes them from the emitted-set comparison. The other five
+  formerly-unemitted events were resolved by CORE-EVT-004: `SessionCreated` and
+  `RecapGenerated` are now emitted (the emitted set is the ten names in
+  `apps/api/Realtime/SessionEventTypes.cs`), and `PrivateMessageSent`,
+  `AssetRevealed` and `SessionNoteCreated` were removed from the catalog as
+  vertical/future events with no Core command.
 
 ## Checking consistency
 
@@ -320,9 +361,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
 
 The script exits `0` when every invariant holds, `1` when it finds drift (with a
 per-finding report), and `2` on a configuration error (a spec file it cannot
-find or parse). It runs ten checks — the five name-set invariants (CORE-DOC-001)
-and five semantic invariants validated against the implementation
-(CORE-SPEC-001):
+find or parse). It runs eleven checks — the five name-set invariants
+(CORE-DOC-001), five semantic invariants validated against the implementation
+(CORE-SPEC-001), and the session-event catalog binding (CORE-EVT-004):
 
 1. every route in the `docs/08` representative block is a row in
    `csv/api_routes.csv`;
@@ -366,7 +407,16 @@ and five semantic invariants validated against the implementation
     receipt, per-subject entitlement/quota uniqueness, tenant/workspace slug
     uniqueness, the gap-free audit and session-event sequences) are declared
     `IsUnique()` in the snapshot.
+11. **session-event catalog binding (CORE-EVT-004).** The emitted session-event
+    set — the `public const string` members of
+    `apps/api/Realtime/SessionEventTypes.cs` — equals the **non-deferred**
+    `csv/event_catalog.csv` events (both directions): a non-deferred catalog event
+    that no command emits, or a `SessionEventTypes` constant that is not a
+    non-deferred catalog row, fails. A catalog row whose `notes` are marked
+    `DEFERRED` is excluded from the comparison (today the workspace-prepared
+    `SceneCreated`/`ContentBlockCreated`). The catalog is now a contract, not
+    aspirational.
 
-Checks 6–10 are the reason a spec change that touches a route, role, store event,
-mobile path or table must be reconciled with the code (or the code with the spec)
-before CI goes green.
+Checks 6–11 are the reason a spec change that touches a route, role, store event,
+mobile path, table or session event must be reconciled with the code (or the code
+with the spec) before CI goes green.

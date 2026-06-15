@@ -23,30 +23,37 @@ Each event has:
 The source of truth for the session-event vocabulary is
 `csv/event_catalog.csv`; the table below mirrors it (see
 `docs/24_SPEC_CONSISTENCY.md`). The store/entitlement domain events live
-separately in `csv/entitlement_event_catalog.csv`. Not every catalog event is
-emitted yet: the events wired into the implementation today are
-`SessionStarted`, `SessionEnded`, `ParticipantJoined`, `ParticipantLeft`,
-`SceneActivated`, `VisibilityRuleChanged`, `ContentRevealed` and
-`ContentHidden` (`SessionEventTypes`); the remaining rows are planned and land
-with their own stories.
+separately in `csv/entitlement_event_catalog.csv`. The catalog is a **contract,
+not aspirational** (CORE-EVT-004, the session-event analogue of CORE-SPEC-002):
+the emitted set is the ten names in `apps/api/Realtime/SessionEventTypes.cs` —
+`SessionCreated`, `SessionStarted`, `SessionEnded`, `ParticipantJoined`,
+`ParticipantLeft`, `SceneActivated`, `VisibilityRuleChanged`, `ContentRevealed`,
+`ContentHidden` and `RecapGenerated` — and the spec-consistency check (check 11)
+requires that set to equal the **non-deferred** catalog, so the catalog can no
+longer list a session event that no command emits. `SceneCreated` and
+`ContentBlockCreated` stay in the catalog marked **deferred**: a scene/content
+block is workspace-prepared and carries **no session**, so it cannot be a
+session-scoped event until a session binds it (the Sessions active-scene
+pointer), and emitting it as a session event would need that future story, not
+this one. The three vertical/future events `PrivateMessageSent`, `AssetRevealed`
+and `SessionNoteCreated` were **removed** from the catalog (they tie to no Core
+command and belong to a vertical), so the catalog now lists only events that are
+emitted or explicitly deferred.
 
 | Event | Emitted by | Visible to | Persisted | Notes |
 |---|---|---|---:|---|
-| SessionCreated | Host/Admin | Host/Admin/CoHost | yes | not always participant-visible |
+| SessionCreated | Host/Admin | Host/Admin/CoHost | yes | not always participant-visible; emitted host-only on session create (CORE-EVT-004) |
 | SessionStarted | Host/CoHost | session audience | yes | starts live timeline |
 | SessionEnded | Host/CoHost | session audience | yes | ends live timeline |
 | ParticipantJoined | Participant/System | Host/CoHost, maybe audience | yes | join visibility configurable |
 | ParticipantLeft | System | Host/CoHost | yes | participant feed optional |
-| SceneCreated | Host/CoHost | Host/CoHost | yes | preparation event |
+| SceneCreated | Host/CoHost | Host/CoHost | yes | preparation event; **deferred** — no session scope (owner: the Sessions active-scene pointer) |
 | SceneActivated | Host/CoHost | authorized audience | yes | scene switch; emitted on a scene reveal (CORE-EVT-003), subject-gated |
-| ContentBlockCreated | Host/CoHost | Host/CoHost | yes | prep only by default |
+| ContentBlockCreated | Host/CoHost | Host/CoHost | yes | prep only by default; **deferred** — no session scope (owner: the Sessions active-scene pointer) |
 | VisibilityRuleChanged | Host/CoHost | Host/CoHost/Audit | yes | security-relevant; realtime event subject-gated, host-facing on a hide (CORE-EVT-003), distinct from the audit record |
 | ContentRevealed | Host/CoHost | selected recipients | yes | central event |
 | ContentHidden | Host/CoHost | selected recipients | yes | un-reveal; inverse of ContentRevealed |
-| PrivateMessageSent | Host/CoHost | selected recipients | yes | content filtered per recipient |
-| AssetRevealed | Host/CoHost | selected recipients | yes | signed URL requested separately |
-| SessionNoteCreated | Host/CoHost | Host/CoHost | yes | never participant-visible by default |
-| RecapGenerated | Host/System | Host/CoHost/Admin | yes | participant recap requires separate reveal |
+| RecapGenerated | Host/System | Host/CoHost/Admin | yes | participant recap requires separate reveal; emitted host-only by the recap worker (CORE-EVT-004) |
 
 ## Scene and visibility lifecycle events (CORE-EVT-003)
 

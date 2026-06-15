@@ -35,6 +35,11 @@
      10. csv/database_tables.csv equals the EF model snapshot's tables (both
          directions) and the promised UNIQUE indexes are declared in the snapshot.
 
+    Session-event catalog binding (CORE-EVT-004):
+     11. the emitted session-event set (the SessionEventTypes constants) equals the
+         non-deferred csv/event_catalog.csv events, in both directions, so the
+         catalog can no longer list a session event that no command emits.
+
     Exits 0 when every invariant holds, 1 when drift is found, and 2 on a
     configuration error (a spec file that cannot be found or parsed).
 

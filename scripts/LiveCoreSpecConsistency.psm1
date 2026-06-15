@@ -34,6 +34,15 @@
           spec promises are actually declared in the snapshot (table
           columns/indexes).
 
+    CORE-EVT-004 adds one more semantic invariant, binding the session-event
+    catalog to the implementation (the session-event analogue of CORE-SPEC-002):
+
+      11. the EMITTED session-event set (the SessionEventTypes constants in
+          apps/api/Realtime/SessionEventTypes.cs) equals the NON-deferred
+          csv/event_catalog.csv events, in both directions, so the catalog can no
+          longer list a session event that no command emits (a DEFERRED-marked
+          catalog row is excluded).
+
     The single source of truth per concern is docs/24_SPEC_CONSISTENCY.md.
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh).
 #>
@@ -301,6 +310,42 @@ function Get-LiveCoreEntitlementEvent {
     param([Parameter(Mandatory)][string]$RepoRoot)
     $csv = Get-LiveCoreSpecFile -RepoRoot $RepoRoot -RelativePath 'csv/entitlement_event_catalog.csv'
     return @(Import-Csv -Path $csv)
+}
+
+function Get-LiveCoreSessionEventType {
+    # The EMITTED session-event vocabulary (CORE-EVT-004), parsed from the SessionEventTypes catalog so a
+    # rename/addition in code is reflected without editing this script (mirrors Get-LiveCoreAuditAction). These
+    # are the product-neutral event-type NAMES (the `public const string` values) the Realtime publisher
+    # actually emits; the host-only routing set is a `static readonly` field and so is intentionally not matched.
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    $file = Get-LiveCoreSpecFile -RepoRoot $RepoRoot -RelativePath 'apps/api/Realtime/SessionEventTypes.cs'
+    $text = Get-Content -LiteralPath $file -Raw
+    $types = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($text, 'public\s+const\s+string\s+\w+\s*=\s*"(?<value>[^"]+)"')) {
+        $types.Add($m.Groups['value'].Value)
+    }
+    return $types.ToArray()
+}
+
+function Get-LiveCoreCatalogEvent {
+    # The session-event catalog rows (csv/event_catalog.csv, the single source of truth for the session-event
+    # vocabulary), each with its event name and whether its notes mark it DEFERRED. A DEFERRED row is a
+    # documented-but-unemitted event with a named owner (today the workspace-prepared SceneCreated/
+    # ContentBlockCreated), excluded from the emitted-set binding exactly as check 3 excludes DEFERRED
+    # entitlement tables.
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    $csv = Get-LiveCoreSpecFile -RepoRoot $RepoRoot -RelativePath 'csv/event_catalog.csv'
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($row in (Import-Csv -Path $csv)) {
+        $notes = if ($null -ne $row.notes) { [string]$row.notes } else { '' }
+        $rows.Add([pscustomobject]@{
+                Event      = ([string]$row.event).Trim()
+                IsDeferred = ($notes -match 'DEFERRED')
+            })
+    }
+    return $rows.ToArray()
 }
 
 # --- Semantic checks (each returns a string[] of drift findings) ---
@@ -583,6 +628,40 @@ function Test-LiveCoreTableSchema {
     return $findings.ToArray()
 }
 
+function Test-LiveCoreSessionEventEmission {
+    # CORE-EVT-004: the catalog is a CONTRACT, not aspirational. The EMITTED session-event set (the
+    # SessionEventTypes constants) must EQUAL the NON-deferred catalog (csv/event_catalog.csv), in BOTH
+    # directions: a non-deferred catalog event that no command emits (no SessionEventTypes member), and a
+    # SessionEventTypes constant that is not a non-deferred catalog row, both fail. A DEFERRED-marked catalog
+    # row is a documented-but-unemitted event with a named owner and is excluded from the comparison (the
+    # session-event analogue of CORE-SPEC-002's AuditAction binding, and of check 3's DEFERRED-table handling).
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$CatalogRow,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$EmittedType
+    )
+    $findings = New-Object System.Collections.Generic.List[string]
+
+    $emitted = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($t in $EmittedType) { [void]$emitted.Add($t) }
+
+    $nonDeferred = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($r in $CatalogRow) {
+        if (-not $r.IsDeferred) { [void]$nonDeferred.Add($r.Event) }
+    }
+
+    foreach ($event in $nonDeferred) {
+        if (-not $emitted.Contains($event)) {
+            $findings.Add("EVENT-EMIT: csv/event_catalog.csv lists non-deferred event '$event' which no Core command emits (no SessionEventTypes member); emit it, remove it, or mark it DEFERRED - CORE-EVT-004")
+        }
+    }
+    foreach ($type in $emitted) {
+        if (-not $nonDeferred.Contains($type)) {
+            $findings.Add("EVENT-EMIT: SessionEventTypes emits '$type' but it is not a non-deferred event in csv/event_catalog.csv - CORE-EVT-004")
+        }
+    }
+    return $findings.ToArray()
+}
+
 # --- Shared constants for the new checks ---
 
 function Get-LiveCoreKnownRoleDescriptor {
@@ -762,6 +841,12 @@ function Invoke-LiveCoreSpecConsistency {
     $requiredIndexes = @(Get-LiveCoreRequiredUniqueIndex)
     foreach ($f in (Test-LiveCoreTableSchema -CsvTable $csvTables -SnapshotTable $snapshotTables -SnapshotText $snapshotText -RequiredUniqueIndex $requiredIndexes)) { $findings.Add($f) }
 
+    # --- Check 11: emitted session events vs the non-deferred catalog (CORE-EVT-004) ---
+    $checkCount++
+    $catalogEvents = @(Get-LiveCoreCatalogEvent -RepoRoot $RepoRoot)
+    $emittedTypes = @(Get-LiveCoreSessionEventType -RepoRoot $RepoRoot)
+    foreach ($f in (Test-LiveCoreSessionEventEmission -CatalogRow $catalogEvents -EmittedType $emittedTypes)) { $findings.Add($f) }
+
     return @{
         Findings   = $findings.ToArray()
         CheckCount = $checkCount
@@ -778,6 +863,8 @@ Export-ModuleMember -Function @(
     'Get-LiveCoreSnapshotTable',
     'Get-LiveCoreSnapshotText',
     'Get-LiveCoreEntitlementEvent',
+    'Get-LiveCoreSessionEventType',
+    'Get-LiveCoreCatalogEvent',
     'Get-LiveCoreKnownRoleDescriptor',
     'Get-LiveCoreRequiredUniqueIndex',
     'ConvertTo-LiveCoreRouteKey',
@@ -787,5 +874,6 @@ Export-ModuleMember -Function @(
     'Test-LiveCoreMobileStoreRoute',
     'Test-LiveCoreUniqueIndex',
     'Test-LiveCoreTableSchema',
+    'Test-LiveCoreSessionEventEmission',
     'Invoke-LiveCoreSpecConsistency'
 )

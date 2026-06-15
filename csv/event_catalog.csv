@@ -1,16 +1,13 @@
 event,emitter,visible_to,persisted,notes
-SessionCreated,Host/Admin,Host/Admin/CoHost,yes,Preparation event
+SessionCreated,Host/Admin,Host/Admin/CoHost,yes,Preparation event; emitted host-only on session create (CORE-EVT-004)
 SessionStarted,Host/CoHost,authorized session audience,yes,Starts live run
 SessionEnded,Host/CoHost,authorized session audience,yes,Ends live run
 ParticipantJoined,Participant/System,Host/CoHost and configured audience,yes,Connection event
 ParticipantLeft,System,Host/CoHost,yes,Connection event
-SceneCreated,Host/CoHost,Host/CoHost,yes,Prep event
+SceneCreated,Host/CoHost,Host/CoHost,yes,Prep event; DEFERRED - a workspace-prepared scene carries no session so it is not a session-scoped event yet; owner the Sessions active-scene pointer (CORE-EVT-004)
 SceneActivated,Host/CoHost,authorized session audience,yes,Scene switch; emitted on a scene reveal (CORE-EVT-003) and subject-gated to the audience that may see the scene
-ContentBlockCreated,Host/CoHost,Host/CoHost,yes,Prep event
+ContentBlockCreated,Host/CoHost,Host/CoHost,yes,Prep event; DEFERRED - a workspace-prepared content block carries no session so it is not a session-scoped event yet; owner the Sessions active-scene pointer (CORE-EVT-004)
 VisibilityRuleChanged,Host/CoHost,Host/CoHost/Auditor,yes,Security relevant; realtime event subject-gated and host-facing on a hide (CORE-EVT-003); distinct from the audit record
 ContentRevealed,Host/CoHost,selected recipients,yes,Central reveal event
 ContentHidden,Host/CoHost,selected recipients,yes,Inverse of ContentRevealed; un-reveal removes visibility
-PrivateMessageSent,Host/CoHost,selected recipients,yes,Recipient-specific projection
-AssetRevealed,Host/CoHost,selected recipients,yes,Asset metadata only; URL separate
-SessionNoteCreated,Host/CoHost,Host/CoHost,yes,Host-only by default
-RecapGenerated,System/Host,Host/CoHost/Admin,yes,Participant-visible only after separate reveal
+RecapGenerated,System/Host,Host/CoHost/Admin,yes,Participant-visible only after separate reveal; emitted host-only by the recap worker (CORE-EVT-004)

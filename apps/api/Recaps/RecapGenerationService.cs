@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LiveCore.Api.Realtime;
 using Microsoft.EntityFrameworkCore;
 
@@ -40,6 +41,20 @@ namespace LiveCore.Api.Recaps;
 /// <see cref="RecapAppendResult.AlreadyExists"/> — a benign no-op, counted as
 /// <see cref="RecapGenerationResult.Deduplicated"/>, never a duplicate and never a failure. So at most one
 /// system recap exists per session regardless of how many replicas or overlapping sweeps run.
+/// </para>
+///
+/// <para>
+/// EMITS RecapGenerated (CORE-EVT-004). When a recap is FRESHLY produced (not on a deduplicated race), the
+/// job appends the durable, HOST-ONLY <see cref="SessionEventTypes.RecapGenerated"/> session event to that
+/// session's own append-only stream — a SYSTEM event (no actor), with an identifier-only payload (the recap
+/// and session ids, never the recap body; threat T7) — so the catalog event is real and a host learns on
+/// reconnect/replay that a recap exists, while the audience never does until a separate reveal. The recap is
+/// the durable source of truth and is committed FIRST (its NOT-EXISTS-then-append dedup, CORE-RCP-001, cannot
+/// share an enclosing transaction without the partial-unique-index race aborting it), then the event is
+/// appended in its own durable transaction; a failure to append the event leaves the recap intact and is
+/// logged identifier-only rather than re-counting the recap as failed. The append routes itself: the
+/// recipient resolver delivers a host-only event to the session hosts only (it never widens to the audience),
+/// so no audience-widening can occur here.
 /// </para>
 ///
 /// <para>
@@ -164,6 +179,11 @@ public sealed class RecapGenerationService
                         "Generated system recap {RecapId} for ended session {SessionId}.",
                         recap.Id,
                         session.SessionId);
+
+                    // CORE-EVT-004: emit the durable, HOST-ONLY RecapGenerated session event for the recap just
+                    // produced. Only on a FRESH recap (never a deduplicated race), so a session gets exactly one
+                    // RecapGenerated event, matching its one system recap.
+                    await EmitRecapGeneratedEventAsync(recap, generatedAt, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
@@ -194,4 +214,63 @@ public sealed class RecapGenerationService
 
         return new RecapGenerationResult(Examined: examined, Generated: generated, Deduplicated: deduplicated, Failed: failed);
     }
+
+    /// <summary>
+    /// Appends the durable, HOST-ONLY <see cref="SessionEventTypes.RecapGenerated"/> session event for a
+    /// freshly produced recap (CORE-EVT-004). The event is a SYSTEM event (no actor — the platform produced
+    /// it, docs/09_EVENT_CATALOG.md <c>RecapGenerated</c> source "System/Host"), carries no visibility subject
+    /// and no selected participant, and its payload is identifier-only (the recap and session ids, never the
+    /// recap body; threat T7). Because <see cref="SessionEventTypes.IsHostOnly"/> classifies it host-only, the
+    /// recipient resolver delivers it to the session hosts only — the audience never receives it until a host
+    /// reveals the recap (threats T2/T7) — so this append can never widen an event's audience.
+    /// <para>
+    /// The recap is already committed (the source of truth); this event is appended in its OWN transaction
+    /// because the recap's NOT-EXISTS-then-append dedup (CORE-RCP-001) cannot share an enclosing transaction
+    /// without the partial-unique-index race aborting it. A failure here leaves the recap intact, so it is
+    /// logged identifier-only and swallowed rather than re-counting the already-produced recap as a failure or
+    /// crashing the sweep; host shutdown (cancellation) still propagates.
+    /// </para>
+    /// </summary>
+    private async Task EmitRecapGeneratedEventAsync(Recap recap, DateTimeOffset generatedAt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = JsonSerializer.Serialize(new RecapGeneratedEventPayload(recap.Id, recap.SessionId));
+
+            var sessionEvent = SessionEvent.Create(
+                recap.OrganizationId,
+                recap.WorkspaceId,
+                recap.SessionId,
+                SessionEventTypes.RecapGenerated,
+                createdBy: null,
+                targetParticipantId: null,
+                payload,
+                schemaVersion: 1,
+                generatedAt);
+
+            await _sessionEvents.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Host shutdown during the append is expected; let it propagate so the sweep stops cleanly.
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // The recap is durable and already committed, so a failed event append degrades only the host-only
+            // RecapGenerated notification, not the recap itself; log identifiers/counts only (threat T7) and
+            // continue the sweep rather than marking the produced recap as failed.
+            _logger.LogWarning(
+                exception,
+                "Generated system recap {RecapId} for session {SessionId} but failed to append its RecapGenerated event; the recap is durable and unaffected.",
+                recap.Id,
+                recap.SessionId);
+        }
+    }
+
+    /// <summary>
+    /// The server-composed payload of a <see cref="SessionEventTypes.RecapGenerated"/> event: the recap id
+    /// and the session it summarizes. Identifiers only — never the recap body (threat T7).
+    /// </summary>
+    private sealed record RecapGeneratedEventPayload(Guid RecapId, Guid SessionId);
 }

@@ -188,9 +188,11 @@ public sealed class GoldenPathSessionJourneyEndpointTests
                 "Replay events must be in strictly increasing sequence order.");
         }
 
-        // Complete: the stream opens with SessionStarted and closes with SessionEnded, and every event the
-        // journey emitted is present.
-        Assert.Equal(SessionEventTypes.SessionStarted, hostReplay.Events[0].EventType);
+        // Complete: the stream opens with the host-only SessionCreated (CORE-EVT-004) then SessionStarted, and
+        // closes with SessionEnded, and every event the journey emitted is present. The host (a workspace Host)
+        // is in the session-hosts group, so the host replay includes the host-only SessionCreated prep event.
+        Assert.Equal(SessionEventTypes.SessionCreated, hostReplay.Events[0].EventType);
+        Assert.Equal(SessionEventTypes.SessionStarted, hostReplay.Events[1].EventType);
         Assert.Equal(SessionEventTypes.SessionEnded, hostReplay.Events[^1].EventType);
 
         var hostEventTypes = hostReplay.Events.Select(e => e.EventType).ToArray();

@@ -4,10 +4,37 @@ namespace LiveCore.Api.Realtime;
 /// The Core-level catalog of session event type names (CORE-RT-003), the product-neutral
 /// <c>eventType</c> values of docs/09_EVENT_CATALOG.md. Names are generic Core events, never vertical
 /// terms. Extensible: later stories add members as their commands begin emitting events (the start/end
-/// lifecycle events were wired by CORE-EVT-001; the remaining catalog events follow).
+/// lifecycle events were wired by CORE-EVT-001; <see cref="SessionCreated"/> and <see cref="RecapGenerated"/>
+/// by CORE-EVT-004).
+///
+/// <para>
+/// CATALOG-AS-CONTRACT (CORE-EVT-004). This set is the SINGLE source of the emitted session-event
+/// vocabulary, and the spec-consistency check (scripts/spec-consistency.ps1, check 11) binds it to
+/// csv/event_catalog.csv: every constant here must be a NON-deferred catalog row, and every non-deferred
+/// catalog row must have a constant here. So the catalog can no longer list a session event that no command
+/// emits (the session-event analogue of CORE-SPEC-002, which made the entitlement/store catalog real). A
+/// catalog event that has no Core command yet — for example the workspace-prepared <c>SceneCreated</c> /
+/// <c>ContentBlockCreated</c>, which carry no session and so cannot be session-scoped events without an
+/// active-scene pointer (a future Sessions story) — stays in the catalog marked deferred and is deliberately
+/// absent here.
+/// </para>
 /// </summary>
 public static class SessionEventTypes
 {
+    /// <summary>
+    /// A session was created in a workspace — the Sessions module's create command
+    /// (docs/09_EVENT_CATALOG.md: "SessionCreated | Host/Admin | Host/Admin/CoHost | yes | not always
+    /// participant-visible"). Emitted by the create endpoint (CORE-EVT-004) when a session is actually
+    /// created (the <c>Prepared</c> state the session starts in), appended to its OWN session's stream inside
+    /// the create command's unit of work (CORE-CONC-002). Unlike the subjectless lifecycle events
+    /// (<see cref="SessionStarted"/>), which reach the WHOLE session audience, this is a HOST-ONLY
+    /// preparation event (<see cref="IsHostOnly"/>): the catalog makes it visible to the hosts only, so the
+    /// recipient resolver delivers it to the session hosts and to no observer or participant — never the
+    /// audience — both live and on reconnect replay. The payload carries the session IDENTIFIER and its
+    /// lifecycle status only, never any content (threat T7); the actor is the host who created the session.
+    /// </summary>
+    public const string SessionCreated = "SessionCreated";
+
     /// <summary>
     /// A session moved from <c>Prepared</c> to <c>Live</c> — the Sessions module's start command
     /// (docs/09_EVENT_CATALOG.md: "SessionStarted | Host/CoHost | session audience | yes | starts live
@@ -105,4 +132,44 @@ public static class SessionEventTypes
     /// active participant — and carries resource IDENTIFIERS only, never content (threats T2/T3/T7).
     /// </summary>
     public const string ContentHidden = "ContentHidden";
+
+    /// <summary>
+    /// A recap was generated for a session — the Recaps module's recap-generation job
+    /// (docs/09_EVENT_CATALOG.md: "RecapGenerated | Host/System | Host/CoHost/Admin | yes | participant
+    /// recap requires separate reveal"). Emitted by the background recap worker (CORE-EVT-004,
+    /// <see cref="LiveCore.Api.Recaps.RecapGenerationService"/>) when a recap is actually produced for an
+    /// ENDED session, appended to that session's stream as a SYSTEM event (no actor). Like
+    /// <see cref="SessionCreated"/> it is a HOST-ONLY event (<see cref="IsHostOnly"/>): a generated recap is
+    /// "Participant-visible only after separate reveal", so the recipient resolver delivers it to the session
+    /// hosts only — never an observer or participant — both live and on reconnect replay, so the recap's
+    /// existence never leaks to the audience before a host reveals it (threats T2/T7). The payload carries
+    /// the recap and session IDENTIFIERS only, never the recap body.
+    /// </summary>
+    public const string RecapGenerated = "RecapGenerated";
+
+    /// <summary>
+    /// The HOST-ONLY session events (CORE-EVT-004): preparation/output events the catalog marks visible to
+    /// the hosts only — a generated recap is "Participant-visible only after separate reveal", and a created
+    /// session is "not always participant-visible" (docs/09_EVENT_CATALOG.md; csv/event_catalog.csv). They
+    /// are durable and host-facing, so the recipient resolver delivers them to the session hosts and to NO
+    /// observer or participant, both live and on reconnect replay — even after a resource the event concerns
+    /// is later revealed to the audience, the prep/output event itself never reaches the audience. This is a
+    /// subject-INDEPENDENT routing class (unlike <see cref="SceneActivated"/>, whose audience changes as the
+    /// scene's visibility changes), so it is recorded as Core routing policy on the catalog rather than
+    /// derived from the event's visibility subject.
+    /// </summary>
+    private static readonly HashSet<string> _hostOnlyEventTypes = new(StringComparer.Ordinal)
+    {
+        SessionCreated,
+        RecapGenerated,
+    };
+
+    /// <summary>
+    /// Whether the given event type is a HOST-ONLY event (see <see cref="_hostOnlyEventTypes"/>): a
+    /// preparation/output event the catalog routes to the session hosts only, never the audience. The
+    /// recipient resolver (<see cref="SessionEventRecipientResolver"/>) consults this to deliver such an
+    /// event to the hosts group alone, both for live delivery and on reconnect replay, so the routing can
+    /// never widen to an observer or participant.
+    /// </summary>
+    public static bool IsHostOnly(string eventType) => _hostOnlyEventTypes.Contains(eventType);
 }

@@ -216,6 +216,59 @@ public sealed class RecapGenerationServiceTests
             store.Appended.Select(recap => recap.SessionId).OrderBy(id => id));
     }
 
+    [Fact]
+    public async Task Emits_a_host_only_RecapGenerated_event_for_each_generated_recap()
+    {
+        // CORE-EVT-004: each freshly produced recap appends one durable RecapGenerated session event to its
+        // own session's stream — a SYSTEM event (no actor), host-only and identifier-only.
+        var first = EndedSession();
+        var second = EndedSession();
+        var store = new FakeRecapStore(first, second);
+        var service = CreateService(store);
+
+        var result = await service.GenerateDueRecapsAsync(CancellationToken.None);
+
+        Assert.Equal(2, result.Generated);
+        Assert.Equal(2, store.AppendedEvents.Count);
+        foreach (var session in new[] { first, second })
+        {
+            var recap = Assert.Single(store.Appended, candidate => candidate.SessionId == session.SessionId);
+            var sessionEvent = Assert.Single(store.AppendedEvents, candidate => candidate.SessionId == session.SessionId);
+
+            // RecapGenerated, host-only, system-produced (no actor), subjectless and not selected — so the
+            // recipient resolver routes it to the session hosts only (never the audience).
+            Assert.Equal(SessionEventTypes.RecapGenerated, sessionEvent.EventType);
+            Assert.True(SessionEventTypes.IsHostOnly(sessionEvent.EventType));
+            Assert.Null(sessionEvent.CreatedBy);
+            Assert.Null(sessionEvent.TargetParticipantId);
+            Assert.False(sessionEvent.HasVisibilitySubject);
+
+            // Scoped to its OWN session's tenant/workspace/session (threat T5), with an identifier-only
+            // payload carrying the recap and session ids and never the recap body (threat T7).
+            Assert.Equal(session.OrganizationId, sessionEvent.OrganizationId);
+            Assert.Equal(session.WorkspaceId, sessionEvent.WorkspaceId);
+            Assert.Contains(recap.Id.ToString(), sessionEvent.Payload, StringComparison.Ordinal);
+            Assert.Contains(session.SessionId.ToString(), sessionEvent.Payload, StringComparison.Ordinal);
+            Assert.DoesNotContain(recap.Summary, sessionEvent.Payload, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Emits_no_RecapGenerated_event_when_the_recap_is_deduplicated()
+    {
+        // A second sweep finds the session already recapped (idempotent), so it produces NO new recap and
+        // therefore appends NO RecapGenerated event — exactly one event per session, matching its one recap.
+        var session = EndedSession();
+        var store = new FakeRecapStore(session);
+        var service = CreateService(store);
+
+        await service.GenerateDueRecapsAsync(CancellationToken.None);
+        var second = await service.GenerateDueRecapsAsync(CancellationToken.None);
+
+        Assert.Equal(0, second.Generated);
+        Assert.Single(store.AppendedEvents);
+    }
+
     private static RecapGenerationService CreateService(FakeRecapStore store)
         => new(
             store,
@@ -260,6 +313,9 @@ public sealed class RecapGenerationServiceTests
         public FakeRecapStore(params RecapEligibleSession[] endedSessions) => _endedSessions = [.. endedSessions];
 
         public List<Recap> Appended { get; } = [];
+
+        /// <summary>The durable RecapGenerated session events the job appended (CORE-EVT-004).</summary>
+        public List<SessionEvent> AppendedEvents { get; } = [];
 
         public HashSet<Guid> FailAppendFor { get; } = [];
 
@@ -326,10 +382,15 @@ public sealed class RecapGenerationServiceTests
         public Task<IReadOnlyList<Recap>> ListBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
-        // ISessionEventRepository — the recap body's source (CORE-RCP-002). Only the tenant- and session-scoped
-        // read is exercised; the append is the Realtime module's path, not the generation job's.
+        // ISessionEventRepository — the recap body's source (CORE-RCP-002) AND, since CORE-EVT-004, the sink
+        // for the durable RecapGenerated event the job appends on each freshly produced recap. Capture the
+        // appended events so the tests can assert the host-only, identifier-only emission.
         public Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
-            => throw new NotSupportedException();
+        {
+            ArgumentNullException.ThrowIfNull(sessionEvent);
+            AppendedEvents.Add(sessionEvent);
+            return Task.CompletedTask;
+        }
 
         public Task<IReadOnlyList<SessionEvent>> ListBySessionAsync(Guid organizationId, Guid sessionId, CancellationToken cancellationToken)
         {

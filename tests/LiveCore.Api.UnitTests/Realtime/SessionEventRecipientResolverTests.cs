@@ -41,6 +41,11 @@ public sealed class SessionEventRecipientResolverTests
             targetParticipantId: target, "{\"resourceId\":\"x\"}", 1, _now,
             visibilitySubjectType: "Entity", visibilitySubjectId: Guid.NewGuid());
 
+    private static SessionEvent HostOnlyEvent(string eventType)
+        => SessionEvent.Create(
+            _org, _workspace, _session, eventType, Guid.NewGuid(),
+            targetParticipantId: null, "{\"sessionId\":\"x\"}", 1, _now);
+
     [Fact]
     public async Task A_selected_event_reaches_only_the_selected_participant_and_hosts()
     {
@@ -162,6 +167,29 @@ public sealed class SessionEventRecipientResolverTests
                 RealtimeGroups.SessionParticipant(_session, a.Id),
             },
             deliveries.Select(delivery => delivery.Group));
+        Assert.False(visibility.WasConsulted);
+    }
+
+    [Theory]
+    [InlineData(SessionEventTypes.SessionCreated)]
+    [InlineData(SessionEventTypes.RecapGenerated)]
+    public async Task A_host_only_event_reaches_the_hosts_group_only_and_never_the_audience(string eventType)
+    {
+        // CORE-EVT-004: a host-only preparation/output event (SessionCreated, RecapGenerated) reaches the
+        // session hosts group and STOPS — never an observer, never a participant — even with active
+        // participants present and full visibility. The Visibility engine is never consulted (the routing is
+        // subject-independent), so the audience can never receive it, live or on replay (threats T2/T7).
+        var a = NewParticipant();
+        var b = NewParticipant();
+        var visibility = new FakeRecipientVisibility(); // everyone would otherwise be visible
+        var resolver = new SessionEventRecipientResolver(visibility, new FakeParticipantRepository(a, b));
+
+        var deliveries = await resolver.ResolveAsync(HostOnlyEvent(eventType), CancellationToken.None);
+
+        Assert.Equal(new[] { RealtimeGroups.SessionHosts(_session) }, deliveries.Select(d => d.Group));
+        Assert.DoesNotContain(RealtimeGroups.SessionObservers(_session), deliveries.Select(d => d.Group));
+        Assert.DoesNotContain(RealtimeGroups.SessionParticipant(_session, a.Id), deliveries.Select(d => d.Group));
+        Assert.DoesNotContain(RealtimeGroups.SessionParticipant(_session, b.Id), deliveries.Select(d => d.Group));
         Assert.False(visibility.WasConsulted);
     }
 

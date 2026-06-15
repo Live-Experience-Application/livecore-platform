@@ -12,10 +12,10 @@
     It proves the SEMANTIC checks reject seeded drift over fixtures - a route with
     a changed (unknown) role, an undocumented endpoint, a documented-but-unmounted
     route, an entitlement-catalog event with no audit action, a mobile route whose
-    auth_required disagrees with the route, and a table/unique-index that the EF
-    model snapshot does not back - and then proves the REAL repository tree passes
-    every check. This is the seeded-drift / real-tree-passes requirement of
-    CORE-SPEC-001.
+    auth_required disagrees with the route, a table/unique-index that the EF model
+    snapshot does not back, and a non-deferred session event no command emits
+    (CORE-EVT-004) - and then proves the REAL repository tree passes every check.
+    This is the seeded-drift / real-tree-passes requirement of CORE-SPEC-001.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-spec-consistency.ps1
@@ -250,6 +250,48 @@ $indexDrift = @(Test-LiveCoreTableSchema -CsvTable $snapshotTables -SnapshotTabl
 AssertTrue (Test-AnyFinding -Finding $indexDrift -Pattern 'INDEX:.*purchase_transactions') `
     'a promised UNIQUE index missing from the EF model snapshot fails the check'
 
+# === Check 11: emitted session events vs the non-deferred catalog (CORE-EVT-004) ===
+
+function Get-CatalogEventFixture {
+    param([string]$Event, [bool]$Deferred)
+    return [pscustomobject]@{ Event = $Event; IsDeferred = $Deferred }
+}
+
+# A catalog whose non-deferred events exactly match the emitted set produces no findings; a DEFERRED row is
+# excluded (it need not be emitted), exactly as the real SceneCreated/ContentBlockCreated are.
+$consistentCatalog = @(
+    Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false
+    Get-CatalogEventFixture -Event 'SceneCreated' -Deferred $true
+)
+$consistentEmission = @(Test-LiveCoreSessionEventEmission -CatalogRow $consistentCatalog -EmittedType @('SessionCreated'))
+AssertTrue ($consistentEmission.Count -eq 0) `
+    'a catalog whose non-deferred events equal the emitted set (DEFERRED rows excluded) produces no findings (CORE-EVT-004)'
+
+# A non-deferred catalog event that nothing emits fails (the catalog is aspirational).
+$aspirationalCatalog = @(
+    Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false
+    Get-CatalogEventFixture -Event 'PhantomEvent' -Deferred $false
+)
+$aspirational = @(Test-LiveCoreSessionEventEmission -CatalogRow $aspirationalCatalog -EmittedType @('SessionCreated'))
+AssertTrue (Test-AnyFinding -Finding $aspirational -Pattern 'EVENT-EMIT:.*PhantomEvent.*no Core command emits') `
+    'a non-deferred catalog event that no command emits fails the check (CORE-EVT-004)'
+
+# An emitted type that is not a non-deferred catalog row fails (emitting an undocumented or deferred event).
+$ghostEmit = @(Test-LiveCoreSessionEventEmission `
+        -CatalogRow @(Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false) `
+        -EmittedType @('SessionCreated', 'GhostEmitted'))
+AssertTrue (Test-AnyFinding -Finding $ghostEmit -Pattern 'EVENT-EMIT:.*GhostEmitted.*not a non-deferred event') `
+    'a SessionEventTypes constant that is not a non-deferred catalog event fails the check (CORE-EVT-004)'
+
+# The real SessionEventTypes carries the CORE-EVT-004 events and binds cleanly to the real catalog.
+$realEmittedTypes = @(Get-LiveCoreSessionEventType -RepoRoot $repoRoot)
+AssertTrue (($realEmittedTypes -contains 'SessionCreated') -and ($realEmittedTypes -contains 'RecapGenerated')) `
+    'SessionEventTypes carries the CORE-EVT-004 events (SessionCreated, RecapGenerated)'
+$realCatalogEvents = @(Get-LiveCoreCatalogEvent -RepoRoot $repoRoot)
+$realEmission = @(Test-LiveCoreSessionEventEmission -CatalogRow $realCatalogEvents -EmittedType $realEmittedTypes)
+AssertTrue ($realEmission.Count -eq 0) `
+    'the real SessionEventTypes set equals the real non-deferred event catalog (CORE-EVT-004)'
+
 # === The real repository tree passes every check ===
 
 $realEntitlementEvents = @(Get-LiveCoreEntitlementEvent -RepoRoot $repoRoot)
@@ -258,7 +300,7 @@ $realCatalog = @(Test-LiveCoreEntitlementEventCatalog -Row $realEntitlementEvent
 AssertTrue ($realCatalog.Count -eq 0) 'the real csv/entitlement_event_catalog.csv passes the catalog check and the AuditAction binding (CORE-SPEC-002)'
 
 $result = Invoke-LiveCoreSpecConsistency -RepoRoot $repoRoot
-AssertTrue ($result.CheckCount -eq 10) 'the orchestrator runs all ten checks'
+AssertTrue ($result.CheckCount -eq 11) 'the orchestrator runs all eleven checks'
 if ($result.Findings.Count -gt 0) {
     foreach ($finding in $result.Findings) {
         $failures.Add("FAIL (real tree): $finding")
@@ -278,5 +320,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Spec consistency tests passed: seeded route/role/auth/event/mobile/schema drift is rejected and the real tree passes.' -ForegroundColor Green
+Write-Host 'Spec consistency tests passed: seeded route/role/auth/event/mobile/schema/session-event drift is rejected and the real tree passes.' -ForegroundColor Green
 exit 0

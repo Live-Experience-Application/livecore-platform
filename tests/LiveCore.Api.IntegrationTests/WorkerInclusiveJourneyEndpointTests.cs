@@ -103,7 +103,13 @@ public sealed class WorkerInclusiveJourneyEndpointTests
         // the session's own persisted append-only stream. Each count is derived INDEPENDENTLY from the stream
         // here (not from the composer), so this proves the worker composed the recap from the real events the
         // API produced. The substrings omit the trailing plural "s" so they match either singular or plural.
-        var stream = await ReadSessionStreamAsync(factory, journey.OrganizationId, journey.EndedSessionId);
+        // Exclude the RecapGenerated event the job appends AFTER composing the recap (CORE-EVT-004): the recap
+        // was composed from the stream as it stood before its own event existed, so the recorded-count must
+        // match the stream MINUS that one event. The host-only SessionCreated prep event (CORE-EVT-004) IS part
+        // of the composed stream and so is counted, exactly as the recap composed it.
+        var stream = (await ReadSessionStreamAsync(factory, journey.OrganizationId, journey.EndedSessionId))
+            .Where(sessionEvent => sessionEvent.EventType != SessionEventTypes.RecapGenerated)
+            .ToList();
         Assert.NotEmpty(stream);
         Assert.Contains($"recorded {stream.Count} event", recap.Summary);
         Assert.Contains($"{Count(stream, SessionEventTypes.SceneActivated)} scene activation", recap.Summary);

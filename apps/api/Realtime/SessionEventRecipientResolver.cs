@@ -18,6 +18,11 @@ namespace LiveCore.Api.Realtime;
 ///   (docs/06_AUTHORIZATION_MATRIX.md) — with the HOST projection (<see cref="SessionEventEnvelope.ForHost"/>),
 ///   which carries the "to whom" routing confirmation (docs/09_EVENT_CATALOG.md "host receives
 ///   audit/confirmation event").</item>
+///   <item>A HOST-ONLY event (<see cref="SessionEventTypes.IsHostOnly"/> — the catalog's preparation/output
+///   events <c>SessionCreated</c> and <c>RecapGenerated</c>, CORE-EVT-004) reaches the hosts group and STOPS:
+///   no observers and no participants, live or on reconnect replay. It is a subject-INDEPENDENT host-facing
+///   routing class (the catalog marks it visible to hosts only), so the audience never receives it even after
+///   a resource it concerns is later revealed (threats T2/T7).</item>
 ///   <item>A SELECTED-participant event (<see cref="SessionEvent.TargetParticipantId"/> set) is delivered
 ///   to ONLY that one participant's group (plus hosts) — never to observers or any other participant — and
 ///   only when they may see the subject. A non-selected participant is not in that group AND would fail
@@ -86,6 +91,19 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
         deliveries.Add(new SessionEventDelivery(
             RealtimeGroups.SessionHosts(sessionEvent.SessionId),
             SessionEventEnvelope.ForHost(sessionEvent)));
+
+        // HOST-ONLY events (CORE-EVT-004): the preparation/output events the catalog routes to the hosts
+        // only — SessionCreated, RecapGenerated (SessionEventTypes.IsHostOnly). They reach the session hosts
+        // group and STOP: no observers, no participants, live or on reconnect replay (the replay filter
+        // re-runs this resolver, so it keeps them host-only). This NARROWS delivery — it can never widen an
+        // audience — and is a subject-INDEPENDENT routing class: unlike a SceneActivated whose audience
+        // tracks the scene's current visibility, a created session or a generated recap is host-facing
+        // regardless of any later reveal, so a participant who joins and replays the stream never receives
+        // the prep/output event (the catalog's "visible to Host/CoHost/Admin"; threats T2/T7).
+        if (SessionEventTypes.IsHostOnly(sessionEvent.EventType))
+        {
+            return deliveries;
+        }
 
         var audienceEnvelope = SessionEventEnvelope.ForAudience(sessionEvent);
 
