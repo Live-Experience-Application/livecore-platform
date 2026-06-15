@@ -2025,12 +2025,13 @@ realtime hub, remain Realtime-epic follow-ups.
 The Scenes and Content modules expose their first HTTP routes for preparing a
 workspace's scenes and the content blocks shown within them:
 
-| Method | Route                                     | Authorized callers                             |
-| ------ | ----------------------------------------- | ---------------------------------------------- |
-| `GET`  | `/api/v1/workspaces/{workspaceId}/scenes` | any member of that workspace                   |
-| `POST` | `/api/v1/workspaces/{workspaceId}/scenes` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
-| `GET`  | `/api/v1/scenes/{sceneId}`                | any member of the scene's workspace            |
-| `POST` | `/api/v1/scenes/{sceneId}/content-blocks` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| Method | Route                                                       | Authorized callers                             |
+| ------ | ----------------------------------------------------------- | ---------------------------------------------- |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/scenes`                   | any member of that workspace                   |
+| `POST` | `/api/v1/workspaces/{workspaceId}/scenes`                   | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/scenes/{sceneId}`                                  | any member of the scene's workspace            |
+| `POST` | `/api/v1/scenes/{sceneId}/content-blocks`                   | workspace `Owner`, `Admin`, `Host` or `CoHost` |
 
 The two workspace-scoped scene routes resolve the target organization from a
 required `organizationSlug` (a query parameter on the `GET`, a body field on the
@@ -2045,9 +2046,18 @@ not a member of the workspace, is hidden as `404` (never `403`); a known member
 who lacks the write role is `403`.
 
 Creating a scene assigns its ordering position server-side (appended after the
-current last scene in the workspace); clients never supply or reorder positions.
-Creating a content block stores it at its initial revision. Both creates return
-`201 Created`.
+current last scene in the workspace). Reordering a scene
+(`POST .../scenes/{sceneId}/reorder`) moves it to a client-supplied **0-based list
+position** (`targetIndex`), but the actual `scene_order` values are still assigned
+server-side: the server re-packs the workspace's scenes to a contiguous, gap-free,
+duplicate-free ordering and returns the new sequence (`200 OK`). A position at or
+beyond the end moves the scene to the last slot (clamped); a negative position is
+`400`. Reordering is host-only (`Owner`/`Admin`/`Host`/`CoHost`) and a benign
+metadata move, so it is not audited — but it **is** a genuine read-modify-write on
+the scene rows, so two interleaved reorders are guarded by the scene's optimistic
+concurrency token: the loser gets a `409` rather than corrupting the ordering.
+Clients therefore never supply or collide an absolute order. Creating a content
+block stores it at its initial revision. Both creates return `201 Created`.
 
 The scene list **and the by-scene-id read** (`GET /api/v1/scenes/{sceneId}`,
 CORE-API-007) project by the caller's workspace role through the same projector:

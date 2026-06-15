@@ -63,6 +63,7 @@ POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide
 GET    /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes
+POST   /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder
 GET    /api/v1/scenes/{sceneId}
 POST   /api/v1/scenes/{sceneId}/content-blocks
 GET    /api/v1/participants/{participantId}/visible-feed

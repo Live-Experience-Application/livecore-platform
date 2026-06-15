@@ -9,7 +9,9 @@ namespace LiveCore.Api.Scenes;
 /// <summary>
 /// HTTP endpoints of the Scenes module. The scene content read/create routes are CORE-SCENE-003
 /// ("Implement scene content APIs") and the by-scene-id read is CORE-API-007; the scene DELETE route is
-/// CORE-LIFE-005 ("Implement scene deletion", the "Resource Lifecycle and Deletion" epic). They realize the
+/// CORE-LIFE-005 ("Implement scene deletion", the "Resource Lifecycle and Deletion" epic); the scene REORDER
+/// route is CORE-SCENE-006 ("Implement the scene reorder endpoint", the "Authoring Completeness" epic). They
+/// realize the
 /// documented request flow end-to-end for the workspace-scoped and by-scene-id scene routes:
 /// "authentication middleware -> tenant/workspace context resolver -> endpoint -> authorization policy"
 /// (docs/02_ARCHITECTURE.md), mirroring <see cref="Workspaces.WorkspaceEndpoints"/>'s
@@ -43,9 +45,20 @@ namespace LiveCore.Api.Scenes;
 ///   <see cref="ISceneRepository.AddAsync"/>. The order is assigned SERVER-SIDE as
 ///   append-to-end (the next order after the current maximum in the workspace; an empty
 ///   workspace gets order 0), so a client can never choose, skip or collide a position.
-///   No reorder route exists in csv/api_routes.csv, so reorder is out of scope.
+///   The user-driven reorder is the separate <c>.../reorder</c> route below (CORE-SCENE-006).
 ///   Rejected with 409 when the parent workspace is archived (read-only;
 ///   CORE-LIFE-009).</item>
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder</c> — module
+///   Scenes, roles "Host,CoHost,Owner,Admin" (CORE-SCENE-006). Moves a scene to a desired
+///   0-based position via <see cref="SceneReorderService"/>, which re-packs the workspace's
+///   scene ordering DETERMINISTICALLY (contiguous, gap-free, no duplicates) reusing the
+///   SCENE-001 (scene_order, id) ordering and the delete-repack logic. The position is a
+///   client-supplied LIST INDEX, but the actual order is assigned SERVER-SIDE (no
+///   client-trusted absolute order); a too-large index clamps to the end and a negative index
+///   is a 400. A reorder is a benign metadata move, so it is NOT audited. Concurrent reorders
+///   are made safe by the scene's xmin token (CORE-CONC-006): the loser gets a 409 rather than
+///   corrupting the order. Rejected with 409 when the parent workspace is archived
+///   (CORE-LIFE-009). Returns the re-packed scene list; a foreign/unknown scene is hidden-404.</item>
 ///   <item><c>GET  /api/v1/scenes/{sceneId}</c> — module Scenes, roles "workspace members"
 ///   (CORE-API-007, the documented-not-built by-scene-id read of docs/08_API_CONTRACTS.md).
 ///   Reads ONE scene by id within the query-supplied organization via
@@ -105,6 +118,7 @@ internal static class SceneEndpoints
 
         workspaceScopedGroup.MapGet("/{workspaceId}/scenes", ListScenesAsync);
         workspaceScopedGroup.MapPost("/{workspaceId}/scenes", CreateSceneAsync);
+        workspaceScopedGroup.MapPost("/{workspaceId}/scenes/{sceneId}/reorder", ReorderSceneAsync);
         workspaceScopedGroup.MapDelete("/{workspaceId}/scenes/{sceneId}", DeleteSceneAsync);
 
         // The by-scene-id read group (CORE-API-007): the route path carries only the
@@ -409,6 +423,145 @@ internal static class SceneEndpoints
         return Results.Created($"/api/v1/scenes/{scene.Id}", response);
     }
 
+    // POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder
+    //
+    // Moves ONE scene to a new position within its parent workspace (CORE-SCENE-006, the "Authoring
+    // Completeness" epic). The flow mirrors the create/delete handlers (the same fail-closed,
+    // load-then-authorize, hidden-404 shape): the parent workspace is resolved FIRST (the route pins
+    // {workspaceId} and {sceneId}, the tenant comes from the required organizationSlug body field), the caller
+    // is authorized by their role in that workspace, and only then is the scene moved — the workspace's scene
+    // ordering re-packed deterministically (contiguous, gap-free, no duplicates) — atomically through the
+    // tenant- and workspace-scoped reorder service. The target POSITION (a 0-based list index) is supplied by
+    // the client, but the actual order is assigned SERVER-SIDE (no client-trusted absolute order). A reorder
+    // is a benign metadata move, so it is NOT audited (unlike the delete). On success the re-packed scene list
+    // is returned; reordering a non-existent or foreign scene is a safe hidden-404.
+    private static async Task<IResult> ReorderSceneAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string sceneId,
+        [FromBody] ReorderSceneRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // The target position is a 0-based list index; a negative index is malformed input and is rejected as
+        // a 400 before touching the tenant (an out-of-range/foreign SCENE is hidden as 404; a too-large index
+        // is clamped to the end by the service). Validating the body shape first keeps a broken request a 400
+        // regardless of authorization.
+        if (request.TargetIndex < 0)
+        {
+            return ValidationError("A non-negative target index is required.");
+        }
+
+        // A malformed workspace or scene id can never address a stored row; treat each as hidden (404), never
+        // echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 so a foreign or non-existent tenant is indistinguishable
+            // from a missing scene (threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace (the parent workspace,
+        // resolved first). A caller who is a member of the tenant but NOT of the workspace must not learn the
+        // workspace's scenes exist, so a missing membership is hidden as 404 (not 403) — the same rule as the
+        // create and delete routes (threats T1/T5). The member's workspace role then drives the role check.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // The caller is a known member of the workspace, so an insufficient role is a 403 (authorized to know
+        // the workspace exists, but not to reorder its scenes). Reordering is host-prepared authoring, governed
+        // by the host-capable roles Owner/Admin/Host/CoHost (csv/api_routes.csv; docs/06_AUTHORIZATION_MATRIX.md),
+        // exactly like scene create and delete. MembershipRole is non-linear, so this is an EXACT set membership
+        // check, never a >/< ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Read-only when the parent workspace is archived (CORE-LIFE-009): reordering a scene is an authoring
+        // mutation, so an archived workspace rejects it with a 409 Conflict that changes nothing. The check is
+        // placed AFTER role authorization so a member who lacks the reorder role still gets a 403 and never
+        // learns the archived state (threat T7), mirroring the scene create handler.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenScene();
+        }
+
+        if (workspace.IsArchived)
+        {
+            return ArchivedReadOnly();
+        }
+
+        // Authorized: move the scene to its target position and re-pack the workspace's scene ordering
+        // atomically. The service loads the scene through the tenant- AND workspace-scoped FindByIdAsync, so a
+        // scene in another workspace or tenant is never moved even when its id is known; an unknown id is a
+        // SAFE 404 that changes nothing (threats T1/T5). A concurrent reorder is detected by the xmin token
+        // and surfaces as a 409 through the ConcurrencyConflictMiddleware (CORE-CONC-006).
+        var now = timeProvider.GetUtcNow();
+        var result = await deps.SceneReorder
+            .ReorderAsync(context.OrganizationId, workspaceGuid, sceneGuid, request.TargetIndex, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result != SceneReorderResult.Reordered)
+        {
+            return HiddenScene();
+        }
+
+        // Return the re-packed scene list so the caller sees the new (scene_order, id) sequence. The reorder
+        // role is always host-capable (the audience roles were already 403'd), so the host shape is always the
+        // right projection; reuse the same projector the list/by-id reads use for consistency.
+        var scenes = await deps.Scenes
+            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        return Results.Ok(SceneProjection.Project(scenes, member.Role));
+    }
+
     // DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}?organizationSlug={slug}
     //
     // Deletes ONE scene from its parent workspace (CORE-LIFE-005, the "Resource Lifecycle and Deletion"
@@ -519,12 +672,14 @@ internal static class SceneEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var scenes = services.GetService<ISceneRepository>();
         var sceneDeletion = services.GetService<SceneDeletionService>();
+        var sceneReorder = services.GetService<SceneReorderService>();
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
 
         if (resolver is null
             || scenes is null
             || sceneDeletion is null
+            || sceneReorder is null
             || workspaces is null
             || workspaceMembers is null)
         {
@@ -533,7 +688,7 @@ internal static class SceneEndpoints
         }
 
         dependencies = new SceneEndpointDependencies(
-            resolver, scenes, sceneDeletion, workspaces, workspaceMembers);
+            resolver, scenes, sceneDeletion, sceneReorder, workspaces, workspaceMembers);
         return true;
     }
 
@@ -615,6 +770,7 @@ internal static class SceneEndpoints
         TenantContextResolver Resolver,
         ISceneRepository Scenes,
         SceneDeletionService SceneDeletion,
+        SceneReorderService SceneReorder,
         IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers);
 }

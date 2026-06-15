@@ -818,6 +818,18 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // by DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId} (wired by MapSceneEndpoints).
     builder.Services.AddScoped<SceneDeletionService>();
 
+    // Scene reorder command (CORE-SCENE-006, the "Authoring Completeness" epic): the Scenes module's "a host
+    // can move a scene to a new position" command. Registered here, inside the persistence conditional, because
+    // it composes the scene repository (above) plus the shared DbContext for a single transaction. It loads the
+    // scene through the tenant- AND workspace-scoped ISceneRepository.FindByIdAsync FIRST (a scene in another
+    // workspace/tenant is never reachable; threats T1/T5), then moves it to the requested 0-based position and
+    // RE-PACKS the workspace's scene ordering DETERMINISTICALLY (contiguous, gap-free, no duplicates) reusing
+    // the SCENE-001 ordering and the delete-repack logic — the order assigned SERVER-SIDE, never a
+    // client-trusted absolute order. Each re-pack write is xmin-guarded (CORE-CONC-006), so concurrent reorders
+    // surface a 409 instead of corrupting the order. A reorder is a benign metadata move, so it is NOT audited.
+    // Consumed by POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder (wired by MapSceneEndpoints).
+    builder.Services.AddScoped<SceneReorderService>();
+
     // Entitlement and plan definition catalog (CORE-ENTL-001, the first story of the "Entitlements and Quotas"
     // epic): the Entitlements module — FIRST appearing here — owns the GLOBAL entitlement_definitions,
     // plan_definitions and plan_entitlements tables that hold the deployment-wide monetization catalog
@@ -1266,24 +1278,30 @@ app.MapHideEndpoints();
 app.MapSessionEventReplayEndpoints();
 
 // Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read; CORE-LIFE-005 adds the
-// DELETE): the Scenes module's HTTP routes, GET/POST /api/v1/workspaces/{workspaceId}/scenes,
-// GET /api/v1/scenes/{sceneId} and DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}. They live in
-// authenticated route groups and fail closed (503) when persistence is not configured, exactly like the
-// workspace endpoints. No new DI registration beyond the SceneDeletionService above is required: the tenant
-// context resolver, the scene repository and the workspace member repository they consume are already
-// registered above inside the persistence conditional. The GET list and the GET by-id both PROJECT BY ROLE
-// through the same SceneProjection (the host shape to host-capable/metadata roles, the stripped participant
-// shape to audience roles — the "Projection by role" route note, CORE-SCENE-004). The by-id read resolves
-// the scene within the query-supplied organization, discovers its workspace from the loaded row and
-// authorizes the caller's membership there (every denial hidden as 404). The POST assigns the scene order
-// server-side as append-to-end (no client-supplied order, no reorder route). The DELETE resolves the parent
-// workspace first (the route pins {workspaceId}, the tenant comes from the required ?organizationSlug=),
-// authorizes the caller's role in that workspace (Owner/Admin/Host/CoHost), then loads the scene through the
-// tenant- and workspace-scoped lookup, CASCADES its child content blocks and the dependent visibility rules
-// / asset links, RE-PACKS the remaining scenes' ordering so there is no gap and appends a SceneDeleted audit
-// record, all atomically (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md).
-// Deleting a non-existent scene is a safe 404. The reorder route remains out of scope (none in
-// csv/api_routes.csv).
+// DELETE; CORE-SCENE-006 adds the reorder POST): the Scenes module's HTTP routes,
+// GET/POST /api/v1/workspaces/{workspaceId}/scenes, GET /api/v1/scenes/{sceneId},
+// DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId} and
+// POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder. They live in authenticated route groups and
+// fail closed (503) when persistence is not configured, exactly like the workspace endpoints. No new DI
+// registration beyond the SceneDeletionService and SceneReorderService above is required: the tenant context
+// resolver, the scene repository and the workspace member repository they consume are already registered above
+// inside the persistence conditional. The GET list and the GET by-id both PROJECT BY ROLE through the same
+// SceneProjection (the host shape to host-capable/metadata roles, the stripped participant shape to audience
+// roles — the "Projection by role" route note, CORE-SCENE-004). The by-id read resolves the scene within the
+// query-supplied organization, discovers its workspace from the loaded row and authorizes the caller's
+// membership there (every denial hidden as 404). The POST assigns the scene order server-side as append-to-end
+// (no client-supplied order). The DELETE resolves the parent workspace first (the route pins {workspaceId}, the
+// tenant comes from the required ?organizationSlug=), authorizes the caller's role in that workspace
+// (Owner/Admin/Host/CoHost), then loads the scene through the tenant- and workspace-scoped lookup, CASCADES its
+// child content blocks and the dependent visibility rules / asset links, RE-PACKS the remaining scenes'
+// ordering so there is no gap and appends a SceneDeleted audit record, all atomically (cascade, not block;
+// docs/adr/0012-resource-deletion-cascades-dependents.md). The REORDER POST resolves the parent workspace
+// first (the tenant from the required organizationSlug body field), authorizes the caller's role
+// (Owner/Admin/Host/CoHost), then moves the scene to the client-supplied 0-based position and RE-PACKS the
+// ordering DETERMINISTICALLY (contiguous, gap-free, no duplicates) with the order assigned server-side; the
+// scene's xmin token (CORE-CONC-006) makes a concurrent reorder a 409 instead of a corrupted order, and the
+// re-packed list is returned. A reorder is a benign metadata move, so it is NOT audited. Deleting or
+// reordering a non-existent/foreign scene is a safe 404.
 app.MapSceneEndpoints();
 
 // Scene content-block endpoints: the Content module's HTTP routes,

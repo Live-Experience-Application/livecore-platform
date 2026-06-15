@@ -30,6 +30,33 @@ namespace LiveCore.Api.Scenes;
 public sealed record CreateSceneRequest(string? OrganizationSlug, string? Title);
 
 /// <summary>
+/// Request body for reordering a scene (CORE-SCENE-006,
+/// <c>POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder</c>, csv/api_routes.csv "Reorder scene",
+/// roles Host,CoHost,Owner,Admin).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> (the route path carries only the
+/// workspace and scene ids), resolved into a trusted tenant context exactly like the scene create/delete
+/// routes, and the reorder is then authorized by the caller's role in the route's workspace (threat T5).
+///
+/// The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): it carries only a desired
+/// <see cref="TargetIndex"/> — a 0-based LIST POSITION, NOT an absolute <c>scene_order</c> value. The scene's
+/// actual order is assigned SERVER-SIDE: the server moves the scene to the requested position and re-packs
+/// every scene to a contiguous, gap-free, duplicate-free ordering, so a client can never choose, skip or
+/// collide an absolute ordering position (the story's "assign order server-side; no client-trusted absolute
+/// order"). A target index at or beyond the end moves the scene to the last position (it is clamped); a
+/// negative index is rejected with <c>400</c>.
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to resolve the tenant context (the
+/// route carries no organization in its path).
+/// </param>
+/// <param name="TargetIndex">
+/// The desired 0-based position of the scene within its workspace's ordered scene list. Must be non-negative;
+/// a value at or beyond the end moves the scene to the last position.
+/// </param>
+public sealed record ReorderSceneRequest(string? OrganizationSlug, int TargetIndex);
+
+/// <summary>
 /// HOST-facing response projection of a scene (CORE-SCENE-003 introduced it;
 /// CORE-SCENE-004 makes it the HOST half of the host-vs-participant DTO separation
 /// for <c>GET /api/v1/workspaces/{workspaceId}/scenes</c> and the create response).
