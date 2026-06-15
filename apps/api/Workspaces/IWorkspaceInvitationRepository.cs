@@ -78,6 +78,29 @@ public interface IWorkspaceInvitationRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the PENDING invitations of exactly the given organization and
+    /// workspace, oldest first (CORE-WS-008). "Pending" is the lifecycle status
+    /// only (<see cref="WorkspaceInvitationStatus.Pending"/>): an already-accepted
+    /// or already-revoked invitation is never returned, so the result is the
+    /// workspace's outstanding invites. The organization and workspace both scope
+    /// the read (the organization boundary checked before the workspace boundary),
+    /// so an invitation in another workspace, or in the same workspace id under a
+    /// different organization, is never returned: a foreign-tenant or
+    /// wrong-workspace caller sees an empty result, never another scope's invites
+    /// (threats T1/T5). This is a read-only projection source for the
+    /// manage-members pending-invitations list; it returns the aggregates and the
+    /// endpoint maps them to a PII-safe DTO that never exposes the token hash
+    /// (threats T6/T7).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or workspace id is empty.
+    /// </exception>
+    Task<IReadOnlyList<WorkspaceInvitation>> ListPendingByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists changes to an invitation previously loaded through this repository
     /// (CORE-WS-006). The tenant, workspace, invited email, role, token hash and
     /// expiry of an invitation are immutable (<see cref="WorkspaceInvitation"/>);

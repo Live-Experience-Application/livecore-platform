@@ -39,6 +39,14 @@ namespace LiveCore.Api.Workspaces;
 ///   single-use invite token and returns the plaintext token exactly once; only
 ///   its hash is stored (threats T6/T7). The matching acceptance/redeem route is
 ///   CORE-WS-006 below; email delivery and UI remain out of scope.</item>
+///   <item><c>GET /api/v1/workspaces/{workspaceId}/invitations</c> — list a
+///   workspace's PENDING invitations (CORE-WS-008), "Manage members" (Owner or
+///   Admin), so the manage-members surface can see its outstanding invites. Returns
+///   a PII-safe projection (id, invited email, role, status, expiry) and NEVER the
+///   token hash (threats T6/T7); the invited email is the only personal datum.
+///   Tenant/workspace-scoped and fail-closed: a foreign or unknown workspace is an
+///   indistinguishable hidden 404, a known tenant member without Owner/Admin is a
+///   403.</item>
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c> —
 ///   redeem a workspace invitation (CORE-WS-006). The scoped token is a BEARER
 ///   grant (threat T6): the AUTHENTICATED CALLER who presents a valid token in the
@@ -119,6 +127,7 @@ internal static class WorkspaceEndpoints
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
         group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
+        group.MapGet("/{workspaceId}/invitations", ListPendingWorkspaceInvitationsAsync);
         group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/invitations/{invitationId}", RevokeWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
@@ -708,6 +717,90 @@ internal static class WorkspaceEndpoints
         // The one-time token is returned to the caller here and only here.
         var response = WorkspaceInvitationResponse.From(invitation, plaintextToken);
         return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/invitations?organizationSlug={slug}
+    //
+    // Lists a workspace's PENDING invitations (CORE-WS-008), so the manage-members surface can see its
+    // outstanding invites (the read half of the invite flow). It returns a PII-safe projection — id, invited
+    // email, role, status, expiry — and NEVER the token hash (threats T6/T7); the invited email is the only
+    // personal datum. The flow mirrors the other workspace by-id reads (fail-closed, resolve-tenant,
+    // load-then-authorize, hidden-404): the tenant comes from the required ?organizationSlug=, the workspace is
+    // loaded within that tenant, and the caller is authorized as the organization Owner/Admin (the "Manage
+    // members" matrix row, exactly like the member-invite/revoke siblings). A cross-tenant/unknown workspace is
+    // an indistinguishable hidden 404; a known tenant member who is not Owner/Admin is a 403. The read takes no
+    // clock: "pending" is the lifecycle status only, so an accepted or revoked invitation is never listed.
+    private static async Task<IResult> ListPendingWorkspaceInvitationsAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the other workspace by-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404), never
+        // echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is indistinguishable
+            // from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant or
+        // unknown workspace is never revealed; threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite/revoke siblings on
+        // this same path. The caller is a known member of the tenant and the workspace exists, so an insufficient
+        // role is a 403. Exact, non-linear role check (no >/<). Seeing the outstanding invites is itself a
+        // manage-members capability, so a non-Owner/Admin is denied before any invitation is read.
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Read the pending invitations WITHIN this tenant and workspace; an invitation in another workspace or
+        // tenant is never returned (threats T1/T5). The aggregates carry the token hash, but the response is the
+        // PII-safe projection, which never emits it (threats T6/T7).
+        var invitations = await deps.WorkspaceInvitations
+            .ListPendingByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+
+        var response = invitations.Select(PendingWorkspaceInvitationResponse.From).ToArray();
+        return Results.Ok(response);
     }
 
     // POST /api/v1/workspaces/{workspaceId}/invitations/accept

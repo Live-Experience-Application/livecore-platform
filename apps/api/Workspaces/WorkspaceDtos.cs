@@ -178,6 +178,66 @@ public sealed record WorkspaceInvitationResponse(
 }
 
 /// <summary>
+/// PII-safe response projection of a PENDING workspace invitation (CORE-WS-008,
+/// <c>GET /api/v1/workspaces/{workspaceId}/invitations</c>). It is the read DTO
+/// of the manage-members pending-invitations list, returned to an Owner/Admin so
+/// they can see a workspace's outstanding invites.
+///
+/// Data minimization and the token-at-rest model (docs/08_API_CONTRACTS.md DTO
+/// rules; threats T6/T7 in docs/07_SECURITY_THREAT_MODEL.md):
+/// <list type="bullet">
+///   <item>The <see cref="InvitedEmail"/> is the ONLY personal datum and is
+///   included by design — an admin needs to see who was invited — but it remains
+///   DATA, never a credential (docs/adr/0005).</item>
+///   <item>The token hash is NEVER projected (there is no field for it), and the
+///   one-time plaintext token does not exist on a stored invitation, so it can
+///   never be returned on a read. The creation response
+///   (<see cref="WorkspaceInvitationResponse"/>) is the only place a token is ever
+///   returned, exactly once.</item>
+///   <item>No internal authorization rationale is carried (threat T7).</item>
+/// </list>
+/// </summary>
+/// <param name="Id">Surrogate id of the invitation (UUIDv7).</param>
+/// <param name="OrganizationId">Tenant the invitation belongs to.</param>
+/// <param name="WorkspaceId">Workspace the invite grants admission to.</param>
+/// <param name="InvitedEmail">Email of the invitee (the only personal datum; data, not a credential).</param>
+/// <param name="Role">Generic role the invite will grant on redemption.</param>
+/// <param name="Status">Lifecycle status of the invitation (always Pending for this list).</param>
+/// <param name="ExpiresAt">When the scoped token expires (UTC).</param>
+/// <param name="CreatedAt">When the invitation was created (UTC).</param>
+public sealed record PendingWorkspaceInvitationResponse(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    string InvitedEmail,
+    string Role,
+    string Status,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>
+    /// Projects a <see cref="WorkspaceInvitation"/> aggregate into its PII-safe
+    /// list DTO. Only the generic fields plus the single allowed personal datum
+    /// (the invited email) are copied; the token hash is DELIBERATELY never copied
+    /// out (threats T6/T7). The role and status are emitted by their stable names.
+    /// </summary>
+    public static PendingWorkspaceInvitationResponse From(WorkspaceInvitation invitation)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+
+        return new PendingWorkspaceInvitationResponse(
+            invitation.Id,
+            invitation.OrganizationId,
+            invitation.WorkspaceId,
+            invitation.InvitedEmail,
+            invitation.Role.ToString(),
+            invitation.Status.ToString(),
+            invitation.ExpiresAt,
+            invitation.CreatedAt);
+    }
+}
+
+/// <summary>
 /// Request body for redeeming a workspace invitation (CORE-WS-006,
 /// <c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c>).
 ///

@@ -1324,6 +1324,7 @@ The workspace routes implemented so far:
 | `PUT`    | `/api/v1/workspaces/{workspaceId}`                            | organization `Owner` or `Admin` (rename)                                  |
 | `POST`   | `/api/v1/workspaces/{workspaceId}/archive`                    | organization `Owner` (archive — see below)                                |
 | `POST`   | `/api/v1/workspaces/{workspaceId}/members`                    | organization `Owner` or `Admin` (create invite)                           |
+| `GET`    | `/api/v1/workspaces/{workspaceId}/invitations`                | organization `Owner` or `Admin` (list pending invites — see below)        |
 | `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept`         | any authenticated org member who holds a valid token (redeem — see below) |
 | `DELETE` | `/api/v1/workspaces/{workspaceId}/invitations/{invitationId}` | organization `Owner` or `Admin` (revoke invite — see below)               |
 | `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` (remove member — see below)               |
@@ -1338,6 +1339,32 @@ bound to one organization, one workspace, one role and an expiry, and is
 single-use. It is a one-time join grant, not an authentication credential and
 not a JWT (`docs/adr/0005-oidc-first-authentication.md`). Delivery and revocation
 endpoints are follow-up stories.
+
+### Workspace pending-invitations list (CORE-WS-008)
+
+`GET /api/v1/workspaces/{workspaceId}/invitations` lists a workspace's **pending**
+invitations so the manage-members surface can see its outstanding invites (the read
+half of the invite flow; until now there was no way to see which invites were
+outstanding). "Pending" is the lifecycle status only: an already-accepted or
+already-revoked invitation is never listed. The route resolves its tenant from a
+required `?organizationSlug=` query parameter (like the other workspace by-id routes).
+
+The response is a **PII-safe projection** — id, invited email, role, status and expiry
+(plus the tenant/workspace ids and the creation timestamp). The **invited email is the
+only personal datum** and is included by design so an admin can see who was invited; it
+remains data, never a credential. The **token hash is never returned** (there is no field
+for it), and the one-time plaintext token does not exist on a stored invitation, so a read
+can never expose it — the creation response is the only place a token is ever returned,
+exactly once (threats T6/T7).
+
+Authorization mirrors the member-invite/revoke routes on the same path: the **"Manage
+members"** matrix row, **organization `Owner` or `Admin`** (`docs/06_AUTHORIZATION_MATRIX.md`),
+matched exactly (`MembershipRole` is non-linear). Seeing the outstanding invites is itself
+a manage-members capability, so a known tenant member who lacks `Owner`/`Admin` is `403`.
+Every step is fail-closed and hidden as `404` for a caller who cannot see the tenant or a
+workspace not in the resolved tenant, so a foreign or unknown workspace's invitations can
+never be listed or probed for (threats T1/T5). The read is tenant- and workspace-scoped, so
+invitations of another workspace or tenant are never returned.
 
 ### Workspace invitation acceptance (CORE-WS-006)
 

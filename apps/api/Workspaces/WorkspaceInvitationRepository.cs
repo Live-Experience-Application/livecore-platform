@@ -136,6 +136,44 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceInvitation>> ListPendingByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a tenant or workspace (ids are generated non-empty), so the lookup fails
+        // fast instead of scanning the whole table.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // All three predicates translate to parameterized SQL equality. Scoping by the organization (the
+        // tenant, checked before the workspace boundary) and the workspace means an invitation under another
+        // organization or workspace is never returned (threats T1/T5); the tenant-scoped composite index leads
+        // with organization_id (WorkspaceInvitationConfiguration). The status is persisted as its stable name
+        // (HasConversion<string>), so EF translates this equality to the stored name; the lifecycle is
+        // non-linear, so this is an EXACT Pending match, never an ordering comparison. The read is tracking-free
+        // (it never mutates) and ordered oldest-first by the surrogate id, which is a time-ordered UUIDv7, so it
+        // yields a deterministic chronological page WITHOUT ordering by a DateTimeOffset column (which the SQLite
+        // provider cannot translate), mirroring every other tenant-scoped list query. The token hash rides along
+        // on the aggregate but the endpoint projects to a PII-safe DTO that never emits it (threats T6/T7).
+        return await _dbContext.WorkspaceInvitations
+            .AsNoTracking()
+            .Where(invitation => invitation.OrganizationId == organizationId
+                && invitation.WorkspaceId == workspaceId
+                && invitation.Status == WorkspaceInvitationStatus.Pending)
+            .OrderBy(invitation => invitation.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(invitation);

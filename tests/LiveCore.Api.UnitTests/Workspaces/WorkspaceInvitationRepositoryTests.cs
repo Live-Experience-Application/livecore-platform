@@ -422,4 +422,72 @@ public sealed class WorkspaceInvitationRepositoryTests : IDisposable
         await Assert.ThrowsAsync<DbUpdateException>(
             () => new WorkspaceInvitationRepository(context).AddAsync(ghost, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task ListPendingByWorkspace_returns_only_pending_invitations_within_the_scope()
+    {
+        // CORE-WS-008 (T1/T5): the pending-invitations list is scoped by BOTH organization and workspace and
+        // filtered to the Pending lifecycle status. An accepted or revoked invitation, an invitation in another
+        // workspace of the same tenant, and an invitation in another tenant must all be excluded — only the
+        // workspace's own outstanding invites are returned, oldest first.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var otherWorkspaceA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugB);
+        var workspaceB = await SeedWorkspaceAsync(organizationB.Id, "b-show");
+
+        // Two pending invitations in workspace A, created at distinct times so the order is deterministic.
+        var pendingOne = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, "one@example.test", MembershipRole.Host, _createdAt, out _);
+        var pendingTwo = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, "two@example.test", MembershipRole.Admin, _createdAt.AddMinutes(1), out _);
+        // An accepted and a revoked invitation in workspace A (must be excluded).
+        var accepted = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, "accepted@example.test", MembershipRole.Host, _createdAt, out _);
+        accepted.Redeem(_createdAt.AddMinutes(2));
+        var revoked = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, "revoked@example.test", MembershipRole.Host, _createdAt, out _);
+        revoked.Revoke(_createdAt.AddMinutes(2));
+        // A pending invitation in another workspace of the same tenant, and one in another tenant (excluded).
+        var pendingOtherWorkspace = WorkspaceInvitation.Create(
+            organizationA.Id, otherWorkspaceA.Id, "other-ws@example.test", MembershipRole.Host, _createdAt, out _);
+        var pendingOtherTenant = WorkspaceInvitation.Create(
+            organizationB.Id, workspaceB.Id, "other-org@example.test", MembershipRole.Host, _createdAt, out _);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceInvitationRepository(context);
+            foreach (var invitation in new[]
+                { pendingOne, pendingTwo, accepted, revoked, pendingOtherWorkspace, pendingOtherTenant })
+            {
+                await repository.AddAsync(invitation, CancellationToken.None);
+            }
+        }
+
+        await using var read = CreateContext();
+        var pending = await new WorkspaceInvitationRepository(read)
+            .ListPendingByWorkspaceAsync(organizationA.Id, workspaceA.Id, CancellationToken.None);
+
+        // Exactly the two pending invitations of workspace A, oldest first.
+        Assert.Equal(new[] { pendingOne.Id, pendingTwo.Id }, pending.Select(i => i.Id).ToArray());
+        Assert.All(pending, i => Assert.Equal(WorkspaceInvitationStatus.Pending, i.Status));
+
+        // Wrong tenant and wrong workspace yield nothing (never another scope's invites).
+        Assert.Empty(await new WorkspaceInvitationRepository(read)
+            .ListPendingByWorkspaceAsync(organizationB.Id, workspaceA.Id, CancellationToken.None));
+        Assert.Empty(await new WorkspaceInvitationRepository(read)
+            .ListPendingByWorkspaceAsync(organizationA.Id, workspaceB.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ListPendingByWorkspace_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceInvitationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ListPendingByWorkspaceAsync(
+            Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ListPendingByWorkspaceAsync(
+            Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
 }
