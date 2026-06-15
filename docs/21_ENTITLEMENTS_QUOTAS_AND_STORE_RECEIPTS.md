@@ -540,6 +540,44 @@ terminal").
   CORE-MON-004 the v1 monetization loop (grant on verified purchase, revoke and
   stay revoked on refund) is complete.
 
+## Cancelled means immediate, permanent (absorbing) revoke — documented contract (CORE-MON-011)
+
+CORE-MON-004 made the purchase status machine monotonic and listed `Cancelled` alongside `Refunded` as an
+absorbing revoked state, but left the **intended meaning** of `Cancelled` implicit. CORE-MON-011 makes it an
+**explicit contract** and pins it with a test, so the semantics cannot silently regress. It is **test + docs
+only** — there is no behavior change (the machine already behaves this way; this story documents and locks in
+what it does).
+
+**The contract.** A `Cancelled` purchase is a **termination, not a grace period**:
+
+- **Immediate.** Entering `Cancelled` revokes the granted `SubjectEntitlement` **at once** — through the same
+  `PurchaseEntitlementRevocationService` a refund uses, because
+  `PurchaseTransactionStatusMachine.IsRevoked(Cancelled)` is true — not at the end of the paid period. The moment
+  a cancellation notification is processed, premium disappears from the effective-entitlements read
+  (`GET /api/v1/me/entitlements`). A buyer who keeps access until period-end is the explicit purpose of the
+  separate `InGracePeriod` state, **not** of `Cancelled`.
+- **Permanent / absorbing.** `Cancelled` is **terminal**, exactly like `Refunded`: once a purchase is
+  `Cancelled`, no later notification — a renewal back to `Active`, a grace period, or even a refund — can move it
+  (`PurchaseTransactionStatusMachine.CanTransitionTo`). A `Cancelled` purchase that **later** receives a
+  later-`OccurredAt` `Renewed` notification **stays `Cancelled`** and the entitlement **stays revoked**, on the
+  synchronous webhook and through the reconciliation monotonic fold alike.
+
+**Why this is the chosen behavior (product decision, 2026-06-15).** A consequence of immediate-permanent revoke
+is that a subscriber who turns auto-renew **off** mid-period loses premium immediately and permanently, rather
+than keeping it until the period ends. The product decision is to **keep** immediate-permanent revoke:
+`Cancelled` models a definitive termination, and a buyer who resubscribes obtains a **new** purchase (a new
+`provider_transaction_id` and a fresh `PurchaseTransaction`) rather than reactivating the absorbed one. A future
+"cancel at period end / soft cancel that keeps access until expiry" behavior would be a deliberate, separately
+specified change (a distinct notification type and a non-absorbing intermediate state), **not** a silent edit of
+this contract — which is exactly what the pinning test prevents.
+
+**Pinned by tests.** `PurchaseTransactionStatusMachineTests` pins the absorbing fold at the pure-machine level
+(a `Cancelled` then a later `Renewed` converges to `Cancelled`), and `PurchaseRevocationMonotonicTests` pins the
+end-to-end effect over the real notification service and grant chain (a cancellation **immediately** revokes the
+granted entitlement, and a later renewal leaves the purchase `Cancelled` with the entitlement revoked).
+CORE-MON-011 reuses `PurchaseTransactionStatusMachine` and the existing CORE-MON-004 monotonicity tests, and
+**adds no new table, route, event or migration**.
+
 ## Atomic quota check-and-consume (CORE-CONC-004)
 
 Server-side quota enforcement (CORE-ENTL-004) is the gate that makes "Free limits cannot be bypassed

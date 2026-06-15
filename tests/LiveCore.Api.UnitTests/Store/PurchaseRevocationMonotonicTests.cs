@@ -25,6 +25,15 @@ namespace LiveCore.Api.UnitTests.Store;
 ///   revoked state is terminal — a renewal cannot resurrect it), through the synchronous webhook AND through the
 ///   reconciliation sweep (a missed refund the webhook could not apply is converged and revoked).</item>
 /// </list>
+///
+/// CORE-MON-011 EXTENDS THE SAME HARNESS TO THE CANCELLED PATH. The "Lock in and document the Cancelled equals
+/// immediate-revoke semantics" story pins the contract that <see cref="PurchaseTransactionStatus.Cancelled"/> is a
+/// TERMINATION (not a grace period): it revokes the granted entitlement IMMEDIATELY and is ABSORBING exactly like
+/// <see cref="PurchaseTransactionStatus.Refunded"/>. Its required test — "a purchase that goes Cancelled then
+/// receives a later-OccurredAt Renewed stays Cancelled and the entitlement stays revoked" — is the Cancelled
+/// analogue of the refund tests below; the behavior is unchanged from CORE-MON-004 (this is test + docs only) and
+/// these tests stop it from silently regressing (docs/21 "Cancelled means immediate, permanent (absorbing) revoke").
+///
 /// All fixtures are generic Core vocabulary (AGENTS.md, csv/forbidden_core_terms.csv).
 /// </summary>
 public sealed class PurchaseRevocationMonotonicTests : IDisposable
@@ -34,6 +43,7 @@ public sealed class PurchaseRevocationMonotonicTests : IDisposable
 
     private static readonly DateTimeOffset _recordedAt = new(2026, 6, 12, 9, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _refundEvent = new(2026, 6, 12, 10, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _cancelEvent = new(2026, 6, 12, 10, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _renewEvent = new(2026, 6, 12, 11, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _receivedAt = new(2026, 6, 12, 12, 0, 0, TimeSpan.Zero);
 
@@ -187,6 +197,56 @@ public sealed class PurchaseRevocationMonotonicTests : IDisposable
         Assert.Equal(StoreNotificationProcessingOutcome.Unchanged, renew.Outcome); // the renewal applied nothing
         Assert.Equal(PurchaseTransactionStatus.Refunded, await StatusAsync(PurchaseProvider.Apple, "txn-1"));
         Assert.Equal(0, (await ResolveAsync(subjectId)).Count); // the entitlement stays revoked
+    }
+
+    // --- CORE-MON-011: Cancelled is immediate + permanent (absorbing) revoke ----
+
+    [Fact]
+    public async Task A_cancellation_notification_immediately_revokes_the_granted_entitlement()
+    {
+        var subjectId = await SeedGrantedPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        var result = await HandleAsync(Notification("ntf-cancel", StoreNotificationType.Cancelled, "txn-1", _cancelEvent));
+
+        Assert.Equal(StoreNotificationProcessingOutcome.Applied, result.Outcome);
+        Assert.Equal(PurchaseTransactionStatus.Cancelled, await StatusAsync(PurchaseProvider.Apple, "txn-1"));
+        // Cancelled is a termination, not a grace period: premium is gone IMMEDIATELY, not at period end.
+        Assert.Equal(0, (await ResolveAsync(subjectId)).Count);
+    }
+
+    // The required test: a Cancelled purchase that later receives a later-OccurredAt Renewed stays Cancelled and the
+    // entitlement stays revoked (Cancelled is absorbing exactly like Refunded — the CORE-MON-011 contract, docs/21).
+    [Fact]
+    public async Task A_later_renewal_after_a_cancellation_keeps_it_cancelled_and_the_entitlement_revoked()
+    {
+        var subjectId = await SeedGrantedPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        // The cancellation revokes premium...
+        await HandleAsync(Notification("ntf-cancel", StoreNotificationType.Cancelled, "txn-1", _cancelEvent));
+        // ...and a legitimate renewal delivered afterwards, with a LATER event time, must not resurrect it.
+        var renew = await HandleAsync(Notification("ntf-renew", StoreNotificationType.Renewed, "txn-1", _renewEvent));
+
+        Assert.Equal(StoreNotificationProcessingOutcome.Unchanged, renew.Outcome); // the renewal applied nothing
+        Assert.Equal(PurchaseTransactionStatus.Cancelled, await StatusAsync(PurchaseProvider.Apple, "txn-1"));
+        Assert.Equal(0, (await ResolveAsync(subjectId)).Count); // the entitlement stays revoked
+    }
+
+    [Fact]
+    public async Task Reconciliation_cannot_resurrect_a_cancelled_purchase()
+    {
+        var subjectId = await SeedGrantedPurchaseAsync(PurchaseProvider.Apple, "txn-1");
+
+        await HandleAsync(Notification("ntf-cancel", StoreNotificationType.Cancelled, "txn-1", _cancelEvent));
+        await HandleAsync(Notification("ntf-renew", StoreNotificationType.Renewed, "txn-1", _renewEvent));
+
+        // The cancelled purchase is terminal, so the sweep finds no drift and changes nothing — it cannot resurrect
+        // the cancellation even though a later renewal is recorded (the reconciliation analogue of the refund case).
+        var result = await ReconcileSweepAsync();
+        Assert.Equal(0, result.Examined);
+        Assert.Equal(0, result.Reconciled);
+
+        Assert.Equal(PurchaseTransactionStatus.Cancelled, await StatusAsync(PurchaseProvider.Apple, "txn-1"));
+        Assert.Equal(0, (await ResolveAsync(subjectId)).Count);
     }
 
     [Fact]

@@ -84,6 +84,23 @@ public sealed class PurchaseTransactionStatusMachineTests
     }
 
     [Fact]
+    public void Converge_makes_a_cancellation_absorbing_even_when_a_later_renewal_exists()
+    {
+        // CORE-MON-011 (the "Cancelled equals immediate-revoke" contract, docs/21): a Cancelled purchase that later
+        // receives a renewal stays Cancelled — Cancelled is absorbing exactly like Refunded, so the later renewal is
+        // skipped and the purchase converges to Cancelled. This pins the "a Cancelled then later Renewed stays
+        // revoked" semantics at the pure-machine level (the same shape as the Refunded test above).
+        var (status, determinedAt) = PurchaseTransactionStatusMachine.Converge(new[]
+        {
+            (PurchaseTransactionStatus.Cancelled, _t1, Guid.CreateVersion7()),
+            (PurchaseTransactionStatus.Active, _t2, Guid.CreateVersion7()),
+        });
+
+        Assert.Equal(PurchaseTransactionStatus.Cancelled, status);
+        Assert.Equal(_t1, determinedAt); // the cancellation determined the converged state
+    }
+
+    [Fact]
     public void Converge_is_order_independent_and_the_first_revoking_event_by_time_wins()
     {
         // Events presented out of order; the earliest-by-event-time revoking event (the cancellation at _t1) is

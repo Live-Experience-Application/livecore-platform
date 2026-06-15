@@ -228,6 +228,18 @@ The reconciliation candidate scan still computes the latest-per-purchase **clien
 (`ReconcilablePurchaseReader`); a SQL window-function form for high-volume deployments stays a documented
 follow-up, fine for this off-by-default, low-volume job.
 
+**Cancelled-semantics note (CORE-MON-011 locked in immediate-permanent revoke).** The v1 acceptance above already
+requires that a cancellation "revokes or downgrades the granted entitlement and **stays revoked** (a revoked state
+is terminal — a later renewal cannot resurrect it)". CORE-MON-011 makes the **`Cancelled`** semantics an
+**explicit contract** and pins them with a test: `Cancelled` is a **termination, not a grace period** — it revokes
+the granted entitlement **immediately** (not at period end) and is **absorbing like `Refunded`**, so a `Cancelled`
+purchase that later receives a later-`OccurredAt` `Renewed` stays `Cancelled` with the entitlement revoked. This
+records the **product decision (2026-06-15): keep immediate-permanent revoke** — a subscriber toggling auto-renew
+off loses access immediately and permanently, and a resubscribe is a **new** purchase, not a reactivation of the
+absorbed one. It is **test + docs only** (no behavior change from CORE-MON-004) and **adds no table, route, event
+or migration**, so the spec-consistency check stays green. The full contract is documented in `docs/21`
+("Cancelled means immediate, permanent (absorbing) revoke").
+
 ## Catalog-as-contract note (CORE-SPEC-002 backed the entitlement/store event catalog with real audit actions)
 
 `csv/entitlement_event_catalog.csv` marked eight events `persisted=true, audit=true`
