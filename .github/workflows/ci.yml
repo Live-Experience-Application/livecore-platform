@@ -549,7 +549,27 @@ jobs:
       - name: Run PSScriptAnalyzer on scripts/
         shell: pwsh
         run: |
-          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $ErrorActionPreference = 'Stop'
+          # Bootstrap the module source so Install-Module can resolve PSScriptAnalyzer
+          # even when the runner's NuGet provider / PSGallery registration is cold
+          # (the transient "No match was found for ... 'PSScriptAnalyzer'" install flake).
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction SilentlyContinue | Out-Null
+          # Install with a few retries to ride out a transient gallery/network blip.
+          $installed = $false
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+              $installed = $true
+              break
+            }
+            catch {
+              Write-Host "PSScriptAnalyzer install attempt $attempt failed: $($_.Exception.Message)"
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+          if (-not $installed) { Write-Error 'Could not install PSScriptAnalyzer after 4 attempts.'; exit 1 }
+          Import-Module PSScriptAnalyzer -ErrorAction Stop
           # Excluded rules (with rationale):
           # - PSAvoidUsingWriteHost: the scan/backup scripts are console tools and
           #   Write-Host targets the host information stream by design (PowerShell 5+).
