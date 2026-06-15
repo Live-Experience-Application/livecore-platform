@@ -14,6 +14,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Npgsql;
 
 namespace LiveCore.Api.IntegrationTests;
 
@@ -24,14 +25,18 @@ namespace LiveCore.Api.IntegrationTests;
 /// unit of work; the default integration factory uses a plain non-retrying SQLite provider, so that re-run path
 /// is never exercised — which is exactly why the change-tracker leak this story fixes stayed latent.
 ///
-/// These tests close that gap. <see cref="RetryingCommandApiFactory"/> swaps in a retrying execution strategy
-/// AND a one-shot transient failure at the durable session-event append (after the command's state/rule change,
-/// audit and quota/idempotency writes have run inside the transaction), so the FIRST attempt rolls back and the
-/// unit of work retries once. The contract under test: the retried command ultimately SUCCEEDS with correct
-/// state, because the unit of work clears the change tracker before the retry and the command reloads its
-/// entities inside the delegate — so the retry runs against fresh state rather than the first attempt's stale,
-/// already-mutated tracked entities (no <see cref="InvalidSessionStateTransitionException"/>, no double-add).
-/// All fixtures are generic (AGENTS.md).
+/// These tests close that gap on BOTH providers. The injected failure is a GENUINE transient PostgreSQL error
+/// — a serialization failure (SQLSTATE 40001), one of the transaction-rollback transients the production
+/// strategy retries — thrown exactly once at the durable session-event append (after the command's state/rule
+/// change, audit and quota/idempotency writes have run inside the transaction), so the FIRST attempt rolls back
+/// and the unit of work retries once. On the CI PostgreSQL leg the UNCHANGED production
+/// <c>EnableRetryOnFailure</c> strategy retries it (the real production posture); on the default SQLite leg
+/// <see cref="RetryingCommandApiFactory"/> installs an equivalent retrying execution strategy (SQLite has none
+/// by default) so the same re-run path runs without a PostgreSQL server. The contract under test: the retried
+/// command ultimately SUCCEEDS with correct state, because the unit of work clears the change tracker before the
+/// retry and the command reloads its entities inside the delegate — so the retry runs against fresh state rather
+/// than the first attempt's stale, already-mutated tracked entities (no
+/// <see cref="InvalidSessionStateTransitionException"/>, no double-add). All fixtures are generic (AGENTS.md).
 /// </summary>
 public sealed class CommandRetryResilienceTests
 {
@@ -261,11 +266,13 @@ public sealed class CommandRetryResilienceTests
     // =====================================================================
 
     /// <summary>
-    /// A <see cref="WorkspaceApiFactory"/> whose SQLite DbContext uses a RETRYING execution strategy (so the
-    /// production <c>EnableRetryOnFailure</c> re-run path is genuinely exercised) and whose
-    /// <see cref="ISessionEventRepository"/> throws a transient failure exactly ONCE on the first append — so a
-    /// command's first attempt fails mid-delegate and the unit of work retries it. Only those two seams are
-    /// swapped; the unit of work, the command services and every other repository are the production wiring.
+    /// A <see cref="WorkspaceApiFactory"/> that exercises the execution-strategy retry path over real HTTP. Its
+    /// <see cref="ISessionEventRepository"/> throws a one-shot transient PostgreSQL serialization failure on the
+    /// first append, so a command's first attempt fails mid-delegate and the unit of work retries it. On the
+    /// PostgreSQL leg the UNCHANGED production <c>EnableRetryOnFailure</c> strategy retries that transient error;
+    /// on the default SQLite leg this factory installs an equivalent retrying execution strategy (SQLite has none
+    /// by default), so the re-run path runs identically on both providers. Only those seams are swapped; the unit
+    /// of work, the command services and every other repository are the production wiring.
     /// </summary>
     private sealed class RetryingCommandApiFactory : WorkspaceApiFactory
     {
@@ -284,23 +291,25 @@ public sealed class CommandRetryResilienceTests
     }
 
     /// <summary>
-    /// The transient failure injected mid-command. It models a routine transient database disruption (a
-    /// failover/restart/partition) — the kind the production retrying strategy retries — so the retry path runs
-    /// without needing a real PostgreSQL outage.
+    /// Creates the one-shot transient failure injected mid-command: a genuine PostgreSQL SERIALIZATION FAILURE
+    /// (SQLSTATE 40001), one of the transaction-rollback transients the production <c>EnableRetryOnFailure</c>
+    /// strategy retries. Using a real transient error means the PostgreSQL leg retries it with the unchanged
+    /// production strategy (the real posture) and the SQLite leg retries it with the factory's equivalent
+    /// strategy — modelling a routine transient disruption without needing a real database outage.
     /// </summary>
-    private sealed class TransientCommandException : Exception
-    {
-        public TransientCommandException()
-            : base("Injected transient failure at the session-event append (retried by the execution strategy).")
-        {
-        }
-    }
+    private static PostgresException CreateTransientFailure()
+        => new(
+            "Injected transient failure at the session-event append (retried by the execution strategy).",
+            "ERROR",
+            "ERROR",
+            PostgresErrorCodes.SerializationFailure);
 
     /// <summary>
-    /// A retrying <see cref="ExecutionStrategy"/> that retries ONLY the injected
-    /// <see cref="TransientCommandException"/> — the test analogue of the production Npgsql
-    /// <c>EnableRetryOnFailure</c> strategy. The first retry incurs no back-off delay (the EF Core formula
-    /// yields zero for the first retry) and exactly one failure is injected, so the retry is immediate.
+    /// The SQLite leg's analogue of the production Npgsql <c>EnableRetryOnFailure</c> strategy: a retrying
+    /// <see cref="ExecutionStrategy"/> that retries the injected transient serialization failure (SQLSTATE
+    /// 40001) — the same error the production strategy retries on the PostgreSQL leg. The first retry incurs no
+    /// back-off delay (the EF Core formula yields zero for the first retry) and exactly one failure is injected,
+    /// so the retry is immediate.
     /// </summary>
     private sealed class TransientRetryingExecutionStrategy : ExecutionStrategy
     {
@@ -309,15 +318,16 @@ public sealed class CommandRetryResilienceTests
         {
         }
 
-        protected override bool ShouldRetryOn(Exception exception) => exception is TransientCommandException;
+        protected override bool ShouldRetryOn(Exception exception)
+            => exception is PostgresException { SqlState: PostgresErrorCodes.SerializationFailure };
     }
 
     /// <summary>
-    /// A scoped <see cref="ISessionEventRepository"/> decorator that throws a <see cref="TransientCommandException"/>
-    /// on the FIRST append of the request (mid-delegate, after the command's state/rule change, audit and
-    /// quota/idempotency writes have run inside the transaction) and DELEGATES every later append to the real
-    /// repository. The throw triggers exactly one execution-strategy retry; the retried attempt's appends then
-    /// succeed. The counter is per request scope, so each command retries at most once.
+    /// A scoped <see cref="ISessionEventRepository"/> decorator that throws a one-shot transient PostgreSQL
+    /// serialization failure on the FIRST append of the request (mid-delegate, after the command's state/rule
+    /// change, audit and quota/idempotency writes have run inside the transaction) and DELEGATES every later
+    /// append to the real repository. The throw triggers exactly one execution-strategy retry; the retried
+    /// attempt's appends then succeed. The counter is per request scope, so each command retries at most once.
     /// </summary>
     private sealed class TransientOnceSessionEventRepository : ISessionEventRepository
     {
@@ -333,7 +343,7 @@ public sealed class CommandRetryResilienceTests
         {
             if (Interlocked.Increment(ref _appendCalls) == 1)
             {
-                throw new TransientCommandException();
+                throw CreateTransientFailure();
             }
 
             return _inner.AppendAsync(sessionEvent, cancellationToken);
