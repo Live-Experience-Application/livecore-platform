@@ -23,12 +23,16 @@ namespace LiveCore.Api.UnitTests.Assets;
 /// epic acceptance "assets are private by default and accessed only through authorized signed URLs"; threat
 /// T4 "Asset leak"; threat T2 visibility leak; threat T5 tenant isolation):
 /// <list type="bullet">
-///   <item>HOST-content roles (Owner/Admin/Host/CoHost) may always download — even with NO link.</item>
+///   <item>HOST-content roles (Owner/Admin/Host/CoHost) may always download — even with NO link, and
+///   without naming a session (host content access is session-agnostic).</item>
 ///   <item>AUDIENCE roles (Participant/Observer) may download ONLY when the asset is linked to a content
-///   block / entity that is VISIBLE to the audience; a hidden-only link, or no link, is denied.</item>
+///   block / entity that is VISIBLE to the audience IN THE GIVEN SESSION (a reveal is session-scoped,
+///   CORE-SVIS-004); a hidden-only link, no link, an empty session, or a reveal only in a SIBLING session
+///   is denied.</item>
 ///   <item>The audit role and any undefined role are DENIED even when a linked target is visible.</item>
-///   <item>ISOLATION: a visible target in another WORKSPACE never grants audience download here (the
-///   asset's own workspace scopes both the link lookup and the visibility decision; threat T5).</item>
+///   <item>ISOLATION: a visible target in another WORKSPACE or another SESSION never grants audience
+///   download here (the asset's own workspace and the supplied session scope both the link lookup and the
+///   visibility decision; threats T5/T3).</item>
 /// </list>
 /// All fixtures are generic (AGENTS.md, csv/forbidden_core_terms.csv).
 /// </summary>
@@ -184,7 +188,7 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         return (org, ws, user, asset);
     }
 
-    // --- Host-content roles always download ------------------------------------
+    // --- Host-content roles always download (session-agnostic) -----------------
 
     [Theory]
     [InlineData(MembershipRole.Owner)]
@@ -198,10 +202,12 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.True(await policy.CanDownloadAsync(asset, role, CancellationToken.None));
+        // Host content access is session-agnostic: a host short-circuits to ALLOW before any rule lookup, so
+        // no session is needed (Guid.Empty here, ignored).
+        Assert.True(await policy.CanDownloadAsync(asset, role, Guid.Empty, CancellationToken.None));
     }
 
-    // --- Audience roles: only when linked to a visible target ------------------
+    // --- Audience roles: only when linked to a target visible in their session -
 
     [Theory]
     [InlineData(MembershipRole.Participant)]
@@ -212,11 +218,12 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         var contentBlockId = Guid.CreateVersion7();
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.True(await policy.CanDownloadAsync(asset, role, CancellationToken.None));
+        Assert.True(await policy.CanDownloadAsync(asset, role, session, CancellationToken.None));
     }
 
     [Fact]
@@ -226,11 +233,12 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         var entityId = Guid.CreateVersion7();
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.Entity, entityId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.True(await policy.CanDownloadAsync(asset, MembershipRole.Participant, CancellationToken.None));
+        Assert.True(await policy.CanDownloadAsync(asset, MembershipRole.Observer, session, CancellationToken.None));
     }
 
     [Theory]
@@ -243,23 +251,25 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
         // Linked, but the target is hidden from the audience -> the asset is not audience-accessible.
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.False(await policy.CanDownloadAsync(asset, role, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, role, session, CancellationToken.None));
     }
 
     [Fact]
     public async Task Audience_role_cannot_download_an_unlinked_asset()
     {
-        var (_, _, _, asset) = await SeedBaseAsync();
+        var (org, ws, _, asset) = await SeedBaseAsync();
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
         // No link at all -> host-only by default -> denied to the audience (the pre-CORE-AST-005 posture).
-        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Participant, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Participant, session, CancellationToken.None));
     }
 
     [Fact]
@@ -272,11 +282,48 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, visibleTarget, user.Id);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.ContentBlock, hiddenTarget, VisibilityState.Hidden);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.Entity, visibleTarget, VisibilityState.Visible);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.True(await policy.CanDownloadAsync(asset, MembershipRole.Observer, CancellationToken.None));
+        Assert.True(await policy.CanDownloadAsync(asset, MembershipRole.Observer, session, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Audience_role_cannot_download_a_resource_revealed_only_in_a_sibling_session()
+    {
+        // CORE-SVIS-004: the role-level (Observer) download is session-scoped too. The asset is linked to a
+        // content block revealed audience-wide in session A only; an Observer querying session B (a sibling
+        // session of the SAME workspace) is denied — the reveal is session-scoped, so it is not visible in B.
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var contentBlockId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.ContentBlock, contentBlockId, user.Id);
+        var sessionA = await SeedSessionAsync(org.Id, ws.Id, "Session A");
+        var sessionB = await SeedSessionAsync(org.Id, ws.Id, "Session B");
+        await SeedRuleInSessionAsync(org.Id, ws.Id, sessionA, VisibilityResourceType.ContentBlock, contentBlockId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.True(await policy.CanDownloadAsync(asset, MembershipRole.Observer, sessionA, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Observer, sessionB, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Audience_role_with_an_empty_session_cannot_download()
+    {
+        // An audience caller must name a session (a reveal is session-scoped). An empty session matches no
+        // rule, so the download is denied fail-closed even where the linked target is revealed.
+        var (org, ws, user, asset) = await SeedBaseAsync();
+        var entityId = Guid.CreateVersion7();
+        await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
+        await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.Entity, entityId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Observer, Guid.Empty, CancellationToken.None));
     }
 
     // --- Audit / undefined roles: denied even when a target is visible ---------
@@ -288,12 +335,13 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         var entityId = Guid.CreateVersion7();
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.Entity, entityId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
         // Auditor is audit-only, not a live content grant: a visible link does not grant download.
-        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Auditor, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Auditor, session, CancellationToken.None));
     }
 
     [Fact]
@@ -303,11 +351,12 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         var entityId = Guid.CreateVersion7();
         await SeedLinkAsync(org.Id, ws.Id, asset.Id, AssetLinkTargetType.Entity, entityId, user.Id);
         await SeedRuleAsync(org.Id, ws.Id, VisibilityResourceType.Entity, entityId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org.Id, ws.Id);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.False(await policy.CanDownloadAsync(asset, (MembershipRole)999, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, (MembershipRole)999, session, CancellationToken.None));
     }
 
     // --- Isolation: a visible target elsewhere does not grant audience download -
@@ -316,8 +365,8 @@ public sealed class AssetDownloadPolicyTests : IDisposable
     public async Task A_visible_rule_in_another_workspace_does_not_grant_audience_download()
     {
         // The asset is in workspace A and linked to target T; T is visible in workspace B only. An audience
-        // viewer of A must NOT be able to download — both the link lookup and the visibility decision are
-        // scoped to the asset's OWN workspace (threat T5).
+        // viewer of A (in a session of A) must NOT be able to download — both the link lookup and the
+        // visibility decision are scoped to the asset's OWN workspace (threat T5).
         var org = await SeedOrganizationAsync(_organizationSlugA);
         var wsA = await SeedWorkspaceAsync(org.Id, _workspaceSlugA);
         var wsB = await SeedWorkspaceAsync(org.Id, _workspaceSlugB);
@@ -327,11 +376,12 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         await SeedLinkAsync(org.Id, wsA.Id, asset.Id, AssetLinkTargetType.ContentBlock, targetId, user.Id);
         // The visible rule for the target is in workspace B, not the asset's workspace A.
         await SeedRuleAsync(org.Id, wsB.Id, VisibilityResourceType.ContentBlock, targetId, VisibilityState.Visible);
+        var sessionInA = await SeedSessionAsync(org.Id, wsA.Id, "Session in A");
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Participant, CancellationToken.None));
+        Assert.False(await policy.CanDownloadAsync(asset, MembershipRole.Participant, sessionInA, CancellationToken.None));
     }
 
     [Fact]
@@ -341,7 +391,7 @@ public sealed class AssetDownloadPolicyTests : IDisposable
         var policy = CreatePolicy(context);
 
         await Assert.ThrowsAsync<ArgumentNullException>(
-            () => policy.CanDownloadAsync(null!, MembershipRole.Owner, CancellationToken.None));
+            () => policy.CanDownloadAsync(null!, MembershipRole.Owner, Guid.CreateVersion7(), CancellationToken.None));
     }
 
     // =====================================================================

@@ -141,34 +141,40 @@ download, and the audit role and any other role are denied fail-closed. The asse
 reached only through the single short-lived signed URL minted after the permission check (the epic
 acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak).
 
-### Session-scoped participant download (CORE-SVIS-003)
+### Session-scoped audience download (CORE-SVIS-003, completed by CORE-SVIS-004)
 
 A reveal is **session-scoped** (`docs/adr/0013-session-scoped-visibility-rules.md`): a resource is made
 visible to **one session's** audience, never workspace-wide. So when an audience caller downloads an asset,
-"is the linked resource visible?" is only meaningful **within a session**. A **participant's** asset
-download is therefore authorized against the **session-scoped** visibility of the linked resource, not the
-workspace-wide one.
+"is the linked resource visible?" is only meaningful **within a session**. **Every** audience asset download
+is therefore authorized against the **session-scoped** visibility of the linked resource; the workspace-wide,
+session-agnostic overload that once backed the role-level path has been **removed** (CORE-SVIS-004), so a
+session-agnostic audience decision can no longer be reintroduced.
 
-The participant supplies the session in an optional `?sessionId=` **query parameter** on the signed download
-route (the same way the participant-visible feed names its session). For a `Participant`-role caller it is
-**required**: the asset's links are gated by the **same per-participant primitive the feed uses**
-(`AssetDownloadPolicy.CanParticipantDownloadAsync` over `VisibilityPolicy.CanParticipantViewResource`,
-reused — not forked), so a participant may obtain a download URL only when the asset is linked to a content
-block or entity **visible to them in that session** — an audience-wide reveal of that session **or** a
-reveal scoped to exactly them. A participant **cannot** obtain a download URL for an asset tied to a
-resource revealed only in a **sibling session** of the same workspace (the cross-session leak this closes;
-threat T5/T3), nor for one revealed only to **another** participant (the selected-participant guarantee;
-threat T2). Because the caller is already a known member of the asset's workspace, a missing or malformed
-`sessionId` is a request-shape `400` (surfaced only after the membership `404`-hide gate), and a
-participant-role member with **no active participant record** in the asset's workspace is denied fail-closed
-(`403`). A foreign or unknown session id simply matches no rule, so it is a fail-closed `403` and never
-probes session existence.
+The audience caller supplies the session in a `?sessionId=` **query parameter** on the signed download route
+(the same way the participant-visible feed names its session). It is **required for any audience caller** —
+both `Participant` and `Observer`:
 
-**Host/role-level (non-participant) access is unchanged.** The host-content roles
-(`Owner`/`Admin`/`Host`/`CoHost`) may always download and the non-participant audience role (`Observer`)
-keeps the workspace-wide, session-agnostic decision (`VisibilityPolicy.CanViewResource`); both ignore
-`sessionId`. This is the ADR 0013 role-level carve-out; making entity-search session-scoped and removing the
-workspace-wide overload is the follow-up CORE-SVIS-004. The tenant/asset boundary is enforced **before** the
+- A **`Participant`**'s links are gated by the **same per-participant primitive the feed uses**
+  (`AssetDownloadPolicy.CanParticipantDownloadAsync` over `VisibilityPolicy.CanParticipantViewResource`,
+  reused — not forked), so a participant may obtain a download URL only when the asset is linked to a content
+  block or entity **visible to them in that session** — an audience-wide reveal of that session **or** a
+  reveal scoped to exactly them. A participant **cannot** obtain a download URL for an asset tied to a
+  resource revealed only in a **sibling session** of the same workspace (the cross-session leak; threat
+  T5/T3), nor for one revealed only to **another** participant (the selected-participant guarantee; threat
+  T2). A participant-role member with **no active participant record** in the asset's workspace is denied
+  fail-closed (`403`).
+- The non-participant audience role **`Observer`** is gated by the **session-scoped role-level** decision
+  (`AssetDownloadPolicy.CanDownload` over `VisibilityPolicy.CanViewResource`), so an Observer may download
+  only when a linked target is **audience-wide visible in the supplied session** — never one revealed only in
+  a **sibling session** (the residual the ADR 0013 role-level carve-out left, now closed).
+
+Because the caller is already a known member of the asset's workspace, a missing or malformed `sessionId` for
+an audience caller is a request-shape `400` (surfaced only after the membership `404`-hide gate). A foreign or
+unknown session id simply matches no rule, so it is a fail-closed `403` and never probes session existence.
+
+**Host-content access is unchanged.** The host-content roles (`Owner`/`Admin`/`Host`/`CoHost`) may always
+download; their content access is **session-agnostic**, so they need no `sessionId`. The audit role and any
+undefined role are denied fail-closed. The tenant/asset boundary is enforced **before** the
 participant/session logic, so a foreign-tenant asset is still hidden as `404`.
 
 ### Host-initiated deletion flow (CORE-LIFE-006)
@@ -233,7 +239,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - signed URLs are short-lived
 - asset metadata is filtered by visibility rules
 - an asset is audience-accessible only when linked to a visible content block or entity
-- a participant's download is authorized against the session-scoped visibility of the linked resource (not the workspace-wide one)
+- every audience download (participant and observer) is authorized against the session-scoped visibility of the linked resource; the workspace-wide overload has been removed (CORE-SVIS-004)
 - deleting an asset removes its storage object before its metadata row (no orphaned object)
 
 ## Asset lifecycle

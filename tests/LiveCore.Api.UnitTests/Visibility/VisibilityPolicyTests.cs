@@ -13,24 +13,23 @@ namespace LiveCore.Api.UnitTests.Visibility;
 /// Tests for <see cref="VisibilityPolicy"/> (CORE-VIS-002) — the <c>CanViewResource</c> decision. The
 /// policy is a fail-closed decision service over the real EF Core visibility-rule repository, driven
 /// against an in-memory SQLite database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>),
-/// so the tenant/workspace-scoped rule lookups run against genuinely persisted rules — exactly like
-/// the CORE-SES-003 join service and CORE-ENT-005 search service tests.
+/// so the tenant/workspace/session-scoped rule lookups run against genuinely persisted rules — exactly
+/// like the CORE-SES-003 join service and CORE-ENT-005 search service tests.
 ///
-/// The story's required tests are "Negative authorization tests, idempotency tests, projection
-/// tests"; this is the NEGATIVE-AUTHORIZATION-heavy suite that the policy demands:
+/// EVERY decision is SESSION-SCOPED (CORE-SVIS-001, completed by CORE-SVIS-004): the workspace-wide,
+/// session-agnostic overloads have been removed, so a decision can never fold a reveal across sessions.
+/// This is the NEGATIVE-AUTHORIZATION-heavy suite the policy demands:
 /// <list type="bullet">
 ///   <item>HOST-content roles (Owner/Admin/Host/CoHost) may view a resource whether it is hidden or
 ///   visible — allowed even with NO rule (docs/06 "View host-only content" = yes).</item>
-///   <item>AUDIENCE roles (Participant/Observer) may view a resource ONLY when a rule makes it visible
-///   ("if visible"); a hidden-only or rule-less resource is denied (deny-by-default).</item>
+///   <item>AUDIENCE roles (Participant/Observer) may view a resource ONLY when a rule of THEIR SESSION
+///   makes it visible ("if visible"); a hidden-only or rule-less resource is denied (deny-by-default).</item>
 ///   <item>The audit role and any undefined role are DENIED even when the resource is visible
 ///   (Auditor is audit-only, not a live content grant; threats T1/T5).</item>
-///   <item>ISOLATION: a visible rule in another WORKSPACE or another TENANT never makes the resource
-///   visible to an audience viewer of this workspace/tenant (organization boundary before workspace
-///   boundary before resource-level visibility; threat T5).</item>
+///   <item>ISOLATION: a visible rule in another WORKSPACE, TENANT or SESSION never makes the resource
+///   visible to an audience viewer of this workspace/tenant/session (organization boundary before
+///   workspace boundary before session before resource-level visibility; threats T5/T3).</item>
 /// </list>
-/// "idempotency tests" and "projection tests" target later stories (the reveal command CORE-VIS-004 /
-/// the participant projection CORE-VIS-003), not this read-only access decision.
 ///
 /// All fixtures are GENERIC — no vertical vocabulary appears (AGENTS.md, csv/forbidden_core_terms.csv).
 /// </summary>
@@ -173,12 +172,13 @@ public sealed class VisibilityPolicyTests : IDisposable
     {
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
-        // No rule seeded: a hidden-by-default resource is still visible to a host role.
+        // No rule seeded: a hidden-by-default resource is still visible to a host role. A host short-circuits
+        // before any rule lookup, so the session is irrelevant (host content access is session-agnostic).
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, role, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            org, ws, Guid.NewGuid(), role, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
 
         Assert.True(decision.CanView);
         Assert.Equal(VisibilityAccessReason.GrantedByHostRole, decision.Reason);
@@ -190,17 +190,18 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Host, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+            org, ws, session, MembershipRole.Host, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
 
         Assert.True(decision.CanView);
         Assert.Equal(VisibilityAccessReason.GrantedByHostRole, decision.Reason);
     }
 
-    // --- Audience roles: only if visible ---------------------------------------
+    // --- Audience roles: only if visible in their session ----------------------
 
     [Theory]
     [InlineData(MembershipRole.Participant)]
@@ -210,11 +211,12 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, role, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
+            org, ws, session, role, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
 
         Assert.True(decision.CanView);
         Assert.Equal(VisibilityAccessReason.GrantedByVisibleRule, decision.Reason);
@@ -228,11 +230,12 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, role, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
+            org, ws, session, role, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
@@ -243,38 +246,16 @@ public sealed class VisibilityPolicyTests : IDisposable
     {
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
+        var session = (await SeedSessionAsync(org, ws)).Id;
         // No rule at all -> host-only by default -> denied to the audience.
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+            org, ws, session, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
-    }
-
-    [Fact]
-    public async Task Audience_role_can_view_when_any_of_several_rules_is_visible()
-    {
-        var (org, ws) = await SeedWorkspaceAsync();
-        var resourceId = Guid.NewGuid();
-        // The same resource carries one audience-wide rule in EACH of two concurrent sessions of the
-        // workspace (the single-rule-per-(session, resource, dimension) constraint, CORE-SVIS-002, allows
-        // one per session): hidden in session A, visible in session B. The workspace-wide, session-agnostic
-        // overload folds across sessions, so any visible rule grants visibility.
-        var sessionA = await SeedSessionAsync(org, ws, "Session A");
-        var sessionB = await SeedSessionAsync(org, ws, "Session B");
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden, sessionA.Id);
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionB.Id);
-
-        await using var context = CreateContext();
-        var policy = CreatePolicy(context);
-        var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Observer, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
-
-        Assert.True(decision.CanView);
-        Assert.Equal(VisibilityAccessReason.GrantedByVisibleRule, decision.Reason);
     }
 
     // --- Audit role / undefined role: denied even when visible -----------------
@@ -285,11 +266,12 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Auditor, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            org, ws, session, MembershipRole.Auditor, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
 
         // Auditor is audit-only on both content rows: a visible resource does not grant it live access.
         Assert.False(decision.CanView);
@@ -302,11 +284,12 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         var decision = await policy.CanViewResourceAsync(
-            org, ws, (MembershipRole)999, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            org, ws, session, (MembershipRole)999, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedRoleNotPermitted, decision.Reason);
@@ -323,12 +306,13 @@ public sealed class VisibilityPolicyTests : IDisposable
         var resourceId = Guid.NewGuid();
         // The resource is visible in workspace B only.
         await SeedRuleAsync(organization.Id, workspaceB.Id, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+        var sessionInA = (await SeedSessionAsync(organization.Id, workspaceA.Id)).Id;
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
-        // An audience viewer of workspace A must NOT see it (the rule is in another workspace).
+        // An audience viewer of workspace A (in a session of A) must NOT see it (the rule is in another workspace).
         var decision = await policy.CanViewResourceAsync(
-            organization.Id, workspaceA.Id, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+            organization.Id, workspaceA.Id, sessionInA, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
@@ -342,13 +326,14 @@ public sealed class VisibilityPolicyTests : IDisposable
         var resourceId = Guid.NewGuid();
         // The resource is visible in tenant B only.
         await SeedRuleAsync(orgB, wsB, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+        var sessionInA = (await SeedSessionAsync(orgA, wsA)).Id;
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
         // An audience viewer of tenant A must NOT see it (the rule is in another tenant). The
         // organization boundary is checked before the workspace boundary (threat T5).
         var decision = await policy.CanViewResourceAsync(
-            orgA, wsA, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+            orgA, wsA, sessionInA, MembershipRole.Participant, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
 
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
@@ -363,12 +348,13 @@ public sealed class VisibilityPolicyTests : IDisposable
         var resourceId = Guid.NewGuid();
         var selected = (await SeedParticipantAsync(org, ws)).Id;
         await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
         Assert.True(await policy.CanParticipantViewResourceAsync(
-            org, ws, selected, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
+            org, ws, session, selected, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -381,12 +367,13 @@ public sealed class VisibilityPolicyTests : IDisposable
         var selected = (await SeedParticipantAsync(org, ws)).Id;
         var other = (await SeedParticipantAsync(org, ws)).Id;
         await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
         Assert.False(await policy.CanParticipantViewResourceAsync(
-            org, ws, other, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
+            org, ws, session, other, VisibilityResourceType.Entity, resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -395,13 +382,14 @@ public sealed class VisibilityPolicyTests : IDisposable
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
-        // Any participant sees an audience-wide visible resource.
+        // Any participant sees an audience-wide visible resource in that session.
         Assert.True(await policy.CanParticipantViewResourceAsync(
-            org, ws, Guid.NewGuid(), VisibilityResourceType.Scene, resourceId, CancellationToken.None));
+            org, ws, session, Guid.NewGuid(), VisibilityResourceType.Scene, resourceId, CancellationToken.None));
     }
 
     [Fact]
@@ -413,18 +401,19 @@ public sealed class VisibilityPolicyTests : IDisposable
         var resourceId = Guid.NewGuid();
         var selected = (await SeedParticipantAsync(org, ws)).Id;
         await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, selected, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
 
         await using var context = CreateContext();
         var policy = CreatePolicy(context);
 
         var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Participant, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            org, ws, session, MembershipRole.Participant, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
         Assert.False(decision.CanView);
         Assert.Equal(VisibilityAccessReason.DeniedNotVisible, decision.Reason);
 
         // ...but a host still sees it (host-only content access).
         var hostDecision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Host, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
+            org, ws, session, MembershipRole.Host, VisibilityResourceType.ContentBlock, resourceId, CancellationToken.None);
         Assert.True(hostDecision.CanView);
     }
 
@@ -436,13 +425,13 @@ public sealed class VisibilityPolicyTests : IDisposable
         var id = Guid.NewGuid();
 
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
-            Guid.Empty, id, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+            Guid.Empty, id, id, id, VisibilityResourceType.Entity, id, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
-            id, Guid.Empty, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+            id, Guid.Empty, id, id, VisibilityResourceType.Entity, id, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
-            id, id, Guid.Empty, VisibilityResourceType.Entity, id, CancellationToken.None));
+            id, id, id, Guid.Empty, VisibilityResourceType.Entity, id, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanParticipantViewResourceAsync(
-            id, id, id, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
+            id, id, id, id, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
     }
 
     // --- Session scoping (CORE-SVIS-001, the cross-session leak) ---------------
@@ -495,25 +484,6 @@ public sealed class VisibilityPolicyTests : IDisposable
     }
 
     [Fact]
-    public async Task Workspace_wide_overload_spans_sessions_for_the_role_level_path()
-    {
-        // The session-agnostic role-level overload (used by asset download / entity search) still sees a
-        // reveal regardless of which session made it — it is not bounded by a session.
-        var (org, ws) = await SeedWorkspaceAsync();
-        var sessionA = await SeedSessionAsync(org, ws, "Session A");
-        var resourceId = Guid.NewGuid();
-        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible, sessionA.Id);
-
-        await using var context = CreateContext();
-        var policy = CreatePolicy(context);
-
-        var decision = await policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Participant, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
-        Assert.True(decision.CanView);
-        Assert.Equal(VisibilityAccessReason.GrantedByVisibleRule, decision.Reason);
-    }
-
-    [Fact]
     public async Task Session_scoped_overloads_reject_an_empty_session_id()
     {
         await using var context = CreateContext();
@@ -539,13 +509,14 @@ public sealed class VisibilityPolicyTests : IDisposable
 
         var org = Guid.NewGuid();
         var ws = Guid.NewGuid();
+        var session = Guid.NewGuid();
         var resource = Guid.NewGuid();
 
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanViewResourceAsync(
-            Guid.Empty, ws, MembershipRole.Owner, VisibilityResourceType.Entity, resource, CancellationToken.None));
+            Guid.Empty, ws, session, MembershipRole.Owner, VisibilityResourceType.Entity, resource, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanViewResourceAsync(
-            org, Guid.Empty, MembershipRole.Owner, VisibilityResourceType.Entity, resource, CancellationToken.None));
+            org, Guid.Empty, session, MembershipRole.Owner, VisibilityResourceType.Entity, resource, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanViewResourceAsync(
-            org, ws, MembershipRole.Owner, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
+            org, ws, session, MembershipRole.Owner, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
     }
 }

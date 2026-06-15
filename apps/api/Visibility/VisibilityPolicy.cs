@@ -38,13 +38,14 @@ namespace LiveCore.Api.Visibility;
 /// workspace boundary, the workspace before the SESSION, and the session before resource-level
 /// visibility — the rule lookup leads with <c>organization_id</c> then <c>workspace_id</c> then
 /// <c>session_id</c>, so a rule in another tenant, workspace or session can never make a resource visible
-/// here (threat T5/T3). A reveal is session-scoped (CORE-SVIS-001), so every per-session surface (the
-/// realtime recipient gate, the participant feed, replay) passes a <c>sessionId</c> and gets the
-/// session-scoped overload; the workspace-wide overloads exist only for the role-level, session-agnostic
-/// asset-download and entity-search callers. The caller is responsible for having
-/// resolved the workspace <see cref="MembershipRole"/> from a verified membership (the tenant context
-/// resolver); this policy trusts the passed role exactly as <c>EntitySearchService</c> does and
-/// decides only the content-visibility question.
+/// here (threat T5/T3). EVERY visibility decision is SESSION-SCOPED (CORE-SVIS-001, completed by
+/// CORE-SVIS-004): a reveal belongs to the session it was made in, so a session-agnostic, workspace-wide
+/// decision is not representable here — every caller (the reveal command, the participant feed, the
+/// realtime recipient gate, replay, asset download and entity search) passes a <c>sessionId</c>, and the
+/// workspace-wide overloads that once spanned sessions have been REMOVED so a cross-session leak cannot be
+/// reintroduced. The caller is responsible for having resolved the workspace <see cref="MembershipRole"/>
+/// from a verified membership (the tenant context resolver); this policy trusts the passed role exactly as
+/// <c>EntitySearchService</c> does and decides only the content-visibility question.
 ///
 /// SCOPE: this story implements only <c>CanViewResource</c>. Computing a participant's full visible
 /// set (<c>GetVisibleResourcesForParticipant</c> — the audience computation the CORE-SES-005 and
@@ -105,35 +106,14 @@ internal sealed class VisibilityPolicy
     }
 
     /// <summary>
-    /// Workspace-wide, SESSION-AGNOSTIC role-level decision used by the decisions that are NOT tied to a
-    /// single session — the asset-download authorization (a workspace role, not a session participant).
-    /// It allows an audience role iff an audience-wide visible rule exists for the resource in ANY session
-    /// of the workspace. Whenever the session is known (every per-session surface — reveal, participant
-    /// feed, realtime delivery, replay) the session-scoped overload above is the one to use; this overload
-    /// exists only for the role-level, session-agnostic callers.
-    /// </summary>
-    /// <exception cref="ArgumentException">The organization id, workspace id or resource id is empty.</exception>
-    public Task<ResourceVisibilityDecision> CanViewResourceAsync(
-        Guid organizationId,
-        Guid workspaceId,
-        MembershipRole viewerRole,
-        VisibilityResourceType resourceType,
-        Guid resourceId,
-        CancellationToken cancellationToken)
-        => CanViewResourceCoreAsync(
-            organizationId, workspaceId, sessionId: null, viewerRole, resourceType, resourceId, cancellationToken);
-
-    /// <summary>
-    /// The single implementation of the role-level audience visibility decision (CORE-VIS-002), shared by
-    /// the session-scoped and the workspace-wide overloads — the rule logic lives in exactly ONE place
-    /// (docs/05_MODULE_CONTRACTS.md). The two overloads differ ONLY in which rules are fetched: a non-null
-    /// <paramref name="sessionId"/> consults exactly that session's rules; a null one consults the
-    /// resource's rules across all sessions of the workspace.
+    /// The single implementation of the role-level audience visibility decision (CORE-VIS-002), always
+    /// SESSION-SCOPED (CORE-SVIS-004) — the rule logic lives in exactly ONE place
+    /// (docs/05_MODULE_CONTRACTS.md), and it consults only the rules of the supplied session.
     /// </summary>
     private async Task<ResourceVisibilityDecision> CanViewResourceCoreAsync(
         Guid organizationId,
         Guid workspaceId,
-        Guid? sessionId,
+        Guid sessionId,
         MembershipRole viewerRole,
         VisibilityResourceType resourceType,
         Guid resourceId,
@@ -173,16 +153,16 @@ internal sealed class VisibilityPolicy
         }
 
         // AUDIENCE role (role-level, no specific participant): ALLOW iff an AUDIENCE-WIDE visibility
-        // rule makes the resource visible. The lookup is tenant- and workspace-scoped (organization
-        // boundary before workspace boundary; resource-level visibility checked last — docs/06
-        // authorization principles) and, when a session is supplied, session-scoped too, so a rule in
-        // another tenant, workspace or session can never make this resource visible (threat T5/T3). A
-        // rule scoped to a SPECIFIC participant (CORE-VIS-005) does NOT grant visibility at this role
-        // level — only the audience-wide rules do — because a role-level check does not identify a
-        // participant; whether a specific participant may see a selected-participant reveal is
+        // rule makes the resource visible IN THIS SESSION. The lookup is tenant-, workspace- AND
+        // session-scoped (organization boundary before workspace boundary before session; resource-level
+        // visibility checked last — docs/06 authorization principles), so a rule in another tenant,
+        // workspace or session can never make this resource visible (threat T5/T3). A rule scoped to a
+        // SPECIFIC participant (CORE-VIS-005) does NOT grant visibility at this role level — only the
+        // audience-wide rules do — because a role-level check does not identify a participant; whether a
+        // specific participant may see a selected-participant reveal is
         // <see cref="CanParticipantViewResourceAsync(Guid, Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>.
-        var rules = await ListRulesAsync(
-                organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
+        var rules = await _rules
+            .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
         return rules.Any(rule => rule.IsVisibleToAudience() && rule.IsAudienceWide)
@@ -197,10 +177,11 @@ internal sealed class VisibilityPolicy
     /// to everyone) or a visible rule scoped to exactly this participant (a selected-participant
     /// reveal). A visible rule scoped to a DIFFERENT participant does NOT grant access — the
     /// selected-participant guarantee: a non-selected participant must not see a private reveal (threat
-    /// T5; docs/06 "Send private content"; docs/09 "selected recipients"). The lookup is tenant- and
-    /// workspace-scoped, so a rule in another tenant or workspace never contributes (the organization
-    /// boundary is checked before the workspace boundary). This is a per-participant content check, NOT
-    /// a role check; the caller establishes that the participant is entitled to a feed.
+    /// T5; docs/06 "Send private content"; docs/09 "selected recipients"). The lookup is tenant-,
+    /// workspace- AND session-scoped (CORE-SVIS-001), so a rule in another tenant, workspace or session
+    /// never contributes (the organization boundary is checked before the workspace boundary before the
+    /// session). This is a per-participant content check, NOT a role check; the caller establishes that
+    /// the participant is entitled to a feed.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// The organization id, workspace id, participant id or resource id is empty.
@@ -228,34 +209,14 @@ internal sealed class VisibilityPolicy
     }
 
     /// <summary>
-    /// Workspace-wide, SESSION-AGNOSTIC per-participant decision used by the entity-search audience
-    /// filter, which is not tied to a single session. It is visible to the participant iff an
-    /// audience-wide visible rule, or a visible rule scoped to exactly them, exists for the resource in
-    /// ANY session of the workspace. Whenever the session is known (the participant feed and the realtime
-    /// recipient gate) the session-scoped overload above is the one to use.
-    /// </summary>
-    /// <exception cref="ArgumentException">
-    /// The organization id, workspace id, participant id or resource id is empty.
-    /// </exception>
-    public Task<bool> CanParticipantViewResourceAsync(
-        Guid organizationId,
-        Guid workspaceId,
-        Guid participantId,
-        VisibilityResourceType resourceType,
-        Guid resourceId,
-        CancellationToken cancellationToken)
-        => CanParticipantViewResourceCoreAsync(
-            organizationId, workspaceId, sessionId: null, participantId, resourceType, resourceId, cancellationToken);
-
-    /// <summary>
-    /// The single implementation of the per-participant visibility decision (CORE-VIS-005), shared by the
-    /// session-scoped and the workspace-wide overloads — the rule logic lives in exactly ONE place
-    /// (docs/05_MODULE_CONTRACTS.md). The two overloads differ ONLY in which rules are fetched.
+    /// The single implementation of the per-participant visibility decision (CORE-VIS-005), always
+    /// SESSION-SCOPED (CORE-SVIS-004) — the rule logic lives in exactly ONE place
+    /// (docs/05_MODULE_CONTRACTS.md), and it consults only the rules of the supplied session.
     /// </summary>
     private async Task<bool> CanParticipantViewResourceCoreAsync(
         Guid organizationId,
         Guid workspaceId,
-        Guid? sessionId,
+        Guid sessionId,
         Guid participantId,
         VisibilityResourceType resourceType,
         Guid resourceId,
@@ -281,30 +242,11 @@ internal sealed class VisibilityPolicy
             throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
         }
 
-        var rules = await ListRulesAsync(
-                organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
+        var rules = await _rules
+            .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
         // Visible to THIS participant iff some rule is visible AND (audience-wide OR scoped to them).
         return rules.Any(rule => rule.IsVisibleTo(participantId));
     }
-
-    /// <summary>
-    /// Fetches the rules governing a resource, session-scoped when a session is supplied (the secure
-    /// default for every per-session surface) and workspace-wide (across sessions) otherwise (the
-    /// role-level, session-agnostic callers). This is the only place the two repository lookups are
-    /// chosen between, so both decision cores route through it identically.
-    /// </summary>
-    private Task<IReadOnlyList<VisibilityRule>> ListRulesAsync(
-        Guid organizationId,
-        Guid workspaceId,
-        Guid? sessionId,
-        VisibilityResourceType resourceType,
-        Guid resourceId,
-        CancellationToken cancellationToken)
-        => sessionId is { } scopedSessionId
-            ? _rules.ListByResourceAsync(
-                organizationId, workspaceId, scopedSessionId, resourceType, resourceId, cancellationToken)
-            : _rules.ListByResourceAcrossSessionsAsync(
-                organizationId, workspaceId, resourceType, resourceId, cancellationToken);
 }

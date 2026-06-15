@@ -21,12 +21,13 @@ namespace LiveCore.Api.Assets;
 ///   whether or not it is linked or visible. Short-circuits to ALLOW before any database read.</item>
 ///   <item>AUDIENCE roles (Participant/Observer — "View participant-visible content" = "if visible",
 ///   <see cref="VisibilityRoles.IsAudienceRole"/>) may download ONLY when the asset is linked to a content
-///   block or entity that is VISIBLE to the audience. The policy lists the asset's links
+///   block or entity that is VISIBLE to the audience IN THE GIVEN SESSION (a reveal is session-scoped, ADR
+///   0013 / CORE-SVIS-004). The policy lists the asset's links
 ///   (<see cref="IAssetLinkRepository.ListByAssetAsync"/>, tenant- and workspace-scoped) and DELEGATES
-///   each target to <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> (the SAME central decision the
+///   each target to <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> (the SAME central decision the
 ///   REST/realtime paths use, so an asset's audience access can never diverge from its target's visibility
 ///   — docs/05_MODULE_CONTRACTS.md: do not duplicate visibility logic). It ALLOWS as soon as ANY linked
-///   target is visible to the audience; otherwise DENIES.</item>
+///   target is visible to the audience in that session; otherwise DENIES.</item>
 ///   <item>EVERY OTHER role — the audit role Auditor (audit-only on both content rows, never a live
 ///   content grant) and any undefined enum value — is DENIED by default WITHOUT reading any link, so no
 ///   link or visibility existence can leak to a role with no content-view standing (threats T1/T5).</item>
@@ -39,15 +40,15 @@ namespace LiveCore.Api.Assets;
 /// changes WHO may pass this check, never how the bytes are served — the endpoint still mints a single
 /// short-lived signed URL only after this allow (threat T4 "Asset leak").
 ///
-/// PARTICIPANT-LEVEL vs ROLE-LEVEL. The policy exposes TWO decisions, differing only in how the audience
-/// case is scoped:
+/// ROLE-LEVEL vs PER-PARTICIPANT. Both decisions are now SESSION-SCOPED (CORE-SVIS-004 removed the
+/// workspace-wide carve-out); they differ only in how the audience case is identified:
 /// <list type="bullet">
-///   <item><see cref="CanDownloadAsync"/> is the ROLE-level, workspace-wide decision the endpoint applies
-///   to host-content roles and the NON-participant audience role (Observer). It allows an audience role iff
-///   an AUDIENCE-WIDE visible rule exists for a linked target in ANY session of the workspace, via the
-///   session-agnostic <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>.
-///   This is the ADR 0013 role-level carve-out (the download route carries no session for these callers);
-///   migrating entity-search and removing the workspace-wide overload is the follow-up CORE-SVIS-004.</item>
+///   <item><see cref="CanDownloadAsync"/> is the ROLE-level decision the endpoint applies to host-content
+///   roles and the NON-participant audience role (Observer). Host-content roles may always download; the
+///   audience role (Observer) may download iff an AUDIENCE-WIDE visible rule exists for a linked target IN
+///   THE GIVEN SESSION, via the session-scoped <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>,
+///   so an Observer cannot download an asset tied to a resource revealed only in a SIBLING session of the
+///   same workspace (the cross-session leak CORE-SVIS-004 closes; threat T5/T3).</item>
 ///   <item><see cref="CanParticipantDownloadAsync"/> is the SESSION-scoped, per-PARTICIPANT decision the
 ///   endpoint applies to a <see cref="MembershipRole.Participant"/> caller (CORE-SVIS-003). It threads the
 ///   request's session and the caller's participant identity into the SAME per-participant primitive the
@@ -71,25 +72,34 @@ internal sealed class AssetDownloadPolicy
     }
 
     /// <summary>
-    /// Decides whether a viewer with the given workspace role may download the given asset, applying the
-    /// host-content vs audience-visible rules over the asset's links and the central Visibility engine. This
-    /// is the ROLE-level, workspace-wide decision; the endpoint applies it to host-content roles and the
-    /// non-participant audience role (Observer). A <see cref="MembershipRole.Participant"/> caller is routed
-    /// to the SESSION-scoped <see cref="CanParticipantDownloadAsync"/> instead (CORE-SVIS-003).
+    /// Decides whether a viewer with the given workspace role may download the given asset IN THE GIVEN
+    /// SESSION, applying the host-content vs audience-visible rules over the asset's links and the central
+    /// Visibility engine. This is the ROLE-level decision; the endpoint applies it to host-content roles and
+    /// the non-participant audience role (Observer). A <see cref="MembershipRole.Participant"/> caller is
+    /// routed to the per-PARTICIPANT <see cref="CanParticipantDownloadAsync"/> instead (CORE-SVIS-003).
     /// </summary>
     /// <param name="asset">The already-resolved, tenant- and workspace-scoped asset.</param>
     /// <param name="viewerRole">The caller's role in the asset's own workspace.</param>
+    /// <param name="sessionId">
+    /// The session the audience decision is bounded by (a reveal is session-scoped, ADR 0013 /
+    /// CORE-SVIS-004). It is consulted only for an audience role; a host-content role short-circuits to
+    /// ALLOW before any rule lookup and so never depends on it, and an audit/undefined role is denied
+    /// before any lookup. For an audience role a missing/empty session matches no rule, so the download is
+    /// DENIED fail-closed (the caller — the endpoint — supplies a valid session for an audience caller).
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns><see langword="true"/> when the viewer may download; otherwise <see langword="false"/>.</returns>
     /// <exception cref="ArgumentNullException">The asset is null.</exception>
     public async Task<bool> CanDownloadAsync(
         Asset asset,
         MembershipRole viewerRole,
+        Guid sessionId,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(asset);
 
-        // HOST-CONTENT roles may always download — short-circuit to ALLOW before any database read.
+        // HOST-CONTENT roles may always download — short-circuit to ALLOW before any database read. Host
+        // content access is session-agnostic, so no session is consulted.
         if (VisibilityRoles.ViewsHostOnlyContent(viewerRole))
         {
             return true;
@@ -103,10 +113,20 @@ internal sealed class AssetDownloadPolicy
             return false;
         }
 
-        // AUDIENCE role: ALLOW iff the asset is linked to a content block or entity the audience may see.
+        // AUDIENCE role: a reveal is session-scoped (ADR 0013 / CORE-SVIS-004), so "is the linked resource
+        // visible to the audience?" is only meaningful within a session. An empty session can never address
+        // a real session, so it grants nothing — fail closed (the session-scoped policy would otherwise
+        // reject an empty id; the endpoint supplies a valid session for an audience caller).
+        if (sessionId == Guid.Empty)
+        {
+            return false;
+        }
+
+        // ALLOW iff the asset is linked to a content block or entity the audience may see IN THIS SESSION.
         // The links are tenant- and workspace-scoped to the asset's own boundary, and each target's
-        // visibility is the central Visibility engine's decision (reused, never duplicated). The asset
-        // becomes audience-accessible the moment ANY linked target is audience-visible.
+        // visibility is the central SESSION-SCOPED Visibility decision (reused, never duplicated), so a
+        // resource revealed only in a sibling session of the same workspace grants no download here. The
+        // asset becomes audience-accessible the moment ANY linked target is audience-visible in this session.
         var links = await _links
             .ListByAssetAsync(asset.OrganizationId, asset.WorkspaceId, asset.Id, cancellationToken)
             .ConfigureAwait(false);
@@ -117,6 +137,7 @@ internal sealed class AssetDownloadPolicy
                 .CanViewResourceAsync(
                     asset.OrganizationId,
                     asset.WorkspaceId,
+                    sessionId,
                     viewerRole,
                     link.TargetType.ToVisibilityResourceType(),
                     link.TargetId,

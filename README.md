@@ -2355,14 +2355,18 @@ asset_id)`) is the **join** that lets an asset **inherit** the audience visibili
 resource it is attached to. Linking **never** makes an asset public — it only records the
 attachment whose audience visibility the **central Visibility engine** governs. The signed
 download flow (CORE-AST-004) now consults these links through `AssetDownloadPolicy`, which
-**reuses** `VisibilityPolicy.CanViewResource` (visibility logic is not duplicated): an
-**audience** role (`Participant`/`Observer`) may download an asset **only** when it is linked
-to a content block or entity **visible to the audience**; host-content roles
-(`Owner`/`Admin`/`Host`/`CoHost`) may always download; the audit role and any undefined role
-are **denied fail-closed**. The asset stays **private by default** and is reached only through
-the single short-lived signed URL minted after the permission check (the epic acceptance
-criterion; threat T4 "Asset leak"; threat T2 visibility leak). Per-participant asset access
-(an asset linked to a resource revealed only to one participant) is a later story.
+**reuses** the central Visibility engine (visibility logic is not duplicated). A reveal is
+**session-scoped** (ADR 0013), so **every** audience download is authorized against the
+**session-scoped** visibility of the linked resource (CORE-SVIS-003 for the participant path,
+CORE-SVIS-004 for the observer role-level path — the workspace-wide overload has been removed).
+An **audience** role (`Participant`/`Observer`) supplies a `?sessionId=` and may download an
+asset **only** when it is linked to a content block or entity **visible to them in that
+session** — never one revealed only in a **sibling session** of the same workspace, nor (for a
+participant) one revealed only to **another** participant; host-content roles
+(`Owner`/`Admin`/`Host`/`CoHost`) may always download and need no session; the audit role and
+any undefined role are **denied fail-closed**. The asset stays **private by default** and is
+reached only through the single short-lived signed URL minted after the permission check (the
+epic acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak).
 
 ### Asset cleanup job
 

@@ -19,12 +19,12 @@ public enum EntitySearchView
     /// <summary>
     /// The AUDIENCE view: the visibility-filtered set returned to an audience caller. For an audience
     /// PARTICIPANT it holds exactly the entities the central Visibility engine
-    /// (<see cref="Visibility.VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, Visibility.VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>, CORE-VIS-005)
-    /// reveals to that participant — an audience-wide visible rule, or a visible rule scoped to exactly
-    /// them (CORE-API-006); a caller with no content-view standing (the audit role, any undefined role,
-    /// an audience role with no participant) receives the same view, fail-closed EMPTY, so the two are
-    /// indistinguishable. No per-entity visibility logic is duplicated here (docs/02_ARCHITECTURE.md,
-    /// docs/05_MODULE_CONTRACTS.md).
+    /// (<see cref="Visibility.VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, Visibility.VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>, CORE-VIS-005 + CORE-SVIS-004)
+    /// reveals to that participant IN THEIR SESSION — an audience-wide visible rule of that session, or a
+    /// visible rule of that session scoped to exactly them (CORE-API-006); a caller with no content-view
+    /// standing (the audit role, any undefined role, an audience role with no participant or no session)
+    /// receives the same view, fail-closed EMPTY, so the two are indistinguishable. No per-entity
+    /// visibility logic is duplicated here (docs/02_ARCHITECTURE.md, docs/05_MODULE_CONTRACTS.md).
     /// </summary>
     AudienceVisibilityFiltered = 2,
 }

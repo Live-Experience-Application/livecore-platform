@@ -106,20 +106,29 @@ namespace LiveCore.Api.Assets;
 ///   holds even unconfigured).</item>
 /// </list>
 ///
-/// SESSION-SCOPED PARTICIPANT DOWNLOAD (CORE-SVIS-003). Once an asset can be linked to a visible resource
-/// (CORE-AST-005), an audience caller may download it. A reveal is SESSION-scoped (ADR 0013), so a
-/// PARTICIPANT's download is authorized against the SESSION-scoped visibility of the linked resource, not
-/// the workspace-wide one: the participant supplies the session in a required <c>?sessionId=</c> QUERY
-/// parameter (mirroring the participant-visible feed), and the asset's links are gated by the SAME
-/// per-participant primitive the feed uses (<see cref="AssetDownloadPolicy.CanParticipantDownloadAsync"/>
-/// over <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
-/// so a participant cannot obtain a download URL for an asset tied to a resource revealed only in a SIBLING
-/// session of the same workspace (the cross-session leak; threat T5/T3). The <c>sessionId</c> is required
-/// only for a participant (a known member of the asset's workspace, so its absence is a request-shape 400
-/// surfaced only after the membership gate); a participant-role member with no active participant record in
-/// the asset's workspace is DENIED fail-closed (403). Host/role-level (non-participant) access — the
-/// host-content roles and the non-participant audience role Observer — is UNCHANGED: it stays workspace-wide
-/// (the ADR 0013 role-level carve-out) and ignores <c>sessionId</c>.
+/// SESSION-SCOPED AUDIENCE DOWNLOAD (CORE-SVIS-003, completed by CORE-SVIS-004). Once an asset can be linked
+/// to a visible resource (CORE-AST-005), an audience caller may download it. A reveal is SESSION-scoped (ADR
+/// 0013), so EVERY audience download is authorized against the SESSION-scoped visibility of the linked
+/// resource, never the workspace-wide one. The audience caller supplies the session in a <c>?sessionId=</c>
+/// QUERY parameter (mirroring the participant-visible feed):
+/// <list type="bullet">
+///   <item>A <c>Participant</c>'s links are gated by the SAME per-participant primitive the feed uses
+///   (<see cref="AssetDownloadPolicy.CanParticipantDownloadAsync"/> over
+///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
+///   so a participant cannot obtain a download URL for an asset tied to a resource revealed only in a SIBLING
+///   session, nor for one revealed only to ANOTHER participant. A participant-role member with no active
+///   participant record in the asset's workspace is DENIED fail-closed (403).</item>
+///   <item>The non-participant audience role <c>Observer</c> is gated by the session-scoped ROLE-level
+///   decision (<see cref="AssetDownloadPolicy.CanDownloadAsync"/> over
+///   <see cref="VisibilityPolicy.CanViewResourceAsync(System.Guid, System.Guid, System.Guid, MembershipRole, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
+///   so an Observer can download only when a linked target is audience-wide visible IN THE SUPPLIED session —
+///   never one revealed only in a sibling session (the cross-session leak CORE-SVIS-004 closes; threat
+///   T5/T3).</item>
+/// </list>
+/// The <c>sessionId</c> is required for any audience caller (a known member of the asset's workspace, so its
+/// absence is a request-shape 400 surfaced only after the membership gate). Host-content roles
+/// (Owner/Admin/Host/CoHost) need no <c>sessionId</c> — their content access is session-agnostic — and the
+/// audit role and any undefined role are DENIED fail-closed.
 ///
 /// Persistence dependency: like the reveal/scene endpoints, these use the repositories, the tenant context
 /// resolver, the upload-intent service and the storage adapter, which are registered only when a database
@@ -366,16 +375,19 @@ internal static class AssetEndpoints
 
         // The caller is a known member of the asset's workspace, so an insufficient role is 403.
         // Authorization is the central Assets download policy (CORE-AST-005), which reuses the Visibility
-        // engine so asset access never diverges from content visibility (docs/05_MODULE_CONTRACTS.md). The
-        // decision is split by the caller's workspace role:
-        //   * A PARTICIPANT's download is SESSION-scoped (CORE-SVIS-003): they may download only when the
-        //     asset is linked to a content block/entity VISIBLE to THEM IN THE SUPPLIED session, gated by the
-        //     same per-participant primitive the participant feed uses, so an asset tied to a resource
-        //     revealed only in a SIBLING session of the same workspace is never downloadable (threat T5/T3).
-        //   * Host/role-level (non-participant) access is UNCHANGED and workspace-wide (the ADR 0013
-        //     role-level carve-out): the host-content roles (Owner/Admin/Host/CoHost) may always download,
-        //     and the non-participant audience role (Observer) may download only when a linked target is
-        //     audience-wide visible in any session; the audit role and any undefined role are DENIED
+        // engine so asset access never diverges from content visibility (docs/05_MODULE_CONTRACTS.md). A
+        // reveal is session-scoped (ADR 0013), so EVERY audience download is now session-scoped
+        // (CORE-SVIS-004 removed the workspace-wide carve-out). The decision is split by the caller's
+        // workspace role:
+        //   * A PARTICIPANT's download is SESSION-scoped per-PARTICIPANT (CORE-SVIS-003): they may download
+        //     only when the asset is linked to a content block/entity VISIBLE to THEM IN THE SUPPLIED
+        //     session, gated by the same per-participant primitive the participant feed uses, so an asset
+        //     tied to a resource revealed only in a SIBLING session is never downloadable (threat T5/T3).
+        //   * The non-participant AUDIENCE role (Observer) is SESSION-scoped at the ROLE level: it must name
+        //     the session and may download only when a linked target is audience-wide visible IN THAT
+        //     session, so an Observer cannot download a resource revealed only in a sibling session either.
+        //   * Host-content roles (Owner/Admin/Host/CoHost) may always download and need no session (host
+        //     content access is session-agnostic); the audit role and any undefined role are DENIED
         //     fail-closed (threat T4 "Asset leak"; threat T2 visibility leak).
         // MembershipRole is non-linear, so the role check is EXACT, never an ordering comparison.
         if (member.Role == MembershipRole.Participant)
@@ -387,9 +399,14 @@ internal static class AssetEndpoints
                 return participantDenial;
             }
         }
-        else if (!await deps.DownloadPolicy.CanDownloadAsync(asset, member.Role, cancellationToken).ConfigureAwait(false))
+        else
         {
-            return Forbidden();
+            var roleLevelDenial = await AuthorizeRoleLevelDownloadAsync(
+                deps, asset, sessionId, member.Role, cancellationToken).ConfigureAwait(false);
+            if (roleLevelDenial is not null)
+            {
+                return roleLevelDenial;
+            }
         }
 
         // Downloadable only once the upload is confirmed (Available): a still-pending asset's object may not
@@ -484,6 +501,60 @@ internal static class AssetEndpoints
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The ROLE-level download authorization for a non-<see cref="MembershipRole.Participant"/> caller who is
+    /// already a known member of the asset's workspace. Returns a non-null <see cref="IResult"/> to
+    /// short-circuit the request (the denial/validation response), or <see langword="null"/> when the caller
+    /// is authorized and the caller should continue to mint the URL. A reveal is session-scoped (ADR 0013), so
+    /// the NON-participant audience role (Observer) is now session-scoped too (CORE-SVIS-004): it must name the
+    /// session, and may download only when a linked target is audience-wide visible in THAT session — an asset
+    /// tied to a resource revealed only in a SIBLING session of the same workspace is never downloadable
+    /// (threat T5/T3). Fail-closed at every step:
+    /// <list type="bullet">
+    ///   <item>Host-content roles (Owner/Admin/Host/CoHost) need no session — their content access is
+    ///   session-agnostic — so no <c>sessionId</c> is required of them and the policy allows them
+    ///   regardless.</item>
+    ///   <item>The audience role (Observer) MUST name the session. The caller is a known member, so a
+    ///   missing/blank or malformed <c>sessionId</c> is surfaced as a request-shape 400 (mirroring the
+    ///   participant path) — not a 404, because the asset's existence is already disclosed to the
+    ///   member.</item>
+    ///   <item>The asset's links are gated by <see cref="AssetDownloadPolicy.CanDownloadAsync"/> over the
+    ///   session-scoped role-level visibility decision; the audit role and any undefined role are DENIED 403,
+    ///   and a foreign or unknown session id matches no rule so it too is a fail-closed 403.</item>
+    /// </list>
+    /// </summary>
+    private static async Task<IResult?> AuthorizeRoleLevelDownloadAsync(
+        AssetEndpointDependencies deps,
+        Asset asset,
+        string? sessionId,
+        MembershipRole viewerRole,
+        CancellationToken cancellationToken)
+    {
+        // The non-participant audience role (Observer) is session-scoped (a reveal is session-scoped, ADR
+        // 0013 / CORE-SVIS-004), so it must name the session, validated as a request-shape 400 (the caller is
+        // a known member). Host-content roles need no session (their access is session-agnostic) and the
+        // audit/undefined roles are denied below regardless of the session.
+        var sessionScope = Guid.Empty;
+        if (VisibilityRoles.IsAudienceRole(viewerRole))
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return MissingSession();
+            }
+
+            if (!Guid.TryParse(sessionId, out sessionScope) || sessionScope == Guid.Empty)
+            {
+                return ValidationError($"The '{_sessionIdQuery}' value is not a valid session id.");
+            }
+        }
+
+        return await deps.DownloadPolicy
+            .CanDownloadAsync(asset, viewerRole, sessionScope, cancellationToken)
+            .ConfigureAwait(false)
+            ? null
+            : Forbidden();
     }
 
     // POST /api/v1/assets/{assetId}/links

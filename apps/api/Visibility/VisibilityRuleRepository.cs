@@ -135,46 +135,6 @@ internal sealed class VisibilityRuleRepository : IVisibilityRuleRepository
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<VisibilityRule>> ListByResourceAcrossSessionsAsync(
-        Guid organizationId,
-        Guid workspaceId,
-        VisibilityResourceType resourceType,
-        Guid resourceId,
-        CancellationToken cancellationToken)
-    {
-        // Empty ids can never address a stored resource's rules, so the lookup fails fast instead of
-        // returning an arbitrary set of rows.
-        if (organizationId == Guid.Empty)
-        {
-            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
-        }
-
-        if (workspaceId == Guid.Empty)
-        {
-            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
-        }
-
-        if (resourceId == Guid.Empty)
-        {
-            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
-        }
-
-        // The workspace-wide, SESSION-AGNOSTIC lookup for the role-level decisions not tied to one session
-        // (asset download, entity-search audience filter). The predicate leads with the tenant column,
-        // then matches the workspace, the resource type and the resource id, so another tenant's or
-        // workspace's rules are never returned (threat T5/T1); it may span more than one session. The
-        // ordering is deterministic — sorted by the time-ordered surrogate id.
-        return await _dbContext.VisibilityRules
-            .Where(rule => rule.OrganizationId == organizationId
-                && rule.WorkspaceId == workspaceId
-                && rule.ResourceType == resourceType
-                && rule.ResourceId == resourceId)
-            .OrderBy(rule => rule.Id)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-    /// <inheritdoc />
     public async Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(rule);

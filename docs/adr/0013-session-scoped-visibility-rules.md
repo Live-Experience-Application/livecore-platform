@@ -86,11 +86,23 @@ session-scoped default; it needs its own ADR and human approval.
   visibility of the linked resource (`AssetDownloadPolicy.CanParticipantDownloadAsync` over the
   session-scoped `VisibilityPolicy.CanParticipantViewResource` — the same primitive the participant feed
   uses, reused not forked), so a participant cannot obtain a download URL for an asset tied to a resource
-  revealed only in a sibling session. The **role-level** carve-out still stands for the non-participant
-  callers: host-content roles and the `Observer` audience role keep the workspace-wide, session-agnostic
-  `VisibilityPolicy.CanViewResource`, and **entity search** is still workspace-wide. Migrating entity search
-  and **removing** the workspace-wide overload (so a session-agnostic decision cannot be reintroduced) is
-  the follow-up CORE-SVIS-004.
+  revealed only in a sibling session.
+
+  **Update (CORE-SVIS-004) — the carve-out is now closed.** Both remaining session-agnostic consumers are
+  migrated, so **every** visibility decision is session-scoped:
+  - **Entity search** (`EntitySearchService`) now scopes its audience filter to a `sessionId`: a
+    participant's entity search returns only the entities revealed **in the session it names**, never one
+    revealed only in a sibling session, gated by the same session-scoped per-participant primitive the feed
+    uses.
+  - The **role-level** asset download — the non-participant audience role `Observer` — is now session-scoped
+    too (`AssetDownloadPolicy.CanDownload` over the session-scoped `VisibilityPolicy.CanViewResource`): an
+    Observer must supply the `sessionId` and may download only a target audience-wide visible **in that
+    session**. Host-content roles still need no session (their access is session-agnostic).
+  - With both consumers migrated, the **workspace-wide, session-agnostic overloads have been DELETED**
+    (`VisibilityPolicy.CanViewResource`/`CanParticipantViewResource` no-session overloads and
+    `VisibilityRuleRepository.ListByResourceAcrossSessionsAsync`), so a session-agnostic visibility decision
+    is now **structurally impossible** — the leak class cannot be reintroduced (the build proves there are no
+    remaining callers).
 - There is still **no persisted session-participant roster** (a participant is workspace-scoped, and the
   participant connection metadata is deferred — see `SessionParticipantJoinService`). The realtime
   audience fan-out therefore still *enumerates* the workspace's active participants as the candidate set;

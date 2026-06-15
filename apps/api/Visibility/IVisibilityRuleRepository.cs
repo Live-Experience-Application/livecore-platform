@@ -85,29 +85,6 @@ public interface IVisibilityRuleRepository
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Lists every visibility rule governing the given resource (named by type + id) WITHIN the given
-    /// organization and workspace, ACROSS ALL SESSIONS, in deterministic (time-ordered surrogate id)
-    /// order. This is the workspace-wide, SESSION-AGNOSTIC lookup the role-level decisions use that are
-    /// not tied to a single session — the asset-download authorization (a workspace role, not a session
-    /// participant) and the entity-search audience filter. The list is tenant-, workspace- AND
-    /// resource-scoped: the predicate leads with <c>organization_id</c>, then matches
-    /// <c>workspace_id</c>, <c>resource_type</c> and <c>resource_id</c>, so a foreign tenant's or
-    /// workspace's rules are NEVER returned (threat T5/T1). It may return rules from MORE THAN ONE
-    /// session for the resource; the session-scoped <see cref="ListByResourceAsync(Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>
-    /// overload is the one to use whenever the session is known (every per-session surface: reveal,
-    /// participant feed, realtime delivery, replay).
-    /// </summary>
-    /// <exception cref="ArgumentException">
-    /// The organization id, workspace id or resource id is empty.
-    /// </exception>
-    Task<IReadOnlyList<VisibilityRule>> ListByResourceAcrossSessionsAsync(
-        Guid organizationId,
-        Guid workspaceId,
-        VisibilityResourceType resourceType,
-        Guid resourceId,
-        CancellationToken cancellationToken);
-
-    /// <summary>
     /// Persists a new visibility rule. Returns <see cref="VisibilityRuleAddResult.Added"/> on success, or
     /// <see cref="VisibilityRuleAddResult.Duplicate"/> when a rule already exists for the same (session,
     /// resource, DIMENSION) and the filtered unique index (CORE-SVIS-002) rejected the insert — typically

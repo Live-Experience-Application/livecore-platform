@@ -4,12 +4,13 @@ using LiveCore.Api.Visibility;
 namespace LiveCore.Api.Entities;
 
 /// <summary>
-/// Entity search within a workspace WITH VISIBILITY FILTERING (CORE-ENT-005, retrofitted by
-/// CORE-API-006 to apply the REAL audience visibility filter). Given a tenant, a workspace, the
-/// caller's WORKSPACE role, the optional calling PARTICIPANT and generic
-/// <see cref="EntitySearchCriteria"/>, it returns the entities that caller may see —
-/// host-capable roles get every matching entity (the host-only-content view), an audience participant
-/// gets exactly the entities REVEALED to them, and every other role gets the fail-closed empty view.
+/// Entity search within a workspace WITH SESSION-SCOPED VISIBILITY FILTERING (CORE-ENT-005, retrofitted
+/// by CORE-API-006 to apply the REAL audience visibility filter, then by CORE-SVIS-004 to scope that
+/// filter to the caller's SESSION). Given a tenant, a workspace, the SESSION, the caller's WORKSPACE
+/// role, the optional calling PARTICIPANT and generic <see cref="EntitySearchCriteria"/>, it returns the
+/// entities that caller may see — host-capable roles get every matching entity (the host-only-content
+/// view), an audience participant gets exactly the entities REVEALED to them IN THAT SESSION, and every
+/// other role gets the fail-closed empty view.
 /// It is a plain, unit-testable application service over <see cref="IEntityRepository"/> and the
 /// central <see cref="VisibilityPolicy"/> taking explicit inputs, exactly like
 /// <see cref="VisibilityPreviewService"/> and <c>TenantContextResolver</c>; resolving the "current"
@@ -28,22 +29,23 @@ namespace LiveCore.Api.Entities;
 ///   <item>HOST-CAPABLE roles (Owner/Admin/Host/CoHost) get the host-only-content view: every entity
 ///   in the workspace that matches the criteria, regardless of any visibility rule. The calling
 ///   participant is irrelevant on this path.</item>
-///   <item>An AUDIENCE PARTICIPANT (a Participant/Observer role with an identified participant) gets
-///   the entities the central Visibility engine says are visible TO THEM: each matching candidate is
-///   routed through
-///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> over
-///   <see cref="VisibilityResourceType.Entity"/> — the SAME participant-aware primitive
+///   <item>An AUDIENCE PARTICIPANT (a Participant/Observer role with an identified participant AND an
+///   identified SESSION) gets the entities the central Visibility engine says are visible TO THEM IN
+///   THAT SESSION: each matching candidate is routed through
+///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> over
+///   <see cref="VisibilityResourceType.Entity"/> — the SAME session-scoped participant-aware primitive
 ///   <see cref="VisibilityPreviewService"/> and the realtime recipient resolver use, so entity search
 ///   can never diverge from the participant-visible feed or per-resource access. An entity is kept iff
-///   an AUDIENCE-WIDE visible rule, or a visible rule scoped to EXACTLY this participant (a
-///   selected-participant private reveal), applies; an entity revealed only to a DIFFERENT participant
-///   is excluded — the selected-participant guarantee, fail-closed (threats T1/T5 in
+///   an AUDIENCE-WIDE visible rule of that session, or a visible rule of that session scoped to EXACTLY
+///   this participant (a selected-participant private reveal), applies; an entity revealed only to a
+///   DIFFERENT participant, or only in a SIBLING session of the same workspace, is excluded — the
+///   selected-participant and cross-session guarantees, fail-closed (threats T1/T5/T3 in
 ///   docs/07_SECURITY_THREAT_MODEL.md).</item>
 ///   <item>EVERY OTHER caller — the audit role Auditor (audit-only on the content rows, never a live
-///   content grant), any undefined role, and an audience role with NO identified participant — gets
-///   the fail-closed EMPTY view. This path is short-circuited BEFORE any database query, so a caller
-///   with no content-view standing can never learn whether any entity exists (no existence leak;
-///   threats T1/T5; docs/06 "View host-only content").</item>
+///   content grant), any undefined role, and an audience role with NO identified participant or NO
+///   identified session — gets the fail-closed EMPTY view. This path is short-circuited BEFORE any
+///   database query, so a caller with no content-view standing can never learn whether any entity exists
+///   (no existence leak; threats T1/T5; docs/06 "View host-only content").</item>
 /// </list>
 ///
 /// Tenant + workspace isolation. Every path reads through the existing tenant- AND workspace-scoped
@@ -83,6 +85,14 @@ internal sealed class EntitySearchService
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The workspace to search within.</param>
+    /// <param name="sessionId">
+    /// The session the audience visibility filter is bounded by (a reveal is session-scoped, ADR 0013);
+    /// <see langword="null"/> (or <see cref="Guid.Empty"/>) means "no identified session". It is only
+    /// consulted for an audience participant: the host path sees every entity regardless of session, and a
+    /// non-host non-audience role fails closed to the empty view whether or not a session is supplied. An
+    /// audience role with no identified session (like one with no identified participant) fails closed to
+    /// the empty view, so a participant search always names the session whose reveals it is asking about.
+    /// </param>
     /// <param name="viewerRole">The caller's role in <paramref name="workspaceId"/>.</param>
     /// <param name="participantId">
     /// The calling participant when the caller is an audience participant viewing their own feed;
@@ -96,7 +106,7 @@ internal sealed class EntitySearchService
     /// <param name="criteria">Normalized, validated search criteria (see <see cref="EntitySearchCriteria"/>).</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>
-    /// The host-only-content view (every matching entity) for a host-capable role, the
+    /// The host-only-content view (every matching entity) for a host-capable role, the session-scoped
     /// visibility-filtered set an audience participant may see, or the fail-closed empty view for any
     /// other caller.
     /// </returns>
@@ -105,6 +115,7 @@ internal sealed class EntitySearchService
     public async Task<EntitySearchResult> SearchAsync(
         Guid organizationId,
         Guid workspaceId,
+        Guid? sessionId,
         MembershipRole viewerRole,
         Guid? participantId,
         EntitySearchCriteria criteria,
@@ -127,23 +138,29 @@ internal sealed class EntitySearchService
         var viewsHostOnlyContent = EntitySearchVisibility.ViewsHostOnlyContent(viewerRole);
 
         // An audience participant is an audience role (Participant/Observer) WITH an identified
-        // participant; only then can the per-participant visibility be computed. An empty/absent
-        // participant id leaves the audience role with no participant to compute for, so it falls into
-        // the fail-closed branch below rather than reaching the per-participant policy (which rejects an
-        // empty id). The role classification delegates to the central Visibility module so the role sets
-        // are never duplicated here (docs/05_MODULE_CONTRACTS.md).
+        // participant AND an identified SESSION; only then can the SESSION-SCOPED per-participant
+        // visibility be computed (a reveal is session-scoped, ADR 0013 / CORE-SVIS-004). An empty/absent
+        // participant id OR an empty/absent session id leaves the audience role with nothing to compute,
+        // so it falls into the fail-closed branch below rather than reaching the session-scoped
+        // per-participant policy (which rejects an empty participant or session id). The role
+        // classification delegates to the central Visibility module so the role sets are never duplicated
+        // here (docs/05_MODULE_CONTRACTS.md).
+        var audienceSessionId = sessionId is { } candidateSessionId && candidateSessionId != Guid.Empty
+            ? sessionId
+            : null;
         var audienceParticipant = !viewsHostOnlyContent
             && EntitySearchVisibility.ViewsAudienceFilteredContent(viewerRole)
             && participantId is { } candidateId
             && candidateId != Guid.Empty
+            && audienceSessionId is not null
                 ? participantId
                 : null;
 
         // FAIL-CLOSED, BEFORE any query. A caller that is neither a host-capable role nor an audience
         // participant — the audit role, any undefined role, and an audience role with no identified
-        // participant — gets the empty view. Short-circuiting here means the database is never queried
-        // for such a caller, so no entity existence can leak to a role that may not see host-only
-        // content (threats T1/T5; docs/06 "View host-only content").
+        // participant or no identified session — gets the empty view. Short-circuiting here means the
+        // database is never queried for such a caller, so no entity existence can leak to a role that may
+        // not see host-only content (threats T1/T5; docs/06 "View host-only content").
         if (!viewsHostOnlyContent && audienceParticipant is null)
         {
             return EntitySearchResult.AudienceEmpty();
@@ -179,15 +196,18 @@ internal sealed class EntitySearchService
             return EntitySearchResult.Host(candidates);
         }
 
-        // AUDIENCE-PARTICIPANT view: keep only the entities this participant may actually see, decided
-        // by the central per-participant visibility primitive (CORE-VIS-005) — the SAME one the
-        // participant-visible feed (VisibilityPreviewService) and the realtime recipient resolver use,
-        // so entity search can never diverge (docs/05: do not duplicate visibility logic elsewhere). An
-        // entity is visible iff an audience-wide visible rule, or a visible rule scoped to EXACTLY this
-        // participant, applies; one revealed only to another participant is excluded (fail-closed; the
-        // selected-participant guarantee, threat T5). The lookup is tenant- and workspace-scoped, so a
-        // rule in another tenant or workspace never reveals an entity here.
+        // AUDIENCE-PARTICIPANT view: keep only the entities this participant may actually see IN THIS
+        // SESSION, decided by the central SESSION-SCOPED per-participant visibility primitive
+        // (CORE-VIS-005 + CORE-SVIS-001) — the SAME one the participant-visible feed
+        // (VisibilityPreviewService) and the realtime recipient resolver use, so entity search can never
+        // diverge (docs/05: do not duplicate visibility logic elsewhere). An entity is visible iff an
+        // audience-wide visible rule of this session, or a visible rule of this session scoped to EXACTLY
+        // this participant, applies; one revealed only to another participant — or only in a sibling
+        // session of the same workspace — is excluded (fail-closed; the selected-participant and
+        // cross-session guarantees, threats T5/T3). The lookup is tenant-, workspace- and session-scoped,
+        // so a rule in another tenant, workspace or session never reveals an entity here.
         var participant = audienceParticipant!.Value;
+        var session = audienceSessionId!.Value;
         var visible = new List<Entity>(candidates.Count);
         foreach (var entity in candidates)
         {
@@ -195,6 +215,7 @@ internal sealed class EntitySearchService
                 .CanParticipantViewResourceAsync(
                     organizationId,
                     workspaceId,
+                    session,
                     participant,
                     VisibilityResourceType.Entity,
                     entity.Id,

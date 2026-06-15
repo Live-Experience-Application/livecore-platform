@@ -463,31 +463,6 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
         Assert.Empty(inB);
     }
 
-    [Fact]
-    public async Task ListByResourceAcrossSessions_returns_rules_from_every_session_for_the_role_level_path()
-    {
-        // The workspace-wide, session-agnostic lookup (used by the role-level asset-download and
-        // entity-search reads) returns the resource's rules across ALL sessions of the workspace.
-        var (org, ws) = await SeedWorkspaceAsync();
-        var sessionA = await SeedSessionAsync(org, ws, "Session A");
-        var sessionB = await SeedSessionAsync(org, ws, "Session B");
-        var resourceId = Guid.NewGuid();
-        var ruleInA = await SeedRuleAsync(
-            org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionA.Id);
-        var ruleInB = await SeedRuleAsync(
-            org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden, sessionB.Id);
-
-        await using var context = CreateContext();
-        var repository = new VisibilityRuleRepository(context);
-
-        var across = await repository.ListByResourceAcrossSessionsAsync(
-            org, ws, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
-
-        Assert.Equal(2, across.Count);
-        Assert.Contains(across, rule => rule.Id == ruleInA.Id);
-        Assert.Contains(across, rule => rule.Id == ruleInB.Id);
-    }
-
     // --- Foreign keys ----------------------------------------------------------
 
     [Fact]
