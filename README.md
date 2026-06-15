@@ -52,8 +52,98 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
 - [Mobile-related Core extension](#mobile-related-core-extension)
 - [Prerequisites](#prerequisites)
 - [Build, format, lint, test and boundary scan](#build-format-lint-test-and-boundary-scan)
+  - [.NET solution (API, worker, smoke tests)](#net-solution-api-worker-smoke-tests)
+  - [Code coverage and the coverage gate](#code-coverage-and-the-coverage-gate)
+  - [TypeScript packages](#typescript-packages)
+  - [TypeScript contract package](#typescript-contract-package)
+  - [TypeScript SDK package](#typescript-sdk-package)
+  - [TypeScript design tokens package](#typescript-design-tokens-package)
+  - [TypeScript UI core package](#typescript-ui-core-package)
+  - [Package versioning and changelog](#package-versioning-and-changelog)
+  - [Boundary scan](#boundary-scan)
+  - [Spec consistency check](#spec-consistency-check)
 - [Run the hosts locally](#run-the-hosts-locally)
+  - [Deploy the whole stack with Docker Compose](#deploy-the-whole-stack-with-docker-compose)
+- [Operations and observability](#operations-and-observability)
+  - [Health endpoints](#health-endpoints)
+  - [Metrics endpoint](#metrics-endpoint)
+  - [Source offer endpoint (AGPL section 13)](#source-offer-endpoint-agpl-section-13)
+  - [Worker metrics and per-loop liveness](#worker-metrics-and-per-loop-liveness)
+  - [Structured logging](#structured-logging)
+  - [Distributed tracing](#distributed-tracing)
+- [Identity, persistence and migrations](#identity-persistence-and-migrations)
+  - [Identity (OIDC principal model)](#identity-oidc-principal-model)
+  - [Persistence (user profile reference)](#persistence-user-profile-reference)
+  - [Applying migrations (deployment step)](#applying-migrations-deployment-step)
+- [Runtime resilience and edge](#runtime-resilience-and-edge)
+  - [Optimistic concurrency](#optimistic-concurrency)
+  - [Transactional unit of work (commit-then-publish)](#transactional-unit-of-work-commit-then-publish)
+  - [Database connection resilience (retry on transient failures)](#database-connection-resilience-retry-on-transient-failures)
+  - [Concurrency conflicts in the worker job contexts](#concurrency-conflicts-in-the-worker-job-contexts)
+  - [Atomic quota check-and-consume (no TOCTOU race)](#atomic-quota-check-and-consume-no-toctou-race)
+  - [Reverse-proxy edge: CORS, forwarded headers and HTTPS posture](#reverse-proxy-edge-cors-forwarded-headers-and-https-posture)
+  - [Request rate limiting](#request-rate-limiting)
+  - [Graceful shutdown and SignalR sticky sessions](#graceful-shutdown-and-signalr-sticky-sessions)
+- [HTTP API and domain](#http-api-and-domain)
+  - [Tenant model and HTTP API](#tenant-model-and-http-api)
+  - [Current principal](#current-principal)
+  - [Organization create and read](#organization-create-and-read)
+  - [Workspace member invites (scoped tokens)](#workspace-member-invites-scoped-tokens)
+  - [Member removal (revoking access)](#member-removal-revoking-access)
+  - [Workspace archive (lifecycle end-state)](#workspace-archive-lifecycle-end-state)
+  - [Session create and list](#session-create-and-list)
+  - [Session lifecycle commands](#session-lifecycle-commands)
+  - [Session cancel (lifecycle off-ramp)](#session-cancel-lifecycle-off-ramp)
+  - [Participant presence events (join / leave)](#participant-presence-events-join--leave)
+  - [Reveal command](#reveal-command)
+  - [Hide (un-reveal) command](#hide-un-reveal-command)
+  - [Scene and content lifecycle session events](#scene-and-content-lifecycle-session-events)
+  - [Audit log](#audit-log)
+  - [Participant visible feed](#participant-visible-feed)
+  - [Scene content APIs](#scene-content-apis)
+  - [Entity relationship removal](#entity-relationship-removal)
+  - [Entity deletion](#entity-deletion)
+  - [Content block deletion](#content-block-deletion)
+  - [Scene deletion](#scene-deletion)
+- [Realtime](#realtime)
+  - [Realtime hub](#realtime-hub)
+- [Assets, storage and background jobs](#assets-storage-and-background-jobs)
+  - [Secret management and the configuration contract](#secret-management-and-the-configuration-contract)
+  - [Asset metadata](#asset-metadata)
+  - [Asset storage adapter](#asset-storage-adapter)
+  - [Concrete S3-compatible storage adapter](#concrete-s3-compatible-storage-adapter)
+  - [Asset upload intent](#asset-upload-intent)
+  - [Asset signed download](#asset-signed-download)
+  - [Asset linking](#asset-linking)
+  - [Asset cleanup job](#asset-cleanup-job)
+  - [Recap generation job](#recap-generation-job)
+  - [Export processing job](#export-processing-job)
+  - [Store notification reconciliation job](#store-notification-reconciliation-job)
+  - [Worker liveness heartbeat](#worker-liveness-heartbeat)
+  - [Asset deletion](#asset-deletion)
+  - [Asset-link removal](#asset-link-removal)
+  - [Template deletion](#template-deletion)
+  - [Export jobs](#export-jobs)
+  - [Export manifests](#export-manifests)
+  - [Recaps](#recaps)
+- [Entitlements, quotas and monetization](#entitlements-quotas-and-monetization)
+  - [Entitlement and plan definitions](#entitlement-and-plan-definitions)
+  - [Subject entitlements](#subject-entitlements)
+  - [Quota definitions and quota status](#quota-definitions-and-quota-status)
+  - [Quota enforcement on protected commands](#quota-enforcement-on-protected-commands)
+  - [Ad eligibility](#ad-eligibility)
+  - [Current-user entitlements](#current-user-entitlements)
+  - [Mobile API path shape (the `/v1` gateway)](#mobile-api-path-shape-the-v1-gateway)
+  - [Purchase provider abstraction](#purchase-provider-abstraction)
+  - [Purchase transaction persistence and audit trail](#purchase-transaction-persistence-and-audit-trail)
+  - [Apple transaction verification endpoint](#apple-transaction-verification-endpoint)
+  - [Google purchase token verification endpoint](#google-purchase-token-verification-endpoint)
+  - [Buyer linkage for verified purchases](#buyer-linkage-for-verified-purchases)
+  - [Store notifications](#store-notifications)
 - [Container images](#container-images)
+  - [Publishing release images (CORE-OPS-009)](#publishing-release-images-core-ops-009)
+  - [Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)](#supply-chain-pinned-base-images-sbom-and-cve-scan-core-dep-003)
+  - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
 - [License](#license)
 
@@ -536,6 +626,11 @@ migrate gate and the documented health/readiness/liveness probes are tested by
 `scripts/test-compose-deploy.ps1` and the `compose-smoke` CI job. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo deployment manifest").
 
+## Operations and observability
+
+Observe and operate a running host: the health and metrics endpoints, the AGPL
+source-offer endpoint, worker metrics, structured logging and distributed tracing.
+
 ### Health endpoints
 
 The API host exposes two unauthenticated health endpoints:
@@ -716,6 +811,11 @@ coarse operation name and the stable session-event type name — never a token,
 tenant identifier or resource content (threat T7), and the `/health/*` and
 `/metrics` infrastructure endpoints are not traced.
 
+## Identity, persistence and migrations
+
+The host's authentication model (the OIDC principal), the persisted user-profile
+reference, and how database migrations are applied as a deployment step.
+
 ### Identity (OIDC principal model)
 
 Authentication is OIDC-first (`docs/adr/0005-oidc-first-authentication.md`):
@@ -836,6 +936,13 @@ guidance are in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Migration rollback
 policy"). A CI lint (the `migration-down-lint` job, `scripts/lint-migration-downs.ps1`)
 flags any migration whose `Down()` drops a table or column so it cannot merge
 without being reviewed and acknowledged in `csv/migration_destructive_down_review.csv`.
+
+## Runtime resilience and edge
+
+The correctness and resilience guarantees behind every command — optimistic
+concurrency, transactional commit-then-publish, database retry on transient
+failures, worker concurrency handling and atomic quota check-and-consume — plus
+the reverse-proxy edge posture, request rate limiting and graceful shutdown.
 
 ### Optimistic concurrency
 
@@ -1095,6 +1202,12 @@ negotiate/transport handshake breaks. Affinity (handshake pinning) and the backp
 Affinity is a proxy/edge concern, not a Core host setting; the proxy-specific configuration is
 documented in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Graceful shutdown and SignalR
 sticky-session affinity") and `docs/11_REALTIME_SYNC.md`.
+
+## HTTP API and domain
+
+The `/api/v1` surface and the domain it exposes: tenants, the current principal,
+organizations, workspaces, sessions, participants, reveals, the audit log, the
+participant feed, scene content and the resource-deletion commands.
 
 ### Tenant model and HTTP API
 
@@ -2048,6 +2161,11 @@ scene — never any content (threats T1/T5/T7). The audit record is a recorded f
 now-deleted scene it references. Faithful to the entity- and content-block-deletion precedents, the deletion
 emits no realtime session event (the event catalog defines none for scene deletion).
 
+## Realtime
+
+The SignalR realtime hub that streams role-filtered session events to connected
+participants.
+
 ### Realtime hub
 
 The Realtime module exposes an authenticated [SignalR](https://learn.microsoft.com/aspnet/core/signalr/introduction)
@@ -2245,6 +2363,13 @@ it. The registry tracks the connections of the instance it runs on (the abort ha
 is the per-event recipient computation that already re-gates the participant audience fan-out, and propagating
 the host/observer eviction signal across instances is a documented follow-up — the same single-instance posture
 as the in-process backplane (`docs/11_REALTIME_SYNC.md`).
+
+## Assets, storage and background jobs
+
+Configuration secrets and the storage adapter, the asset lifecycle (metadata,
+upload intent, signed download, linking and deletion), and the background worker
+jobs (asset cleanup, recap generation, export processing and store-notification
+reconciliation) with their exports, manifests, recaps and templates.
 
 ### Secret management and the configuration contract
 
@@ -2943,6 +3068,13 @@ emits `RecapGenerated`), the separate participant reveal, and any recap HTTP rou
 server-side access authorization are later stories (exactly as CORE-AUD-002/003 deferred the export
 endpoint). CORE-AUD-004 is the recap model, its persistence, its EF migration and its role-based
 projection only; there is no recap HTTP route yet.
+
+## Entitlements, quotas and monetization
+
+The product-neutral monetization surface: entitlement and plan definitions,
+subject entitlements, quota definitions and enforcement, ad eligibility, the
+mobile `/v1` path shape, purchase verification and persistence, buyer linkage and
+store notifications.
 
 ### Entitlement and plan definitions
 
