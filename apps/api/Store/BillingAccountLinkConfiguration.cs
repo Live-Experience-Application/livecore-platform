@@ -66,6 +66,13 @@ internal sealed class BillingAccountLinkConfiguration : IEntityTypeConfiguration
             .HasDatabaseName("ix_billing_account_links_purchase_transaction_id")
             .IsUnique();
 
+        // Subject lookup index (CORE-MON-012): the cross-product entitlement-retention check reads ALL of one
+        // subject's linked purchases (ListLinkedPurchasesBySubjectAsync) to decide whether a shared entitlement is
+        // still granted by another active purchase. Non-unique — a subject may hold many purchases — and mirrors the
+        // (subject_type, subject_id) lookup prefix on subject_entitlements.
+        builder.HasIndex(link => new { link.SubjectType, link.SubjectId })
+            .HasDatabaseName("ix_billing_account_links_subject_type_subject_id");
+
         // The purchase the link binds. CASCADE on delete: the buyer link is part of the purchase's lifecycle
         // (mirrors purchase_events), so a purchase and its link are removed together.
         builder.HasOne<PurchaseTransaction>()

@@ -54,6 +54,28 @@ public sealed class BillingAccountLinkRepositoryTests : IDisposable
         return transaction.Id;
     }
 
+    // Seeds a verified purchase (in the given status) AND its buyer link to the subject — the joined state
+    // ListLinkedPurchasesBySubjectAsync reads.
+    private async Task SeedLinkedPurchaseAsync(
+        string transactionId,
+        Guid subjectId,
+        string productReference,
+        PurchaseTransactionStatus status,
+        EntitlementSubjectType subjectType = EntitlementSubjectType.User)
+    {
+        await using var context = CreateContext();
+        var transaction = PurchaseTransaction.Record(
+            VerifiedPurchase.Create(PurchaseProvider.Apple, transactionId, productReference), _at);
+        if (status != PurchaseTransactionStatus.Active)
+        {
+            transaction.ChangeStatus(status, _at.AddMinutes(1));
+        }
+
+        await new PurchaseTransactionRepository(context).AddAsync(transaction, CancellationToken.None);
+        await new BillingAccountLinkRepository(context).AddAsync(
+            BillingAccountLink.Link(transaction.Id, subjectType, subjectId, _at), CancellationToken.None);
+    }
+
     // --- Round-trip -------------------------------------------------------------
 
     [Fact]
@@ -145,5 +167,62 @@ public sealed class BillingAccountLinkRepositoryTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentException>(
             () => repository.FindByPurchaseTransactionAsync(Guid.Empty, CancellationToken.None));
+    }
+
+    // --- Subject lookup (CORE-MON-012) ------------------------------------------
+
+    [Fact]
+    public async Task ListLinkedPurchasesBySubject_returns_only_that_subjects_purchases_with_status_and_product()
+    {
+        var subjectA = Guid.CreateVersion7();
+        var subjectB = Guid.CreateVersion7();
+        await SeedLinkedPurchaseAsync("txn-a1", subjectA, "product.alpha", PurchaseTransactionStatus.Active);
+        await SeedLinkedPurchaseAsync("txn-a2", subjectA, "product.beta", PurchaseTransactionStatus.Refunded);
+        await SeedLinkedPurchaseAsync("txn-b1", subjectB, "product.alpha", PurchaseTransactionStatus.Active);
+
+        await using var context = CreateContext();
+        var results = await new BillingAccountLinkRepository(context)
+            .ListLinkedPurchasesBySubjectAsync(EntitlementSubjectType.User, subjectA, CancellationToken.None);
+
+        // Only subject A's two purchases, with their product reference and current status — never subject B's
+        // (subject isolation, threat T5).
+        Assert.Equal(2, results.Count);
+        Assert.Contains(results, p => p.ProductReference == "product.alpha" && p.Status == PurchaseTransactionStatus.Active);
+        Assert.Contains(results, p => p.ProductReference == "product.beta" && p.Status == PurchaseTransactionStatus.Refunded);
+    }
+
+    [Fact]
+    public async Task ListLinkedPurchasesBySubject_returns_empty_for_a_subject_with_no_purchases()
+    {
+        await using var context = CreateContext();
+        var results = await new BillingAccountLinkRepository(context)
+            .ListLinkedPurchasesBySubjectAsync(EntitlementSubjectType.User, Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task ListLinkedPurchasesBySubject_does_not_match_a_workspace_subject_sharing_the_id()
+    {
+        // The subject id is polymorphic: a User subject and a Workspace subject sharing a guid must never collide —
+        // isolation is by the (subject_type, subject_id) pair.
+        var sharedId = Guid.CreateVersion7();
+        await SeedLinkedPurchaseAsync("txn-user", sharedId, "product.alpha", PurchaseTransactionStatus.Active, EntitlementSubjectType.User);
+
+        await using var context = CreateContext();
+        var asWorkspace = await new BillingAccountLinkRepository(context)
+            .ListLinkedPurchasesBySubjectAsync(EntitlementSubjectType.Workspace, sharedId, CancellationToken.None);
+
+        Assert.Empty(asWorkspace);
+    }
+
+    [Fact]
+    public async Task ListLinkedPurchasesBySubject_rejects_an_empty_id()
+    {
+        await using var context = CreateContext();
+        var repository = new BillingAccountLinkRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListLinkedPurchasesBySubjectAsync(EntitlementSubjectType.User, Guid.Empty, CancellationToken.None));
     }
 }

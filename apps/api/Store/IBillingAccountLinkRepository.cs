@@ -1,3 +1,5 @@
+using LiveCore.Api.Entitlements;
+
 namespace LiveCore.Api.Store;
 
 /// <summary>
@@ -6,7 +8,10 @@ namespace LiveCore.Api.Store;
 /// module's application services (docs/02_ARCHITECTURE.md: module boundaries).
 ///
 /// A link is addressed by the purchase it binds (the <c>purchase_transaction_id</c>), which is unique per row, so
-/// the lookup is by that id — never a list-everything read of all links.
+/// the per-purchase lookup is by that id — never a list-everything read of all links. The cross-product
+/// entitlement-retention check (CORE-MON-012) also needs the reverse direction — all of ONE subject's linked
+/// purchases — so it is a SUBJECT-scoped read (<see cref="ListLinkedPurchasesBySubjectAsync"/>), bounded by the
+/// subject pair the same way <c>subject_entitlements</c> is read by subject.
 /// </summary>
 public interface IBillingAccountLinkRepository
 {
@@ -26,5 +31,21 @@ public interface IBillingAccountLinkRepository
     /// <exception cref="System.ArgumentException">The purchase transaction id is empty.</exception>
     Task<BillingAccountLink?> FindByPurchaseTransactionAsync(
         Guid purchaseTransactionId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every verified purchase linked to exactly the given subject — the reverse, subject-scoped read the
+    /// cross-product entitlement-retention check needs (CORE-MON-012). Each result joins one link to the
+    /// <see cref="PurchaseTransaction"/> it binds and carries the purchase id, its product reference and its current
+    /// status, so the revocation service can exclude the purchase being revoked, keep only the still-active
+    /// (non-revoked) purchases and resolve which entitlements those purchases still grant. Bounded by the
+    /// (<paramref name="subjectType"/>, <paramref name="subjectId"/>) pair — one subject's purchases are never read
+    /// through another subject's id (subject isolation, threat T5). Returns an empty list when the subject has no
+    /// linked purchases.
+    /// </summary>
+    /// <exception cref="System.ArgumentException">The subject id is empty.</exception>
+    Task<IReadOnlyList<LinkedSubjectPurchase>> ListLinkedPurchasesBySubjectAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
         CancellationToken cancellationToken);
 }

@@ -25,6 +25,7 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
     private static readonly DateTimeOffset _at = new(2026, 6, 14, 9, 0, 0, TimeSpan.Zero);
 
     private const string _productReference = "product.premium";
+    private const string _standardProduct = "product.standard";
     private const string _adsDisabledKey = "ads.disabled";
     private const string _workspaceLimitKey = "workspace.active.max";
 
@@ -79,6 +80,26 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
                 new PlanDefinitionRepository(context),
                 new EntitlementDefinitionRepository(context)));
         return await service.RevokeForProductAsync(subjectType, subjectId, productReference, at, CancellationToken.None);
+    }
+
+    // The CORE-MON-012 retention overload: revoke the product's entitlements EXCEPT those still granted by the
+    // subject's other still-active products.
+    private async Task<ProductEntitlementRevocationResult> RevokeForProductAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        string productReference,
+        DateTimeOffset at,
+        IReadOnlyCollection<string>? stillActiveProductReferences)
+    {
+        await using var context = CreateContext();
+        var service = new ProductEntitlementGrantService(
+            new PlanDefinitionRepository(context),
+            new SubjectEntitlementAssignmentService(
+                new SubjectEntitlementRepository(context),
+                new PlanDefinitionRepository(context),
+                new EntitlementDefinitionRepository(context)));
+        return await service.RevokeForProductAsync(
+            subjectType, subjectId, productReference, at, stillActiveProductReferences, CancellationToken.None);
     }
 
     // Grant/revoke variants wired with the append-only audit log (CORE-SPEC-002), so the emitted
@@ -167,6 +188,26 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
         plan.GrantQuota(workspaceLimit, 5);
         await SeedPlanAsync(plan);
         return plan;
+    }
+
+    /// <summary>
+    /// Seeds two plans sharing the ad-free flag (CORE-MON-012): the premium plan (keyed by
+    /// <see cref="_productReference"/>) grants the shared ad-free flag plus a non-shared workspace quota; the
+    /// standard plan (keyed by <see cref="_standardProduct"/>) grants only the shared ad-free flag.
+    /// </summary>
+    private async Task SeedTwoPlansSharingAdsDisabledAsync()
+    {
+        var adFree = await SeedDefinitionAsync(FlagDefinition(_adsDisabledKey));
+        var workspaceLimit = await SeedDefinitionAsync(QuotaDefinition(_workspaceLimitKey));
+
+        var premium = PlanDefinition.Define(_productReference, "Premium", null, _at);
+        premium.GrantFlag(adFree, true);
+        premium.GrantQuota(workspaceLimit, 5);
+        await SeedPlanAsync(premium);
+
+        var standard = PlanDefinition.Define(_standardProduct, "Standard", null, _at);
+        standard.GrantFlag(adFree, true);
+        await SeedPlanAsync(standard);
     }
 
     // --- Positive: a mapped product grants exactly the plan's entitlements ------
@@ -377,6 +418,73 @@ public sealed class ProductEntitlementGrantServiceTests : IDisposable
         var result = await RevokeForProductAsync(EntitlementSubjectType.User, Guid.CreateVersion7(), productReference, _at);
 
         Assert.Equal(ProductEntitlementRevocationOutcome.ProductNotMapped, result.Outcome);
+    }
+
+    // --- CORE-MON-012: narrow cross-product revocation (retain shared entitlements) ---
+
+    [Fact]
+    public async Task Revoking_retains_an_entitlement_still_granted_by_another_active_product()
+    {
+        await SeedTwoPlansSharingAdsDisabledAsync();
+        var subjectId = Guid.CreateVersion7();
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _standardProduct, _at);
+        // The subject holds the shared ad-free flag (granted by both, held once) and the premium-only quota.
+        Assert.Equal(2, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+
+        // Revoke the premium product, but the standard product is still active and also grants the ad-free flag.
+        var result = await RevokeForProductAsync(
+            EntitlementSubjectType.User,
+            subjectId,
+            _productReference,
+            _at.AddHours(1),
+            new[] { _standardProduct });
+
+        Assert.Equal(ProductEntitlementRevocationOutcome.Revoked, result.Outcome);
+        Assert.Equal(1, result.RevokedCount); // only the non-shared quota is revoked; the shared flag is retained
+
+        var effective = await ResolveAsync(EntitlementSubjectType.User, subjectId);
+        Assert.True(effective.IsFlagEnabled(_adsDisabledKey)); // shared — retained (still granted by product.standard)
+        Assert.False(effective.TryGetQuotaLimit(_workspaceLimitKey, out _)); // non-shared — revoked
+    }
+
+    [Fact]
+    public async Task An_unmapped_still_active_product_reference_retains_nothing()
+    {
+        // A still-active product reference that maps to no plan contributes no retained entitlements (fail-closed),
+        // so the refunded product's entitlements are all revoked.
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+
+        var result = await RevokeForProductAsync(
+            EntitlementSubjectType.User,
+            subjectId,
+            _productReference,
+            _at.AddHours(1),
+            new[] { "product.unmapped" });
+
+        Assert.Equal(2, result.RevokedCount);
+        Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
+    }
+
+    [Fact]
+    public async Task Passing_no_still_active_products_revokes_everything()
+    {
+        // An empty still-active set is the unconditional CORE-MON-004 behavior — every mapped entitlement is revoked.
+        await SeedProductPlanAsync();
+        var subjectId = Guid.CreateVersion7();
+        await GrantForProductAsync(EntitlementSubjectType.User, subjectId, _productReference, _at);
+
+        var result = await RevokeForProductAsync(
+            EntitlementSubjectType.User,
+            subjectId,
+            _productReference,
+            _at.AddHours(1),
+            Array.Empty<string>());
+
+        Assert.Equal(2, result.RevokedCount);
+        Assert.Equal(0, (await ResolveAsync(EntitlementSubjectType.User, subjectId)).Count);
     }
 
     // --- Audit (CORE-SPEC-002): grant/revoke write the documented audit record ---

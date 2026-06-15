@@ -240,6 +240,22 @@ absorbed one. It is **test + docs only** (no behavior change from CORE-MON-004) 
 or migration**, so the spec-consistency check stays green. The full contract is documented in `docs/21`
 ("Cancelled means immediate, permanent (absorbing) revoke").
 
+**Cross-product revocation note (CORE-MON-012 narrowed the refund revoke to the entitlements no active purchase still
+grants).** The v1 acceptance above requires that a refund/cancellation "revokes or downgrades the granted
+entitlement". But a subject can hold **two** purchases whose plans **share** an entitlement (for example two products
+that both grant `ads.disabled`), and because a subject holds each entitlement at most once, the original revoke —
+which stripped **all** of a refunded product's plan entitlements — also stripped a shared entitlement the subject's
+**other still-active** purchase legitimately granted (an under-granting bug). CORE-MON-012 narrows it: before
+revoking, `PurchaseEntitlementRevocationService` reads the **same** subject's other linked purchases, keeps only the
+**non-revoked** ones other than the purchase being revoked, and passes their product references to
+`ProductEntitlementGrantService.RevokeForProductAsync`, which **retains** any entitlement those products still grant —
+so refunding one of two products sharing an entitlement **keeps** it, and refunding the **last** product holding it
+finally revokes it. Retention is **subject-scoped** (a different subject's active purchase never retains this
+subject's entitlement — fail-closed isolation) and **idempotent**. It **adds no new table** — it composes the
+existing `billing_account_links` + `purchase_transactions` + `subject_entitlements` model — and its only schema change
+is the **non-unique** subject lookup index `ix_billing_account_links_subject_type_subject_id` that serves the new
+per-subject read (`docs/10`, `docs/21`).
+
 ## Catalog-as-contract note (CORE-SPEC-002 backed the entitlement/store event catalog with real audit actions)
 
 `csv/entitlement_event_catalog.csv` marked eight events `persisted=true, audit=true`

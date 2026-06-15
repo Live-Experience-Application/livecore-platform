@@ -2,8 +2,8 @@ namespace LiveCore.Api.Entitlements;
 
 /// <summary>
 /// Outcome of revoking a subject's entitlements mapped to a purchased product
-/// (CORE-MON-004, <see cref="ProductEntitlementGrantService.RevokeForProductAsync"/>) — the inverse of
-/// <see cref="ProductEntitlementGrantOutcome"/>.
+/// (CORE-MON-004, <see cref="ProductEntitlementGrantService.RevokeForProductAsync(EntitlementSubjectType, Guid,
+/// string, DateTimeOffset, CancellationToken)"/>) — the inverse of <see cref="ProductEntitlementGrantOutcome"/>.
 /// </summary>
 public enum ProductEntitlementRevocationOutcome
 {

@@ -33,13 +33,24 @@ namespace LiveCore.Api.Entitlements;
 /// unverified/failed purchase never reaches it ("Never unlock limits before server verification succeeds"; "Never
 /// trust client-side premium flags", docs/21).
 ///
-/// REVOKE IS THE INVERSE (CORE-MON-004). <see cref="RevokeForProductAsync"/> revokes the same product → plan →
-/// entitlement mapping when a purchase is refunded, cancelled or charged back ("Refunds and chargebacks must revoke
-/// or downgrade entitlements", docs/21): it resolves the plan by the product reference and revokes each of the
-/// plan's entitlements from the subject (reusing <see cref="SubjectEntitlementAssignmentService.RevokeAsync"/>),
-/// so the grant and its revocation share one mapping and can never disagree. It is idempotent (revoking an
-/// already-revoked or never-held entitlement is a safe no-op) and resolves the plan even when it is RETIRED — a
-/// refund must still revoke a previously-granted entitlement of a now-retired plan.
+/// REVOKE IS THE INVERSE (CORE-MON-004). <see cref="RevokeForProductAsync(EntitlementSubjectType, Guid, string,
+/// DateTimeOffset, CancellationToken)"/> revokes the same product → plan → entitlement mapping when a purchase is
+/// refunded, cancelled or charged back ("Refunds and chargebacks must revoke or downgrade entitlements", docs/21):
+/// it resolves the plan by the product reference and revokes each of the plan's entitlements from the subject
+/// (reusing <see cref="SubjectEntitlementAssignmentService.RevokeAsync"/>), so the grant and its revocation share
+/// one mapping and can never disagree. It is idempotent (revoking an already-revoked or never-held entitlement is a
+/// safe no-op) and resolves the plan even when it is RETIRED — a refund must still revoke a previously-granted
+/// entitlement of a now-retired plan.
+///
+/// NARROW CROSS-PRODUCT REVOCATION (CORE-MON-012). One subject can hold two purchases whose plans share an
+/// entitlement (for example two products that both grant <c>ads.disabled</c>). Because a subject holds each
+/// entitlement at most once, revoking ALL of a refunded product's entitlements would strip a shared entitlement the
+/// subject's OTHER, still-active purchase legitimately grants. The retention overload
+/// <see cref="RevokeForProductAsync(EntitlementSubjectType, Guid, string, DateTimeOffset, IReadOnlyCollection{string},
+/// CancellationToken)"/> takes the product references of the subject's other still-active purchases, resolves the
+/// union of entitlements those products still grant, and revokes only the refunded product's entitlements that are
+/// NOT in that retained union — so an entitlement shared by a second still-active product is retained, and refunding
+/// the last product holding it finally revokes it.
 /// </summary>
 public sealed class ProductEntitlementGrantService
 {
@@ -154,13 +165,8 @@ public sealed class ProductEntitlementGrantService
     /// <summary>
     /// Revokes from the subject every entitlement of the plan mapped to <paramref name="productReference"/> — the
     /// inverse of <see cref="GrantForProductAsync"/> for a refund, cancellation or chargeback (CORE-MON-004; docs/21
-    /// "Refunds and chargebacks must revoke or downgrade entitlements"). Resolves the plan whose
-    /// <see cref="PlanDefinition.Key"/> the product reference names (the same product → plan mapping the grant uses)
-    /// and revokes each of the plan's grants from the subject (reusing
-    /// <see cref="SubjectEntitlementAssignmentService.RevokeAsync"/>). Returns
-    /// <see cref="ProductEntitlementRevocationResult.ProductNotMapped"/> — revoking nothing — when the product
-    /// reference maps to no plan (fail-closed). Idempotent: an entitlement the subject does not hold (or already
-    /// revoked) is a safe no-op, so revoking the same product twice converges.
+    /// "Refunds and chargebacks must revoke or downgrade entitlements"). This is the unconditional revoke; the
+    /// retention overload narrows it across a subject's other still-active products (CORE-MON-012).
     /// </summary>
     /// <param name="subjectType">The kind of subject to revoke from (the buyer is a <see cref="EntitlementSubjectType.User"/>).</param>
     /// <param name="subjectId">The subject's id (non-empty).</param>
@@ -169,11 +175,52 @@ public sealed class ProductEntitlementGrantService
     /// <param name="cancellationToken">A cancellation token.</param>
     /// <exception cref="ArgumentOutOfRangeException">The subject type is not a defined value.</exception>
     /// <exception cref="ArgumentException">The subject id is empty.</exception>
+    public Task<ProductEntitlementRevocationResult> RevokeForProductAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        string productReference,
+        DateTimeOffset revokedAt,
+        CancellationToken cancellationToken)
+        => RevokeForProductAsync(
+            subjectType,
+            subjectId,
+            productReference,
+            revokedAt,
+            stillActiveProductReferences: null,
+            cancellationToken);
+
+    /// <summary>
+    /// Revokes from the subject the entitlements of the plan mapped to <paramref name="productReference"/>, EXCEPT
+    /// those still granted by another of the subject's active purchases (CORE-MON-012, the narrow cross-product
+    /// revocation story). Resolves the plan whose <see cref="PlanDefinition.Key"/> the product reference names (the
+    /// same product → plan mapping the grant uses), resolves the union of entitlements that
+    /// <paramref name="stillActiveProductReferences"/> still grant, and revokes each of the refunded product's
+    /// grants from the subject (reusing <see cref="SubjectEntitlementAssignmentService.RevokeAsync"/>) UNLESS it is
+    /// in that retained union — so an entitlement a second still-active product also grants is retained, and only the
+    /// refund of the last product holding it actually revokes it. Returns
+    /// <see cref="ProductEntitlementRevocationResult.ProductNotMapped"/> — revoking nothing — when the product
+    /// reference maps to no plan (fail-closed). Idempotent: an entitlement the subject does not hold (or already
+    /// revoked) is a safe no-op, so revoking the same product twice converges.
+    /// </summary>
+    /// <param name="subjectType">The kind of subject to revoke from (the buyer is a <see cref="EntitlementSubjectType.User"/>).</param>
+    /// <param name="subjectId">The subject's id (non-empty).</param>
+    /// <param name="productReference">The refunded/cancelled purchase's opaque store product reference.</param>
+    /// <param name="revokedAt">When the revocation happens.</param>
+    /// <param name="stillActiveProductReferences">
+    /// The product references of the SAME subject's other still-active (non-revoked) purchases. The entitlements
+    /// those products still grant are retained (not revoked). Null or empty means no other active purchase — the
+    /// refunded product's entitlements are all revoked (the unconditional CORE-MON-004 behavior). A reference that
+    /// maps to no plan contributes nothing, so a stray/unmapped value is a safe no-op.
+    /// </param>
+    /// <param name="cancellationToken">A cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException">The subject type is not a defined value.</exception>
+    /// <exception cref="ArgumentException">The subject id is empty.</exception>
     public async Task<ProductEntitlementRevocationResult> RevokeForProductAsync(
         EntitlementSubjectType subjectType,
         Guid subjectId,
         string productReference,
         DateTimeOffset revokedAt,
+        IReadOnlyCollection<string>? stillActiveProductReferences,
         CancellationToken cancellationToken)
     {
         if (!Enum.IsDefined(subjectType))
@@ -211,12 +258,25 @@ public sealed class ProductEntitlementGrantService
             return ProductEntitlementRevocationResult.ProductNotMapped;
         }
 
-        // Revoke each of the plan's entitlements from the subject (REUSING the CORE-ENTL-002 revoke primitive). Each
-        // revoke is idempotent — an assignment the subject does not hold, or already revoked, is a safe no-op — so a
-        // duplicate refund / retry converges rather than erroring.
+        // CORE-MON-012: the union of entitlements the subject's OTHER still-active purchases still grant. Before
+        // revoking one of this product's entitlements, check whether another active purchase still grants it; only
+        // revoke if none does, so a shared entitlement is retained while any active purchase backs it.
+        var retained = await ResolveRetainedEntitlementIdsAsync(stillActiveProductReferences, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Revoke each of the plan's entitlements from the subject (REUSING the CORE-ENTL-002 revoke primitive),
+        // skipping any still granted by another active purchase. Each revoke is idempotent — an assignment the
+        // subject does not hold, or already revoked, is a safe no-op — so a duplicate refund / retry converges
+        // rather than erroring.
         var revoked = 0;
         foreach (var grant in plan.Entitlements)
         {
+            if (retained.Contains(grant.EntitlementDefinitionId))
+            {
+                // Still granted by another active purchase of the same subject — retain it (CORE-MON-012).
+                continue;
+            }
+
             if (await _assignment
                 .RevokeAsync(subjectType, subjectId, grant.EntitlementDefinitionId, revokedAt, cancellationToken)
                 .ConfigureAwait(false))
@@ -239,5 +299,51 @@ public sealed class ProductEntitlementGrantService
         }
 
         return ProductEntitlementRevocationResult.Revoked(plan.Id, revoked);
+    }
+
+    /// <summary>
+    /// Resolves the union of entitlement-definition ids that the given still-active product references still grant —
+    /// the set of entitlements a refund must RETAIN because another active purchase of the same subject backs them
+    /// (CORE-MON-012). Each reference is mapped to its plan by the same product → plan key mapping the revoke uses
+    /// (resolving the plan even when RETIRED, since an active purchase of a now-retired plan still grants its
+    /// entitlements); a blank, invalid or unmapped reference contributes nothing (fail-closed). Returns an empty set
+    /// when there are no other active products.
+    /// </summary>
+    private async Task<HashSet<Guid>> ResolveRetainedEntitlementIdsAsync(
+        IReadOnlyCollection<string>? stillActiveProductReferences,
+        CancellationToken cancellationToken)
+    {
+        var retained = new HashSet<Guid>();
+        if (stillActiveProductReferences is null || stillActiveProductReferences.Count == 0)
+        {
+            return retained;
+        }
+
+        foreach (var productReference in stillActiveProductReferences)
+        {
+            if (string.IsNullOrWhiteSpace(productReference))
+            {
+                continue;
+            }
+
+            var planKey = productReference.Trim().ToLowerInvariant();
+            if (!PlanDefinition.IsValidKey(planKey))
+            {
+                continue;
+            }
+
+            var plan = await _plans.FindByKeyAsync(planKey, cancellationToken).ConfigureAwait(false);
+            if (plan is null)
+            {
+                continue;
+            }
+
+            foreach (var grant in plan.Entitlements)
+            {
+                retained.Add(grant.EntitlementDefinitionId);
+            }
+        }
+
+        return retained;
     }
 }

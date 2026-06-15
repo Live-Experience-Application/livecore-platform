@@ -578,6 +578,44 @@ granted entitlement, and a later renewal leaves the purchase `Cancelled` with th
 CORE-MON-011 reuses `PurchaseTransactionStatusMachine` and the existing CORE-MON-004 monotonicity tests, and
 **adds no new table, route, event or migration**.
 
+## Narrow cross-product entitlement over-revocation (CORE-MON-012)
+
+CORE-MON-004 revokes a refunded/cancelled purchase's granted entitlement through
+`PurchaseEntitlementRevocationService` → `ProductEntitlementGrantService.RevokeForProductAsync`, which revoked **all**
+of the refunded product's plan entitlements unconditionally. But one subject can hold **two** purchases whose plans
+**share** an entitlement (for example two products that both grant `ads.disabled`), and because a subject holds each
+entitlement **at most once** (the unique per-subject `subject_entitlements` index), revoking all of one product's
+entitlements **stripped a shared entitlement the subject's other still-active purchase legitimately granted** — an
+under-granting bug from the adversarial review. CORE-MON-012 corrects it: **refunding/cancelling one product revokes
+only the entitlements not still granted by another active purchase of the same subject; an entitlement shared by a
+second still-active product is retained** (the story's acceptance criterion).
+
+- **The retention check is subject-scoped and reuses the existing model.** Before revoking, the Store
+  `PurchaseEntitlementRevocationService` reads the **same** subject's other linked purchases through the new
+  `IBillingAccountLinkRepository.ListLinkedPurchasesBySubjectAsync` (a join of `billing_account_links` to
+  `purchase_transactions`), keeps only the purchases that are **still active** — not in a revoked (absorbing) state,
+  by the same `PurchaseTransactionStatusMachine.IsRevoked` the rest of the system uses — and **excludes the purchase
+  being revoked** (whose status is not yet committed to a revoked state when the revoke runs, so it would otherwise
+  still read as active). It passes those products' references to the new retention overload of
+  `ProductEntitlementGrantService.RevokeForProductAsync`, which resolves the **union** of entitlements those active
+  products still grant (the same product → plan mapping the grant/revoke already use, resolving a plan even when it is
+  retired) and revokes only the refunded product's entitlements **not** in that retained union. So refunding one of
+  two products sharing an entitlement **keeps** the shared entitlement, and refunding the **last** product holding it
+  finally revokes it.
+- **Fail-closed and idempotent.** Retention is scoped strictly to the **same** subject pair, so a **different**
+  subject's active purchase of a product granting the same entitlement never retains this subject's entitlement
+  (subject isolation, threat T5). A still-active product reference that maps to no plan contributes nothing to the
+  retained set (a stray/unmapped value is a safe no-op), and with no other active purchase the revoke is the
+  unchanged CORE-MON-004 "revoke everything" behavior. A second still-active purchase of the **same** product
+  correctly retains everything. The revoke stays idempotent (revoking an already-revoked or never-held entitlement is
+  a safe no-op).
+- **No new table; one lookup index.** The chain composes the existing
+  `billing_account_links`/`purchase_transactions`/`subject_entitlements` model — **no new table**. Its only schema
+  change is the **non-unique** subject lookup index `billing_account_links(subject_type, subject_id)` that serves the
+  new per-subject read, mirroring the `subject_entitlements(subject_type, subject_id)` lookup prefix
+  (`docs/10_DATABASE_SCHEMA.md`). Low-likelihood with one-product-per-plan seed data, but corrected so a vertical that
+  sells overlapping bundles cannot silently lose a still-paid-for entitlement.
+
 ## Atomic quota check-and-consume (CORE-CONC-004)
 
 Server-side quota enforcement (CORE-ENTL-004) is the gate that makes "Free limits cannot be bypassed

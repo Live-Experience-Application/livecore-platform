@@ -1,3 +1,4 @@
+using LiveCore.Api.Entitlements;
 using LiveCore.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -75,5 +76,42 @@ internal sealed class BillingAccountLinkRepository : IBillingAccountLinkReposito
                 link => link.PurchaseTransactionId == purchaseTransactionId,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<LinkedSubjectPurchase>> ListLinkedPurchasesBySubjectAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored subject, so the lookup fails fast instead of matching arbitrary
+        // rows (mirrors FindByPurchaseTransactionAsync).
+        if (subjectId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject id must not be empty.", nameof(subjectId));
+        }
+
+        // Join each of the subject's links to the purchase it binds and project only the three facts the retention
+        // decision needs. Filtered by the (subject_type, subject_id) pair — served by the
+        // ix_billing_account_links_subject_type_subject_id lookup index — so one subject's purchases are never read
+        // through another subject's id. The "is this purchase still active?" decision stays out of SQL (it belongs
+        // to PurchaseTransactionStatusMachine.IsRevoked, the single source of truth) and is applied by the caller.
+        var rows = await (
+            from link in _dbContext.BillingAccountLinks.AsNoTracking()
+            join transaction in _dbContext.PurchaseTransactions.AsNoTracking()
+                on link.PurchaseTransactionId equals transaction.Id
+            where link.SubjectType == subjectType && link.SubjectId == subjectId
+            select new
+            {
+                transaction.Id,
+                transaction.ProductReference,
+                transaction.Status,
+            })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return rows
+            .Select(row => new LinkedSubjectPurchase(row.Id, row.ProductReference, row.Status))
+            .ToList();
     }
 }

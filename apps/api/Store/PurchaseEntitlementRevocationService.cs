@@ -13,7 +13,8 @@ namespace LiveCore.Api.Store;
 ///
 /// IT ONLY WIRES, IT DOES NOT DUPLICATE. The purchase → buyer linkage already exists
 /// (<see cref="BillingAccountLink"/>, CORE-MON-002) and the product → plan → entitlement revoke already exists
-/// (<see cref="ProductEntitlementGrantService.RevokeForProductAsync"/>, which reuses the CORE-ENTL-002 revoke
+/// (<see cref="ProductEntitlementGrantService.RevokeForProductAsync(EntitlementSubjectType, Guid, string,
+/// DateTimeOffset, CancellationToken)"/>, which reuses the CORE-ENTL-002 revoke
 /// primitive); this service supplies only the remaining "purchase → its buyer + product" resolution that turns a
 /// purchase-status change into the right subject's revocation. It mirrors how the Apple/Google verification
 /// endpoints (CORE-MON-003) resolve the buyer and grant — here the trigger is the store-notification handler and
@@ -25,6 +26,20 @@ namespace LiveCore.Api.Store;
 /// nothing (<see cref="PurchaseEntitlementRevocationOutcome.ProductNotMapped"/>). Revoking an already-revoked or
 /// never-held entitlement is a safe no-op, so it is invoked unconditionally whenever a revoking notification lands
 /// on an existing purchase (a re-delivery, a retry or a reconciliation sweep converges rather than erroring).
+///
+/// NARROW CROSS-PRODUCT OVER-REVOCATION (CORE-MON-012). A subject can hold two purchases whose plans share an
+/// entitlement, and because a subject holds each entitlement at most once, revoking ALL of one refunded purchase's
+/// entitlements would strip a shared entitlement the subject's OTHER still-active purchase legitimately grants.
+/// Before revoking, this service reads the SAME subject's other linked purchases
+/// (<see cref="IBillingAccountLinkRepository.ListLinkedPurchasesBySubjectAsync"/>), keeps only the still-active
+/// (non-revoked, by <see cref="PurchaseTransactionStatusMachine.IsRevoked"/>) ones other than the purchase being
+/// revoked, and passes their product references to
+/// <see cref="ProductEntitlementGrantService.RevokeForProductAsync(EntitlementSubjectType, Guid, string,
+/// DateTimeOffset, IReadOnlyCollection{string}, CancellationToken)"/>, which retains any entitlement those products
+/// still grant. So refunding one of two products sharing an entitlement keeps the entitlement, and refunding the
+/// last product holding it finally revokes it. The purchase being revoked is excluded by id (its status has not yet
+/// been committed to a revoked state when this runs, so it would otherwise appear "active"); a second still-active
+/// purchase of the SAME product correctly retains everything.
 /// </summary>
 public sealed class PurchaseEntitlementRevocationService
 {
@@ -49,8 +64,10 @@ public sealed class PurchaseEntitlementRevocationService
     /// Revokes the entitlement the named purchase granted to its buyer. Looks the purchase up by its (provider,
     /// provider transaction id) idempotency key, resolves the buyer subject from the purchase's
     /// <see cref="BillingAccountLink"/>, and revokes the entitlements the purchase's product maps to (reusing
-    /// <see cref="ProductEntitlementGrantService.RevokeForProductAsync"/>). Fail-closed: an unrecorded purchase, a
-    /// purchase with no buyer link, or a product that maps to no plan revokes nothing. Idempotent.
+    /// <see cref="ProductEntitlementGrantService.RevokeForProductAsync(EntitlementSubjectType, Guid, string,
+    /// DateTimeOffset, IReadOnlyCollection{string}, CancellationToken)"/>) EXCEPT those still granted by another of
+    /// the subject's active purchases (CORE-MON-012). Fail-closed: an unrecorded purchase, a purchase with no buyer
+    /// link, or a product that maps to no plan revokes nothing. Idempotent.
     /// </summary>
     /// <param name="provider">The store that issued the purchase.</param>
     /// <param name="providerTransactionId">The provider-assigned transaction id naming the purchase.</param>
@@ -81,12 +98,50 @@ public sealed class PurchaseEntitlementRevocationService
             return PurchaseEntitlementRevocationOutcome.NotLinked;
         }
 
+        // CORE-MON-012: the product references of the SAME subject's OTHER still-active purchases, so a shared
+        // entitlement another active purchase still grants is retained rather than over-revoked.
+        var stillActiveProducts = await ResolveStillActiveProductReferencesAsync(
+                link.SubjectType, link.SubjectId, transaction.Id, cancellationToken)
+            .ConfigureAwait(false);
+
         var revocation = await _grants
-            .RevokeForProductAsync(link.SubjectType, link.SubjectId, transaction.ProductReference, revokedAt, cancellationToken)
+            .RevokeForProductAsync(
+                link.SubjectType,
+                link.SubjectId,
+                transaction.ProductReference,
+                revokedAt,
+                stillActiveProducts,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return revocation.Outcome == ProductEntitlementRevocationOutcome.ProductNotMapped
             ? PurchaseEntitlementRevocationOutcome.ProductNotMapped
             : PurchaseEntitlementRevocationOutcome.Revoked;
+    }
+
+    /// <summary>
+    /// Resolves the product references of the subject's OTHER still-active (non-revoked) purchases — every purchase
+    /// linked to the subject except the one being revoked (<paramref name="revokedPurchaseTransactionId"/>) whose
+    /// status is not a revoked (absorbing) state. These are the purchases whose entitlements must be RETAINED through
+    /// the cross-product narrowing (CORE-MON-012). The purchase being revoked is excluded by id because its status is
+    /// not yet committed to a revoked state when this runs (the revoke precedes the status change), so it would
+    /// otherwise still read as active.
+    /// </summary>
+    private async Task<IReadOnlyCollection<string>> ResolveStillActiveProductReferencesAsync(
+        EntitlementSubjectType subjectType,
+        Guid subjectId,
+        Guid revokedPurchaseTransactionId,
+        CancellationToken cancellationToken)
+    {
+        var linkedPurchases = await _links
+            .ListLinkedPurchasesBySubjectAsync(subjectType, subjectId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return linkedPurchases
+            .Where(purchase =>
+                purchase.PurchaseTransactionId != revokedPurchaseTransactionId
+                && !PurchaseTransactionStatusMachine.IsRevoked(purchase.Status))
+            .Select(purchase => purchase.ProductReference)
+            .ToArray();
     }
 }

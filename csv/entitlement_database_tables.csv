@@ -9,4 +9,4 @@ purchase_providers,Configured purchase providers,Store,DEFERRED - not in the imp
 purchase_transactions,Stores verified purchase records,Store,Idempotent transaction handling required
 purchase_events,Append-only purchase lifecycle events,Store,Renewal/cancel/refund/grace events
 store_notification_events,Raw and normalized store notifications,Store,Idempotent and auditable
-billing_account_links,Links a verified purchase to the authenticated buyer subject,Store,Implemented by CORE-MON-002 (one subject per receipt; unique on purchase_transaction_id); authoritative schema is csv/database_tables.csv; see docs/24
+billing_account_links,Links a verified purchase to the authenticated buyer subject,Store,Implemented by CORE-MON-002 (one subject per receipt; unique on purchase_transaction_id; non-unique subject_type/subject_id lookup index added by CORE-MON-012 for the cross-product revocation check); authoritative schema is csv/database_tables.csv; see docs/24

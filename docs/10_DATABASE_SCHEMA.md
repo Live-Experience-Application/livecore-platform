@@ -107,6 +107,7 @@ plan_entitlements(plan_definition_id, entitlement_definition_id) unique
 purchase_transactions(provider, provider_transaction_id) unique
 purchase_events(purchase_transaction_id, created_at)
 billing_account_links(purchase_transaction_id) unique
+billing_account_links(subject_type, subject_id)
 idempotency_keys(scope, key)
 ```
 
@@ -258,6 +259,12 @@ never changes; re-binding to a different subject is exactly what the uniqueness 
 append-only tables it carries no optimistic-concurrency token. The Apple and Google verification endpoints
 record the purchase and link the buyer in **one transaction** (CORE-CONC-002), so the buyer linkage is durably
 atomic with the recording.
+
+A second, **non-unique** index `billing_account_links(subject_type, subject_id)` serves the reverse,
+subject-scoped read (CORE-MON-012): the narrow cross-product entitlement-revocation check lists **all** of one
+subject's linked purchases to decide whether a refunded purchase's entitlement is still granted by another of the
+subject's active purchases (and so must be retained). It mirrors the `subject_entitlements(subject_type,
+subject_id)` lookup prefix and is independent of the one-subject-per-receipt unique index above.
 
 ## Tamper-evident audit log (CORE-SEC-003)
 
