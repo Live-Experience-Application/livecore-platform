@@ -591,14 +591,14 @@ function Unprotect-LiveCoreBackupFile {
     $headerLength = $script:LiveCoreBackupEncryptionMagic.Length + $script:LiveCoreBackupSaltLength + $script:LiveCoreBackupIvLength
     $minLength = $headerLength + $script:LiveCoreBackupMacLength
 
-    $input = [System.IO.File]::OpenRead($Path)
+    $artifactStream = [System.IO.File]::OpenRead($Path)
     try {
-        if ($input.Length -lt $minLength) {
+        if ($artifactStream.Length -lt $minLength) {
             throw "File '$Path' is not a LiveCore encrypted backup artifact (too short); a restore is refused fail-closed (CORE-DR-001)."
         }
 
         $magic = New-Object byte[] $script:LiveCoreBackupEncryptionMagic.Length
-        Read-LiveCoreExactBytes -Stream $input -Buffer $magic -Count $magic.Length
+        Read-LiveCoreExactBytes -Stream $artifactStream -Buffer $magic -Count $magic.Length
         for ($i = 0; $i -lt $magic.Length; $i++) {
             if ($magic[$i] -ne $script:LiveCoreBackupEncryptionMagic[$i]) {
                 throw "File '$Path' is not a LiveCore encrypted backup artifact (bad header); a restore is refused fail-closed (CORE-DR-001)."
@@ -606,24 +606,24 @@ function Unprotect-LiveCoreBackupFile {
         }
 
         $salt = New-Object byte[] $script:LiveCoreBackupSaltLength
-        Read-LiveCoreExactBytes -Stream $input -Buffer $salt -Count $salt.Length
+        Read-LiveCoreExactBytes -Stream $artifactStream -Buffer $salt -Count $salt.Length
         $iv = New-Object byte[] $script:LiveCoreBackupIvLength
-        Read-LiveCoreExactBytes -Stream $input -Buffer $iv -Count $iv.Length
+        Read-LiveCoreExactBytes -Stream $artifactStream -Buffer $iv -Count $iv.Length
 
         $material = Get-LiveCoreBackupKeyMaterial -Passphrase $Passphrase -Salt $salt
-        $macOffset = $input.Length - $script:LiveCoreBackupMacLength
+        $macOffset = $artifactStream.Length - $script:LiveCoreBackupMacLength
 
         # Verify the MAC over magic||salt||iv||ciphertext before decrypting a byte:
         # a wrong passphrase or any tampering fails closed here (encrypt-then-MAC).
         $hmac = New-Object System.Security.Cryptography.HMACSHA256(, $material.MacKey)
         $computedMac = $null
         try {
-            $input.Position = 0
+            $artifactStream.Position = 0
             $buffer = New-Object byte[] 65536
             $remaining = $macOffset
             while ($remaining -gt 0) {
                 $toRead = [Math]::Min([long]$buffer.Length, $remaining)
-                $read = $input.Read($buffer, 0, [int]$toRead)
+                $read = $artifactStream.Read($buffer, 0, [int]$toRead)
                 if ($read -le 0) { break }
                 [void]$hmac.TransformBlock($buffer, 0, $read, $buffer, 0)
                 $remaining -= $read
@@ -636,8 +636,8 @@ function Unprotect-LiveCoreBackupFile {
         }
 
         $storedMac = New-Object byte[] $script:LiveCoreBackupMacLength
-        $input.Position = $macOffset
-        Read-LiveCoreExactBytes -Stream $input -Buffer $storedMac -Count $storedMac.Length
+        $artifactStream.Position = $macOffset
+        Read-LiveCoreExactBytes -Stream $artifactStream -Buffer $storedMac -Count $storedMac.Length
 
         if (-not (Test-LiveCoreFixedTimeEquals -Left $computedMac -Right $storedMac)) {
             throw "Backup artifact '$Path' failed its integrity/authentication check: the passphrase is wrong or the file was tampered with. A restore is refused fail-closed (CORE-DR-001)."
@@ -656,12 +656,12 @@ function Unprotect-LiveCoreBackupFile {
                 $output = [System.IO.File]::Create($Destination)
                 $crypto = New-Object System.Security.Cryptography.CryptoStream($output, $decryptor, [System.Security.Cryptography.CryptoStreamMode]::Write)
                 try {
-                    $input.Position = $headerLength
+                    $artifactStream.Position = $headerLength
                     $remaining = $macOffset - $headerLength
                     $buffer = New-Object byte[] 65536
                     while ($remaining -gt 0) {
                         $toRead = [Math]::Min([long]$buffer.Length, $remaining)
-                        $read = $input.Read($buffer, 0, [int]$toRead)
+                        $read = $artifactStream.Read($buffer, 0, [int]$toRead)
                         if ($read -le 0) { break }
                         $crypto.Write($buffer, 0, $read)
                         $remaining -= $read
@@ -681,7 +681,7 @@ function Unprotect-LiveCoreBackupFile {
         }
     }
     finally {
-        $input.Dispose()
+        $artifactStream.Dispose()
     }
 
     if ($RemoveSource) {

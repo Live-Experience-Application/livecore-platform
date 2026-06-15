@@ -550,10 +550,19 @@ jobs:
         shell: pwsh
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
-          # PSAvoidUsingWriteHost is excluded: the scan scripts are console
-          # tools and Write-Host targets the host information stream by
-          # design (PowerShell 5+).
-          $findings = @(Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Severity Error, Warning -ExcludeRule PSAvoidUsingWriteHost)
+          # Excluded rules (with rationale):
+          # - PSAvoidUsingWriteHost: the scan/backup scripts are console tools and
+          #   Write-Host targets the host information stream by design (PowerShell 5+).
+          # - PSAvoidUsingPlainTextForPassword: the backup-encryption passphrase and
+          #   database password are interfaces to PBKDF2/external tooling; PowerShell
+          #   must materialize them as bytes to derive the key, so a SecureString
+          #   would be converted straight back to plaintext. The -*PassphraseFile
+          #   parameters are the recommended secure path (CORE-DR-001).
+          # - PSUseSingularNouns: the crypto helpers use deliberately descriptive
+          #   plural nouns (Test-LiveCoreFixedTimeEquals mirrors .NET
+          #   CryptographicOperations.FixedTimeEquals; Read-LiveCoreExactBytes);
+          #   singularizing them would make the names misleading.
+          $findings = @(Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Severity Error, Warning -ExcludeRule PSAvoidUsingWriteHost, PSAvoidUsingPlainTextForPassword, PSUseSingularNouns)
           if ($findings.Count -gt 0) {
             $findings |
               Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize |
