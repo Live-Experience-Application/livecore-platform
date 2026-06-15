@@ -70,6 +70,31 @@ locally, so a default run stays on SQLite):
   of the token on SQLite, so it passes on **both** providers while exercising the
   PostgreSQL-only semantics on the PostgreSQL leg.
 
+The money paths additionally have **real write-concurrency** coverage on the
+PostgreSQL leg (CORE-TST-006, `MoneyPathWriteConcurrencyTests`). The duplicate /
+race-resolution branches in the billing repositories — the
+`DbUpdateException -> re-read -> resolve` recovery in
+`BillingAccountLinkRepository` / `PurchaseTransactionRepository` /
+`SubjectEntitlementRepository`, and the `xmin` `DbUpdateConcurrencyException` guard
+on a purchase-status change — were until then only reasoned, never exercised by two
+genuinely concurrent writers (the integration suite's single shared SQLite
+connection serializes every write, and the cross-subject tests were sequential
+A-then-B, so the loser's re-read never fired). The new tests race two writers — each
+on its own `LiveCoreDbContext`, and so its own Npgsql connection — at the same
+colliding key: the same `billing_account_link` for one purchase, the same
+`(subject, entitlement)` grant, the same purchase recording, and the same
+purchase-status change. On PostgreSQL exactly one writer wins and the loser re-reads
+and resolves (a duplicate, or a loud `xmin` conflict that converges) — **never a
+double-grant**; on SQLite the writers run sequentially (the same branch, without the
+true concurrency). The final test races the whole verify → record → link → grant
+chain over real HTTP for two buyers submitting one receipt: a unique violation
+inside the endpoint's explicit transaction aborts it on PostgreSQL, so the duplicate
+surfaces either as a clean **409** (the requests serialize and the loser's
+find-first sees the committed link) or as a **500 that succeeds on retry** (the
+inserts truly collide and abort the loser's transaction) — but the persisted result
+is always one billing link and one buyer's worth of entitlements, never a
+double-grant.
+
 ## Coverage measurement and the CI gate
 
 "No feature without tests" is enforced, not just expected (CORE-TST-001). CI
