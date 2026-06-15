@@ -369,6 +369,12 @@ public sealed class ManyConcurrentHubConnectionsDeliveryTests
         Guid sessionId,
         Guid? participantId)
     {
+        // Snapshot the registry before opening this connection. Connections are established sequentially (every
+        // ConnectProbeAsync is awaited and confirmed below before the next), so exactly this connection raises
+        // the registered count by one once its server-side OnConnectedAsync completes.
+        var registry = factory.Services.GetRequiredService<RealtimeConnectionRegistry>();
+        var registeredBefore = registry.Count;
+
         var query = $"organizationSlug={_orgA}&sessionId={sessionId}";
         if (participantId is { } pid)
         {
@@ -392,6 +398,14 @@ public sealed class ManyConcurrentHubConnectionsDeliveryTests
         using var startCancellation = new CancellationTokenSource(_timeout);
         await connection.StartAsync(startCancellation.Token);
         Assert.Equal(HubConnectionState.Connected, connection.State);
+
+        // Confirm THIS connection's server-side OnConnectedAsync has finished before returning — registration is
+        // its last step, after the group joins. StartAsync returns once the transport handshake completes, which
+        // is BEFORE OnConnectedAsync runs; opening several connections and only polling for a bulk count lets
+        // their server-side handshakes run concurrently, and on a loaded 2-core CI runner one can be starved past
+        // the wait (seen as "saw 4 of 5"). Establishing one at a time and confirming each keeps at most one
+        // OnConnectedAsync in flight, which is what makes the over-the-wire fan-out deterministic (CORE-E2E-005).
+        await WaitForRegisteredAsync(factory, registeredBefore + 1);
         return probe;
     }
 
