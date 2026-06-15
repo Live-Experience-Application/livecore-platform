@@ -1,10 +1,99 @@
 # livecore-platform
 
 [![CI](https://github.com/Live-Experience-Application/livecore-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Live-Experience-Application/livecore-platform/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+[![.NET](https://img.shields.io/badge/.NET-10.0-512BD4.svg)](https://dotnet.microsoft.com/)
+[![Node.js](https://img.shields.io/badge/Node.js-22-339933.svg)](https://nodejs.org/)
+[![pnpm](https://img.shields.io/badge/pnpm-10-F69220.svg)](https://pnpm.io/)
+[![Packages](https://img.shields.io/badge/packages-0.1.0-blue.svg)](CHANGELOG.md)
 
 Generic Core Platform for live, role-aware, scene-based interactive sessions.
 
 This repository must stay product-neutral. It must not contain ArcanOS, Pen-and-Paper, DnD, Enterprise or ScenarioOS domain language in source code.
+
+## Overview
+
+LiveCore is a self-hostable platform for controlled, interactive live sessions. A
+**Host** prepares a **Workspace**, creates **Sessions**, organizes **Scenes**,
+manages **Participants**, defines **ContentBlocks** and **Entities**, applies
+**VisibilityRules**, executes **Reveals**, streams **SessionEvents** and produces
+**Recaps** — deciding what information is visible to which participant, when, and
+in what context.
+
+It is a reusable **Live Experience Engine**: one product-neutral foundation that
+multiple vertical products build on. The Core owns the platform (API, realtime
+hub, domain model, persistence, the visibility and reveal engines, assets, the
+audit log, entitlements/quotas and the typed TypeScript contracts and SDK); each
+vertical adds its own domain language on top, never the other way around. The
+Core therefore carries no vertical terminology of its own — see
+[Owns](#owns) and [Does not own](#does-not-own).
+
+The platform is **production-oriented**: server-side authorization, OIDC
+authentication, optimistic concurrency, transactional event publishing,
+observability (metrics, structured logging, distributed tracing), supply-chain
+gating and Docker/self-hosting readiness are part of the foundation rather than
+afterthoughts. Mobile monetization — server-side purchase verification,
+entitlements, quotas and ad eligibility — is in scope for v1, while paywalls,
+storefronts and ad rendering stay in the vertical apps
+([Mobile-related Core extension](#mobile-related-core-extension)).
+
+New to the repository? Read [Start here](#start-here) for the document reading
+order, then use [Quick start](#quick-start) to build and run it. The published
+TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANGELOG.md).
+
+## Table of contents
+
+- [Overview](#overview)
+- [Quick start](#quick-start)
+- [Owns](#owns)
+- [Does not own](#does-not-own)
+- [Start here](#start-here)
+- [Repository layout](#repository-layout)
+- [Mobile-related Core extension](#mobile-related-core-extension)
+- [Prerequisites](#prerequisites)
+- [Build, format, lint, test and boundary scan](#build-format-lint-test-and-boundary-scan)
+- [Run the hosts locally](#run-the-hosts-locally)
+- [Container images](#container-images)
+- [Continuous integration](#continuous-integration)
+- [License](#license)
+
+## Quick start
+
+> Prerequisites: .NET SDK 10, Node.js 22 and pnpm 10 (Docker optional). See
+> [Prerequisites](#prerequisites) for details. Run every command from the
+> repository root; CI runs them verbatim, so a green local run means a green
+> pipeline.
+
+```bash
+# Clone
+git clone https://github.com/Live-Experience-Application/livecore-platform.git
+cd livecore-platform
+
+# .NET solution: API host, background worker and tests
+dotnet build LiveCore.slnx
+dotnet test  LiveCore.slnx
+
+# TypeScript packages: contracts, SDK, UI core and design tokens
+pnpm install
+pnpm --recursive run build
+pnpm --recursive run test
+
+# Run the hosts directly — each in its own terminal (API on http://localhost:5062)
+dotnet run --project apps/api
+dotnet run --project apps/worker
+```
+
+Prefer containers? Bring up **PostgreSQL + the migrations runner + the API + the
+worker** with the in-repo deployment stack — from `deploy/compose`:
+
+```bash
+docker compose up -d --build
+```
+
+For configuration, the coverage/boundary/spec gates, the health and metrics
+endpoints, migrations and the full runtime reference, continue with
+[Build, format, lint, test and boundary scan](#build-format-lint-test-and-boundary-scan)
+and [Run the hosts locally](#run-the-hosts-locally).
 
 ## Owns
 
@@ -3571,4 +3660,4 @@ This project is licensed under the GNU Affero General Public License v3.0 or lat
 
 Commercial dual licensing may be offered in the future for organizations that require proprietary use, embedding, hosting, or distribution without AGPL obligations.
 
-For commercial licensing inquiries, contact: singh.harwinder@outlook.copm
+For commercial licensing inquiries, contact: singh.harwinder@outlook.com
