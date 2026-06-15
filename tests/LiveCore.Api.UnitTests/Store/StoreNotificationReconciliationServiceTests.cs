@@ -98,6 +98,33 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
         return await service.ReconcileDriftedPurchasesAsync(CancellationToken.None);
     }
 
+    // Like ReconcileSweepAsync, but the purchase read-modify-write for one designated transaction loses an
+    // optimistic-concurrency race (CORE-CONC-007): the SQLite test provider carries no xmin token, so the conflict
+    // the PostgreSQL token would raise is injected through a decorating repository that mirrors the real
+    // PurchaseTransactionRepository.UpdateAsync contract on a lost race (detach the conflicted row from the shared
+    // sweep context, then surface a DbUpdateConcurrencyException).
+    private async Task<StoreNotificationReconciliationResult> ReconcileSweepWithConflictAsync(
+        string conflictTransactionId,
+        int batchSize = 50)
+    {
+        await using var context = CreateContext();
+        var purchaseRepository = new ConcurrencyConflictInjectingPurchaseTransactionRepository(
+            new PurchaseTransactionRepository(context),
+            context,
+            conflictTransactionId);
+        var service = new StoreNotificationReconciliationService(
+            new ReconcilablePurchaseReader(context),
+            new StoreNotificationService(
+                new StoreNotificationEventRepository(context),
+                new PurchaseTransactionService(
+                    purchaseRepository,
+                    new PurchaseEventRepository(context)),
+                new TransactionalUnitOfWork(context)),
+            new StoreNotificationReconciliationOptions(enabled: true, TimeSpan.FromHours(1), batchSize),
+            NullLogger<StoreNotificationReconciliationService>.Instance);
+        return await service.ReconcileDriftedPurchasesAsync(CancellationToken.None);
+    }
+
     private async Task<PurchaseTransaction?> FindTransactionAsync(PurchaseProvider provider, string transactionId)
     {
         await using var context = CreateContext();
@@ -359,5 +386,122 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
         var b = await FindTransactionAsync(PurchaseProvider.Google, "txn-b");
         Assert.NotNull(b);
         Assert.Equal(PurchaseTransactionStatus.Cancelled, b.Status);
+    }
+
+    // --- Concurrency conflicts in the worker sweep (CORE-CONC-007) ----------------
+
+    [Fact]
+    public async Task A_concurrency_conflict_on_one_purchase_is_skipped_and_the_sweep_reconciles_the_rest()
+    {
+        // Two purchases, both drifted by an out-of-order grace/renewal delivery: the webhook applied grace -> renew
+        // and left each Active, but the grace period is the latest event, so each should converge to InGracePeriod.
+        // The candidate reader orders by (provider, provider transaction id), so "txn-conflict" is reconciled FIRST
+        // and "txn-ok" SECOND on the SAME shared sweep context.
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-conflict");
+        await HandleAsync(Notification(PurchaseProvider.Apple, "c-grace", StoreNotificationType.GracePeriodStarted, "txn-conflict", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "c-renew", StoreNotificationType.Renewed, "txn-conflict", _earlierEvent));
+
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-ok");
+        await HandleAsync(Notification(PurchaseProvider.Apple, "o-grace", StoreNotificationType.GracePeriodStarted, "txn-ok", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "o-renew", StoreNotificationType.Renewed, "txn-ok", _earlierEvent));
+
+        // The reconciliation read-modify-write on "txn-conflict" loses an optimistic-concurrency race. The worker has
+        // no ConcurrencyConflictMiddleware, so the loop itself must catch the DbUpdateConcurrencyException, skip the
+        // conflicted purchase and carry on — without crashing and without poisoning the rest of the batch.
+        var result = await ReconcileSweepWithConflictAsync("txn-conflict");
+
+        Assert.Equal(2, result.Examined);
+        Assert.Equal(1, result.Reconciled);
+        Assert.Equal(1, result.Failed);
+
+        // The conflicted purchase committed no status change — it stays drifted (Active) for the next sweep to retry.
+        var conflicted = await FindTransactionAsync(PurchaseProvider.Apple, "txn-conflict");
+        Assert.NotNull(conflicted);
+        Assert.Equal(PurchaseTransactionStatus.Active, conflicted.Status);
+
+        // The other purchase was still reconciled on the same shared context AFTER the conflict — proof the conflict
+        // neither tore the loop down nor poisoned the subsequent purchase's SaveChanges.
+        var ok = await FindTransactionAsync(PurchaseProvider.Apple, "txn-ok");
+        Assert.NotNull(ok);
+        Assert.Equal(PurchaseTransactionStatus.InGracePeriod, ok.Status);
+    }
+
+    [Fact]
+    public async Task A_purchase_that_conflicted_is_reconciled_on_a_later_sweep()
+    {
+        await RecordPurchaseAsync(PurchaseProvider.Apple, "txn-conflict");
+        await HandleAsync(Notification(PurchaseProvider.Apple, "c-grace", StoreNotificationType.GracePeriodStarted, "txn-conflict", _laterEvent));
+        await HandleAsync(Notification(PurchaseProvider.Apple, "c-renew", StoreNotificationType.Renewed, "txn-conflict", _earlierEvent));
+
+        // First sweep: the convergence loses the race, so it is skipped and the purchase is left drifted.
+        var first = await ReconcileSweepWithConflictAsync("txn-conflict");
+        Assert.Equal(1, first.Examined);
+        Assert.Equal(0, first.Reconciled);
+        Assert.Equal(1, first.Failed);
+        Assert.Equal(
+            PurchaseTransactionStatus.Active,
+            (await FindTransactionAsync(PurchaseProvider.Apple, "txn-conflict"))!.Status);
+
+        // The next sweep (no injected conflict) retries the still-drifted purchase and converges it — the conflict
+        // was a transient skip, not a permanent failure.
+        var second = await ReconcileSweepAsync();
+        Assert.Equal(1, second.Examined);
+        Assert.Equal(1, second.Reconciled);
+        Assert.Equal(0, second.Failed);
+        Assert.Equal(
+            PurchaseTransactionStatus.InGracePeriod,
+            (await FindTransactionAsync(PurchaseProvider.Apple, "txn-conflict"))!.Status);
+    }
+
+    /// <summary>
+    /// A decorating <see cref="IPurchaseTransactionRepository"/> that makes the read-modify-write for ONE designated
+    /// purchase lose an optimistic-concurrency race, leaving every other call to the real repository untouched. The
+    /// default in-memory SQLite test provider carries no <c>xmin</c> token (the token is mapped only on Npgsql — see
+    /// <see cref="LiveCoreDbContext"/>), so the conflict a concurrent writer would trigger on PostgreSQL is simulated
+    /// here. It faithfully reproduces the real <see cref="PurchaseTransactionRepository.UpdateAsync"/> contract on a
+    /// lost race (CORE-CONC-007): it DETACHES the conflicted, still-Modified entity from the shared sweep context so
+    /// it is not re-sent by a later SaveChanges, then throws a <see cref="DbUpdateConcurrencyException"/>. The real
+    /// repository's detach-and-rethrow is verified directly by the repository tests.
+    /// </summary>
+    private sealed class ConcurrencyConflictInjectingPurchaseTransactionRepository : IPurchaseTransactionRepository
+    {
+        private readonly IPurchaseTransactionRepository _inner;
+        private readonly LiveCoreDbContext _context;
+        private readonly string _conflictTransactionId;
+
+        public ConcurrencyConflictInjectingPurchaseTransactionRepository(
+            IPurchaseTransactionRepository inner,
+            LiveCoreDbContext context,
+            string conflictTransactionId)
+        {
+            _inner = inner;
+            _context = context;
+            _conflictTransactionId = conflictTransactionId;
+        }
+
+        public Task<PurchaseTransactionAddResult> AddAsync(
+            PurchaseTransaction transaction,
+            CancellationToken cancellationToken)
+            => _inner.AddAsync(transaction, cancellationToken);
+
+        public Task<PurchaseTransaction?> FindByProviderTransactionAsync(
+            PurchaseProvider provider,
+            string providerTransactionId,
+            CancellationToken cancellationToken)
+            => _inner.FindByProviderTransactionAsync(provider, providerTransactionId, cancellationToken);
+
+        public Task UpdateAsync(PurchaseTransaction transaction, CancellationToken cancellationToken)
+        {
+            if (string.Equals(transaction.ProviderTransactionId, _conflictTransactionId, StringComparison.Ordinal))
+            {
+                // Mirror the real repository's post-conflict contract: keep the shared context usable by detaching the
+                // abandoned change, then surface the conflict for the loop to handle.
+                _context.Entry(transaction).State = EntityState.Detached;
+                throw new DbUpdateConcurrencyException(
+                    "Simulated optimistic-concurrency conflict on the purchase read-modify-write.");
+            }
+
+            return _inner.UpdateAsync(transaction, cancellationToken);
+        }
     }
 }

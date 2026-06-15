@@ -39,10 +39,15 @@ namespace LiveCore.Api.Store;
 /// </para>
 ///
 /// <para>
-/// RESILIENCE. The sweep is per-purchase resilient: a purchase whose reconciliation fails (a transient persistence
-/// error) is logged and counted, and that purchase is left unchanged — no status change was committed — so the
-/// next sweep retries it, rather than aborting the whole run. All logging is identifier-only (the provider and
-/// counts, never the transaction id, a buyer or any content), so a sweep is safe to log (threat T7).
+/// RESILIENCE. The sweep is per-purchase resilient: a purchase whose reconciliation fails is logged and counted,
+/// and that purchase is left unchanged — no status change was committed — so the next sweep retries it, rather than
+/// aborting the whole run. This explicitly includes an OPTIMISTIC-CONCURRENCY CONFLICT (CORE-CONC-007): the
+/// purchase's read-modify-write goes through the same token-bearing model the HTTP path uses, but the worker has no
+/// <c>ConcurrencyConflictMiddleware</c> to turn a <see cref="DbUpdateConcurrencyException"/> into a 409, so the loop
+/// catches it here, logs it, and skips-and-continues — a concurrent change to one purchase never surfaces as an
+/// unhandled job exception nor poisons the rest of the batch (the repository detaches the conflicted row from the
+/// shared sweep context). All logging is identifier-only (the provider and counts, never the transaction id, a
+/// buyer or any content), so a sweep is safe to log (threat T7).
 /// </para>
 /// </summary>
 public sealed class StoreNotificationReconciliationService
@@ -116,12 +121,27 @@ public sealed class StoreNotificationReconciliationService
                 // Host shutdown during the sweep is expected; stop cleanly and let the loop end.
                 throw;
             }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                // A concurrent writer changed this purchase between the reconciliation read and its
+                // read-modify-write (the xmin token, CORE-CONC-001/006, raised the conflict rather than a silent
+                // last-write-wins). In an HTTP request this surfaces as a 409 (ConcurrencyConflictMiddleware), but a
+                // worker sweep has no such middleware, so we handle it HERE (CORE-CONC-007): no status change was
+                // committed, the repository detached the conflicted row so the rest of this batch is unaffected, and
+                // the purchase is left drifted for the next sweep to retry — a skip-and-continue, never an unhandled
+                // job exception that tears the loop down. Counted as a failed convergence and logged with the
+                // provider only, never the transaction id or any content (threat T7).
+                failed++;
+                _logger.LogWarning(
+                    exception,
+                    "A concurrent change conflicted while reconciling a {Provider} purchase; it stays drifted and will be retried on the next sweep.",
+                    purchase.Provider);
+            }
             catch (DbUpdateException exception)
             {
-                // A convergence failed to persist (a transient persistence error, or the purchase changed
-                // concurrently). No status change was committed and the purchase is left unchanged, so the next
-                // sweep retries it, and we move on. The message carries only the provider, never the transaction id
-                // or any content (threat T7).
+                // A convergence failed to persist (a transient persistence error). No status change was committed
+                // and the purchase is left unchanged, so the next sweep retries it, and we move on. The message
+                // carries only the provider, never the transaction id or any content (threat T7).
                 failed++;
                 _logger.LogWarning(
                     exception,

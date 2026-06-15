@@ -151,6 +151,68 @@ public sealed class PurchaseTransactionRepositoryTests : IDisposable
         }
     }
 
+    // --- Concurrency conflict keeps the shared context usable (CORE-CONC-007) ----
+
+    [Fact]
+    public async Task Update_that_loses_a_concurrency_race_detaches_the_row_and_does_not_poison_the_context()
+    {
+        // Two purchases. The worker reconciliation sweep reuses ONE scoped context across a whole batch, so a
+        // conflict on one purchase must not break the next purchase's update on the same context.
+        await using (var context = CreateContext())
+        {
+            var seed = new PurchaseTransactionRepository(context);
+            await seed.AddAsync(Transaction(PurchaseProvider.Apple, "txn-conflict"), CancellationToken.None);
+            await seed.AddAsync(Transaction(PurchaseProvider.Apple, "txn-ok"), CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new PurchaseTransactionRepository(context);
+
+            // Load and mutate the first purchase (the tracked read-modify-write a status change performs).
+            var conflicting = await repository.FindByProviderTransactionAsync(
+                PurchaseProvider.Apple, "txn-conflict", CancellationToken.None);
+            Assert.NotNull(conflicting);
+            Assert.True(conflicting.ChangeStatus(PurchaseTransactionStatus.Cancelled, _recordedAt.AddHours(1)));
+
+            // Simulate a concurrent writer removing the row out from under the tracked update, so the UPDATE matches
+            // zero rows and EF raises a genuine DbUpdateConcurrencyException — the same loud conflict the PostgreSQL
+            // xmin token raises on an interleaved write (the SQLite test provider carries no token).
+            await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM purchase_transactions WHERE provider_transaction_id = 'txn-conflict';");
+
+            await Assert.ThrowsAsync<DbUpdateConcurrencyException>(
+                () => repository.UpdateAsync(conflicting, CancellationToken.None));
+
+            // The conflicted entity is detached, so its abandoned change is not re-sent by a later SaveChanges on the
+            // same context.
+            Assert.Equal(EntityState.Detached, context.Entry(conflicting).State);
+
+            // A DIFFERENT purchase can still be updated on the SAME context — proof the conflict did not poison the
+            // batch. Without the detach this SaveChanges would also re-attempt the deleted row and throw again.
+            var other = await repository.FindByProviderTransactionAsync(
+                PurchaseProvider.Apple, "txn-ok", CancellationToken.None);
+            Assert.NotNull(other);
+            Assert.True(other.ChangeStatus(PurchaseTransactionStatus.Refunded, _recordedAt.AddHours(2)));
+            await repository.UpdateAsync(other, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new PurchaseTransactionRepository(context);
+
+            // The second purchase was updated cleanly...
+            var other = await repository.FindByProviderTransactionAsync(
+                PurchaseProvider.Apple, "txn-ok", CancellationToken.None);
+            Assert.NotNull(other);
+            Assert.Equal(PurchaseTransactionStatus.Refunded, other.Status);
+
+            // ...and the lost update was NOT replayed onto the row the concurrent writer removed.
+            Assert.Null(await repository.FindByProviderTransactionAsync(
+                PurchaseProvider.Apple, "txn-conflict", CancellationToken.None));
+        }
+    }
+
     // --- Negative lookup / guards -----------------------------------------------
 
     [Fact]

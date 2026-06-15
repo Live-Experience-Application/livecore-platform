@@ -66,7 +66,24 @@ internal sealed class PurchaseTransactionRepository : IPurchaseTransactionReposi
         // The transaction is already tracked (it was loaded through this context); EF persists the mutated
         // status and timestamp columns. The update is in place — a purchase is one row.
         _dbContext.PurchaseTransactions.Update(transaction);
-        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // A concurrent writer changed (or removed) this purchase between the read and this write — the
+            // PostgreSQL xmin row-version token (CORE-CONC-001/006) made the conflict LOUD instead of a silent
+            // last-write-wins. Detach the conflicted entity so its abandoned, still-Modified change is not re-sent
+            // by a LATER SaveChanges on the same scope — exactly the "keep the context usable" cleanup AddAsync
+            // does after a failed insert. This matters because the worker reconciliation sweep (CORE-CONC-007)
+            // reuses ONE scoped context across every purchase in a batch, so without this detach a single conflict
+            // would poison every subsequent purchase's SaveChanges in that sweep. Rethrow so the caller still sees
+            // the conflict: the HTTP path maps it to a 409 (ConcurrencyConflictMiddleware) and the worker sweep
+            // skips this purchase and retries it on the next pass.
+            _dbContext.Entry(transaction).State = EntityState.Detached;
+            throw;
+        }
     }
 
     /// <inheritdoc />

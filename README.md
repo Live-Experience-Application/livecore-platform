@@ -853,6 +853,29 @@ the test suites used a plain non-retrying provider, so the delegate was never re
 focused unit test and the `CommandRetryResilienceTests` HTTP tests now enable a retrying
 strategy and inject a transient failure mid-delegate to pin the behavior.
 
+### Concurrency conflicts in the worker job contexts
+
+A `DbUpdateConcurrencyException` is no longer an **unhandled** worker-job exception
+(CORE-CONC-007). The four worker loops share the same token-bearing model as the API, but
+only the HTTP `ConcurrencyConflictMiddleware` turns that exception into a `409` — a worker
+has no such middleware. The concrete case is the off-by-default store-notification
+reconciliation sweep: it converges each drifted purchase with a tracked read-modify-write
+on `PurchaseTransaction` (`ChangeStatusAsync`), so a purchase a webhook changes
+concurrently makes that write **lose** the `xmin` race. The per-purchase loop in
+`StoreNotificationReconciliationService` now catches the `DbUpdateConcurrencyException`
+**explicitly** (distinct from a generic persistence error), logs it (provider and counts
+only — never the transaction id or any content, threat T7), counts it as a failed
+convergence and **skips-and-continues** — the conflicted purchase stays drifted for the
+next sweep to retry, and the sweep is never torn down. Crucially, `PurchaseTransactionRepository.UpdateAsync`
+now **detaches** the conflicted row after a lost race (the same "keep the context usable"
+cleanup `AddAsync` already did after a failed insert) before rethrowing, so the abandoned,
+still-`Modified` entity is not re-sent by a later `SaveChanges` on the **one** scoped
+`DbContext` the sweep reuses across the whole batch — a single conflict no longer poisons
+every subsequent purchase in the run. The rethrow keeps the HTTP path's `409` intact. A
+worker unit test injects a simulated conflict on one reconciled purchase and asserts the
+sweep skips it, still reconciles the rest of the batch on the same context, and converges
+the skipped purchase on a later sweep; a repository test pins the genuine detach-and-rethrow.
+
 ### Atomic quota check-and-consume (no TOCTOU race)
 
 A protected command that consumes a server-side quota does its check **and** its consume in
