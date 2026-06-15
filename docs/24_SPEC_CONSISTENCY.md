@@ -346,6 +346,166 @@ in-scope-for-v1 items not yet built (noted per item).
   `apps/api/Realtime/SessionEventTypes.cs`), and `PrivateMessageSent`,
   `AssetRevealed` and `SessionNoteCreated` were removed from the catalog as
   vertical/future events with no Core command.
+- **Deliberately-absent capabilities and the authorization model** — the
+  read/CRUD endpoints the model is ready for but does not yet expose, the
+  reconciled active-scene contradiction, the session-participant roster deferral
+  and the inline-authorization decision are recorded as explicit dated
+  decisions in the register below
+  (*Deliberately-absent capabilities and authorization model recorded as
+  decisions (CORE-SPEC-003)*), so each is auditable as an intentional omission
+  rather than a gap.
+
+## Deliberately-absent capabilities and authorization model recorded as decisions (CORE-SPEC-003)
+
+This is the **single deferral/decision register** for the Core capabilities that
+exist in the model but are deliberately not exposed, the one known active-scene
+spec contradiction, and the inline-authorization decision. It consolidates the
+many "…is a later story" and "…deliberately not wired here" markers scattered
+through the source (the scene/content-block/entity/template/visibility repository
+registrations in `apps/api/Program.cs`, `apps/api/Recaps/Recap.cs`,
+`apps/api/Exports/ExportJob.cs`, `apps/api/Exports/ExportManifestProjection.cs`,
+`apps/api/Content/ContentBlockEndpoints.cs`,
+`apps/api/Realtime/SessionEventTypes.cs`,
+`apps/api/Realtime/SessionEventRecipientResolver.cs` and `docs/11_REALTIME_SYNC.md`)
+into one place, **dated, with a named owner (Core-later vs vertical) and a
+rationale**, so a reader can tell an **intentional omission from a gap** (the
+CORE-SPEC-003 acceptance criterion). It mirrors how CORE-DOC-002 (billing scope)
+and CORE-EVT-004 (the session-event catalog) formalized their decisions above.
+
+This register is **documentation only**: it adds no route, table, event or
+migration and changes no Core source — it only records decisions — so all eleven
+spec-consistency checks and the boundary scan stay green. It pairs with
+CORE-SPEC-001 (the semantic spec-consistency checks) and CORE-EVT-004 (the
+session-event catalog contract).
+
+### (a) Deliberately-absent read/CRUD endpoints — deferred (owner: Core-later)
+
+A capability whose domain model, persistence, EF migration and (where relevant)
+role-based projection are implemented, but which has **no HTTP endpoint**, is a
+deliberate deferral, not drift. `csv/api_routes.csv` is the single source of
+truth for the mounted `/api/v1` routes and the spec-consistency check binds it to
+the implementation **both directions** (check 6), so "no row in
+`csv/api_routes.csv`" is the authoritative statement that the route does not
+exist yet — an endpoint cannot be silently present or silently missing. The
+following are deferred by design (date recorded **2026-06-15**):
+
+- **Export read/download route.** The export job (CORE-AUD-002, `ExportJob.cs`)
+  and the export manifest with its role-based projection (CORE-AUD-003,
+  `ExportManifestProjection.cs`) are modeled, persisted and migrated, but there
+  is **no export read/download route**. Owner: **Core-later** (the Exports
+  endpoint story). Rationale: the projector is the reusable, fail-closed core a
+  later endpoint sits on, and threat **T8 "Export leak"** is already held by the
+  role-based projection regardless of when the route lands. CORE-E2E-003 already
+  records that recap/export have no HTTP read endpoint by design.
+- **Recap read route + separate participant reveal.** The `Recap` aggregate, its
+  persistence, EF migration and host-vs-audience role-based projection
+  (`Recap.cs`) are implemented; there is **no recap read route**, and the
+  separate participant reveal of a recap body is likewise deferred. Owner:
+  **Core-later** (the Recaps endpoint story). Rationale: a generated recap is
+  host content ("Participant-visible only after separate reveal",
+  `docs/09_EVENT_CATALOG.md` / `RecapGenerated`, threat **T2**), guarded by the
+  projection, not by the absence of a route.
+- **Entity / entity-type / entity-relationship / template / visibility-rule
+  create and list endpoints.** The Entities, Templates and Visibility
+  repositories (CORE-ENT-001..004, CORE-VIS-001) are implemented with **no
+  list-everything method** and **no HTTP route** (`csv/api_routes.csv` defines
+  none). Owner: **Core-later** (the respective endpoint stories — e.g.
+  CORE-ENT-002/005, CORE-VIS-004). Rationale: the **explicit-ids contract** — the
+  same-workspace coupling of `entity → entity_type`, an entity_relationship's two
+  endpoints, `content_block → scene` and `visibility_rule → resource` is the
+  future create application flow's responsibility, **not** a database foreign key
+  — is recorded on each aggregate; mounting list/create routes early would invite
+  a list-everything bypass of the tenant/workspace scoping (threat **T5**).
+- **Content-block list/get/update/revise route.** `ContentBlockEndpoints.cs`
+  mounts only create and delete; there is deliberately **no
+  list/get/update/revise route** (the revise capability lives on the aggregate
+  for a later story). Owner: **Core-later**. Rationale: no such route is in
+  `csv/api_routes.csv`.
+- **Preview-as-participant HTTP endpoint.** The preview-as-participant query
+  (CORE-VIS-003, `VisibilityPreviewService`) is implemented and **reused** by the
+  participant-visible-feed projection (CORE-API-005) and the entity-search
+  audience filtering (CORE-API-006), but it has **no dedicated preview HTTP
+  route**. Owner: **Core-later** if a host-facing preview endpoint is ever
+  required; a **vertical**'s host UI may instead consume the existing
+  visible-feed projection. Rationale: visibility is decided in exactly one place
+  (`docs/05_MODULE_CONTRACTS.md`: "do not duplicate visibility logic
+  elsewhere"), so a second preview route is not needed for correctness and would
+  duplicate the surface.
+
+### (b) Decision: reveal-is-activation is the final scene-switch contract
+
+**The one known spec contradiction.** The scene repository registration in
+`apps/api/Program.cs` says a session "activates a scene through its active scene
+pointer in a later story", while `apps/api/Realtime/SessionEventTypes.cs`
+(`SceneActivated`) says "there is no separate active-scene command, so revealing
+a scene to the audience **is** the scene switch". Read literally these disagree
+on whether a separate active-scene command is coming.
+
+**Decision (2026-06-15): reveal-is-activation is the final contract** for
+switching the audience's active scene. There is **no separate active-scene
+command and none is planned**: a host switches the audience's scene by
+**revealing** it — the reveal command emits `SceneActivated`, gated through the
+central Visibility engine so only the audience that may see the scene receives
+the activation (CORE-EVT-003, threats T2/T3). The phrase "active scene pointer …
+in a later story" is **not** a competing scene-switch mechanism; it survives only
+as a narrow, optional future **session-state binding** whose sole purpose would
+be to give the workspace-prepared `SceneCreated` / `ContentBlockCreated` events a
+`session_id` to attach to (the **named owner** of those two **deferred** catalog
+rows, CORE-EVT-004 above). Owner of that narrow binding: **Core-later** (a future
+Sessions story); it is itself a deferral, not a gap — making
+`session_events.session_id` optional instead would be an architecture change (an
+ADR), out of scope. Either way the audience-facing scene switch **is**
+reveal-is-activation; with this decision the spec is consistent on the point.
+
+### (c) The session-participant roster deferral is a deliberate design, not a gap
+
+`docs/11_REALTIME_SYNC.md` and
+`apps/api/Realtime/SessionEventRecipientResolver.cs` note there is **no persisted
+session-participant roster yet** (deferred to the Presence epic, CORE-PRS-001),
+so the audience fan-out enumerates the **workspace's** active participants as the
+candidate set. Recorded decision (2026-06-15): this is a **deliberate design**,
+not a gap. Cross-session isolation correctness is held by **two** independent
+mechanisms, not by a roster:
+
+- **session-keyed realtime groups** — a connection joins only the groups of the
+  session it connected to (`session:{sessionId}:hosts|observers|participant:{p}`),
+  so a delivery addressed to `session:{thisSession}:participant:{p}` reaches a
+  participant only when they are connected to **this** session; and
+- the **session-scoped visibility gate** — every audience and per-recipient
+  decision is delegated to the central Visibility engine **bounded by the event's
+  session**, so it independently confirms the subject is revealed **in this
+  session** (the cross-session leak, threats **T3/T5**).
+
+Owner: **Core-later** (the Presence epic) for the roster as a presence
+feature/optimization; it is **not required for correctness** today, so its
+absence is intentional.
+
+### (d) Decision: per-action authorization is inline by deliberate choice
+
+Recorded decision (2026-06-15), from CORE-WS-005: per-action authorization is
+performed **inline** at each endpoint, and a consolidated capability/policy
+framework is **explicitly not pursued** — this is a **decision, not a gap**.
+Rationale: the inline checks carry **security-relevant ordering** that a
+capability-policy extraction would risk collapsing —
+
+- **404-before-403** — existence is hidden before a role is consulted, so a
+  low-role caller targeting a workspace they cannot see learns nothing about it
+  (threats **T1/T5**);
+- **membership-before-role** — object-level **workspace** membership is
+  authorized before the **organization** role, so a non-member (even an
+  organization Owner) gets a hidden `404`, not a `403`;
+- **existence-before-state** — the resource is resolved within the already
+  tenant-scoped lookup before its state is checked.
+
+CORE-WS-005 pins these rules with a systematic authorization-policy **test
+matrix** (`tests/LiveCore.Api.IntegrationTests/WorkspaceAuthorizationPolicyTests.cs`)
+that asserts the exact `403`-vs-hidden-`404` distinction per route, end-to-end
+over real HTTP. `MembershipRole` is **non-linear** (exact set-membership, never
+an ordering comparison), so there is no policy lattice to factor out. Owner:
+this decision is **final** (not deferred) — a reusable policy/handler framework
+is intentionally not built; extracting one would trade the audited, per-route
+ordering above for a uniform check that could silently reorder or merge the
+status-code contract.
 
 ## Checking consistency
 
