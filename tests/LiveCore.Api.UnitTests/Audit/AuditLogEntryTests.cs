@@ -738,4 +738,79 @@ public sealed class AuditLogEntryTests
         Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
         Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
     }
+
+    [Fact]
+    public void ForMemberInvitationRevoked_sets_the_action_resource_and_status_transition()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var invitation = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForMemberInvitationRevoked(
+            org, ws, actor, "WorkspaceInvitation", invitation, previousState: "Pending", newState: "Revoked",
+            createdAt: _now);
+
+        Assert.Equal(AuditAction.MemberInvitationRevoked, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        // The actor is the admin who revoked the invitation.
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        Assert.Equal("WorkspaceInvitation", entry.ResourceType);
+        Assert.Equal(invitation, entry.ResourceId);
+        // A revoke is a real state transition (the invitation row survives), so it records the before/after
+        // status names exactly like a workspace archive.
+        Assert.Equal("Pending", entry.PreviousState);
+        Assert.Equal("Revoked", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForMemberInvitationRevoked_rejects_an_empty_workspace()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), "WorkspaceInvitation", Guid.NewGuid(), "Pending", "Revoked", _now));
+
+    [Fact]
+    public void ForMemberInvitationRevoked_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, "WorkspaceInvitation", Guid.NewGuid(), "Pending", "Revoked", _now));
+
+    [Fact]
+    public void ForMemberInvitationRevoked_rejects_an_empty_invitation_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceInvitation", Guid.Empty, "Pending", "Revoked", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberInvitationRevoked_rejects_a_blank_resource_type(string resourceType)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), resourceType, Guid.NewGuid(), "Pending", "Revoked", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberInvitationRevoked_rejects_a_blank_previous_state(string previousState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceInvitation", Guid.NewGuid(), previousState, "Revoked", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberInvitationRevoked_rejects_a_blank_new_state(string newState)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceInvitation", Guid.NewGuid(), "Pending", newState, _now));
+
+    [Fact]
+    public void ForMemberInvitationRevoked_normalizes_created_at_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        var entry = AuditLogEntry.ForMemberInvitationRevoked(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceInvitation", Guid.NewGuid(), "Pending", "Revoked", local);
+
+        Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
+    }
 }

@@ -52,6 +52,16 @@ namespace LiveCore.Api.Workspaces;
 ///   indistinguishable hidden 404 (fail-closed). Open to any authenticated org
 ///   member (the token, not a role, is the grant); a caller already a member of the
 ///   workspace is a 409 that does not consume the token.</item>
+///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}</c> —
+///   revoke a pending workspace invitation (CORE-WS-007), "Manage members" (Owner
+///   or Admin), mirroring the member-invite authorization. Transitions the
+///   invitation <c>Pending -> Revoked</c> so its scoped token can never be redeemed
+///   (the threat T6 revocation control), and appends a
+///   <see cref="AuditAction.MemberInvitationRevoked"/> audit record. Only a pending
+///   invitation may be revoked: an already-accepted or already-revoked invitation is
+///   a 409 that changes nothing (placed AFTER the role check so a non-Owner/Admin
+///   still gets a 403 and never learns the invitation state). Fail-closed and hidden
+///   as 404 for a cross-tenant/unknown workspace or invitation.</item>
 ///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
 ///   remove a workspace member (CORE-LIFE-001), "Manage members" (Owner or
 ///   Admin). Hard-deletes the membership, revoking the subject's access on their
@@ -110,6 +120,7 @@ internal static class WorkspaceEndpoints
         group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
         group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
+        group.MapDelete("/{workspaceId}/invitations/{invitationId}", RevokeWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
         return endpoints;
@@ -868,6 +879,138 @@ internal static class WorkspaceEndpoints
         };
     }
 
+    // DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}?organizationSlug={slug}
+    //
+    // Revokes a pending workspace invitation (CORE-WS-007), the take-back half of the invite flow (CORE-WS-004
+    // shipped only the invite; CORE-WS-006 the redeem). It transitions the invitation Pending -> Revoked so its
+    // scoped token can never be redeemed afterwards (the threat T6 revocation control), and audits the change.
+    // The flow mirrors the member-removal sibling on this same module (fail-closed, load-then-authorize,
+    // hidden-404): the tenant comes from the required ?organizationSlug=, the workspace is loaded within that
+    // tenant, the caller is authorized as the organization Owner/Admin (the "Manage members" matrix row, exactly
+    // like the member-invite route), the invitation is loaded within that tenant AND workspace, and only then is
+    // the status transition applied and the revoke audited. A cross-tenant/unknown workspace or invitation is an
+    // indistinguishable hidden 404; an already-accepted or already-revoked invitation is a 409 that changes
+    // nothing.
+    private static async Task<IResult> RevokeWorkspaceInvitationAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string invitationId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the member-removal and other workspace by-id
+        // routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace or invitation id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (!Guid.TryParse(invitationId, out var invitationGuid) || invitationGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is indistinguishable
+            // from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant or
+        // unknown workspace is never revealed; threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite sibling on this
+        // same path (POST .../members). The caller is a known member of the tenant and the workspace exists, so
+        // an insufficient role is a 403. Exact, non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Find the target invitation WITHIN this tenant and workspace; an invitation id that belongs to another
+        // workspace or tenant (or no invitation at all) is hidden as 404, never 403, so an invitation outside the
+        // caller's resolved workspace can never be probed for (threats T1/T5). The by-id lookup never touches the
+        // token secret.
+        var invitation = await deps.WorkspaceInvitations
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, invitationGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (invitation is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Only a PENDING invitation may be revoked: an already-accepted invitation must not silently undo a
+        // granted membership, and an already-revoked one is a no-op. The caller is authorized; the lifecycle
+        // state, not the caller, is the reason, so this is a 409 Conflict that changes nothing and writes no
+        // duplicate audit fact. Placed AFTER the role check so a non-Owner/Admin still gets a 403 and never
+        // learns the invitation state (threat T7). The domain Revoke() enforces the same invariant; checking
+        // here keeps the rejection an HTTP 409 rather than a thrown exception.
+        if (invitation.Status != WorkspaceInvitationStatus.Pending)
+        {
+            return InvitationNotPendingConflict();
+        }
+
+        // Capture the previous status name BEFORE the transition for the audit record (the in-memory object
+        // survives, but capturing first keeps the audited "before" state independent of the mutation below).
+        var previousStatus = invitation.Status.ToString();
+
+        var now = timeProvider.GetUtcNow();
+        invitation.Revoke(now);
+        await deps.WorkspaceInvitations.UpdateAsync(invitation, cancellationToken).ConfigureAwait(false);
+
+        // AUDIT: a revocation retires an outstanding invite token, so append an append-only audit record
+        // capturing the actor (the admin who revoked it), the revoked invitation and the Pending -> Revoked
+        // status transition (threat T6 revocation control). The invite token and the invited email are never
+        // recorded — only the fact of the revocation (threats T6/T7).
+        var entry = AuditLogEntry.ForMemberInvitationRevoked(
+            context.OrganizationId,
+            workspaceGuid,
+            context.UserProfileId,
+            nameof(WorkspaceInvitation),
+            invitation.Id,
+            previousStatus,
+            invitation.Status.ToString(),
+            now);
+        await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+
+        // The invitation's redeemability IS what the revoke takes away, and that is now persisted as the
+        // Revoked status; nothing is returned (204 No Content), mirroring the member-removal sibling.
+        return Results.NoContent();
+    }
+
     // DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
     private static async Task<IResult> RemoveWorkspaceMemberAsync(
         HttpContext httpContext,
@@ -1114,6 +1257,17 @@ internal static class WorkspaceEndpoints
             statusCode: StatusCodes.Status409Conflict,
             title: "Conflict",
             detail: "You are already a member of this workspace.");
+
+    // The invitation is not pending (already accepted or revoked), so it cannot be revoked: an accepted
+    // invitation must not silently undo a granted membership and an already-revoked one is a no-op. The caller
+    // is authorized; the lifecycle state, not the caller, is the reason, so this is a 409 Conflict
+    // (docs/08_API_CONTRACTS.md). The detail names only the generic condition and leaks no tenant data (threat
+    // T7) — it deliberately does not distinguish "accepted" from "revoked".
+    private static IResult InvitationNotPendingConflict()
+        => Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "Conflict",
+            detail: "The invitation is not pending and cannot be revoked.");
 
     // The workspace is archived and therefore read-only (CORE-LIFE-009), so an authoring mutation (rename,
     // member invite) is refused. The caller is authorized; the lifecycle state, not the caller, is the

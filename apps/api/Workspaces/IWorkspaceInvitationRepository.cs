@@ -56,6 +56,28 @@ public interface IWorkspaceInvitationRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Finds the invitation with exactly the given surrogate id WITHIN the given
+    /// organization and workspace, or <see langword="null"/> when none exists
+    /// (CORE-WS-007). The id is the row's own key, but the organization and
+    /// workspace both additionally scope the lookup (the organization boundary
+    /// checked before the workspace boundary), so an invitation with that id in
+    /// another workspace, or in the same workspace id under a different
+    /// organization, is never returned: a foreign-tenant or wrong-workspace
+    /// invitation is indistinguishable from a non-existent one (threats T1/T5).
+    /// This is the by-id lookup the revoke command uses to address a specific
+    /// pending invitation by its <see cref="WorkspaceInvitation.Id"/>; unlike the
+    /// token-hash lookup it never touches the secret (no plaintext, no hash).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or invitation id is empty.
+    /// </exception>
+    Task<WorkspaceInvitation?> FindByIdAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid invitationId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists changes to an invitation previously loaded through this repository
     /// (CORE-WS-006). The tenant, workspace, invited email, role, token hash and
     /// expiry of an invitation are immutable (<see cref="WorkspaceInvitation"/>);

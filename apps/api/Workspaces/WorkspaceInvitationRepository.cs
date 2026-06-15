@@ -98,6 +98,44 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
     }
 
     /// <inheritdoc />
+    public async Task<WorkspaceInvitation?> FindByIdAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid invitationId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored invitation (ids are generated non-empty), so the lookup fails
+        // fast instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (invitationId == Guid.Empty)
+        {
+            throw new ArgumentException("Invitation id must not be empty.", nameof(invitationId));
+        }
+
+        // All three predicates translate to parameterized SQL equality. The id is the row's own key, but the
+        // organization_id and workspace_id predicates additionally pin the tenant and workspace boundaries (the
+        // organization boundary checked before the workspace boundary), so an invitation with that id in another
+        // workspace, or in the same workspace id under a different organization, is never returned (threats
+        // T1/T5). This by-id lookup never touches the token secret — neither the plaintext nor its hash.
+        return await _dbContext.WorkspaceInvitations
+            .FirstOrDefaultAsync(
+                invitation => invitation.Id == invitationId
+                    && invitation.OrganizationId == organizationId
+                    && invitation.WorkspaceId == workspaceId,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(invitation);

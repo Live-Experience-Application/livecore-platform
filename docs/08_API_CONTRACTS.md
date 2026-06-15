@@ -49,6 +49,7 @@ GET    /api/v1/workspaces/{workspaceId}
 POST   /api/v1/workspaces/{workspaceId}/archive
 POST   /api/v1/workspaces/{workspaceId}/members
 POST   /api/v1/workspaces/{workspaceId}/invitations/accept
+DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}
 GET    /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/sessions/{sessionId}/start

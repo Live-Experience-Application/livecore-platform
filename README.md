@@ -1316,16 +1316,17 @@ boundary the `TenantContextResolver` enforces:
 
 The workspace routes implemented so far:
 
-| Method   | Route                                                 | Authorized callers                                                        |
-| -------- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
-| `GET`    | `/api/v1/workspaces`                                  | any workspace member (results filtered to the caller's memberships)       |
-| `POST`   | `/api/v1/workspaces`                                  | organization `Owner` or `Admin`                                           |
-| `GET`    | `/api/v1/workspaces/{workspaceId}`                    | members of that workspace                                                 |
-| `PUT`    | `/api/v1/workspaces/{workspaceId}`                    | organization `Owner` or `Admin` (rename)                                  |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`            | organization `Owner` (archive — see below)                                |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/members`            | organization `Owner` or `Admin` (create invite)                           |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept` | any authenticated org member who holds a valid token (redeem — see below) |
-| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)               |
+| Method   | Route                                                         | Authorized callers                                                        |
+| -------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `GET`    | `/api/v1/workspaces`                                          | any workspace member (results filtered to the caller's memberships)       |
+| `POST`   | `/api/v1/workspaces`                                          | organization `Owner` or `Admin`                                           |
+| `GET`    | `/api/v1/workspaces/{workspaceId}`                            | members of that workspace                                                 |
+| `PUT`    | `/api/v1/workspaces/{workspaceId}`                            | organization `Owner` or `Admin` (rename)                                  |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`                    | organization `Owner` (archive — see below)                                |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/members`                    | organization `Owner` or `Admin` (create invite)                           |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept`         | any authenticated org member who holds a valid token (redeem — see below) |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/invitations/{invitationId}` | organization `Owner` or `Admin` (revoke invite — see below)               |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` (remove member — see below)               |
 
 ### Workspace member invites (scoped tokens)
 
@@ -1361,6 +1362,37 @@ an **indistinguishable hidden `404`**. A caller who is already a member of the
 workspace gets a `409` and does **not** consume the token. On PostgreSQL the
 invitation carries the `xmin` concurrency token, so two concurrent redemptions of one
 token cannot both grant a membership (the second conflicts with a `409`).
+
+### Workspace invitation revoke (CORE-WS-007)
+
+`DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}` revokes a
+**pending** invitation so its scoped token **can never be redeemed** — the take-back
+half of the invite flow and the threat T6 _revocation_ control made reachable for the
+first time (until now an invite, once issued, could not be taken back). It is a soft
+**`Pending -> Revoked` status transition**, not a delete: the invitation row survives so
+its audit history is preserved. The route resolves its tenant from a required
+`?organizationSlug=` query parameter (like the other workspace by-id routes).
+
+Authorization mirrors the member-invite route on the same path: the **"Manage members"**
+matrix row, **organization `Owner` or `Admin`** (`docs/06_AUTHORIZATION_MATRIX.md`),
+matched exactly (`MembershipRole` is non-linear). Every step is fail-closed and hidden
+as `404` for a caller who cannot see the tenant, a workspace not in the resolved tenant,
+or an `invitationId` that belongs to another workspace/tenant — so an invitation outside
+the caller's scope can never be revoked or probed for (threats T1/T5). A known tenant
+member who lacks `Owner`/`Admin` is `403`.
+
+Only a **pending** invitation may be revoked: an already-accepted invitation must not
+silently undo a granted membership, and an already-revoked one is a no-op, so both are a
+`409 Conflict` that changes nothing (placed **after** the role check, so a
+non-`Owner`/`Admin` still gets a `403` and never learns the invitation state). The `409`
+detail deliberately does not distinguish "accepted" from "revoked" (threat T7). A
+successful revoke returns `204 No Content`; a subsequent redeem of the token is rejected
+as the same **indistinguishable hidden `404`** as any other non-redeemable token.
+
+Every successful revoke appends an append-only `MemberInvitationRevoked` audit record
+(see "Audit log" below) capturing the tenant, the workspace, the authenticated **actor**
+(the admin who revoked it), the revoked invitation and the `Pending -> Revoked` status
+transition — never the invited email, the token or any content (threats T6/T7).
 
 ### Member removal (revoking access)
 
@@ -1788,7 +1820,7 @@ transition, so `new_state` is now nullable). `ForVisibilityRuleChange` is now a 
 specialization of that generic factory, so the reveal producer is unchanged and
 visibility logic is not duplicated. The generic action catalog
 (`VisibilityRuleChanged`, `SessionStarted`, `SessionEnded`, `MemberInvited`,
-`MemberRemoved`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`,
+`MemberRemoved`, `MemberInvitationRevoked`, `EntityDeleted`, `ContentBlockDeleted`, `SceneDeleted`, `AssetDeleted`, `WorkspaceArchived`,
 `SessionCancelled`, plus the entitlement/store actions `EntitlementGranted`, `EntitlementRevoked`,
 `QuotaExceeded`, `PurchaseVerificationSubmitted`, `PurchaseVerificationSucceeded`, `PurchaseVerificationFailed`,
 `StoreNotificationReceived`, `StoreNotificationProcessed` added by CORE-SPEC-002, below) is

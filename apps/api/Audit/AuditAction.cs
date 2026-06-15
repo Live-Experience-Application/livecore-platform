@@ -107,6 +107,24 @@ public enum AuditAction
     MemberJoined = 20,
 
     /// <summary>
+    /// An Owner/Admin revoked a pending workspace invitation so its scoped token can never be redeemed — the
+    /// invitation revoke command (CORE-WS-007). It is the take-back counterpart of <see cref="MemberInvited"/>
+    /// (the invite half, CORE-WS-004) and pairs with the redemption path <see cref="MemberJoined"/>
+    /// (CORE-WS-006): where a redemption consumes a token into a membership, a revocation retires the token
+    /// before it is ever redeemed. Auditing the revocation is the threat model's stated control against invite
+    /// abuse (threat T6 in docs/07_SECURITY_THREAT_MODEL.md lists "revocation" and "audit logs" among the
+    /// invite-token controls): it records that an authorized admin took an outstanding invite back. Unlike the
+    /// deletion actions — and exactly like <see cref="WorkspaceArchived"/> — a revoke is a real STATE TRANSITION
+    /// (the invitation row survives so its audit history is preserved), so it records the before/after status
+    /// NAMES (<c>Pending</c> -&gt; <c>Revoked</c>); its actor is the admin who revoked the invitation and its
+    /// resource is the invitation itself (its generic kind name and surrogate id). A generic, workspace-scoped
+    /// audit fact whose values are identifiers, an enum or a generic state name — never the invited email, the
+    /// token or any free-form content (threats T6/T7) — recorded through
+    /// <see cref="AuditLogEntry.ForMemberInvitationRevoked"/>.
+    /// </summary>
+    MemberInvitationRevoked = 21,
+
+    /// <summary>
     /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
     /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
     /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that

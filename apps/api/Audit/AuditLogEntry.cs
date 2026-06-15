@@ -718,6 +718,91 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a workspace invitation revocation (<see cref="AuditAction.MemberInvitationRevoked"/>) — the audit
+    /// fact written when an authorized Owner/Admin revokes a pending workspace invitation so its scoped token can
+    /// never be redeemed (CORE-WS-007). It is the take-back counterpart of <see cref="ForMemberJoined"/> (the
+    /// redemption path) and, like <see cref="ForWorkspaceArchive"/>, a thin specialization of
+    /// <see cref="Create"/> that pins the action and applies the revoke producer's stricter contract: the tenant,
+    /// the workspace the invitation belonged to, the authenticated actor (the admin who revoked it) and the
+    /// revoked invitation resource (its generic kind name and surrogate id) are all REQUIRED, where the generic
+    /// factory leaves them optional. Unlike the deletion factories, a revoke is a real STATE TRANSITION (the
+    /// invitation row survives so its audit history is preserved), so it records the before/after status NAMES
+    /// (e.g. <c>Pending</c> -&gt; <c>Revoked</c>), exactly as <see cref="ForWorkspaceArchive"/> records the
+    /// archive transition. The invitation is both the scope (<paramref name="workspaceId"/> is the invitation's
+    /// workspace) and the governed resource (its id), because the action is performed ON the invitation. The
+    /// resource kind and the state names are passed as generic strings so the Audit module does not depend on the
+    /// Workspaces module's types. Every value is an identifier, an enum or a generic state name — never the
+    /// invited email, the token or any free-form content (threats T6/T7) — and the audit row outlives any later
+    /// change to the invitation it references because the reference is a recorded fact, not a foreign key (see the
+    /// type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the revocation happened in (required).</param>
+    /// <param name="workspaceId">The workspace the revoked invitation belonged to (required for this action).</param>
+    /// <param name="actorUserProfileId">The admin who performed the revocation (required; the audited actor).</param>
+    /// <param name="invitationResourceType">The revoked invitation's generic kind name (e.g. WorkspaceInvitation).</param>
+    /// <param name="invitationId">The revoked invitation's surrogate id.</param>
+    /// <param name="previousState">The lifecycle status name before the revoke (e.g. Pending; required).</param>
+    /// <param name="newState">The lifecycle status name after the revoke (e.g. Revoked; required).</param>
+    /// <param name="createdAt">When the revocation happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the invitation resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForMemberInvitationRevoked(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string invitationResourceType,
+        Guid invitationId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(invitationResourceType))
+        {
+            throw new ArgumentException("Invitation resource type must not be empty.", nameof(invitationResourceType));
+        }
+
+        if (invitationId == Guid.Empty)
+        {
+            throw new ArgumentException("Invitation id must not be empty.", nameof(invitationId));
+        }
+
+        // A revoke is a real state transition, so both before and after status names are required even though
+        // the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.MemberInvitationRevoked,
+            actorUserProfileId,
+            invitationResourceType,
+            invitationId,
+            targetParticipantId: null,
+            previousState: previousState,
+            newState: newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an entity deletion (<see cref="AuditAction.EntityDeleted"/>) — the audit fact written when
     /// an authorized host deletes an entity, removing it and its dependent edges, visibility rules and
     /// asset links (CORE-LIFE-003). A thin specialization of <see cref="Create"/> that pins the action and

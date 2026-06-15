@@ -208,6 +208,95 @@ public sealed class WorkspaceInvitationRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task FindById_resolves_an_invitation_only_within_its_scope()
+    {
+        // CORE-WS-007 (T1/T5): the by-id lookup the revoke command uses is scoped by BOTH organization and
+        // workspace, so an invitation's surrogate id is honoured only inside the exact (organization, workspace)
+        // it belongs to: a correct id under another tenant or another workspace is never returned.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspaceB = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugB);
+        var invitation = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, _email, MembershipRole.Host, _createdAt, out _);
+
+        await using (var context = CreateContext())
+        {
+            await new WorkspaceInvitationRepository(context).AddAsync(invitation, CancellationToken.None);
+        }
+
+        await using var read = CreateContext();
+        var repository = new WorkspaceInvitationRepository(read);
+
+        // Correct scope: found.
+        Assert.NotNull(await repository.FindByIdAsync(
+            organizationA.Id, workspaceA.Id, invitation.Id, CancellationToken.None));
+        // Wrong tenant: denied.
+        Assert.Null(await repository.FindByIdAsync(
+            organizationB.Id, workspaceA.Id, invitation.Id, CancellationToken.None));
+        // Wrong workspace: denied.
+        Assert.Null(await repository.FindByIdAsync(
+            organizationA.Id, workspaceB.Id, invitation.Id, CancellationToken.None));
+        // Unknown id within the correct scope: denied.
+        Assert.Null(await repository.FindByIdAsync(
+            organizationA.Id, workspaceA.Id, Guid.CreateVersion7(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FindById_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceInvitationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.FindByIdAsync(
+            Guid.Empty, Guid.CreateVersion7(), Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.FindByIdAsync(
+            Guid.CreateVersion7(), Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.FindByIdAsync(
+            Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Update_persists_the_revoked_status_transition()
+    {
+        // CORE-WS-007: the revoke command transitions the invitation Pending -> Revoked and persists it through
+        // UpdateAsync. The stored row must reflect the new status, so a later read (and any redeem) can never see
+        // the revoked token as still Pending — the revocation control holds at rest (threat T6).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var invitation = WorkspaceInvitation.Create(
+            organization.Id, workspace.Id, _email, MembershipRole.Host, _createdAt, out _);
+
+        await using (var context = CreateContext())
+        {
+            await new WorkspaceInvitationRepository(context).AddAsync(invitation, CancellationToken.None);
+        }
+
+        // Load by id, revoke and persist through the repository, exactly as the revoke handler does.
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceInvitationRepository(context);
+            var loaded = await repository.FindByIdAsync(
+                organization.Id, workspace.Id, invitation.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+
+            loaded.Revoke(_createdAt.AddMinutes(1));
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var stored = await context.WorkspaceInvitations.SingleAsync(i => i.Id == invitation.Id);
+            Assert.Equal(WorkspaceInvitationStatus.Revoked, stored.Status);
+            // The immutable scope is untouched by the update.
+            Assert.Equal(organization.Id, stored.OrganizationId);
+            Assert.Equal(workspace.Id, stored.WorkspaceId);
+            // A revoked invitation is no longer redeemable, so the token can never be used.
+            Assert.False(stored.IsRedeemable(_createdAt.AddMinutes(2)));
+        }
+    }
+
+    [Fact]
     public async Task The_token_hash_column_is_uniquely_indexed()
     {
         // T6: one scoped token addresses at most one invitation. The public
