@@ -814,6 +814,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}.
     builder.Services.AddScoped<EntityDeletionService>();
 
+    // Entity create command (CORE-ENT-006, the "Vertical Authoring and Read API Completeness" epic): the
+    // Entities module's "an authoring role can author a generic entity" command. Registered here, inside the
+    // persistence conditional, because it composes the entity-type, entity and audit repositories plus the
+    // shared DbContext for a single transaction. It resolves the referenced entity type through the tenant-
+    // AND workspace-scoped IEntityTypeRepository.FindByIdAsync FIRST (the same-workspace coupling the database
+    // FK cannot enforce; an unknown/foreign type is never borrowed), then creates the entity with a
+    // server-minted id and appends an EntityCreated audit record, the insert and audit committing together
+    // (CORE-CONC-002). Consumed by POST /api/v1/workspaces/{workspaceId}/entities.
+    builder.Services.AddScoped<EntityCreationService>();
+
     // Content block deletion command (CORE-LIFE-004, the "Resource Lifecycle and Deletion" epic): the
     // Content module's "a host can delete a content block from a scene" command. Registered here, inside the
     // persistence conditional, because it composes the content-block, visibility-rule, asset-link and audit
@@ -1390,19 +1400,22 @@ app.MapContentBlockEndpoints();
 // faithful to the CORE-ENT-003 add-edge precedent.
 app.MapEntityRelationshipEndpoints();
 
-// Entity deletion endpoint (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic):
-// DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}. It lives in the same authenticated route
-// group and fails closed (503) when persistence is not configured, exactly like the entity-relationship
-// removal endpoint. No new DI registration is required beyond the EntityDeletionService above: the tenant
-// context resolver and workspace member repository it consumes are already registered inside the
-// persistence conditional. The parent workspace is resolved FIRST (the route pins {workspaceId}, the
-// tenant comes from the required ?organizationSlug=), the caller is authorized by their role in that
-// workspace (Owner/Admin/Host/CoHost), and the entity is then loaded through the tenant- AND
-// workspace-scoped FindByIdAsync — so an entity in another workspace or tenant is never reachable to
-// delete even when its id is known. Every denial is hidden as 404 (an insufficient role as 403), and
-// deleting a non-existent entity is a safe 404 (threats T1/T5). The deletion CASCADES its dependent edges,
-// visibility rules and asset links and is appended to the append-only audit log (EntityDeleted), all
-// atomically (docs/adr/0012-resource-deletion-cascades-dependents.md).
+// Entity endpoints (CORE-ENT-006 create/list/read, CORE-LIFE-003 delete): the Entities module's generic
+// entity routes under /api/v1/workspaces/{workspaceId}/entities. They live in the same authenticated route
+// group and fail closed (503) when persistence is not configured, exactly like the entity-relationship
+// removal endpoint. The DI they consume — the tenant context resolver, the entity/entity-type/workspace and
+// workspace-member repositories and the EntityCreationService/EntityDeletionService above — is all registered
+// inside the persistence conditional. CORE-ENT-006 adds the authoring CRUD: GET list and GET by-id (allowed
+// to any workspace member, PROJECTED BY ROLE — an entity IS content, so the host-content roles get the full
+// shape and every other role the stripped audience-safe shape), and POST create (Owner/Admin/Host/CoHost),
+// which resolves the entity type within the route's workspace, mints the entity's server-side id and audits
+// the creation (EntityCreated). The parent workspace is resolved FIRST (the route pins {workspaceId}, the
+// tenant comes from the required organizationSlug), the caller is authorized by their role in that workspace,
+// and every entity is loaded through the tenant- AND workspace-scoped repository — so an entity in another
+// workspace or tenant is never reachable even when its id is known. Every denial is hidden as 404 (an
+// insufficient create role as 403), and an unknown entity is a safe 404 (threats T1/T5). The DELETE
+// (CORE-LIFE-003) CASCADES the entity's dependent edges, visibility rules and asset links and audits the
+// deletion (EntityDeleted), all atomically (docs/adr/0012-resource-deletion-cascades-dependents.md).
 app.MapEntityEndpoints();
 
 // Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005

@@ -18,6 +18,7 @@ import { HttpClient } from "./http.js";
 import type { LiveCoreClientOptions } from "./options.js";
 import { AssetsClient } from "./resources/assets.js";
 import { ContentClient } from "./resources/content.js";
+import { EntitiesClient } from "./resources/entities.js";
 import { EntitlementsClient } from "./resources/entitlements.js";
 import { ExportsClient } from "./resources/exports.js";
 import { RealtimeClient } from "./resources/realtime.js";
@@ -36,6 +37,8 @@ export class LiveCoreClient {
   readonly scenes: ScenesClient;
   /** Content block create route. */
   readonly content: ContentClient;
+  /** Generic entity create, list and by-id read routes. */
+  readonly entities: EntitiesClient;
   /** Reveal command and the participant-visible feed. */
   readonly visibility: VisibilityClient;
   /** Reconnect replay of the durable session event stream. */
@@ -55,6 +58,7 @@ export class LiveCoreClient {
     this.sessions = new SessionsClient(http);
     this.scenes = new ScenesClient(http);
     this.content = new ContentClient(http);
+    this.entities = new EntitiesClient(http);
     this.visibility = new VisibilityClient(http);
     this.realtime = new RealtimeClient(http);
     this.assets = new AssetsClient(http);

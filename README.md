@@ -2106,6 +2106,58 @@ a later story), and `Data` a bounded, well-formed JSON document — each with it
 own explicit size limit. An invalid or oversize body is rejected with `400`
 before any persistence, and the rejected content is never echoed back.
 
+### Entity authoring API (create, list, read)
+
+A vertical authors its world through generic **entities**, and CORE-ENT-006 (the
+"Vertical Authoring and Read API Completeness" epic) makes that possible over the
+API. Until now the Entities module exposed only entity **delete**; these add the
+create, list and by-id read so an authoring role can prepare entities through the
+SDK rather than only the database:
+
+| Method | Route                                                  | Authorized callers                        |
+| ------ | ------------------------------------------------------ | ----------------------------------------- |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/entities`            | workspace members (projected by role)     |
+| `POST` | `/api/v1/workspaces/{workspaceId}/entities`            | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/entities/{entityId}` | workspace members (projected by role)     |
+
+Each route pins the `{workspaceId}` in its path and resolves the target organization
+from the request (a required `?organizationSlug=` query parameter for the reads, an
+`organizationSlug` body field for the create) — the same token-claim-and-membership
+tenant check as the other workspace by-id routes. The **parent workspace is resolved
+first**, the caller's membership in that workspace is loaded, and entities are always
+read through the tenant- **and** workspace-scoped repository, so an entity in another
+workspace, or in a workspace owned by another tenant, is never returned even when its
+id is known (threats T1/T5). A caller who cannot see the tenant, or is not a member of
+the route's workspace, is hidden as `404` (never `403`); an unknown entity is a safe
+`404`.
+
+**Create** (`Owner`/`Admin`/`Host`/`CoHost`, matched exactly — `MembershipRole` is
+non-linear) assigns the entity a **server-side id** and binds it immutably to the
+route's tenant and workspace. The request names the entity's `entityTypeId`, a
+human `name` and its `attributeValues` (a JSON document, defaulting to `{}` when
+omitted) — all generic, product-neutral **data** the platform stores without
+inspecting its vocabulary (the template boundary). The referenced entity type is
+**resolved within the route's workspace** before the entity is inserted — the
+same-workspace coupling the database foreign key cannot enforce — so a type id that
+does not resolve in the caller's workspace (unknown, or belonging to another
+workspace/tenant) is a `400` that leaks nothing. The create and its append-only
+audit record (`EntityCreated`) commit together in one transaction, and an archived
+(read-only) workspace rejects the create with a `409` (CORE-LIFE-009). On success the
+route returns `201 Created` with the full host entity.
+
+**List and read** are allowed to any workspace member and **project by role**. An
+entity _is_ content, so the split is the matrix's "View host-only content" row, not
+the scene-style "View workspace metadata": the host-content roles (`Owner`, `Admin`,
+`Host`, `CoHost`) receive the full entity (including its `attributeValues`), while the
+audience roles (`Participant`, `Observer`), the audit role (`Auditor`) and any
+undefined role receive a stripped, audience-safe projection (entity id and name only —
+no attribute-values content, no internal tenant/workspace/type ids, no host
+timestamps, no authorization rationale; threats T2/T7). Only the response shape differs
+by role; every member still receives all of the workspace's entities, since deciding
+which entities an audience may actually _see_ is the entity-search read (CORE-ENT-005)
+and the Visibility module's concern. No vertical entity-type logic lives in Core: every
+entity behaves identically and is defined entirely by its stored data and its type id.
+
 ### Entity relationship removal
 
 The Entities module owns generic `EntityRelationship` edges — directed graph edges

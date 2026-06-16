@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Entities module contracts (`CreateEntityRequest`, `EntityResponse`,
+  `ParticipantEntityResponse`) for the entity create/list/by-id-read routes under
+  `/api/v1/workspaces/{workspaceId}/entities`. An entity is content, so the list
+  and read are projected by role: the host-content roles receive the full
+  `EntityResponse` (including its attribute-values), every other role the stripped
+  `ParticipantEntityResponse` (CORE-ENT-006).
 - `SessionEventReplayItem.sequence`: the per-session, gap-free, strictly
   monotonic event sequence number a client orders the stream by and uses to
   detect a missed event as a gap (CORE-RTC-001).

@@ -9,7 +9,9 @@
  */
 import type {
   AdEligibilityResponse,
+  EntityResponse,
   ExportArtifactResponse,
+  ParticipantEntityResponse,
   ParticipantSceneResponse,
   ProblemDetails,
   PurchaseVerificationResponse,
@@ -23,6 +25,7 @@ import type {
 
 import type {
   AssetsClient,
+  EntitiesClient,
   EntitlementsClient,
   ExportsClient,
   LiveCoreApiError,
@@ -123,6 +126,26 @@ export type SceneListReturn = Assert<
   >
 >;
 
+// --- The entity list/read are the role-projected union; create is the host shape.
+
+export type EntityListReturn = Assert<
+  Equal<
+    Awaited<ReturnType<EntitiesClient["list"]>>,
+    EntityResponse[] | ParticipantEntityResponse[]
+  >
+>;
+
+export type EntityGetReturn = Assert<
+  Equal<
+    Awaited<ReturnType<EntitiesClient["get"]>>,
+    EntityResponse | ParticipantEntityResponse
+  >
+>;
+
+export type CreateEntityReturn = Assert<
+  Equal<Awaited<ReturnType<EntitiesClient["create"]>>, EntityResponse>
+>;
+
 // --- The reveal command REQUIRES a stable idempotency key (retry safety). --------
 
 export type RevealRequiresKey = Assert<
@@ -162,4 +185,8 @@ export type ClientHasWorkspaces = Assert<
 
 export type ClientHasStore = Assert<
   Equal<LiveCoreClient["store"], StoreClient>
+>;
+
+export type ClientHasEntities = Assert<
+  Equal<LiveCoreClient["entities"], EntitiesClient>
 >;

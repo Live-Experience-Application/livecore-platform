@@ -426,17 +426,26 @@ following are deferred by design (date recorded **2026-06-15**):
   reading the recap read route never receives the body until that reveal lands.
   Owner: **Core-later** (the recap-reveal story). Rationale: the host-only body is
   guarded by the projection, not by the absence of a reveal route.
-- **Entity / entity-type / entity-relationship / template / visibility-rule
-  create and list endpoints.** The Entities, Templates and Visibility
-  repositories (CORE-ENT-001..004, CORE-VIS-001) are implemented with **no
+- **Entity-type / entity-relationship-list / template / visibility-rule create
+  and list endpoints.** The entity-TYPE, template and visibility-rule
+  repositories (CORE-ENT-001/004, CORE-VIS-001) are implemented with **no
   list-everything method** and **no HTTP route** (`csv/api_routes.csv` defines
   none). Owner: **Core-later** (the respective endpoint stories — e.g.
-  CORE-ENT-002/005, CORE-VIS-004). Rationale: the **explicit-ids contract** — the
-  same-workspace coupling of `entity → entity_type`, an entity_relationship's two
-  endpoints, `content_block → scene` and `visibility_rule → resource` is the
-  future create application flow's responsibility, **not** a database foreign key
-  — is recorded on each aggregate; mounting list/create routes early would invite
-  a list-everything bypass of the tenant/workspace scoping (threat **T5**).
+  CORE-VIS-004). Rationale: the **explicit-ids contract** — the same-workspace
+  coupling of `entity → entity_type`, an entity_relationship's two endpoints,
+  `content_block → scene` and `visibility_rule → resource` is the create
+  application flow's responsibility, **not** a database foreign key — is recorded
+  on each aggregate; mounting a bare list/create route that does not resolve that
+  coupling would invite a list-everything bypass of the tenant/workspace scoping
+  (threat **T5**). **Resolved for generic entities (2026-06-16, CORE-ENT-006):**
+  the entity create/list/by-id-read routes are now **mounted** under
+  `/api/v1/workspaces/{workspaceId}/entities` — the create resolves the referenced
+  `entity_type` through the **workspace-scoped** repository before inserting (so it
+  honours, rather than bypasses, the same-workspace coupling above), and the
+  list/read are **workspace-scoped** (no list-everything) and **projected by role**
+  (an entity is content, so only the host-content roles receive its
+  attribute-values; threats T2/T5). The entity **search** read with per-participant
+  visibility filtering remains its own concern (CORE-ENT-005).
 - **Content-block list/get/update/revise route.** `ContentBlockEndpoints.cs`
   mounts only create and delete; there is deliberately **no
   list/get/update/revise route** (the revise capability lives on the aggregate

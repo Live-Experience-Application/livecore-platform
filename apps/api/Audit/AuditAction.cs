@@ -125,6 +125,20 @@ public enum AuditAction
     MemberInvitationRevoked = 21,
 
     /// <summary>
+    /// An authoring role created a new entity in a workspace — the entity create command (CORE-ENT-006, the
+    /// "Vertical Authoring and Read API Completeness" epic). Auditing the creation satisfies the story's
+    /// "create … is tenant/workspace-scoped and audited" criterion: it records that an authorized authoring
+    /// role added a workspace resource (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). It is the
+    /// authoring counterpart of <see cref="EntityDeleted"/>: a creation is the birth of a resource, not a
+    /// transition of an existing one, and an entity has no lifecycle state, so there is NO before/after state
+    /// pair (both null). A generic, workspace-scoped audit fact whose actor is the authoring role who created
+    /// the entity and whose resource is the created entity (its generic kind name and surrogate id); the
+    /// entity's host-/template-supplied name and attribute values are NEVER recorded — only identifiers and
+    /// the generic kind name (threat T7) (<see cref="AuditLogEntry.ForEntityCreation"/>).
+    /// </summary>
+    EntityCreated = 22,
+
+    /// <summary>
     /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
     /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
     /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that

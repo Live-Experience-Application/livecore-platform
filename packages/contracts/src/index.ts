@@ -36,6 +36,7 @@ export * from "./workspaces.js";
 export * from "./sessions.js";
 export * from "./scenes.js";
 export * from "./content.js";
+export * from "./entities.js";
 export * from "./visibility.js";
 export * from "./realtime.js";
 export * from "./assets.js";

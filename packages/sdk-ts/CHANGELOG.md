@@ -10,6 +10,15 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ## [Unreleased]
 
+### Added
+
+- `EntitiesClient` (exposed as `client.entities`): `list`, `get` and `create`
+  for a workspace's generic entities under
+  `/api/v1/workspaces/{workspaceId}/entities` (CORE-ENT-006). `list`/`get` return
+  the role-projected union (`EntityResponse[] | ParticipantEntityResponse[]` and
+  `EntityResponse | ParticipantEntityResponse`); `create` returns the full host
+  `EntityResponse`.
+
 ### Changed
 
 - `RealtimeClient.getSessionEvents` reconnect cursor is now the per-session
