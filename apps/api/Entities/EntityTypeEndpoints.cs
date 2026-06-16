@@ -414,20 +414,23 @@ internal static class EntityTypeEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Entity type operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -435,8 +438,9 @@ internal static class EntityTypeEndpoints
     // is refused. The caller is authorized; the workspace's lifecycle state, not the caller, is the reason, so
     // this is a 409 Conflict. The detail names only the generic state and leaks no tenant data (threat T7).
     private static IResult ArchivedReadOnly()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.WorkspaceArchived,
             title: "Conflict",
             detail: "The workspace is archived and is read-only.");
 
@@ -444,8 +448,9 @@ internal static class EntityTypeEndpoints
     // authorized; the existing definition, not the caller, is the reason, so this is a 409 Conflict. The detail
     // names only the generic condition and leaks no tenant data (threat T7).
     private static IResult DuplicateKey()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.DuplicateResource,
             title: "Conflict",
             detail: "An entity type with this key already exists in the workspace.");
 
@@ -453,8 +458,9 @@ internal static class EntityTypeEndpoints
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -463,8 +469,9 @@ internal static class EntityTypeEndpoints
     // to are ALL reported as 404, never distinguishable from each other and never echoing the reason (docs/08;
     // threats T1/T5).
     private static IResult HiddenEntityType()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

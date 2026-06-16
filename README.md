@@ -405,9 +405,11 @@ TypeScript mirror of the Core API surface that vertical apps consume
 (CORE-SDK-001). It exports the request/response DTOs for the implemented
 `/api/v1` routes, the generic enumerations (roles, lifecycle statuses, resource
 and content kinds, quota/store/ad-eligibility codes) as both string-literal
-unions and runtime `as const` tuples, the RFC 7807 `ProblemDetails` error shape,
-the transport constants (`API_BASE_PATH`, request header names) and the realtime
-session event vocabulary. Every type matches the API's JSON exactly (camelCase
+unions and runtime `as const` tuples, the RFC 7807 `ProblemDetails` error shape
+and its stable machine-readable `ProblemCodes` catalog (CORE-DX-001 — every error
+carries a `code` a consumer branches on instead of the prose), the transport
+constants (`API_BASE_PATH`, request header names) and the realtime session event
+vocabulary. Every type matches the API's JSON exactly (camelCase
 fields, enums as stable string names); the package carries no vertical domain
 language. The typed SDK client that calls these contracts is a separate package
 (`@livecore/sdk-ts`, CORE-SDK-002).

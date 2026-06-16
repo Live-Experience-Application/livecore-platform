@@ -227,28 +227,32 @@ internal static class StoreNotificationEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Store notification handling requires persistence, which is not configured.");
 
     private static IResult NotificationUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Store notification handling is not configured.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
     // A body larger than the configured webhook cap (CORE-SEC-001): a 413, recording nothing. The detail names
     // the byte ceiling only — never any part of the (rejected, possibly forged) payload (threat T7).
     private static IResult PayloadTooLarge(long maxBytes)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status413PayloadTooLarge,
+            code: ProblemCodes.PayloadTooLarge,
             title: "Payload Too Large",
             detail: $"A store notification payload must be at most {maxBytes} bytes.");
 
@@ -256,8 +260,9 @@ internal static class StoreNotificationEndpoints
     // body): a 400, recording nothing. The detail is the adapter's generic, log-safe reason (never the payload or
     // receipt content; threat T7); a missing reason falls back to a generic phrase.
     private static IResult NotificationRejected(string? reason)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: string.IsNullOrWhiteSpace(reason) ? "The store notification could not be validated." : reason);
 

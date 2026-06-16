@@ -615,20 +615,23 @@ internal static class ContentBlockEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Content block operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -636,8 +639,9 @@ internal static class ContentBlockEndpoints
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -648,8 +652,9 @@ internal static class ContentBlockEndpoints
     private static IResult HiddenScene() => NotFound();
 
     private static IResult NotFound()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

@@ -220,8 +220,9 @@ internal static class OrganizationEndpoints
             // The slug is the globally-unique natural key, so a second create is a
             // 409 Conflict (docs/08_API_CONTRACTS.md). The error carries no other
             // tenant data, and no membership was created.
-            return Results.Problem(
+            return CoreProblem.Create(
                 statusCode: StatusCodes.Status409Conflict,
+                code: ProblemCodes.DuplicateResource,
                 title: "Conflict",
                 detail: "An organization with this slug already exists.");
         }
@@ -383,26 +384,30 @@ internal static class OrganizationEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Organization operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -412,16 +417,18 @@ internal static class OrganizationEndpoints
     // the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md). The
     // detail names only the generic invariant and leaks no tenant data (threat T7).
     private static IResult LastOwnerConflict()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The last Owner of the organization cannot be removed.");
 
     // Tenant existence is hidden: a foreign tenant (a slug the token does not
     // claim) is reported as 404, never echoing the reason (docs/08; threat T5).
     private static IResult HiddenOrganization()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

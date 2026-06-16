@@ -999,26 +999,30 @@ internal static class AssetEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Asset operations require persistence, which is not configured.");
 
     private static IResult StorageUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Asset storage is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -1032,8 +1036,9 @@ internal static class AssetEndpoints
         => ValidationError($"The '{_sessionIdQuery}' value is required.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -1044,8 +1049,9 @@ internal static class AssetEndpoints
     // the limit, not the caller, is the reason, so this is a 409 rather than a 403 — the same mapping as the
     // workspace-create and session-start quota gates.
     private static IResult QuotaExceeded(QuotaEnforcementDecision decision)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.QuotaExceeded,
             title: "Conflict",
             detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
@@ -1068,8 +1074,9 @@ internal static class AssetEndpoints
     // An authorized viewer asked to download an asset whose upload is not yet confirmed: the object is not
     // downloadable in its current state (mirrors the session lifecycle's 409 for an out-of-state command).
     private static IResult AssetNotDownloadable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The asset is not available for download.");
 
@@ -1077,14 +1084,16 @@ internal static class AssetEndpoints
     // unique key). Reported as 409 only to an authorized host, after authorization, so no link existence
     // leaks to a non-member or an unauthorized role.
     private static IResult AssetAlreadyLinked()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The asset is already linked to the target.");
 
     private static IResult NotFound()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

@@ -252,8 +252,9 @@ public static class RateLimitingConfiguration
                 ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
         }
 
-        return new ValueTask(Results.Problem(
+        return new ValueTask(CoreProblem.Create(
             statusCode: StatusCodes.Status429TooManyRequests,
+            code: ProblemCodes.RateLimited,
             title: "Too Many Requests",
             detail: "The request was rejected because a rate limit was exceeded. Retry after a short delay.")
             .ExecuteAsync(context.HttpContext));

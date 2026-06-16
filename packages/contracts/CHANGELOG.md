@@ -12,6 +12,15 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The stable Problem Details error-code catalog: a `ProblemCodes` runtime
+  `as const` tuple and its `ProblemCode` string-literal union, plus an optional
+  `ProblemDetails.code` field. Every Core API error now carries a stable,
+  machine-readable `code` drawn from this catalog, so a consumer branches on the
+  code rather than the human `title`/`detail` prose. Distinct conditions that
+  share an HTTP status remain distinct codes — notably the three `409`s
+  (`quota_exceeded`, `workspace_archived`, `concurrency_conflict`). The catalog
+  mirrors the server-side catalog exactly, asserted by a contract test
+  (CORE-DX-001).
 - Entity-type module contracts (`CreateEntityTypeRequest`, `EntityTypeResponse`)
   for the entity-type create/list/by-id-read routes under
   `/api/v1/workspaces/{workspaceId}/entity-types`. An entity type is the

@@ -221,26 +221,30 @@ internal static class EntityRelationshipEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Entity relationship operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
     private static IResult MissingOrganization()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: $"The '{_organizationSlugQuery}' value is required.");
 
@@ -249,8 +253,9 @@ internal static class EntityRelationshipEndpoints
     // the caller does not belong to are ALL reported as 404, never distinguishable from each other and
     // never echoing the reason (docs/08; threats T1/T5).
     private static IResult HiddenRelationship()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

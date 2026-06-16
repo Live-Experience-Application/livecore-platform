@@ -302,8 +302,9 @@ internal static class WorkspaceEndpoints
                     amount: 1,
                     cancellationToken)
                 .ConfigureAwait(false);
-            return Results.Problem(
+            return CoreProblem.Create(
                 statusCode: StatusCodes.Status409Conflict,
+                code: ProblemCodes.DuplicateResource,
                 title: "Conflict",
                 detail: "A workspace with this slug already exists in the organization.");
         }
@@ -708,8 +709,9 @@ internal static class WorkspaceEndpoints
             // A token-hash collision is astronomically unlikely for a 256-bit
             // random token; if it ever happens, fail closed without leaking the
             // token rather than returning a non-unique invite.
-            return Results.Problem(
+            return CoreProblem.Create(
                 statusCode: StatusCodes.Status409Conflict,
+                code: ProblemCodes.Conflict,
                 title: "Conflict",
                 detail: "The invitation could not be created; retry.");
         }
@@ -1303,20 +1305,23 @@ internal static class WorkspaceEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Workspace operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -1325,8 +1330,9 @@ internal static class WorkspaceEndpoints
     // to paywall copy) and never leaks an internal id or rationale (threat T7). The caller is authorized by role;
     // the limit, not the caller, is the reason, so this is a 409 rather than a 403.
     private static IResult QuotaExceeded(QuotaEnforcementDecision decision)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.QuotaExceeded,
             title: "Conflict",
             detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
 
@@ -1336,8 +1342,9 @@ internal static class WorkspaceEndpoints
     // The detail names only the generic invariant and leaks no tenant data
     // (threat T7).
     private static IResult LastOwnerConflict()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The last Owner of the workspace cannot be removed.");
 
@@ -1346,8 +1353,9 @@ internal static class WorkspaceEndpoints
     // pre-existing standing, not the token, is the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md).
     // The detail names only the generic condition and leaks no tenant data (threat T7).
     private static IResult AlreadyMemberConflict()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "You are already a member of this workspace.");
 
@@ -1357,8 +1365,9 @@ internal static class WorkspaceEndpoints
     // (docs/08_API_CONTRACTS.md). The detail names only the generic condition and leaks no tenant data (threat
     // T7) — it deliberately does not distinguish "accepted" from "revoked".
     private static IResult InvitationNotPendingConflict()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The invitation is not pending and cannot be revoked.");
 
@@ -1367,8 +1376,9 @@ internal static class WorkspaceEndpoints
     // reason, so this is a 409 Conflict. The detail names only the generic state and leaks no tenant data
     // (threat T7).
     private static IResult ArchivedReadOnly()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.WorkspaceArchived,
             title: "Conflict",
             detail: "The workspace is archived and is read-only.");
 
@@ -1376,8 +1386,9 @@ internal static class WorkspaceEndpoints
     // caller is authorized; the lifecycle state, not the caller, is the reason, so this is a 409 Conflict
     // (docs/08_API_CONTRACTS.md). The detail names only the generic state and leaks no tenant data (threat T7).
     private static IResult AlreadyArchivedConflict()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The workspace is already archived.");
 
@@ -1385,8 +1396,9 @@ internal static class WorkspaceEndpoints
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -1398,8 +1410,9 @@ internal static class WorkspaceEndpoints
     private static IResult HiddenWorkspace() => NotFound();
 
     private static IResult NotFound()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

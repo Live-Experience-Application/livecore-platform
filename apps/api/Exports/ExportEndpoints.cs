@@ -244,26 +244,30 @@ internal static class ExportEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Reading an export requires persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult MissingOrganization()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: $"The '{_organizationSlugQuery}' value is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -271,8 +275,9 @@ internal static class ExportEndpoints
     // unknown export, and an export in a workspace the caller does not belong to are ALL reported as 404, never
     // distinguishable from each other and never echoing the reason (docs/08; threats T1/T5/T8).
     private static IResult HiddenExport()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 
@@ -281,8 +286,9 @@ internal static class ExportEndpoints
     // out-of-state request) AFTER authorization, so only an authorized downloader ever learns the export is not
     // available (mirrors the asset signed-download 409 for a still-pending asset).
     private static IResult ExportNotDownloadable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The export is not available for download.");
 

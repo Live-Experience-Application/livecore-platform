@@ -30,6 +30,12 @@ public sealed class ConcurrencyConflictMiddlewareTests
         Assert.Equal(StatusCodes.Status409Conflict, document.RootElement.GetProperty("status").GetInt32());
         Assert.Equal("Conflict", document.RootElement.GetProperty("title").GetString());
 
+        // The body carries the stable machine-readable code so a consumer can tell this 409 apart from the
+        // other (quota-exceeded, workspace-archived) 409s without parsing the prose (CORE-DX-001).
+        Assert.Equal(
+            ProblemCodes.ConcurrencyConflict,
+            document.RootElement.GetProperty(ProblemCodes.Member).GetString());
+
         // The detail names no resource, tenant or internal state — only the generic
         // concurrency reason (threat T7).
         var detail = document.RootElement.GetProperty("detail").GetString();

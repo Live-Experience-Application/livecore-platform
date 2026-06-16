@@ -712,20 +712,23 @@ internal static class SceneEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Scene operations require persistence, which is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
@@ -733,8 +736,9 @@ internal static class SceneEndpoints
     // refused. The caller is authorized; the workspace's lifecycle state, not the caller, is the reason, so this
     // is a 409 Conflict. The detail names only the generic state and leaks no tenant data (threat T7).
     private static IResult ArchivedReadOnly()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.WorkspaceArchived,
             title: "Conflict",
             detail: "The workspace is archived and is read-only.");
 
@@ -742,8 +746,9 @@ internal static class SceneEndpoints
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -761,8 +766,9 @@ internal static class SceneEndpoints
     private static IResult HiddenScene() => NotFound();
 
     private static IResult NotFound()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
+            code: ProblemCodes.NotFound,
             title: "Not Found",
             detail: "The requested resource was not found.");
 

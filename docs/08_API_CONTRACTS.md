@@ -4,7 +4,8 @@ All APIs are versioned under `/api/v1`.
 
 Use JSON over HTTPS.
 
-Use Problem Details for errors.
+Use Problem Details for errors. Every Problem Details response additionally
+carries a stable, machine-readable `code` (see "Stable error codes" below).
 
 ## Common headers
 
@@ -26,6 +27,45 @@ Idempotency-Key: <required for reveal commands and write actions where retry is 
 | 422 | semantically invalid command |
 | 429 | rate limited |
 | 500 | server error |
+
+## Stable error codes (CORE-DX-001)
+
+The HTTP status alone is not a contract: several distinct conditions share a
+status (a `409` can be a quota refusal, an archived-workspace refusal, an
+optimistic-concurrency conflict or a plain state conflict), and the human
+`title`/`detail` prose is free to change. So **every** Problem Details response
+also carries a stable, machine-readable `code` extension member drawn from the
+documented catalog below. A consumer branches on `code`, never on the prose.
+
+The catalog is the server-side source of truth (`apps/api/ProblemCodes.cs`) and
+is published to vertical apps as the `ProblemCodes` enum in `@livecore/contracts`
+(`packages/contracts/src/problem-details.ts`); a contract test asserts the two
+never drift. The values are lower_snake_case and stable once published.
+
+| `code` | Status | Meaning |
+|---|---:|---|
+| `validation_error` | 400 | request malformed or failed input validation |
+| `authentication_required` | 401 | authentication missing or invalid |
+| `permission_denied` | 403 | authenticated but not authorized |
+| `not_found` | 404 | not found, or intentionally hidden (fail-closed) |
+| `conflict` | 409 | generic state conflict (command not legal from current state) |
+| `duplicate_resource` | 409 | a uniqueness constraint would be violated (key/slug exists) |
+| `quota_exceeded` | 409 | a server-enforced quota would be exceeded |
+| `workspace_archived` | 409 | the target workspace is archived and read-only |
+| `concurrency_conflict` | 409 | optimistic-concurrency check failed — reload and retry |
+| `unprocessable_entity` | 422 | well-formed but semantically invalid command |
+| `payload_too_large` | 413 | request body exceeds the accepted size cap |
+| `rate_limited` | 429 | a rate limit was exceeded |
+| `internal_error` | 500 | unexpected server error (no internal detail leaked) |
+| `service_unavailable` | 503 | a required dependency (e.g. persistence) is not configured |
+
+The three structurally-different `409`s — `quota_exceeded`, `workspace_archived`
+and `concurrency_conflict` — are deliberately distinct codes so a consumer can
+react to each correctly. A `code` names only the generic class of problem; it
+never encodes a resource id, tenant, principal or internal state, so it leaks
+nothing (threat T7 in `docs/07_SECURITY_THREAT_MODEL.md`). The global Problem
+Details exception handler (CORE-RES-001) reuses the same catalog for
+`internal_error`.
 
 ## Core endpoints
 

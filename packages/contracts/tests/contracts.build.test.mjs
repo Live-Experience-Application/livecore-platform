@@ -18,6 +18,7 @@ import {
   KnownSessionEventTypes,
   MembershipRoles,
   PACKAGE_NAME,
+  ProblemCodes,
   PurchaseProviders,
   RequestHeaders,
   SessionStatuses,
@@ -61,6 +62,40 @@ test("the known session event catalog is exported for typed handling", () => {
 test("the transport constants are exported", () => {
   assert.equal(RequestHeaders.IdempotencyKey, "Idempotency-Key");
   assert.ok(CoreErrorStatusCodes.includes(404));
+});
+
+test("the Problem Details error-code catalog is the stable published set", () => {
+  // The published catalog must mirror the server-side ProblemCodes catalog exactly
+  // (apps/api/ProblemCodes.cs); the cross-language drift check is the .NET contract
+  // test. This pins the published surface so it cannot change unnoticed (CORE-DX-001).
+  assert.deepEqual(
+    [...ProblemCodes],
+    [
+      "validation_error",
+      "authentication_required",
+      "permission_denied",
+      "not_found",
+      "conflict",
+      "duplicate_resource",
+      "quota_exceeded",
+      "workspace_archived",
+      "concurrency_conflict",
+      "unprocessable_entity",
+      "payload_too_large",
+      "rate_limited",
+      "internal_error",
+      "service_unavailable",
+    ],
+  );
+
+  // The three structurally-distinct 409s must be distinguishable by code.
+  for (const code of [
+    "quota_exceeded",
+    "workspace_archived",
+    "concurrency_conflict",
+  ]) {
+    assert.ok(ProblemCodes.includes(code), `${code} must be published`);
+  }
 });
 
 // --- Package versioning and changelog process (CORE-SDK-005). ------------------

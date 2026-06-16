@@ -13,6 +13,7 @@ import type {
   ContentBlockType,
   CreateWorkspaceRequest,
   MembershipRole,
+  ProblemCode,
   ProblemDetails,
   PurchaseProvider,
   RevealRequest,
@@ -85,6 +86,31 @@ export type PurchaseProviderIsExact = Assert<
   Equal<PurchaseProvider, "Apple" | "Google">
 >;
 
+export type ProblemCodeIsExact = Assert<
+  Equal<
+    ProblemCode,
+    | "validation_error"
+    | "authentication_required"
+    | "permission_denied"
+    | "not_found"
+    | "conflict"
+    | "duplicate_resource"
+    | "quota_exceeded"
+    | "workspace_archived"
+    | "concurrency_conflict"
+    | "unprocessable_entity"
+    | "payload_too_large"
+    | "rate_limited"
+    | "internal_error"
+    | "service_unavailable"
+  >
+>;
+
+// The Problem Details `code` carries the stable catalog union (CORE-DX-001).
+export type ProblemDetailsCodeIsProblemCode = Assert<
+  Equal<ProblemDetails["code"], ProblemCode | undefined>
+>;
+
 // --- Nullable / optional wire fields keep their nullability. -------------------
 
 export type SessionStartedAtIsNullable = Assert<
@@ -137,4 +163,5 @@ export const problemDetailsExample: ProblemDetails = {
   type: "about:blank",
   title: "Not Found",
   status: 404,
+  code: "not_found",
 };

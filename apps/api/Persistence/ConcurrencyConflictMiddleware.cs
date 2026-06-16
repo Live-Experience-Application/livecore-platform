@@ -59,8 +59,9 @@ internal sealed class ConcurrencyConflictMiddleware
             }
 
             context.Response.Clear();
-            await Results.Problem(
+            await CoreProblem.Create(
                 statusCode: StatusCodes.Status409Conflict,
+                code: ProblemCodes.ConcurrencyConflict,
                 title: "Conflict",
                 detail: "The resource was modified by a concurrent request. Reload the resource and retry.")
                 .ExecuteAsync(context)

@@ -16,9 +16,65 @@ export interface ProblemDetails {
   detail?: string;
   /** A URI reference identifying the specific occurrence. */
   instance?: string;
+  /**
+   * A stable, machine-readable error code drawn from the {@link ProblemCodes}
+   * catalog (CORE-DX-001). Branch on this code, never on the human `title`/`detail`
+   * prose: the prose is free to change, the code is a contract. Every Core API error
+   * carries one. Distinct conditions that share an HTTP status are still distinct
+   * codes — for example the three `409`s (`quota_exceeded`, `workspace_archived`,
+   * `concurrency_conflict`) are told apart by `code`, not by status.
+   */
+  code?: ProblemCode;
   /** RFC 7807 permits additional members; readers must tolerate them. */
   [extension: string]: unknown;
 }
+
+/**
+ * The stable, documented catalog of machine-readable error codes the Core API
+ * carries in the `code` member of every Problem Details response (CORE-DX-001).
+ *
+ * This list mirrors the server-side catalog exactly (a contract test asserts the
+ * two never drift). The values are lower_snake_case and stable: a consumer may
+ * persist them and branch on them. Several codes share an HTTP status — they are
+ * deliberately distinct so a consumer can react to each correctly (notably the
+ * three `409`s `quota_exceeded`, `workspace_archived` and `concurrency_conflict`).
+ */
+export const ProblemCodes = [
+  /** The request was malformed or failed input validation (HTTP 400). */
+  "validation_error",
+  /** Authentication is missing or invalid (HTTP 401). */
+  "authentication_required",
+  /** Authenticated but not authorized for this action (HTTP 403). */
+  "permission_denied",
+  /**
+   * Not found, or intentionally hidden as a fail-closed denial (HTTP 404). A
+   * consumer must not infer existence from this code.
+   */
+  "not_found",
+  /** A generic state conflict: the command is not legal from the current state (HTTP 409). */
+  "conflict",
+  /** A uniqueness constraint would be violated; the key/slug already exists (HTTP 409). */
+  "duplicate_resource",
+  /** The command would exceed a server-enforced quota; may change as usage frees up (HTTP 409). */
+  "quota_exceeded",
+  /** The target workspace is archived and therefore read-only (HTTP 409). */
+  "workspace_archived",
+  /** An optimistic-concurrency check failed; reload and retry (HTTP 409). */
+  "concurrency_conflict",
+  /** The command was well-formed but is semantically invalid (HTTP 422). */
+  "unprocessable_entity",
+  /** The request body exceeds the accepted size cap (HTTP 413). */
+  "payload_too_large",
+  /** The request was rejected because a rate limit was exceeded (HTTP 429). */
+  "rate_limited",
+  /** An unexpected server error occurred; no internal detail is leaked (HTTP 500). */
+  "internal_error",
+  /** A required dependency (for example persistence) is not configured (HTTP 503). */
+  "service_unavailable",
+] as const;
+
+/** A stable machine-readable Core API error code (a member of {@link ProblemCodes}). */
+export type ProblemCode = (typeof ProblemCodes)[number];
 
 /**
  * HTTP status codes the Core API uses to signal errors

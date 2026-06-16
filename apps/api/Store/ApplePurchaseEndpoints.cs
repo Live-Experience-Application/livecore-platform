@@ -333,32 +333,37 @@ internal static class ApplePurchaseEndpoints
     }
 
     private static IResult ServiceUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Purchase verification requires persistence, which is not configured.");
 
     private static IResult VerificationUnavailable()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status503ServiceUnavailable,
+            code: ProblemCodes.ServiceUnavailable,
             title: "Service Unavailable",
             detail: "Apple purchase verification is not configured.");
 
     private static IResult Unauthorized()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status401Unauthorized,
+            code: ProblemCodes.AuthenticationRequired,
             title: "Unauthorized",
             detail: "Valid authentication is required.");
 
     private static IResult Forbidden()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status403Forbidden,
+            code: ProblemCodes.PermissionDenied,
             title: "Forbidden",
             detail: "You are not authorized to perform this action.");
 
     private static IResult ValidationError(string detail)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
+            code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
 
@@ -366,8 +371,9 @@ internal static class ApplePurchaseEndpoints
     // command (docs/08_API_CONTRACTS.md 422). The detail is the adapter's generic, client-safe and log-safe reason
     // (never the proof or receipt content; threat T7); a missing reason falls back to a generic phrase.
     private static IResult VerificationRejected(string? reason)
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status422UnprocessableEntity,
+            code: ProblemCodes.UnprocessableEntity,
             title: "Unprocessable Entity",
             detail: string.IsNullOrWhiteSpace(reason) ? "The transaction could not be verified." : reason);
 
@@ -376,8 +382,9 @@ internal static class ApplePurchaseEndpoints
     // and records/grants nothing. The detail is generic and log-safe (it names no proof or receipt content; threat
     // T7) and does not reveal the deployment's environment posture.
     private static IResult EnvironmentNotHonored()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status422UnprocessableEntity,
+            code: ProblemCodes.UnprocessableEntity,
             title: "Unprocessable Entity",
             detail: "The transaction was verified in an environment this deployment does not accept.");
 
@@ -385,8 +392,9 @@ internal static class ApplePurchaseEndpoints
     // a conflicting claim, so it is denied 409 and nothing is granted to this caller. The detail is generic and
     // reveals nothing about the owning subject (threats T5/T7).
     private static IResult PurchaseAlreadyClaimed()
-        => Results.Problem(
+        => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "This purchase is already linked to a different account.");
 
