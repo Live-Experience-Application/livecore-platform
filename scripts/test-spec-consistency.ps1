@@ -253,15 +253,15 @@ AssertTrue (Test-AnyFinding -Finding $indexDrift -Pattern 'INDEX:.*purchase_tran
 # === Check 11: emitted session events vs the non-deferred catalog (CORE-EVT-004) ===
 
 function Get-CatalogEventFixture {
-    param([string]$Event, [bool]$Deferred)
-    return [pscustomobject]@{ Event = $Event; IsDeferred = $Deferred }
+    param([string]$EventName, [bool]$Deferred)
+    return [pscustomobject]@{ Event = $EventName; IsDeferred = $Deferred }
 }
 
 # A catalog whose non-deferred events exactly match the emitted set produces no findings; a DEFERRED row is
 # excluded (it need not be emitted), exactly as the real SceneCreated/ContentBlockCreated are.
 $consistentCatalog = @(
-    Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false
-    Get-CatalogEventFixture -Event 'SceneCreated' -Deferred $true
+    Get-CatalogEventFixture -EventName 'SessionCreated' -Deferred $false
+    Get-CatalogEventFixture -EventName 'SceneCreated' -Deferred $true
 )
 $consistentEmission = @(Test-LiveCoreSessionEventEmission -CatalogRow $consistentCatalog -EmittedType @('SessionCreated'))
 AssertTrue ($consistentEmission.Count -eq 0) `
@@ -269,8 +269,8 @@ AssertTrue ($consistentEmission.Count -eq 0) `
 
 # A non-deferred catalog event that nothing emits fails (the catalog is aspirational).
 $aspirationalCatalog = @(
-    Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false
-    Get-CatalogEventFixture -Event 'PhantomEvent' -Deferred $false
+    Get-CatalogEventFixture -EventName 'SessionCreated' -Deferred $false
+    Get-CatalogEventFixture -EventName 'PhantomEvent' -Deferred $false
 )
 $aspirational = @(Test-LiveCoreSessionEventEmission -CatalogRow $aspirationalCatalog -EmittedType @('SessionCreated'))
 AssertTrue (Test-AnyFinding -Finding $aspirational -Pattern 'EVENT-EMIT:.*PhantomEvent.*no Core command emits') `
@@ -278,7 +278,7 @@ AssertTrue (Test-AnyFinding -Finding $aspirational -Pattern 'EVENT-EMIT:.*Phanto
 
 # An emitted type that is not a non-deferred catalog row fails (emitting an undocumented or deferred event).
 $ghostEmit = @(Test-LiveCoreSessionEventEmission `
-        -CatalogRow @(Get-CatalogEventFixture -Event 'SessionCreated' -Deferred $false) `
+        -CatalogRow @(Get-CatalogEventFixture -EventName 'SessionCreated' -Deferred $false) `
         -EmittedType @('SessionCreated', 'GhostEmitted'))
 AssertTrue (Test-AnyFinding -Finding $ghostEmit -Pattern 'EVENT-EMIT:.*GhostEmitted.*not a non-deferred event') `
     'a SessionEventTypes constant that is not a non-deferred catalog event fails the check (CORE-EVT-004)'

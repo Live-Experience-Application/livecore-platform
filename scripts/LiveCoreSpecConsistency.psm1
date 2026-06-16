@@ -649,9 +649,9 @@ function Test-LiveCoreSessionEventEmission {
         if (-not $r.IsDeferred) { [void]$nonDeferred.Add($r.Event) }
     }
 
-    foreach ($event in $nonDeferred) {
-        if (-not $emitted.Contains($event)) {
-            $findings.Add("EVENT-EMIT: csv/event_catalog.csv lists non-deferred event '$event' which no Core command emits (no SessionEventTypes member); emit it, remove it, or mark it DEFERRED - CORE-EVT-004")
+    foreach ($catalogEvent in $nonDeferred) {
+        if (-not $emitted.Contains($catalogEvent)) {
+            $findings.Add("EVENT-EMIT: csv/event_catalog.csv lists non-deferred event '$catalogEvent' which no Core command emits (no SessionEventTypes member); emit it, remove it, or mark it DEFERRED - CORE-EVT-004")
         }
     }
     foreach ($type in $emitted) {
