@@ -42,6 +42,9 @@ GET    /api/v1/me
 GET    /api/v1/organizations
 POST   /api/v1/organizations
 GET    /api/v1/audit-logs
+GET    /api/v1/organizations/{organizationSlug}/templates
+POST   /api/v1/organizations/{organizationSlug}/templates
+GET    /api/v1/organizations/{organizationSlug}/templates/{templateId}
 DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}
 GET    /api/v1/workspaces
 POST   /api/v1/workspaces

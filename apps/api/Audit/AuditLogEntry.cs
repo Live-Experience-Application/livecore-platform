@@ -931,6 +931,65 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a template creation (<see cref="AuditAction.TemplateCreated"/>) — the audit fact written when an
+    /// authorized Owner/Admin creates a new organization-scoped template definition (CORE-TMPL-001). It is the
+    /// registry-level counterpart of <see cref="ForEntityTypeCreation"/> and, like it, a thin specialization of
+    /// <see cref="Create"/> that pins the action and applies the producer's stricter contract: the tenant, the
+    /// authenticated actor (the admin who created the template) and the created template resource (its generic
+    /// kind name and surrogate id) are all REQUIRED, where the generic factory leaves them optional. A creation
+    /// is the BIRTH of a resource rather than a transition, and a template has no lifecycle state, so there is NO
+    /// before/after state pair (both null). A template is an ORGANIZATION-level registry resource (not workspace
+    /// content), so — unlike the workspace-scoped entity / entity-type creations — this fact records NO workspace
+    /// (organization-level), exactly as <see cref="ForMemberRemoval"/> records an organization-level member
+    /// removal with a null workspace. The resource kind is passed as a generic NAME string (e.g. <c>Template</c>)
+    /// so the Audit module does not depend on the Templates module's types. Every value is an identifier or a
+    /// generic name — never the template's host-/template-supplied key or definition content or any free-form
+    /// content (threat T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the creation happened in (required).</param>
+    /// <param name="actorUserProfileId">The admin who created the template (required; the audited actor).</param>
+    /// <param name="templateResourceType">The created template's generic kind name (e.g. Template).</param>
+    /// <param name="templateId">The created template's surrogate id.</param>
+    /// <param name="createdAt">When the creation happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the template resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForTemplateCreation(
+        Guid organizationId,
+        Guid actorUserProfileId,
+        string templateResourceType,
+        Guid templateId,
+        DateTimeOffset createdAt)
+    {
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(templateResourceType))
+        {
+            throw new ArgumentException("Template resource type must not be empty.", nameof(templateResourceType));
+        }
+
+        if (templateId == Guid.Empty)
+        {
+            throw new ArgumentException("Template id must not be empty.", nameof(templateId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId: null,
+            AuditAction.TemplateCreated,
+            actorUserProfileId,
+            templateResourceType,
+            templateId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an entity deletion (<see cref="AuditAction.EntityDeleted"/>) — the audit fact written when
     /// an authorized host deletes an entity, removing it and its dependent edges, visibility rules and
     /// asset links (CORE-LIFE-003). A thin specialization of <see cref="Create"/> that pins the action and

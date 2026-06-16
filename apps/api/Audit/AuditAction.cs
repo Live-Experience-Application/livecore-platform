@@ -156,6 +156,24 @@ public enum AuditAction
     EntityTypeCreated = 23,
 
     /// <summary>
+    /// An Owner/Admin created a new organization-scoped template definition — the template create command
+    /// (CORE-TMPL-001, the "Vertical Authoring and Read API Completeness" epic). It is the registry-level
+    /// counterpart of <see cref="EntityTypeCreated"/>: a <c>Template</c> is reusable vertical scaffolding stored
+    /// entirely as DATA (its template key plus the entity types it defines), through which a vertical maps its
+    /// domain onto Core (the template boundary, docs/04_PRODUCT_BOUNDARIES.md). Auditing the creation satisfies
+    /// the story's "audited" criterion: it records that an authorized admin added a tenant template (threats
+    /// T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). A creation is the birth of a resource, not a transition of an
+    /// existing one, and a template has no lifecycle state, so there is NO before/after state pair (both null).
+    /// A template is an ORGANIZATION-level registry resource (not workspace content), so the fact is
+    /// organization-level: it carries the tenant and records NO workspace (unlike the workspace-scoped entity /
+    /// entity-type creations). A generic audit fact whose actor is the admin who created the template and whose
+    /// resource is the created template (its generic kind name and surrogate id); the template's
+    /// host-/template-supplied key and definition content are NEVER recorded — only identifiers and the generic
+    /// kind name (threat T7) (<see cref="AuditLogEntry.ForTemplateCreation"/>).
+    /// </summary>
+    TemplateCreated = 24,
+
+    /// <summary>
     /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
     /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
     /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that

@@ -457,6 +457,24 @@ following are deferred by design (date recorded **2026-06-15**):
   projection ("authorize like entity authoring"; a non-authoring member is `403`, a
   foreign/unknown type hidden-`404`, a duplicate per-workspace key or archived
   workspace `409`, all fail-closed; the create is audited as `EntityTypeCreated`).
+  **Resolved for templates (2026-06-17, CORE-TMPL-001):** the template
+  create/list/by-id-read routes are now **mounted** under
+  `/api/v1/organizations/{organizationSlug}/templates` (joining the pre-existing
+  `DELETE`) — a template is reusable vertical scaffolding stored as **data only**
+  (template key plus the entity types it defines; no `if templateKey` branching in
+  Core source, docs/04). A template is an **organization-level registry resource**
+  (not workspace content), so every route is **org-scoped** (the tenant's slug is in
+  the path) and restricted to **`Owner`/`Admin`** ("reuse the Owner/Admin authz the
+  delete route already uses"; a non-privileged member is `403`). The
+  **global/organization boundary** is enforced structurally: the create **always**
+  builds an organization-scoped template (never a global one) and the list/read use
+  the **org-scoped** repository methods (`ListByOrganizationAsync` /
+  `FindByOrganizationAndIdAsync`), which **never return a global template** — so "an
+  org-scoped lookup never returns a global template for mutation" holds at every
+  route and a global template addressed by id is an indistinguishable hidden-`404`
+  (threats T1/T5). A foreign/unknown template is hidden-`404`, a duplicate per-scope
+  key+version is `409`, and the create is audited as `TemplateCreated`. The
+  visibility-rule create/list endpoints remain deferred (CORE-VIS-004).
 - **Content-block list/get/update/revise route.** `ContentBlockEndpoints.cs`
   mounts only create and delete; there is deliberately **no
   list/get/update/revise route** (the revise capability lives on the aggregate

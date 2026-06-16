@@ -465,6 +465,17 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // version-transition workflow in this story.
     builder.Services.AddScoped<ITemplateRepository, TemplateRepository>();
 
+    // Template create command (CORE-TMPL-001, the "Vertical Authoring and Read API Completeness" epic): the
+    // Templates module's "an Owner/Admin can create an organization-scoped template" command. Registered here,
+    // inside the persistence conditional, because it composes the template and audit repositories plus the
+    // shared DbContext for a single transaction. It resolves any existing per-scope key+version through the
+    // tenant-scoped ITemplateRepository.FindByOrganizationAndKeyAsync FIRST (a key+version the organization
+    // already holds is a duplicate), then creates the template ALWAYS organization-scoped (never global, so the
+    // org route can never mint or mutate a global template; threat T5) with a server-minted id and appends a
+    // TemplateCreated audit record, the insert and audit committing together (CORE-CONC-002). Consumed by
+    // POST /api/v1/organizations/{organizationSlug}/templates.
+    builder.Services.AddScoped<TemplateCreationService>();
+
     // Visibility rule persistence (CORE-VIS-001, the first story of the Visibility and Reveal Engine
     // epic): the Visibility module — THE central security module (docs/05_MODULE_CONTRACTS.md) — owns
     // the workspace-scoped, tenant-scoped visibility_rules table that holds the generic AUDIENCE
@@ -1222,23 +1233,31 @@ app.MapOrganizationEndpoints();
 // bounded by ?limit=/?offset=, and projected PII/secret-free through AuditQueryPolicy (threat T7).
 app.MapAuditLogEndpoints();
 
-// Template deletion endpoint (CORE-LIFE-008, the "Resource Lifecycle and Deletion" epic):
-// DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}. The Templates module had a
-// template create + load (CORE-ENT-004) but no delete; this adds the inverse. It lives in an
-// authenticated route group and fails closed (503) when persistence is not configured, exactly like the
-// organization endpoints. No new DI registration is required: the tenant context resolver and the
-// template repository (extended with RemoveAsync) it consumes are already registered above inside the
-// persistence conditional. The template is org-scoped, so the tenant's slug is in the path (resolved by
-// the same token-claim-and-membership tenant check the organization member-removal route uses), and the
-// caller is authorized as an admin of that tenant (Owner/Admin). The template is then loaded through the
-// tenant-scoped FindByOrganizationAndIdAsync, which never returns a GLOBAL template — so "global
-// templates cannot be deleted by an org" is enforced structurally as a hidden 404 (threats T1/T5), and a
-// template owned by another organization is equally unreachable. Every denial is hidden as 404 (an
-// insufficient role as 403), and deleting a non-existent template is a safe 404. The workspace
-// EntityType rows a previous load materialized carry no foreign key back to the template, so
-// already-instantiated entity types are unaffected (the story acceptance criterion); there is nothing to
-// cascade, and (faithful to the template-create and entity-relationship-removal precedents) the deletion
-// emits no event and writes no audit record.
+// Template endpoints (the Templates module's organization-scoped template routes). The module had a
+// template create + load (CORE-ENT-004) and a DELETE (CORE-LIFE-008,
+// DELETE /api/v1/organizations/{organizationSlug}/templates/{templateId}); CORE-TMPL-001 (the "Vertical
+// Authoring and Read API Completeness" epic) adds the authoring create/list/read so an Owner/Admin can
+// define, list and read its tenant's templates over the API:
+//   GET  /api/v1/organizations/{organizationSlug}/templates
+//   POST /api/v1/organizations/{organizationSlug}/templates
+//   GET  /api/v1/organizations/{organizationSlug}/templates/{templateId}
+// They live in the same authenticated route group and fail closed (503) when persistence is not
+// configured, exactly like the organization endpoints. The only new DI registration is the
+// TemplateCreationService (registered above inside the persistence conditional); the tenant context
+// resolver and the template repository were already registered. A template is an ORGANIZATION-level
+// registry resource (not workspace content), so every route is org-scoped: the tenant's slug is in the
+// path (resolved by the same token-claim-and-membership tenant check the organization member-removal
+// route uses), and the caller is authorized as an admin of that tenant (Owner/Admin; a non-privileged
+// member is 403). THE GLOBAL/ORGANIZATION BOUNDARY is enforced structurally: the create ALWAYS builds an
+// organization-scoped template (never a global one), and the list/read use the org-scoped repository
+// methods (ListByOrganizationAsync / FindByOrganizationAndIdAsync), which never return a GLOBAL template —
+// so "an org-scoped lookup never returns a global template for mutation" holds at every route and a global
+// template addressed by id is an indistinguishable hidden 404 (threats T1/T5). A foreign/unknown template
+// is hidden as 404, a duplicate per-scope key+version is 409, and the create is audited as TemplateCreated
+// (the insert and audit committing together in one transaction). The pre-existing DELETE is unchanged: it
+// loads through the same tenant-scoped FindByOrganizationAndIdAsync (a global template is never deletable
+// by an org), removes only the templates row (already-instantiated entity types are unaffected) and emits
+// no audit record.
 app.MapTemplateEndpoints();
 
 // Workspace endpoints (CORE-WS-003): the first domain HTTP endpoints. They live

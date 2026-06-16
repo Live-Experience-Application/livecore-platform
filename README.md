@@ -3143,6 +3143,50 @@ assets/scenes/entities/content blocks), matched exactly (`MembershipRole` is non
 add-link precedent (CORE-AST-005) and the entity-relationship removal (CORE-LIFE-002), the removal emits no event
 and writes no audit record, and the schema is unchanged so no migration is needed.
 
+### Template authoring API (create, list, read)
+
+A **template** is reusable vertical scaffolding stored as **data**: its template **key** plus the entity types it
+defines (the template boundary, `docs/04_PRODUCT_BOUNDARIES.md`). The template model, scope-aware repository and
+entity-type loader shipped earlier (CORE-ENT-004) with only a `DELETE` route (CORE-LIFE-008); CORE-TMPL-001 (the
+"Vertical Authoring and Read API Completeness" epic) adds the authoring create/list/read so an Owner/Admin can
+define, list and read its tenant's templates over the API:
+
+| Method | Route                                                             | Authorized callers              |
+| ------ | ----------------------------------------------------------------- | ------------------------------- |
+| `GET`  | `/api/v1/organizations/{organizationSlug}/templates`              | organization `Owner` or `Admin` |
+| `POST` | `/api/v1/organizations/{organizationSlug}/templates`              | organization `Owner` or `Admin` |
+| `GET`  | `/api/v1/organizations/{organizationSlug}/templates/{templateId}` | organization `Owner` or `Admin` |
+
+A template is an **organization-level** registry resource (not workspace content), so every route is **org-scoped**
+exactly like the template-deletion and organization member-removal routes: the tenant's slug is in the **path**
+(resolved by the same token-claim-and-membership tenant check), and the caller is authorized as an admin of that
+tenant — the role set is **organization `Owner` or `Admin`** ("reuse the Owner/Admin authz the delete route
+already uses"), matched exactly (`MembershipRole` is non-linear). A template is an authoring/registry artifact, not
+audience content, so — unlike the entity list/read — there is **no** host-vs-participant projection: no audience
+role ever receives a template, and a known tenant member who lacks `Owner`/`Admin` is `403`. A caller who cannot
+see the tenant (a foreign/unknown tenant, a non-member, a service account) is hidden as `404`.
+
+**The global vs organization template boundary** (an acceptance criterion): a **global** template
+(`organization_id IS NULL`) is platform/seed data available to every tenant and is **never authored, listed or
+mutated through this tenant surface**. This is enforced **structurally**, not by a branch: **create** always calls
+`Template.CreateForOrganization` (never the global factory), so a tenant can never mint a global template; and
+**list/read** use the org-scoped repository methods (`ListByOrganizationAsync` / `FindByOrganizationAndIdAsync`),
+which match only rows whose `organization_id` equals the resolved tenant — so **an org-scoped lookup never returns
+a global template for mutation**, and a global template addressed by its exact id is an indistinguishable
+hidden-`404` (threats T1/T5). The response projection rejects a global template defensively, keeping the guarantee
+even at the projection layer.
+
+**Create** assigns the template a **server-side id** and binds it immutably to the route's organization. The
+request names the template's `templateKey` (canonicalized to a stable lower-case dotted slug), an optional
+`version` (a positive integer defaulting to `1`) and a `definition` (a JSON document: a top-level `templateKey`
+plus a non-empty `entityTypes` array of valid entries) — all generic, product-neutral **data** the platform stores
+**without inspecting its vocabulary and without ever branching on it** (no `if templateKey == …` in Core source,
+`docs/04`). The create and its append-only audit record (`TemplateCreated`, an organization-level fact that records
+no workspace) commit together in one transaction; a `templateKey`+`version` the organization already holds is a
+`409 Conflict` (the same key+version stays available in another organization or in the global pool). On success the
+route returns `201 Created` with the template. The schema is unchanged (the `templates` table shipped with
+CORE-ENT-004), so no migration is needed.
+
 ### Template deletion
 
 An authorized admin can delete an organization-scoped template (CORE-LIFE-008, the "Resource Lifecycle and
