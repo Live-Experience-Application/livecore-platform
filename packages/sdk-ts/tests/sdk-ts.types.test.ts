@@ -26,6 +26,7 @@ import type {
 
 import type {
   AssetsClient,
+  ConditionalWriteOptions,
   EntitiesClient,
   EntityTypesClient,
   EntitlementsClient,
@@ -36,6 +37,7 @@ import type {
   RealtimeClient,
   RevealOptions,
   ScenesClient,
+  SdkResponse,
   SessionsClient,
   StoreClient,
   VisibilityClient,
@@ -77,6 +79,27 @@ export type ListWorkspacesReturn = Assert<
 
 export type CreateWorkspaceReturn = Assert<
   Equal<Awaited<ReturnType<WorkspacesClient["create"]>>, WorkspaceResponse>
+>;
+
+// --- The conditional-write surface round-trips the weak ETag (CORE-DX-002). ------
+// getWithETag returns the body PLUS its ETag; update accepts an optional If-Match.
+
+export type GetWithETagReturn = Assert<
+  Equal<
+    Awaited<ReturnType<WorkspacesClient["getWithETag"]>>,
+    SdkResponse<WorkspaceResponse>
+  >
+>;
+
+export type UpdateAcceptsIfMatch = Assert<
+  Equal<
+    Parameters<WorkspacesClient["update"]>[2],
+    ConditionalWriteOptions | undefined
+  >
+>;
+
+export type ConditionalWriteOptionsShape = Assert<
+  Equal<ConditionalWriteOptions, { ifMatch?: string }>
 >;
 
 export type StartSessionReturn = Assert<

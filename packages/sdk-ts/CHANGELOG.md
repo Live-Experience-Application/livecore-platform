@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Optimistic-concurrency round-trip over HTTP (CORE-DX-002): `WorkspacesClient.getWithETag`
+  returns the workspace together with its weak `ETag` (`SdkResponse<WorkspaceResponse>`),
+  and `WorkspacesClient.update` accepts a `ConditionalWriteOptions { ifMatch }` so a rename
+  is made conditional on the version last read (a stale value is refused with `412`). The
+  transport gained `HttpClient.sendWithETag` and a `RequestSpec.ifMatch` that sets the
+  `If-Match` header; `SdkResponse` and `ConditionalWriteOptions` are exported.
 - `EntityTypesClient` (exposed as `client.entityTypes`): `list`, `get` and
   `create` for a workspace's generic entity types under
   `/api/v1/workspaces/{workspaceId}/entity-types` (CORE-ENT-007). An entity type

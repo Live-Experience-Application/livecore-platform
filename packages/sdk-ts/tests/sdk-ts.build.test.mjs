@@ -143,6 +143,88 @@ test("reveal sends the Idempotency-Key header and the org slug in the body", asy
   });
 });
 
+test("the weak ETag round-trips through the SDK as a conditional-write If-Match (CORE-DX-002)", async () => {
+  const etag = 'W/"8147"';
+  const { client, calls } = makeClient({
+    handler: (_url, init) => {
+      // The read carries the weak ETag; the conditional write echoes it back.
+      if (init.method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (name) => (name.toLowerCase() === "etag" ? etag : null),
+          },
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                id: "ws-1",
+                organizationId: "org-1",
+                slug: "demo",
+                name: "Demo",
+                status: "Active",
+                createdAt: "2026-06-13T00:00:00+00:00",
+                updatedAt: "2026-06-13T00:00:00+00:00",
+                version: "8147",
+              }),
+            ),
+        };
+      }
+      return jsonResponse(200, {
+        id: "ws-1",
+        organizationId: "org-1",
+        slug: "demo",
+        name: "Renamed",
+        status: "Active",
+        createdAt: "2026-06-13T00:00:00+00:00",
+        updatedAt: "2026-06-13T00:00:01+00:00",
+        version: "8148",
+      });
+    },
+  });
+
+  // The read exposes the resource's weak ETag (and the same value on the body).
+  const read = await client.workspaces.getWithETag("ws-1", {
+    organizationSlug: "acme",
+  });
+  assert.equal(read.etag, etag);
+  assert.equal(read.data.version, "8147");
+  assert.equal(calls[0].init.headers["If-Match"], undefined);
+
+  // Echoing it back as If-Match makes the rename conditional on that version.
+  const renamed = await client.workspaces.update(
+    "ws-1",
+    { organizationSlug: "acme", name: "Renamed" },
+    { ifMatch: read.etag ?? undefined },
+  );
+  assert.equal(renamed.version, "8148");
+  assert.equal(calls[1].init.method, "PUT");
+  assert.equal(calls[1].init.headers["If-Match"], etag);
+});
+
+test("a workspace rename omits If-Match when none is supplied (unconditional, current behavior)", async () => {
+  const { client, calls } = makeClient({
+    handler: () =>
+      jsonResponse(200, {
+        id: "ws-1",
+        organizationId: "org-1",
+        slug: "demo",
+        name: "Renamed",
+        status: "Active",
+        createdAt: "2026-06-13T00:00:00+00:00",
+        updatedAt: "2026-06-13T00:00:01+00:00",
+        version: "8148",
+      }),
+  });
+
+  await client.workspaces.update("ws-1", {
+    organizationSlug: "acme",
+    name: "Renamed",
+  });
+
+  assert.equal(calls[0].init.headers["If-Match"], undefined);
+});
+
 test("session event replay forwards optional query params and omits them when unset", async () => {
   const { client, calls } = makeClient({
     handler: () =>

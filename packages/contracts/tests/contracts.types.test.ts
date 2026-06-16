@@ -98,6 +98,7 @@ export type ProblemCodeIsExact = Assert<
     | "quota_exceeded"
     | "workspace_archived"
     | "concurrency_conflict"
+    | "precondition_failed"
     | "unprocessable_entity"
     | "payload_too_large"
     | "rate_limited"
@@ -150,6 +151,7 @@ export const workspaceExample: WorkspaceResponse = {
   status: "Active",
   createdAt: "2026-06-13T00:00:00+00:00",
   updatedAt: "2026-06-13T00:00:00+00:00",
+  version: "8147",
 };
 
 export const adEligibilityExample: AdEligibilityResponse = {

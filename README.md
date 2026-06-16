@@ -976,6 +976,21 @@ in-memory SQLite test provider has no such column and is left untouched; the rea
 cross-context conflict is exercised by the integration suite's PostgreSQL job. See
 `docs/10_DATABASE_SCHEMA.md` and `docs/08_API_CONTRACTS.md`.
 
+That `409` only catches a race **within one request**. To also stop a consumer's
+**GET-then-PUT across HTTP** from silently clobbering a concurrent change, CORE-DX-002
+surfaces the same `xmin` token over HTTP: a single-resource read or mutation returns it as
+a weak `ETag` header (`ETag: W/"<version>"`) and a `version` field on the body, and a
+mutating route accepts an `If-Match` header carrying the version the consumer last read. A
+stale `If-Match` is refused **before the write** with `412 Precondition Failed` (`code`
+`precondition_failed`); a matching one (or `If-Match: *`) proceeds; an absent one preserves
+the current unconditional behavior. So two clients' read-modify-write resolves to exactly
+one winner — the loser gets a `412` (it never held the current version) or the in-request
+`409` (it raced at commit), never a silent overwrite. The workspace read/rename/archive
+routes carry this surface, and the typed SDK round-trips it (`workspaces.getWithETag` →
+`workspaces.update(..., { ifMatch })`); the `@livecore/contracts` `WorkspaceResponse`
+exposes the `version`. The same reusable `EntityTag`/`EntityConcurrencyToken` helpers
+extend the surface to the other mutable aggregates' read/mutation routes.
+
 ### Transactional unit of work (commit-then-publish)
 
 A command that changes a rule/state row, appends an audit fact, appends a durable

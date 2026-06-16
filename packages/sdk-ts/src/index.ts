@@ -41,8 +41,10 @@ export type {
   FetchResponse,
   LiveCoreClientOptions,
 } from "./options.js";
+export type { SdkResponse } from "./http.js";
 
 export { WorkspacesClient } from "./resources/workspaces.js";
+export type { ConditionalWriteOptions } from "./resources/workspaces.js";
 export { SessionsClient } from "./resources/sessions.js";
 export { ScenesClient } from "./resources/scenes.js";
 export { ContentClient } from "./resources/content.js";

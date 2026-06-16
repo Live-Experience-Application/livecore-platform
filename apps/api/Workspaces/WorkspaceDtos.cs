@@ -75,11 +75,27 @@ public sealed record WorkspaceResponse(
     DateTimeOffset UpdatedAt)
 {
     /// <summary>
+    /// The resource's optimistic-concurrency version — the opaque value of the weak
+    /// <c>ETag</c> the same read/mutation response carries in its header (CORE-DX-002,
+    /// "Include resource version where concurrent updates matter"; docs/08). It is the
+    /// PostgreSQL <c>xmin</c> token (CORE-CONC-006) surfaced for consumers: a consumer
+    /// echoes it back as <c>If-Match</c> on a later write to make that write conditional,
+    /// so a GET-then-PUT across HTTP cannot silently clobber a concurrent change. It is
+    /// <see langword="null"/> on a representation with no single token to surface — a
+    /// collection item (the list never tracks a per-row token) or the tokenless SQLite
+    /// test provider — never a secret (it leaks no tenant/internal state; threat T7).
+    /// </summary>
+    public string? Version { get; init; }
+
+    /// <summary>
     /// Projects a <see cref="Workspace"/> aggregate into its response DTO. Only
     /// the generic, non-sensitive fields are copied; the lifecycle status is
-    /// emitted by its stable name.
+    /// emitted by its stable name. <paramref name="version"/> is the resource's
+    /// optimistic-concurrency token (<see cref="Version"/>) when the caller resolved
+    /// one for a single-resource response, otherwise <see langword="null"/> (the list
+    /// projection passes none).
     /// </summary>
-    public static WorkspaceResponse From(Workspace workspace)
+    public static WorkspaceResponse From(Workspace workspace, string? version = null)
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
@@ -90,7 +106,10 @@ public sealed record WorkspaceResponse(
             workspace.Name,
             workspace.Status.ToString(),
             workspace.CreatedAt,
-            workspace.UpdatedAt);
+            workspace.UpdatedAt)
+        {
+            Version = version,
+        };
     }
 }
 

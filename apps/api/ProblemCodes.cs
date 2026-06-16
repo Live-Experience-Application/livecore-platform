@@ -86,6 +86,14 @@ internal static class ProblemCodes
     /// </summary>
     public const string ConcurrencyConflict = "concurrency_conflict";
 
+    /// <summary>
+    /// An <c>If-Match</c> precondition failed: the caller's last-known weak <c>ETag</c> no longer
+    /// matches the resource's current version, so a conditional write is refused before it runs.
+    /// The caller should reload the resource and retry (HTTP 412; CORE-DX-002). This is the
+    /// before-the-write counterpart of <see cref="ConcurrencyConflict"/> (the in-request race).
+    /// </summary>
+    public const string PreconditionFailed = "precondition_failed";
+
     /// <summary>The command was well-formed but is semantically invalid (HTTP 422).</summary>
     public const string UnprocessableEntity = "unprocessable_entity";
 
@@ -121,6 +129,7 @@ internal static class ProblemCodes
         QuotaExceeded,
         WorkspaceArchived,
         ConcurrencyConflict,
+        PreconditionFailed,
         UnprocessableEntity,
         PayloadTooLarge,
         RateLimited,

@@ -12,6 +12,14 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The optimistic-concurrency token is surfaced over HTTP (CORE-DX-002):
+  `WorkspaceResponse.version` carries the resource's version (the `xmin` token),
+  the matching single-resource response sets a weak `ETag` header, and a consumer
+  echoes it back as the new `If-Match` request header (`RequestHeaders.IfMatch`,
+  `ResponseHeaders.ETag`) to make a rename/archive conditional. A stale value is
+  refused before the write with `412` (`precondition_failed`, added to the
+  `ProblemCodes` catalog and `CoreErrorStatusCodes`), so a GET-then-PUT across HTTP
+  cannot silently clobber a concurrent change.
 - The stable Problem Details error-code catalog: a `ProblemCodes` runtime
   `as const` tuple and its `ProblemCode` string-literal union, plus an optional
   `ProblemDetails.code` field. Every Core API error now carries a stable,

@@ -50,6 +50,15 @@ export interface WorkspaceResponse {
   createdAt: IsoDateTimeString;
   /** When the workspace was last updated (UTC). */
   updatedAt: IsoDateTimeString;
+  /**
+   * The resource's optimistic-concurrency version — the opaque value of the weak
+   * `ETag` the same single-resource response carries in its header (CORE-DX-002).
+   * Echo it back as `If-Match` on a later rename/archive to make that write
+   * conditional, so a GET-then-PUT across HTTP cannot silently clobber a concurrent
+   * change. It is `null` on a representation with no single token to surface — a
+   * list item, or a deployment whose provider maps no row version.
+   */
+  version: string | null;
 }
 
 /** Request body for `POST /api/v1/workspaces/{workspaceId}/members`. */

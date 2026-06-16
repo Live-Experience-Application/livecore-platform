@@ -38,6 +38,27 @@ export interface RequestSpec {
    * key MUST be reused across retries of one logical command.
    */
   idempotencyKey?: string;
+  /**
+   * Conditional-write precondition for a mutating route. Sent as the `If-Match`
+   * header (CORE-DX-002): the weak `ETag` (or its bare value) the caller last read
+   * for the resource. A stale value is refused with `412` before the write; an
+   * absent value preserves the unconditional behavior.
+   */
+  ifMatch?: string;
+}
+
+/**
+ * A response body together with its `ETag` (CORE-DX-002): the weak
+ * optimistic-concurrency validator the Core API returns on a single-resource read
+ * or mutation. Pass {@link etag} back as `ifMatch` on a later write to make that
+ * write conditional, so a GET-then-PUT across HTTP cannot silently clobber a
+ * concurrent change.
+ */
+export interface SdkResponse<TResponse> {
+  /** The parsed JSON response body. */
+  readonly data: TResponse;
+  /** The weak `ETag` from the response, or `null` when the response carried none. */
+  readonly etag: string | null;
 }
 
 /** Resolves the global `fetch`, or throws a clear error when none exists. */
@@ -94,6 +115,19 @@ export class HttpClient {
 
   /** Sends one request and returns its parsed JSON body typed as `TResponse`. */
   async send<TResponse>(spec: RequestSpec): Promise<TResponse> {
+    const { data } = await this.sendWithETag<TResponse>(spec);
+    return data;
+  }
+
+  /**
+   * Sends one request and returns its parsed JSON body together with the response's
+   * weak `ETag` (CORE-DX-002), so a caller can echo the tag back as `ifMatch` on a
+   * later conditional write. The same transport, auth and error behavior as
+   * {@link send}; a non-success response still raises a `LiveCoreApiError`.
+   */
+  async sendWithETag<TResponse>(
+    spec: RequestSpec,
+  ): Promise<SdkResponse<TResponse>> {
     const token = await this.resolveToken();
     const url = this.buildUrl(spec);
     const headers = this.buildHeaders(token, spec);
@@ -112,7 +146,11 @@ export class HttpClient {
       });
     }
 
-    return this.readResponse<TResponse>(response);
+    // Read the validator before consuming the body; header lookup is
+    // case-insensitive per the WHATWG fetch Headers contract.
+    const etag = response.headers.get("etag");
+    const data = await this.readResponse<TResponse>(response);
+    return { data, etag };
   }
 
   /** Fail closed: never send an authenticated request without a token. */
@@ -158,6 +196,9 @@ export class HttpClient {
     }
     if (spec.idempotencyKey !== undefined) {
       headers["Idempotency-Key"] = spec.idempotencyKey;
+    }
+    if (spec.ifMatch !== undefined) {
+      headers["If-Match"] = spec.ifMatch;
     }
     if (this.generateRequestId) {
       const requestId = this.generateRequestId();

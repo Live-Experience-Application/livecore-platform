@@ -61,6 +61,12 @@ export const ProblemCodes = [
   "workspace_archived",
   /** An optimistic-concurrency check failed; reload and retry (HTTP 409). */
   "concurrency_conflict",
+  /**
+   * An `If-Match` precondition failed: the caller's last-known weak `ETag` no longer
+   * matches the resource's current version, so a conditional write is refused before it
+   * runs; reload and retry (HTTP 412; CORE-DX-002).
+   */
+  "precondition_failed",
   /** The command was well-formed but is semantically invalid (HTTP 422). */
   "unprocessable_entity",
   /** The request body exceeds the accepted size cap (HTTP 413). */
@@ -83,7 +89,7 @@ export type ProblemCode = (typeof ProblemCodes)[number];
  * client must not infer existence from it.
  */
 export const CoreErrorStatusCodes = [
-  400, 401, 403, 404, 409, 422, 429, 500,
+  400, 401, 403, 404, 409, 412, 422, 429, 500,
 ] as const;
 
 /** An HTTP status code the Core API returns on error. */

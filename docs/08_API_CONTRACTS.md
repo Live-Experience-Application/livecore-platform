@@ -13,7 +13,12 @@ carries a stable, machine-readable `code` (see "Stable error codes" below).
 Authorization: Bearer <access-token>
 X-Request-Id: <client-generated-id optional>
 Idempotency-Key: <required for reveal commands and write actions where retry is possible>
+If-Match: <optional weak ETag a consumer echoes back to make a mutation version-conditional (CORE-DX-002)>
 ```
+
+A single-resource read or mutation of a mutable aggregate also returns an `ETag`
+response header (a weak entity-tag carrying the resource's optimistic-concurrency
+version; see "ETag and If-Match" below).
 
 ## Common error codes
 
@@ -24,6 +29,7 @@ Idempotency-Key: <required for reveal commands and write actions where retry is 
 | 403 | authenticated but not authorized |
 | 404 | not found or intentionally hidden |
 | 409 | conflict / version mismatch |
+| 412 | If-Match precondition failed (stale version; reload and retry) |
 | 422 | semantically invalid command |
 | 429 | rate limited |
 | 500 | server error |
@@ -53,6 +59,7 @@ never drift. The values are lower_snake_case and stable once published.
 | `quota_exceeded` | 409 | a server-enforced quota would be exceeded |
 | `workspace_archived` | 409 | the target workspace is archived and read-only |
 | `concurrency_conflict` | 409 | optimistic-concurrency check failed — reload and retry |
+| `precondition_failed` | 412 | an `If-Match` precondition failed (stale `ETag`) — reload and retry |
 | `unprocessable_entity` | 422 | well-formed but semantically invalid command |
 | `payload_too_large` | 413 | request body exceeds the accepted size cap |
 | `rate_limited` | 429 | a rate limit was exceeded |
@@ -164,3 +171,34 @@ no resource, tenant or internal state (threat T7). This is distinct from the
 state-machine `409`s (for example starting a non-`Prepared` session): both are
 conflicts, but a concurrency `409` means "the resource changed underneath you, retry",
 while a state `409` means "the command is not legal from the current state".
+
+### ETag and If-Match (CORE-DX-002)
+
+The server-side `409` above only catches a race **within one request** (two writes that
+interleave at `SaveChanges`). It does nothing for a consumer doing **GET-then-PUT across
+HTTP**: between the read and the write the consumer holds a stale copy, and without a way
+to assert "only write if unchanged" the second writer silently wins (last-write-wins).
+CORE-DX-002 closes that gap by surfacing the same `xmin` token over HTTP:
+
+- A single-resource **read or mutation** of a mutable aggregate returns the token as a
+  **weak `ETag`** response header (`ETag: W/"<version>"`) and as a `version` field on the
+  response body (docs rule "Include resource version where concurrent updates matter").
+  A collection (list) response carries no per-item `ETag`; conditional requests target a
+  single resource.
+- A **mutating** route accepts an optional **`If-Match`** request header. The consumer
+  echoes back the `ETag` (or the bare `version`) it last read. The server compares the
+  supplied tag against the resource's current token **before** the write:
+  - **match** (or `If-Match: *`) → the write proceeds;
+  - **stale** → **`412 Precondition Failed`** (`code` `precondition_failed`), the write is
+    refused and nothing changes — the consumer reloads and retries;
+  - **absent** → the current behavior is preserved (the write is unconditional; the
+    in-request `xmin` `409` is still the backstop against a genuine race).
+
+So a stale `If-Match` is the **before-the-write** counterpart of the in-request
+concurrency `409`: together they make two clients' read-modify-write resolve to exactly
+one winner — the loser gets `412` (it never saw the current version) or `409` (it raced at
+commit), never a silent clobber. The `412` body, like the `409`, names only the generic
+"the resource has changed" reason and leaks no resource, tenant or internal state
+(threat T7). The token is the existing PostgreSQL `xmin` row version (CORE-CONC-006); the
+weak validator and `If-Match` comparison ignore the weak/strong indicator and the quoting,
+so a consumer may send back either the exact `W/"..."` header or the bare `version` value.

@@ -176,7 +176,11 @@ internal static class WorkspaceEndpoints
             .ListByMemberAsync(context.OrganizationId, context.UserProfileId, cancellationToken)
             .ConfigureAwait(false);
 
-        var response = workspaces.Select(WorkspaceResponse.From).ToArray();
+        // The list is a collection projection: each item carries no per-row ETag/version
+        // (the list query does not track a token per row, and HTTP conditional requests
+        // target a single resource), so the version is left null here — CORE-DX-002
+        // surfaces the token on the single-resource read/mutation responses.
+        var response = workspaces.Select(workspace => WorkspaceResponse.From(workspace)).ToArray();
         return Results.Ok(response);
     }
 
@@ -309,7 +313,13 @@ internal static class WorkspaceEndpoints
                 detail: "A workspace with this slug already exists in the organization.");
         }
 
-        var response = WorkspaceResponse.From(workspace);
+        // The created workspace is tracked and its concurrency token populated by the
+        // AddAsync commit, so the 201 carries the same weak ETag + version surface as a
+        // read (CORE-DX-002): a consumer can mutate the just-created workspace
+        // conditionally without a follow-up GET.
+        var version = EntityConcurrencyToken.TryRead(deps.DbContext, workspace);
+        SetETag(httpContext, version);
+        var response = WorkspaceResponse.From(workspace, version);
         return Results.Created($"/api/v1/workspaces/{workspace.Id}", response);
     }
 
@@ -375,7 +385,14 @@ internal static class WorkspaceEndpoints
             return HiddenWorkspace();
         }
 
-        return Results.Ok(WorkspaceResponse.From(workspace));
+        // Surface the optimistic-concurrency token as a weak ETag (header) and the
+        // response's version field (CORE-DX-002), so a consumer can echo it back as
+        // If-Match on a later rename/archive and a GET-then-PUT across HTTP cannot
+        // silently clobber a concurrent change. The token is read from the tracked
+        // entity; it is null on the tokenless SQLite test provider (no ETag emitted).
+        var version = EntityConcurrencyToken.TryRead(deps.DbContext, workspace);
+        SetETag(httpContext, version);
+        return Results.Ok(WorkspaceResponse.From(workspace, version));
     }
 
     // PUT /api/v1/workspaces/{workspaceId}
@@ -447,6 +464,21 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
+        // Honor the If-Match precondition (CORE-DX-002): when the caller supplies the
+        // weak ETag / version it last read, a rename proceeds ONLY while that version is
+        // still current. A stale token is refused with 412 BEFORE any write, so a
+        // consumer GET-then-PUT across HTTP cannot silently clobber a concurrent change
+        // (the before-the-write counterpart of the SaveChanges 409). An absent If-Match
+        // preserves the current unconditional behavior. The check sits AFTER
+        // authorization so a 412 is only ever observable by an authorized caller and
+        // never leaks workspace existence (threats T1/T5/T7).
+        if (EntityTag.EvaluateIfMatch(
+                httpContext.Request,
+                EntityConcurrencyToken.TryRead(deps.DbContext, workspace)) == IfMatchEvaluation.Stale)
+        {
+            return PreconditionFailed();
+        }
+
         // Read-only when archived (CORE-LIFE-009): an archived workspace rejects
         // authoring mutations, so a rename is a 409 Conflict that changes nothing.
         // The caller is authorized; the lifecycle state, not the caller, is the
@@ -464,7 +496,11 @@ internal static class WorkspaceEndpoints
         workspace.Rename(request.Name!.Trim(), now);
         await deps.Workspaces.UpdateAsync(workspace, cancellationToken).ConfigureAwait(false);
 
-        return Results.Ok(WorkspaceResponse.From(workspace));
+        // The write committed, so the token has advanced; return the NEW version + ETag
+        // so a consumer can chain another conditional write without re-reading.
+        var version = EntityConcurrencyToken.TryRead(deps.DbContext, workspace);
+        SetETag(httpContext, version);
+        return Results.Ok(WorkspaceResponse.From(workspace, version));
     }
 
     // POST /api/v1/workspaces/{workspaceId}/archive?organizationSlug={slug}
@@ -539,6 +575,17 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
+        // Honor the If-Match precondition (CORE-DX-002): a supplied stale token is refused with 412 before any
+        // write, so an archive cannot act on a version the caller has not actually seen; an absent If-Match
+        // preserves the current behavior. Placed AFTER authorization so a 412 is only ever observable by an
+        // authorized Owner and never leaks workspace existence (threats T1/T5/T7).
+        if (EntityTag.EvaluateIfMatch(
+                httpContext.Request,
+                EntityConcurrencyToken.TryRead(deps.DbContext, workspace)) == IfMatchEvaluation.Stale)
+        {
+            return PreconditionFailed();
+        }
+
         // The archive is terminal: an already-archived workspace cannot be archived again. The caller is
         // authorized; the lifecycle state, not the caller, is the reason, so this is a 409 Conflict that
         // changes nothing and writes no duplicate audit fact (CanArchive is the Active-only guard). Placed
@@ -591,8 +638,11 @@ internal static class WorkspaceEndpoints
         await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
 
         // The workspace survives the archive (it is now read-only), so the updated DTO is returned with its
-        // new lifecycle status, mirroring the session start/end status-transition commands.
-        return Results.Ok(WorkspaceResponse.From(workspace));
+        // new lifecycle status, mirroring the session start/end status-transition commands. The archive
+        // advanced the concurrency token, so the response carries the NEW version + weak ETag (CORE-DX-002).
+        var version = EntityConcurrencyToken.TryRead(deps.DbContext, workspace);
+        SetETag(httpContext, version);
+        return Results.Ok(WorkspaceResponse.From(workspace, version));
     }
 
     // POST /api/v1/workspaces/{workspaceId}/members
@@ -1268,20 +1318,27 @@ internal static class WorkspaceEndpoints
         var auditLog = services.GetService<IAuditLogRepository>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
 
+        // The scoped DbContext the repositories load through, used to read the
+        // aggregate's optimistic-concurrency token for the ETag/If-Match surface
+        // (CORE-DX-002). It is the same instance injected into the repositories, so the
+        // workspace they return is tracked in it.
+        var dbContext = services.GetService<LiveCoreDbContext>();
+
         if (resolver is null
             || workspaces is null
             || workspaceMembers is null
             || workspaceInvitations is null
             || quotaEnforcement is null
             || auditLog is null
-            || unitOfWork is null)
+            || unitOfWork is null
+            || dbContext is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new WorkspaceEndpointDependencies(
-            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork);
+            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork, dbContext);
         return true;
     }
 
@@ -1392,6 +1449,28 @@ internal static class WorkspaceEndpoints
             title: "Conflict",
             detail: "The workspace is already archived.");
 
+    // The If-Match precondition failed: the caller's weak ETag / version no longer matches the resource's
+    // current version, so the conditional write is refused BEFORE it runs (CORE-DX-002; docs/08). The caller
+    // is authorized; the version mismatch, not the caller, is the reason, so this is a 412 (the before-the-write
+    // counterpart of the SaveChanges 409). The detail names only the generic "the resource has changed" reason
+    // and leaks no tenant or internal state (threat T7). The caller's correct response is to reload and retry.
+    private static IResult PreconditionFailed()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status412PreconditionFailed,
+            code: ProblemCodes.PreconditionFailed,
+            title: "Precondition Failed",
+            detail: "The If-Match precondition failed: the resource has changed. Reload the resource and retry.");
+
+    // Surfaces the resource's optimistic-concurrency token as a weak ETag response header (CORE-DX-002). A null
+    // version (a collection projection, or the tokenless SQLite test provider) emits no header.
+    private static void SetETag(HttpContext httpContext, string? version)
+    {
+        if (version is not null)
+        {
+            httpContext.Response.Headers[EntityTag.ETagHeader] = EntityTag.Weak(version);
+        }
+    }
+
     private static IResult MissingOrganization()
         => ValidationError($"The '{_organizationSlugQuery}' value is required.");
 
@@ -1423,7 +1502,8 @@ internal static class WorkspaceEndpoints
         IWorkspaceInvitationRepository WorkspaceInvitations,
         QuotaEnforcementService QuotaEnforcement,
         IAuditLogRepository AuditLog,
-        TransactionalUnitOfWork UnitOfWork);
+        TransactionalUnitOfWork UnitOfWork,
+        LiveCoreDbContext DbContext);
 
     /// <summary>
     /// The kind of outcome the atomic invitation-redeem unit of work produced (CORE-WS-006), mapped to an

@@ -21,6 +21,7 @@ import {
   ProblemCodes,
   PurchaseProviders,
   RequestHeaders,
+  ResponseHeaders,
   SessionStatuses,
   VERSION,
   VisibilityResourceTypes,
@@ -64,6 +65,14 @@ test("the transport constants are exported", () => {
   assert.ok(CoreErrorStatusCodes.includes(404));
 });
 
+test("the conditional-write transport constants are exported (CORE-DX-002)", () => {
+  // A consumer reads the resource's weak ETag from the response and echoes it back as
+  // If-Match to make a later write conditional; the 412 status is part of the error set.
+  assert.equal(RequestHeaders.IfMatch, "If-Match");
+  assert.equal(ResponseHeaders.ETag, "ETag");
+  assert.ok(CoreErrorStatusCodes.includes(412));
+});
+
 test("the Problem Details error-code catalog is the stable published set", () => {
   // The published catalog must mirror the server-side ProblemCodes catalog exactly
   // (apps/api/ProblemCodes.cs); the cross-language drift check is the .NET contract
@@ -80,6 +89,7 @@ test("the Problem Details error-code catalog is the stable published set", () =>
       "quota_exceeded",
       "workspace_archived",
       "concurrency_conflict",
+      "precondition_failed",
       "unprocessable_entity",
       "payload_too_large",
       "rate_limited",
