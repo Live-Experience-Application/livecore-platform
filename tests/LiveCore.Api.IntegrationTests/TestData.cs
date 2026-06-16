@@ -7,6 +7,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.Recaps;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Templates;
@@ -207,6 +208,34 @@ internal static class TestData
         context.Sessions.Add(session);
         await context.SaveChangesAsync();
         return session;
+    }
+
+    /// <summary>
+    /// Creates and persists a recap for the given session, driving the real <see cref="Recap"/> aggregate
+    /// factory so the seeded row has exactly the invariants production would produce. By default a
+    /// SYSTEM-produced recap (no user), exactly the kind the background recap-generation job writes for an
+    /// ended session (CORE-RCP-001/002); pass <paramref name="generatedByUserProfileId"/> to seed a
+    /// HOST-produced recap instead. The <paramref name="summary"/> is the generic, product-neutral recap body
+    /// (host content; AGENTS.md). Used to arrange a session's generated recap for the recap read tests
+    /// (CORE-RCP-003). The surrogate id is a UUIDv7 derived from <paramref name="generatedAt"/>, so seeding
+    /// recaps with increasing times yields a deterministic produced order.
+    /// </summary>
+    public static async Task<Recap> AddRecapAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        string summary = "The session opened, three scenes were activated and two content blocks were revealed.",
+        Guid? generatedByUserProfileId = null,
+        DateTimeOffset? generatedAt = null)
+    {
+        var producedAt = generatedAt ?? SeedTime;
+        var recap = generatedByUserProfileId is { } host
+            ? Recap.GenerateByHost(organizationId, workspaceId, sessionId, host, summary, producedAt)
+            : Recap.GenerateBySystem(organizationId, workspaceId, sessionId, summary, producedAt);
+        context.Recaps.Add(recap);
+        await context.SaveChangesAsync();
+        return recap;
     }
 
     /// <summary>

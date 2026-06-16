@@ -3194,11 +3194,42 @@ the body) for host-content / metadata roles (Owner/Admin/Host/CoHost/Auditor) ve
 audience-safe `RecapSummaryView` (`{id, sessionId}` only — no body) for audience roles, fail-closed
 to the summary shape for any undefined role. The body is also kept out of logs: the aggregate's
 identifier-only `ToString` renders a coarse length, never the body (threat T7). The projector decides
-the view **shape**, not access; the recap-generation command (the producer that writes a recap and
-emits `RecapGenerated`), the separate participant reveal, and any recap HTTP route with its
-server-side access authorization are later stories (exactly as CORE-AUD-002/003 deferred the export
-endpoint). CORE-AUD-004 is the recap model, its persistence, its EF migration and its role-based
-projection only; there is no recap HTTP route yet.
+the view **shape**, not access. CORE-AUD-004 was the recap model, its persistence, its EF migration
+and its role-based projection only; the worker then produces a recap for every ended session
+(CORE-RCP-001/002, [Recap generation job](#recap-generation-job)), and CORE-RCP-003 finally gives a
+recap a read route ([Reading a recap over HTTP](#reading-a-recap-over-http)). The separate participant
+**reveal** of a recap body remains a later story (`docs/24_SPEC_CONSISTENCY.md`).
+
+#### Reading a recap over HTTP
+
+CORE-RCP-003 (the `Vertical Authoring and Read API Completeness` epic) adds the recap **read** route on
+top of the existing repository and projection — a recap was generated and persisted but had no HTTP
+surface, so an end user could not retrieve it:
+
+```text
+GET /api/v1/sessions/{sessionId}/recap?organizationSlug={slug}
+```
+
+The route returns the session's **most-recently-generated** recap, **role-projected**. A session may
+accumulate more than one recap (the worker produces at most one system recap per session; a host may
+later add host recaps), so the singular route returns the last in produced order — today, where only
+the system recap exists, that is the generated recap. The route path carries only `{sessionId}`, so
+the target tenant is the required `?organizationSlug=` query parameter (exactly like the session
+start/end commands).
+
+Authorization is the **session read surface** (any workspace member may read; `csv/api_routes.csv`
+roles "workspace members"), object-level and fail-closed (`docs/06_AUTHORIZATION_MATRIX.md`; threats
+T1/T5/T8). The trusted tenant is resolved from the token claim **and** persisted membership, the
+session is loaded within that tenant (so a foreign tenant's session is never reached even when the id
+matches), and the caller must be a member of the session's **own** workspace — a service account, a
+foreign/unknown tenant, an unknown session, a non-member, and a session with **no recap yet** are all
+hidden as **404** (never distinguishable, never echoing why). There is no 403 path: the read is
+allowed to every workspace member, and the only role effect is the response **shape**. A known member
+receives the recap through the same `RecapProjection` the worker journey (CORE-E2E-003) exercises —
+Owner/Admin/Host/CoHost/Auditor get the full `RecapView` **with** the body; Participant/Observer get
+the host-only-field-stripped `RecapSummaryView` **without** the body, because a generated recap is host
+content until a separate reveal (`docs/09_EVENT_CATALOG.md` `RecapGenerated`; threats T2/T8). The
+typed SDK method for this route lands with the SDK-completion story (CORE-SDK-006).
 
 ## Entitlements, quotas and monetization
 

@@ -25,6 +25,7 @@ POST,/api/v1/sessions/{sessionId}/participants/{participantId}/leave,Sessions,"H
 GET,/api/v1/sessions/{sessionId}/events,Realtime,session audience,Filtered replay
 POST,/api/v1/sessions/{sessionId}/reveal,Visibility,"Host,CoHost,Owner,Admin",Idempotent reveal
 POST,/api/v1/sessions/{sessionId}/hide,Visibility,"Host,CoHost,Owner,Admin",Idempotent hide/un-reveal; emits ContentHidden
+GET,/api/v1/sessions/{sessionId}/recap,Recaps,workspace members,Read a session's most-recently-generated recap; tenant/workspace/session-scoped via organizationSlug query; role-projected (Owner/Admin/Host/CoHost/Auditor get the full host view with the body; Participant/Observer get the host-only-field-stripped summary - the body stays host content until a separate reveal; T2/T8); reuses RecapRepository+RecapProjection; foreign-tenant/unknown-session/non-member/no-recap-yet hidden-404; fail-closed
 GET,/api/v1/workspaces/{workspaceId}/scenes,Scenes,workspace members,Projection by role
 POST,/api/v1/workspaces/{workspaceId}/scenes,Scenes,"Host,CoHost,Owner,Admin",Create scene
 DELETE,/api/v1/workspaces/{workspaceId}/scenes/{sceneId},Scenes,"Host,CoHost,Owner,Admin",Delete scene; cascade child content blocks/visibility rules/asset links; re-pack remaining scene ordering without gaps; workspace-scoped lookup; audited; hidden-404

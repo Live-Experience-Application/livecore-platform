@@ -11,6 +11,7 @@ using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
+using LiveCore.Api.Recaps;
 using LiveCore.Api.Scenes;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Store;
@@ -558,6 +559,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // defines none). The complementary deployment control — REVOKE UPDATE/DELETE on audit_logs — is documented in
     // docs/13_SELF_HOSTING_REQUIREMENTS.md.
     builder.Services.AddScoped<AuditLogChainVerifier>();
+
+    // Recap repository (CORE-AUD-004): the Recaps module's write-once recap persistence (append + tenant-/
+    // workspace-scoped reads only, no update/delete — a recap is the produced output of a session, mirroring
+    // the append-only audit log). Registered here, inside the persistence conditional, because it depends on
+    // the DbContext. The worker host registers the SAME repository for the background generation job
+    // (RecapGenerationServiceCollectionExtensions.AddRecapGeneration); the API host needs it too so the recap
+    // read endpoint (CORE-RCP-003, GET /api/v1/sessions/{sessionId}/recap, wired by MapRecapEndpoints) can
+    // serve a generated recap. The host-vs-audience RecapProjection is a static policy, so — like the
+    // export/audit projectors — it needs no DI registration.
+    builder.Services.AddScoped<IRecapRepository, RecapRepository>();
 
     // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent
     // reveal — makes a resource VISIBLE to the audience (reusing the CORE-VIS-001
@@ -1218,6 +1229,20 @@ app.MapWorkspaceEndpoints();
 // persisted status transition is the behavior delivered (docs/09_EVENT_CATALOG.md;
 // csv/database_tables.csv assigns session_events to the Realtime module).
 app.MapSessionEndpoints();
+
+// Recap read endpoint (CORE-RCP-003, the "Vertical Authoring and Read API Completeness" epic):
+// GET /api/v1/sessions/{sessionId}/recap. A recap was generated and persisted by the worker (CORE-RCP-001/002)
+// but had no HTTP surface, so an end user could not retrieve it; this finally gives the recap a read route. It
+// lives in an authenticated route group and fails closed (503) when persistence is not configured, exactly
+// like the session endpoints. No new DI registration beyond the recap repository above is required: the tenant
+// context resolver, the session repository and the workspace member repository it also consumes are already
+// registered. The tenant comes from the required ?organizationSlug=; a service account / foreign tenant /
+// unknown session / non-member is hidden as 404 (threats T1/T5), and a known member receives the recap
+// PROJECTED BY ROLE through the existing RecapProjection — host-content roles get the full body, the audience
+// gets the host-only-field-stripped summary (a generated recap is host content until a separate reveal,
+// docs/09_EVENT_CATALOG.md; threats T2/T8). The separate participant reveal of a recap body stays deferred
+// (docs/24_SPEC_CONSISTENCY.md).
+app.MapRecapEndpoints();
 
 // Participant presence endpoints (CORE-PRS-001): the join/leave routes
 // POST /api/v1/sessions/{sessionId}/participants/{participantId}/join and .../leave. They are the real entry

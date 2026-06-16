@@ -61,6 +61,7 @@ POST   /api/v1/sessions/{sessionId}/participants/{participantId}/leave
 GET    /api/v1/sessions/{sessionId}/events
 POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide
+GET    /api/v1/sessions/{sessionId}/recap
 GET    /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder

@@ -395,16 +395,24 @@ following are deferred by design (date recorded **2026-06-15**):
   is **no export read/download route**. Owner: **Core-later** (the Exports
   endpoint story). Rationale: the projector is the reusable, fail-closed core a
   later endpoint sits on, and threat **T8 "Export leak"** is already held by the
-  role-based projection regardless of when the route lands. CORE-E2E-003 already
-  records that recap/export have no HTTP read endpoint by design.
-- **Recap read route + separate participant reveal.** The `Recap` aggregate, its
-  persistence, EF migration and host-vs-audience role-based projection
-  (`Recap.cs`) are implemented; there is **no recap read route**, and the
-  separate participant reveal of a recap body is likewise deferred. Owner:
-  **Core-later** (the Recaps endpoint story). Rationale: a generated recap is
-  host content ("Participant-visible only after separate reveal",
-  `docs/09_EVENT_CATALOG.md` / `RecapGenerated`, threat **T2**), guarded by the
-  projection, not by the absence of a route.
+  role-based projection regardless of when the route lands. CORE-E2E-003 still
+  asserts the export has no HTTP read endpoint at the projection layer (the recap
+  half of that journey now has a read route, CORE-RCP-003 above).
+- **Separate participant reveal of a recap body** (the recap READ route now
+  exists). The `Recap` aggregate, its persistence, EF migration and
+  host-vs-audience role-based projection (`Recap.cs`) were implemented ahead of
+  any route; the **recap read route is now mounted** —
+  `GET /api/v1/sessions/{sessionId}/recap` (CORE-RCP-003, `RecapEndpoints.cs`,
+  `csv/api_routes.csv`), authorized like the session read surface (any workspace
+  member; foreign-tenant/unknown-session/non-member hidden-404, fail-closed) and
+  role-projected through the existing `RecapProjection` so the audience receives
+  the host-only-field-stripped summary. What remains deferred is the **separate
+  participant reveal of a recap body**: a generated recap is host content
+  ("Participant-visible only after separate reveal",
+  `docs/09_EVENT_CATALOG.md` / `RecapGenerated`, threat **T2**), so a participant
+  reading the recap read route never receives the body until that reveal lands.
+  Owner: **Core-later** (the recap-reveal story). Rationale: the host-only body is
+  guarded by the projection, not by the absence of a reveal route.
 - **Entity / entity-type / entity-relationship / template / visibility-rule
   create and list endpoints.** The Entities, Templates and Visibility
   repositories (CORE-ENT-001..004, CORE-VIS-001) are implemented with **no
