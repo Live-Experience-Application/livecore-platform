@@ -824,6 +824,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (CORE-CONC-002). Consumed by POST /api/v1/workspaces/{workspaceId}/entities.
     builder.Services.AddScoped<EntityCreationService>();
 
+    // Entity-type create command (CORE-ENT-007, the "Vertical Authoring and Read API Completeness" epic): the
+    // Entities module's "an authoring role can define a generic entity type" command. Registered here, inside
+    // the persistence conditional, because it composes the entity-type and audit repositories plus the shared
+    // DbContext for a single transaction. It resolves any existing per-workspace key through the tenant- AND
+    // workspace-scoped IEntityTypeRepository.FindByKeyAsync FIRST (a key the workspace already defines is a
+    // duplicate), then creates the type with a server-minted id and appends an EntityTypeCreated audit record,
+    // the insert and audit committing together (CORE-CONC-002). Consumed by
+    // POST /api/v1/workspaces/{workspaceId}/entity-types.
+    builder.Services.AddScoped<EntityTypeCreationService>();
+
     // Content block deletion command (CORE-LIFE-004, the "Resource Lifecycle and Deletion" epic): the
     // Content module's "a host can delete a content block from a scene" command. Registered here, inside the
     // persistence conditional, because it composes the content-block, visibility-rule, asset-link and audit
@@ -1417,6 +1427,24 @@ app.MapEntityRelationshipEndpoints();
 // (CORE-LIFE-003) CASCADES the entity's dependent edges, visibility rules and asset links and audits the
 // deletion (EntityDeleted), all atomically (docs/adr/0012-resource-deletion-cascades-dependents.md).
 app.MapEntityEndpoints();
+
+// Entity-type endpoints (CORE-ENT-007): the Entities module's generic entity-TYPE routes under
+// /api/v1/workspaces/{workspaceId}/entity-types. They live in the same authenticated route group and fail
+// closed (503) when persistence is not configured, exactly like the entity endpoints. The DI they consume —
+// the tenant context resolver, the entity-type/workspace and workspace-member repositories and the
+// EntityTypeCreationService above — is all registered inside the persistence conditional. An entity type is the
+// DATA-DRIVEN definition of a kind of entity (its template key plus field/type metadata), the template boundary
+// through which a vertical maps its domain onto Core (docs/04). The story adds the authoring CRUD: GET list and
+// GET by-id, and POST create, which mints the type's server-side id and audits the definition
+// (EntityTypeCreated). Unlike the entity list/read, an entity type is an authoring/schema artifact rather than
+// audience content, so ALL THREE routes are restricted to the authoring roles (Owner/Admin/Host/CoHost) with no
+// host-vs-participant projection ("authorize like entity authoring"). The parent workspace is resolved FIRST
+// (the route pins {workspaceId}, the tenant comes from the required organizationSlug), the caller is authorized
+// by their role in that workspace, and every type is loaded through the tenant- AND workspace-scoped repository
+// — so a type in another workspace or tenant is never reachable even when its id is known. A non-member is
+// hidden as 404, an insufficient role is 403, an unknown/foreign type is a safe 404, a duplicate per-workspace
+// key or an archived workspace is 409 (threats T1/T5; CORE-LIFE-009).
+app.MapEntityTypeEndpoints();
 
 // Asset endpoints (CORE-AST-003 upload intent, CORE-AST-004 signed download, CORE-AST-005
 // linking, CORE-LIFE-006 deletion): the Assets module's HTTP routes,

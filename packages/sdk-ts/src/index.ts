@@ -47,6 +47,7 @@ export { SessionsClient } from "./resources/sessions.js";
 export { ScenesClient } from "./resources/scenes.js";
 export { ContentClient } from "./resources/content.js";
 export { EntitiesClient } from "./resources/entities.js";
+export { EntityTypesClient } from "./resources/entity-types.js";
 export { VisibilityClient } from "./resources/visibility.js";
 export type { RevealOptions } from "./resources/visibility.js";
 export { RealtimeClient } from "./resources/realtime.js";

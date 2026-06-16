@@ -867,6 +867,70 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records an entity-type definition (<see cref="AuditAction.EntityTypeCreated"/>) — the audit fact written
+    /// when an authorized authoring role defines a new entity TYPE in a workspace (CORE-ENT-007). It is the
+    /// type-definition counterpart of <see cref="ForEntityCreation"/> and, like it, a thin specialization of
+    /// <see cref="Create"/> that pins the action and applies the producer's stricter contract: the tenant, the
+    /// workspace the type belongs to, the authenticated actor (the authoring role who defined the type) and the
+    /// created entity-type resource (its generic kind name and surrogate id) are all REQUIRED, where the generic
+    /// factory leaves them optional. A definition is the BIRTH of a resource rather than a transition, and an
+    /// entity type has no lifecycle state, so there is NO before/after state pair (both null). The resource kind
+    /// is passed as a generic NAME string (e.g. <c>EntityType</c>) so the Audit module does not depend on the
+    /// Entities module's types, exactly like <see cref="ForVisibilityRuleChange"/> takes visibility state names
+    /// as strings. Every value is an identifier or a generic name — never the type's host-/template-supplied key,
+    /// display name or attribute schema or any free-form content (threat T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the definition happened in (required).</param>
+    /// <param name="workspaceId">The workspace the created entity type belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The authoring role who defined the type (required; the audited actor).</param>
+    /// <param name="entityTypeResourceType">The created entity type's generic kind name (e.g. EntityType).</param>
+    /// <param name="entityTypeId">The created entity type's surrogate id.</param>
+    /// <param name="createdAt">When the definition happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the entity-type resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForEntityTypeCreation(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string entityTypeResourceType,
+        Guid entityTypeId,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(entityTypeResourceType))
+        {
+            throw new ArgumentException("Entity type resource type must not be empty.", nameof(entityTypeResourceType));
+        }
+
+        if (entityTypeId == Guid.Empty)
+        {
+            throw new ArgumentException("Entity type id must not be empty.", nameof(entityTypeId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.EntityTypeCreated,
+            actorUserProfileId,
+            entityTypeResourceType,
+            entityTypeId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an entity deletion (<see cref="AuditAction.EntityDeleted"/>) — the audit fact written when
     /// an authorized host deletes an entity, removing it and its dependent edges, visibility rules and
     /// asset links (CORE-LIFE-003). A thin specialization of <see cref="Create"/> that pins the action and

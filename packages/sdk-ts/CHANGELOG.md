@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- `EntityTypesClient` (exposed as `client.entityTypes`): `list`, `get` and
+  `create` for a workspace's generic entity types under
+  `/api/v1/workspaces/{workspaceId}/entity-types` (CORE-ENT-007). An entity type
+  is an authoring/schema artifact rather than audience content, so all three
+  methods return the single `EntityTypeResponse` shape (no role-projected union);
+  the routes are authorized to the authoring roles only.
 - `EntitiesClient` (exposed as `client.entities`): `list`, `get` and `create`
   for a workspace's generic entities under
   `/api/v1/workspaces/{workspaceId}/entities` (CORE-ENT-006). `list`/`get` return

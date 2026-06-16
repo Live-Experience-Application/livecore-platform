@@ -2158,6 +2158,51 @@ which entities an audience may actually _see_ is the entity-search read (CORE-EN
 and the Visibility module's concern. No vertical entity-type logic lives in Core: every
 entity behaves identically and is defined entirely by its stored data and its type id.
 
+### Entity-type authoring API (create, list, read)
+
+An entity **type** is how a vertical maps its domain onto Core: the generic,
+**data-driven** definition of a kind of entity — a stable template **key** plus
+field/type metadata (the template boundary, `docs/04_PRODUCT_BOUNDARIES.md`). The
+entity-type model, repository and template loader shipped earlier (CORE-ENT-001/004)
+with **no HTTP route**; CORE-ENT-007 (the "Vertical Authoring and Read API
+Completeness" epic) adds the authoring CRUD so an authoring role can define, list and
+read its types over the API:
+
+| Method | Route                                                          | Authorized callers                        |
+| ------ | -------------------------------------------------------------- | ----------------------------------------- |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/entity-types`                | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+| `POST` | `/api/v1/workspaces/{workspaceId}/entity-types`                | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+| `GET`  | `/api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId}` | workspace `Owner`/`Admin`/`Host`/`CoHost` |
+
+Each route pins the `{workspaceId}` in its path and resolves the target organization
+from the request (a required `?organizationSlug=` query parameter for the reads, an
+`organizationSlug` body field for the create) — the same token-claim-and-membership
+tenant check as the other workspace by-id routes. The **parent workspace is resolved
+first**, the caller's membership in that workspace is loaded, and every type is read
+through the tenant- **and** workspace-scoped repository, so a type in another workspace,
+or in a workspace owned by another tenant, is never returned even when its id is known
+(threats T1/T5). A caller who cannot see the tenant, or is not a member of the route's
+workspace, is hidden as `404` (never `403`); an unknown/foreign type is a safe `404`.
+
+Unlike the entity list/read, an entity type is an **authoring/schema artifact, not
+audience content**, so all three routes are restricted to the **authoring roles**
+(`Owner`/`Admin`/`Host`/`CoHost`, matched exactly — `MembershipRole` is non-linear)
+with **no** host-vs-participant projection: no audience role ever receives an entity
+type, and a known workspace member who lacks the authoring role is `403` ("authorize
+like entity authoring").
+
+**Create** assigns the type a **server-side id** and binds it immutably to the route's
+tenant and workspace. The request names the type's `typeKey` (canonicalized to a stable
+lower-case slug, unique within the workspace), a human `displayName` and an
+`attributeSchema` (a JSON document of the template-defined fields, defaulting to `{}`
+when omitted) — all generic, product-neutral **data** the platform stores **without
+inspecting its vocabulary and without ever branching on it** (no `if entityType == …`
+in Core source, `docs/04`). The create and its append-only audit record
+(`EntityTypeCreated`) commit together in one transaction; a `typeKey` the workspace
+already defines is a `409 Conflict` (the same key stays available to other workspaces),
+and an archived (read-only) workspace rejects the create with a `409` (CORE-LIFE-009).
+On success the route returns `201 Created` with the entity type.
+
 ### Entity relationship removal
 
 The Entities module owns generic `EntityRelationship` edges — directed graph edges

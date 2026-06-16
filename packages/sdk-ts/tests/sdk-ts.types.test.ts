@@ -10,6 +10,7 @@
 import type {
   AdEligibilityResponse,
   EntityResponse,
+  EntityTypeResponse,
   ExportArtifactResponse,
   ParticipantEntityResponse,
   ParticipantSceneResponse,
@@ -26,6 +27,7 @@ import type {
 import type {
   AssetsClient,
   EntitiesClient,
+  EntityTypesClient,
   EntitlementsClient,
   ExportsClient,
   LiveCoreApiError,
@@ -146,6 +148,22 @@ export type CreateEntityReturn = Assert<
   Equal<Awaited<ReturnType<EntitiesClient["create"]>>, EntityResponse>
 >;
 
+// --- The entity-type list/read/create are the single (non-projected) shape. ------
+// An entity type is an authoring/schema artifact, not audience content, so there is
+// no host-vs-participant union — every authoring caller receives the same shape.
+
+export type EntityTypeListReturn = Assert<
+  Equal<Awaited<ReturnType<EntityTypesClient["list"]>>, EntityTypeResponse[]>
+>;
+
+export type EntityTypeGetReturn = Assert<
+  Equal<Awaited<ReturnType<EntityTypesClient["get"]>>, EntityTypeResponse>
+>;
+
+export type CreateEntityTypeReturn = Assert<
+  Equal<Awaited<ReturnType<EntityTypesClient["create"]>>, EntityTypeResponse>
+>;
+
 // --- The reveal command REQUIRES a stable idempotency key (retry safety). --------
 
 export type RevealRequiresKey = Assert<
@@ -189,4 +207,8 @@ export type ClientHasStore = Assert<
 
 export type ClientHasEntities = Assert<
   Equal<LiveCoreClient["entities"], EntitiesClient>
+>;
+
+export type ClientHasEntityTypes = Assert<
+  Equal<LiveCoreClient["entityTypes"], EntityTypesClient>
 >;

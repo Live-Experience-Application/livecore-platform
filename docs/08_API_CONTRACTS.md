@@ -71,6 +71,9 @@ POST   /api/v1/scenes/{sceneId}/content-blocks
 GET    /api/v1/workspaces/{workspaceId}/entities
 POST   /api/v1/workspaces/{workspaceId}/entities
 GET    /api/v1/workspaces/{workspaceId}/entities/{entityId}
+GET    /api/v1/workspaces/{workspaceId}/entity-types
+POST   /api/v1/workspaces/{workspaceId}/entity-types
+GET    /api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId}
 GET    /api/v1/participants/{participantId}/visible-feed
 POST   /api/v1/assets/upload-intent
 GET    /api/v1/assets/{assetId}/download-url

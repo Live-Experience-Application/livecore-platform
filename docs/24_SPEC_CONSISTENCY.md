@@ -426,9 +426,9 @@ following are deferred by design (date recorded **2026-06-15**):
   reading the recap read route never receives the body until that reveal lands.
   Owner: **Core-later** (the recap-reveal story). Rationale: the host-only body is
   guarded by the projection, not by the absence of a reveal route.
-- **Entity-type / entity-relationship-list / template / visibility-rule create
-  and list endpoints.** The entity-TYPE, template and visibility-rule
-  repositories (CORE-ENT-001/004, CORE-VIS-001) are implemented with **no
+- **Entity-relationship-list / template / visibility-rule create
+  and list endpoints.** The template and visibility-rule
+  repositories (CORE-ENT-004, CORE-VIS-001) are implemented with **no
   list-everything method** and **no HTTP route** (`csv/api_routes.csv` defines
   none). Owner: **Core-later** (the respective endpoint stories — e.g.
   CORE-VIS-004). Rationale: the **explicit-ids contract** — the same-workspace
@@ -446,6 +446,17 @@ following are deferred by design (date recorded **2026-06-15**):
   (an entity is content, so only the host-content roles receive its
   attribute-values; threats T2/T5). The entity **search** read with per-participant
   visibility filtering remains its own concern (CORE-ENT-005).
+  **Resolved for entity types (2026-06-16, CORE-ENT-007):** the entity-TYPE
+  create/list/by-id-read routes are now **mounted** under
+  `/api/v1/workspaces/{workspaceId}/entity-types` — the type definition (template
+  key plus field/type metadata) is stored as **data only** (no `if entityType`
+  branching in Core source, docs/04), the list/read are **workspace-scoped** (no
+  list-everything), and — because an entity type is an **authoring/schema artifact,
+  not audience content** — all three routes are restricted to the **authoring
+  roles** (`Owner`/`Admin`/`Host`/`CoHost`) with **no** host-vs-participant
+  projection ("authorize like entity authoring"; a non-authoring member is `403`, a
+  foreign/unknown type hidden-`404`, a duplicate per-workspace key or archived
+  workspace `409`, all fail-closed; the create is audited as `EntityTypeCreated`).
 - **Content-block list/get/update/revise route.** `ContentBlockEndpoints.cs`
   mounts only create and delete; there is deliberately **no
   list/get/update/revise route** (the revise capability lives on the aggregate

@@ -12,6 +12,13 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Entity-type module contracts (`CreateEntityTypeRequest`, `EntityTypeResponse`)
+  for the entity-type create/list/by-id-read routes under
+  `/api/v1/workspaces/{workspaceId}/entity-types`. An entity type is the
+  data-driven definition of a kind of entity (template key plus field/type
+  metadata, the template boundary); it is an authoring/schema artifact rather than
+  audience content, so there is a single `EntityTypeResponse` shape (no
+  host-vs-participant projection) (CORE-ENT-007).
 - Entities module contracts (`CreateEntityRequest`, `EntityResponse`,
   `ParticipantEntityResponse`) for the entity create/list/by-id-read routes under
   `/api/v1/workspaces/{workspaceId}/entities`. An entity is content, so the list

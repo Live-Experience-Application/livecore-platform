@@ -139,6 +139,23 @@ public enum AuditAction
     EntityCreated = 22,
 
     /// <summary>
+    /// An authoring role defined a new entity TYPE in a workspace — the entity-type create command
+    /// (CORE-ENT-007, the "Vertical Authoring and Read API Completeness" epic). It is the type-definition
+    /// counterpart of <see cref="EntityCreated"/>: an entity type is the generic, DATA-DRIVEN definition of a
+    /// kind of entity (its template key plus field/type metadata) through which a vertical maps its domain onto
+    /// Core (the template boundary, docs/04_PRODUCT_BOUNDARIES.md). Auditing the definition satisfies the
+    /// story's "tenant/workspace-scoped; audited" criterion: it records that an authorized authoring role added
+    /// a workspace type definition (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). A definition is the
+    /// birth of a resource, not a transition of an existing one, and an entity type has no lifecycle state, so
+    /// there is NO before/after state pair (both null). A generic, workspace-scoped audit fact whose actor is
+    /// the authoring role who defined the type and whose resource is the created type (its generic kind name
+    /// and surrogate id); the type's host-/template-supplied key, display name and attribute schema are NEVER
+    /// recorded — only identifiers and the generic kind name (threat T7)
+    /// (<see cref="AuditLogEntry.ForEntityTypeCreation"/>).
+    /// </summary>
+    EntityTypeCreated = 23,
+
+    /// <summary>
     /// A host deleted an entity, removing it and its dependent edges, visibility rules and asset links —
     /// the entity deletion command (CORE-LIFE-003, the "Resource Lifecycle and Deletion" epic). Auditing
     /// the deletion satisfies the story's "deletion is authorized and audited" criterion: it records that
