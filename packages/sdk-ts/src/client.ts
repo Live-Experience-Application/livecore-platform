@@ -19,6 +19,7 @@ import type { LiveCoreClientOptions } from "./options.js";
 import { AssetsClient } from "./resources/assets.js";
 import { ContentClient } from "./resources/content.js";
 import { EntitlementsClient } from "./resources/entitlements.js";
+import { ExportsClient } from "./resources/exports.js";
 import { RealtimeClient } from "./resources/realtime.js";
 import { ScenesClient } from "./resources/scenes.js";
 import { SessionsClient } from "./resources/sessions.js";
@@ -41,6 +42,8 @@ export class LiveCoreClient {
   readonly realtime: RealtimeClient;
   /** Asset upload-intent, signed-download and linking flows. */
   readonly assets: AssetsClient;
+  /** Completed workspace export read/download. */
+  readonly exports: ExportsClient;
   /** Quota status and ad-eligibility reads. */
   readonly entitlements: EntitlementsClient;
   /** Purchase verification submissions. */
@@ -55,6 +58,7 @@ export class LiveCoreClient {
     this.visibility = new VisibilityClient(http);
     this.realtime = new RealtimeClient(http);
     this.assets = new AssetsClient(http);
+    this.exports = new ExportsClient(http);
     this.entitlements = new EntitlementsClient(http);
     this.store = new StoreClient(http);
   }

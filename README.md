@@ -3118,9 +3118,10 @@ projection" control for threat T8): the full `ExportJobView` for host-capable / 
 (Owner/Admin/Host/CoHost/Auditor — the "View workspace metadata" = yes roles) versus the
 stripped, audience-safe `ExportJobSummaryView` (`{id, scope, status}` only) for audience roles,
 fail-closed to the summary shape for any undefined role. The projector decides the view **shape**,
-not access; the export-request/list HTTP route and its server-side access authorization are a
-later Exports story. CORE-AUD-002 is the export job model, its persistence and its EF migration
-only; there is no export HTTP route yet.
+not access; CORE-AUD-002 is the export job model, its persistence and its EF migration only. The
+export **read/download** route that retrieves a completed export's artifact is now mounted
+(CORE-EXP-001, [Reading an export over HTTP](#reading-an-export-over-http)); an export-request HTTP
+route and a user-data export pipeline remain later Exports stories.
 
 ### Export manifests
 
@@ -3158,10 +3159,50 @@ full `ExportManifestView` (with the inventory) for host-capable / metadata roles
 audience-safe `ExportManifestSummaryView` (`{id, scope}` only — no inventory) for audience roles,
 fail-closed to the summary shape for any undefined role. The projector decides the view **shape**,
 not access; CORE-AUD-003 is the manifest model, its persistence, its EF migration and its role-based
-projection only. The worker that actually **drives** the export and produces the manifest is now
+projection only. The worker that actually **drives** the export and produces the manifest is
 implemented — the export processing background job (CORE-JOB-002; see "Export processing job" above) —
-while any export HTTP route with its server-side access authorization remains a later Exports story
-(exactly as CORE-AUD-002 deferred the export endpoint); there is no export HTTP route yet.
+and the export **read/download** route that retrieves the produced manifest as a completed export's
+artifact is now mounted (CORE-EXP-001; see [Reading an export over HTTP](#reading-an-export-over-http)).
+
+#### Reading an export over HTTP
+
+CORE-EXP-001 (the `Vertical Authoring and Read API Completeness` epic) adds the export **read/download**
+route on top of the existing repositories and projection — an export job and its manifest were produced
+but had no HTTP surface, so an authorized host could not retrieve a completed export:
+
+```text
+GET /api/v1/exports/{exportId}?organizationSlug={slug}
+```
+
+In the Core model a completed workspace export's produced **artifact** is its `ExportManifest` — the
+per-kind **table of contents** of what the export covered (counts only, never any exported scene/content
+body; threats T7/T8). The Core stores no separate export blob in object storage, so the artifact is
+delivered as an **authorized stream** — the role-projected manifest in this authenticated, authorized
+response body — and **never** through a public or static URL: the manifest lives only in the
+tenant-scoped database and is reachable only through this server-side permission check, exactly as the
+asset flow never hands out a public bucket URL (threat T4). The route path carries only the `{exportId}`
+(the export **job** id), so the target tenant is the required `?organizationSlug=` query parameter
+(exactly like the asset signed-download and recap read routes).
+
+Authorization is **object-level**, server-side and **fail-closed**, and — like the asset signed-download
+flow — runs **before any artifact is produced** (`docs/06_AUTHORIZATION_MATRIX.md` "Export workspace";
+threats T1/T5/T8). The trusted tenant is resolved from the token claim **and** persisted membership, the
+export job is loaded within that tenant (so a foreign tenant's export is never reached even when the id
+matches), and the caller must be a member of the export's **own** workspace. A service account, a
+foreign/unknown tenant, an unknown export and a non-member are all hidden as **404** (never
+distinguishable, never echoing why). A known member who is not an authorized downloader is **403**: the
+authorized set is the "Export workspace" roles {Owner, Admin, Host} (`ExportAccessPolicy` — an exact,
+non-linear set membership; CoHost, the audience roles Participant/Observer and the deployment-optional
+Auditor all fail closed), so a **non-authoring** caller is denied outright and a participant never
+receives any host-only export content. Only **after** authorization is the export's availability checked
+(so an unauthorized caller never learns its state): an **incomplete or failed** export — anything not
+`Completed`, or (defensively) a completed job with no manifest — has no retrievable artifact and is
+**409** (mirroring the asset signed-download 409 for a still-pending asset). A downloadable, completed
+export is returned **200** as its artifact role-projected through the same `ExportManifestProjection`
+the worker journey (CORE-E2E-003) exercises (defence in depth: the export shape stays role-scoped even
+though only full-view roles reach this point). A retention-based export **expiry** (a true `ExpiresAt`
+with an object-storage purge) and a user-data export pipeline remain later stories
+(`docs/24_SPEC_CONSISTENCY.md`).
 
 ### Recaps
 

@@ -4,6 +4,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
+using LiveCore.Api.Exports;
 using LiveCore.Api.Hosting;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Observability;
@@ -569,6 +570,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // serve a generated recap. The host-vs-audience RecapProjection is a static policy, so — like the
     // export/audit projectors — it needs no DI registration.
     builder.Services.AddScoped<IRecapRepository, RecapRepository>();
+
+    // Export job + manifest repositories (CORE-AUD-002/003): the Exports module's tenant- and workspace-scoped
+    // export job and produced-manifest persistence. The worker host registers the SAME repositories for the
+    // background export-processing job (ExportProcessingServiceCollectionExtensions.AddExportProcessing); the API
+    // host needs them too so the export read/download endpoint (CORE-EXP-001,
+    // GET /api/v1/exports/{exportId}, wired by MapExportEndpoints) can serve a completed export's artifact. The
+    // role-based ExportManifestProjection and the ExportAccessPolicy download gate are static policies, so — like
+    // the recap/audit projectors — they need no DI registration.
+    builder.Services.AddScoped<IExportJobRepository, ExportJobRepository>();
+    builder.Services.AddScoped<IExportManifestRepository, ExportManifestRepository>();
 
     // Reveal command service (CORE-VIS-004; CORE-VIS-006 audit): the Visibility module's idempotent
     // reveal — makes a resource VISIBLE to the audience (reusing the CORE-VIS-001
@@ -1243,6 +1254,21 @@ app.MapSessionEndpoints();
 // docs/09_EVENT_CATALOG.md; threats T2/T8). The separate participant reveal of a recap body stays deferred
 // (docs/24_SPEC_CONSISTENCY.md).
 app.MapRecapEndpoints();
+
+// Export read/download endpoint (CORE-EXP-001, the "Vertical Authoring and Read API Completeness" epic):
+// GET /api/v1/exports/{exportId}. The export job and its produced manifest (with the role-based projection) were
+// modeled, persisted and processed by the worker (CORE-AUD-002/003, CORE-JOB-002) but had no HTTP surface, so an
+// authorized host could not retrieve a completed export; this finally gives the export a read/download route. It
+// lives in an authenticated route group and fails closed (503) when persistence is not configured, exactly like
+// the asset/recap endpoints. No new DI registration beyond the export job + manifest repositories above is
+// required: the tenant context resolver and the workspace member repository it also consumes are already
+// registered. The tenant comes from the required ?organizationSlug=; a service account / foreign tenant /
+// unknown export / non-member is hidden as 404 (threats T1/T5), an authorized downloader is the "Export
+// workspace" set {Owner,Admin,Host} (ExportAccessPolicy; a non-authoring role is 403), and an incomplete/failed
+// export is 409. The completed export's artifact (its manifest) is returned PROJECTED BY ROLE through the
+// existing ExportManifestProjection and delivered as an authorized stream — never a public/static URL (threats
+// T4/T8). Authorization runs BEFORE any artifact is produced (the asset signed-URL discipline).
+app.MapExportEndpoints();
 
 // Participant presence endpoints (CORE-PRS-001): the join/leave routes
 // POST /api/v1/sessions/{sessionId}/participants/{participantId}/join and .../leave. They are the real entry

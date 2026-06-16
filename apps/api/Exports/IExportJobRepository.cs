@@ -35,6 +35,26 @@ public interface IExportJobRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Finds the export job with exactly the given id WITHIN the given organization, or
+    /// <see langword="null"/> when no such job exists there, discovering the job's own workspace from the
+    /// loaded row. Unlike <see cref="FindByIdAsync"/> this lookup is scoped by the TENANT only, for the
+    /// by-export-id read route whose path carries the export id but not the workspace (the export read/download
+    /// endpoint, CORE-EXP-001): the predicate leads with <c>organization_id</c>, so a job under another tenant's
+    /// id is never returned even when the surrogate id matches, and the caller then authorizes against the
+    /// loaded job's OWN workspace AFTER the tenant boundary has been enforced — exactly the load-then-authorize
+    /// shape <see cref="LiveCore.Api.Assets.IAssetRepository.FindByIdInOrganizationAsync"/> uses for the asset
+    /// signed-download route (threat T5 tenant isolation; threat T1 broken object-level authorization).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or job id is empty. An empty id can never address a stored job, so the lookup is
+    /// rejected instead of silently returning nothing.
+    /// </exception>
+    Task<ExportJob?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists every export job of the given workspace (owned by the given organization) in a deterministic
     /// order — sorted by the surrogate id, which is time-ordered (UUIDv7), so the sequence is stable and
     /// repeatable. The list is tenant- AND workspace-scoped: the predicate leads with <c>organization_id</c>

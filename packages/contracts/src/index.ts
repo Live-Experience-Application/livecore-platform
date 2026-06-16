@@ -39,5 +39,6 @@ export * from "./content.js";
 export * from "./visibility.js";
 export * from "./realtime.js";
 export * from "./assets.js";
+export * from "./exports.js";
 export * from "./entitlements.js";
 export * from "./store.js";

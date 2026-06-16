@@ -343,6 +343,12 @@ public sealed class ExportProcessingServiceTests
         public Task<IReadOnlyList<ExportJob>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        // The export-processing sweep re-resolves a job by its full tenant + workspace scope (FindByIdAsync);
+        // the tenant-only by-id lookup is the read/download endpoint's path, never the worker's, so it is
+        // unsupported here as a regression guard.
+        public Task<ExportJob?> FindByIdInOrganizationAsync(Guid organizationId, Guid id, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         // IWorkspaceExportInventoryReader ----------------------------------------------------------------------
 
         public Task<IReadOnlyDictionary<ExportResourceKind, int>> CountWorkspaceResourcesAsync(

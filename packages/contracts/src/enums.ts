@@ -103,6 +103,35 @@ export const AssetLinkTargetTypes = ["ContentBlock", "Entity"] as const;
 /** An asset-link target kind name. */
 export type AssetLinkTargetType = (typeof AssetLinkTargetTypes)[number];
 
+/**
+ * The explicit, generic scope of an export job — what data set the export covers
+ * (`Workspace` = the full workspace data set; `UserData` = a single user's own
+ * data). An export scope is a security boundary, not a cosmetic label: it bounds
+ * what an export may ever include and can never be widened after creation (the
+ * "explicit host/admin export scopes" control for threat T8).
+ */
+export const ExportScopes = ["Workspace", "UserData"] as const;
+
+/** An export scope name. */
+export type ExportScope = (typeof ExportScopes)[number];
+
+/**
+ * The generic, product-neutral kind of Core resource a workspace export manifest
+ * inventories. The manifest carries a count per kind, never the content itself,
+ * so it reveals only the shape of an export (threats T7/T8).
+ */
+export const ExportResourceKinds = [
+  "Session",
+  "Scene",
+  "ContentBlock",
+  "Entity",
+  "Participant",
+  "Asset",
+] as const;
+
+/** An export resource kind name. */
+export type ExportResourceKind = (typeof ExportResourceKinds)[number];
+
 /** The unit a quota measures usage in. */
 export const QuotaUnits = ["Count", "Bytes"] as const;
 

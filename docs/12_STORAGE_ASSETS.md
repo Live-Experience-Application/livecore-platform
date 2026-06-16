@@ -285,3 +285,27 @@ status
 - public bucket access
 - long-lived signed URLs
 - direct storage credentials in frontend
+
+## Export artifacts (CORE-EXP-001)
+
+The export read/download route — `GET /api/v1/exports/{exportId}` (`ExportEndpoints.cs`,
+`csv/api_routes.csv`) — applies the same "no public URL, authorized delivery" rule as the asset
+signed-download flow. In the Core model a completed workspace export's produced artifact is its
+`ExportManifest` (the per-kind table of contents — counts only, never any exported scene/content body;
+threats T7/T8); the Core stores no separate export blob in object storage, so the artifact is delivered
+as an **authorized stream** — the role-projected manifest in the authenticated, authorized response body
+— and **never** through a public or static URL.
+
+- the download is **authorized before any artifact is produced** (the asset signed-URL discipline):
+  resolve the trusted tenant, load the export job within it, resolve the caller's role in the export's
+  **own** workspace, and only then return the artifact
+- only the **"Export workspace"** roles {Owner, Admin, Host} may download (`ExportAccessPolicy`); a
+  non-authoring role is **403**, so a participant-scoped (audience) caller never receives host-only
+  export content (threat T8 "Export leak")
+- a foreign-tenant, unknown export, or non-member of the export's workspace is hidden as **404**
+  (threats T1/T5); an incomplete or failed export (no retrievable artifact) is **409**
+- the artifact is role-projected through the existing `ExportManifestProjection`, so the export shape
+  stays role-scoped (defence in depth)
+
+A retention-based expiry of the artifact (a true `ExpiresAt` with an object-storage purge) lands with
+the data-retention sweeps (CORE-PRIV-003), as does a user-data (`ExportScope.UserData`) export pipeline.

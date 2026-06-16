@@ -366,6 +366,73 @@ public sealed class ExportJobRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task FindByIdInOrganization_returns_the_job_and_discovers_its_workspace()
+    {
+        // The tenant-only by-id lookup the export read/download endpoint uses (CORE-EXP-001): the route carries
+        // the export id but not the workspace, so the job is resolved by (organization, id) and its own workspace
+        // is discovered from the loaded row.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var seeded = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+        var loaded = await repository.FindByIdInOrganizationAsync(organization.Id, seeded.Id, CancellationToken.None);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(seeded.Id, loaded.Id);
+        Assert.Equal(workspace.Id, loaded.WorkspaceId);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_for_a_missing_job_returns_null()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+        var loaded = await repository.FindByIdInOrganizationAsync(
+            organization.Id, Guid.CreateVersion7(), CancellationToken.None);
+
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_never_resolves_a_job_through_another_tenants_id()
+    {
+        // Mandatory negative foreign-tenant test (threat T5): a job exists in a workspace owned by organization
+        // A. The tenant-only by-id lookup under organization B's id must return null even though the job id is
+        // correct — the predicate leads with the organization id, so a foreign tenant's export is never reached.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceInA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var inA = await SeedJobAsync(organizationA.Id, workspaceInA.Id, user.Id);
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+
+        var underA = await repository.FindByIdInOrganizationAsync(organizationA.Id, inA.Id, CancellationToken.None);
+        var underB = await repository.FindByIdInOrganizationAsync(organizationB.Id, inA.Id, CancellationToken.None);
+
+        Assert.NotNull(underA);
+        Assert.Null(underB);
+    }
+
+    [Fact]
+    public async Task FindByIdInOrganization_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.FindByIdInOrganizationAsync(Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task ListByWorkspace_never_returns_another_tenants_jobs()
     {
         // A list scoped to organization A's workspace never borrows organization B's jobs, even when the

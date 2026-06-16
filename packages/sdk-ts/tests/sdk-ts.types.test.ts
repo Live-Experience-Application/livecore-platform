@@ -9,6 +9,7 @@
  */
 import type {
   AdEligibilityResponse,
+  ExportArtifactResponse,
   ParticipantSceneResponse,
   ProblemDetails,
   PurchaseVerificationResponse,
@@ -23,6 +24,7 @@ import type {
 import type {
   AssetsClient,
   EntitlementsClient,
+  ExportsClient,
   LiveCoreApiError,
   LiveCoreClient,
   LiveCoreClientOptions,
@@ -92,6 +94,10 @@ export type AdEligibilityReturn = Assert<
     Awaited<ReturnType<EntitlementsClient["getMyAdEligibility"]>>,
     AdEligibilityResponse
   >
+>;
+
+export type GetExportReturn = Assert<
+  Equal<Awaited<ReturnType<ExportsClient["getExport"]>>, ExportArtifactResponse>
 >;
 
 export type ReplayReturn = Assert<

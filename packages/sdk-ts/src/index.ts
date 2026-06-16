@@ -51,5 +51,6 @@ export type { RevealOptions } from "./resources/visibility.js";
 export { RealtimeClient } from "./resources/realtime.js";
 export type { SessionEventReplayParams } from "./resources/realtime.js";
 export { AssetsClient } from "./resources/assets.js";
+export { ExportsClient } from "./resources/exports.js";
 export { EntitlementsClient } from "./resources/entitlements.js";
 export { StoreClient } from "./resources/store.js";

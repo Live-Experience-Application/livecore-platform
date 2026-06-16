@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace LiveCore.Api.Exports;
 
 /// <summary>
@@ -20,7 +22,15 @@ namespace LiveCore.Api.Exports;
 /// values are only in-memory storage discriminators (persisted by name, like every other enum in the
 /// model — <c>ExportJobStatus</c>, <c>AssetStatus</c>, <c>SessionStatus</c>), carry no ordering meaning and
 /// must not be compared with &gt;/&lt;.
+///
+/// Serialized over HTTP by its stable NAME too (the export read/download endpoint, CORE-EXP-001, surfaces it
+/// directly on each <see cref="ExportManifestEntryView"/>), so the wire contract uses the name exactly as the
+/// other Core enums do (docs/08_API_CONTRACTS.md "enums as stable string names"). The converter is attached
+/// to the enum itself because it is surfaced directly (rather than pre-mapped to a string in its DTO),
+/// mirroring <see cref="LiveCore.Api.Audit.AuditAction"/>; the EF string conversion is configured separately,
+/// so this attribute affects JSON only.
 /// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExportResourceKind
 {
     /// <summary>

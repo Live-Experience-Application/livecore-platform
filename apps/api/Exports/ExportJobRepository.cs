@@ -54,6 +54,35 @@ internal sealed class ExportJobRepository : IExportJobRepository
     }
 
     /// <inheritdoc />
+    public async Task<ExportJob?> FindByIdInOrganizationAsync(
+        Guid organizationId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored job (ids are generated non-empty), so the lookup fails fast
+        // instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Export job id must not be empty.", nameof(id));
+        }
+
+        // The predicate leads with the tenant column, so the lookup is exactly tenant-scoped: a job under
+        // another organization is never returned even when the surrogate id matches (threat T5/T1). The
+        // caller authorizes against the loaded job's OWN workspace afterwards (load-then-authorize), exactly
+        // as the asset signed-download route does.
+        return await _dbContext.ExportJobs
+            .FirstOrDefaultAsync(
+                job => job.OrganizationId == organizationId && job.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<ExportJob>> ListByWorkspaceAsync(
         Guid organizationId,
         Guid workspaceId,

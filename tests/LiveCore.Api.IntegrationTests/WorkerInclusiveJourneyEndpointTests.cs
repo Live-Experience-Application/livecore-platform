@@ -38,11 +38,12 @@ namespace LiveCore.Api.IntegrationTests;
 ///   <item>EXPORT (CORE-JOB-002): requesting a workspace export then running the export job produces a manifest
 ///   scoped to the requesting tenant/workspace whose per-kind inventory counts EXACTLY the workspace's own
 ///   resources and never a concurrent foreign tenant's (threat T5 "no over-export").</item>
-///   <item>VISIBILITY/AUTHORIZATION, FAIL-CLOSED: recaps and exports have no HTTP read endpoint by design, so
-///   authorization is asserted at the projection layer — the host-only recap body and the export inventory are
-///   stripped for an audience role (<see cref="RecapProjection"/> / <see cref="ExportManifestProjection"/> fail
-///   closed) — and at the persistence layer — a FOREIGN tenant's scoped read returns nothing (threats
-///   T1/T5).</item>
+///   <item>VISIBILITY/AUTHORIZATION, FAIL-CLOSED: this worker-composition test exercises the worker + the
+///   role-based projection (the recap/export HTTP read routes — CORE-RCP-003 / CORE-EXP-001 — are covered by
+///   their own endpoint tests), so authorization is asserted at the projection layer — the host-only recap body
+///   and the export inventory are stripped for an audience role (<see cref="RecapProjection"/> /
+///   <see cref="ExportManifestProjection"/> fail closed) — and at the persistence layer — a FOREIGN tenant's
+///   scoped read returns nothing (threats T1/T5).</item>
 ///   <item>IDEMPOTENT: re-running both jobs against the same database produces NO duplicate recap and NO
 ///   duplicate manifest.</item>
 /// </list>
@@ -156,9 +157,9 @@ public sealed class WorkerInclusiveJourneyEndpointTests
             }
         });
 
-        // Request a workspace export for the host's tenant (no HTTP route by design — request it through the
-        // existing aggregate + repository, exactly as a future endpoint would), then run the real processing
-        // sweep against the same database.
+        // Request a workspace export for the host's tenant (there is no HTTP export-REQUEST route — request it
+        // through the existing aggregate + repository, exactly as a future request endpoint would), then run the
+        // real processing sweep against the same database.
         var exportJobId = await RequestWorkspaceExportAsync(
             factory, journey.OrganizationId, journey.WorkspaceId, journey.HostUserProfileId);
 
@@ -285,9 +286,10 @@ public sealed class WorkerInclusiveJourneyEndpointTests
         Assert.Null(await exportJobs.FindByIdAsync(
             foreignOrganizationId, journey.WorkspaceId, exportJobId, CancellationToken.None));
 
-        // UNAUTHORIZED ROLE: recaps/exports have no HTTP read route, so role authorization is enforced by the
-        // role-based projection. The host-only recap body and the export inventory are NEVER exposed to an
-        // audience role — the projection falls closed to the stripped, content-free summary shapes.
+        // UNAUTHORIZED ROLE: this worker-composition test asserts the role-based projection that the HTTP read
+        // routes (CORE-RCP-003 / CORE-EXP-001) also sit on. The host-only recap body and the export inventory are
+        // NEVER exposed to an audience role — the projection falls closed to the stripped, content-free summary
+        // shapes.
         var recap = Assert.Single(await recaps.ListBySessionAsync(
             journey.OrganizationId, journey.WorkspaceId, journey.EndedSessionId, CancellationToken.None));
         var manifest = await manifests.FindByExportJobIdAsync(

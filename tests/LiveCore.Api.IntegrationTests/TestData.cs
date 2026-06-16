@@ -3,6 +3,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Content;
 using LiveCore.Api.Entities;
 using LiveCore.Api.Entitlements;
+using LiveCore.Api.Exports;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
@@ -236,6 +237,72 @@ internal static class TestData
         context.Recaps.Add(recap);
         await context.SaveChangesAsync();
         return recap;
+    }
+
+    /// <summary>
+    /// Creates and persists an export job in the given workspace, driving the real <see cref="ExportJob"/>
+    /// aggregate factory and its guarded lifecycle transitions so the seeded row has exactly the invariants
+    /// production would produce. By default a <see cref="ExportScope.Workspace"/> job driven all the way to
+    /// <see cref="ExportJobStatus.Completed"/> (the kind the export read/download route serves, CORE-EXP-001);
+    /// pass a different <paramref name="status"/> to seed a pending/running/failed job, or a different
+    /// <paramref name="scope"/>. Used to arrange a workspace's export for the export read tests.
+    /// </summary>
+    public static async Task<ExportJob> AddExportJobAsync(
+        this LiveCoreDbContext context,
+        Guid organizationId,
+        Guid workspaceId,
+        Guid requestedByUserProfileId,
+        ExportScope scope = ExportScope.Workspace,
+        ExportJobStatus status = ExportJobStatus.Completed)
+    {
+        var job = ExportJob.Create(organizationId, workspaceId, requestedByUserProfileId, scope, SeedTime);
+
+        if (status is ExportJobStatus.Running or ExportJobStatus.Completed)
+        {
+            job.Start(SeedTime);
+        }
+
+        if (status is ExportJobStatus.Completed)
+        {
+            job.Complete(SeedTime);
+        }
+
+        if (status is ExportJobStatus.Failed)
+        {
+            job.Fail("export processing failed", SeedTime);
+        }
+
+        context.ExportJobs.Add(job);
+        await context.SaveChangesAsync();
+        return job;
+    }
+
+    /// <summary>
+    /// Produces and persists the workspace export manifest for a COMPLETED, workspace-scoped export job,
+    /// driving the real <see cref="ExportManifest.ForWorkspaceExport"/> factory so the seeded artifact has
+    /// exactly the invariants the worker (CORE-JOB-002) would produce. The optional <paramref name="inventory"/>
+    /// is the per-kind resource count the export covered (a small generic default when omitted); it carries
+    /// counts only, never any exported content (threats T7/T8). Used to arrange the artifact the export
+    /// read/download route returns (CORE-EXP-001).
+    /// </summary>
+    public static async Task<ExportManifest> AddExportManifestAsync(
+        this LiveCoreDbContext context,
+        ExportJob completedJob,
+        IReadOnlyDictionary<ExportResourceKind, int>? inventory = null)
+    {
+        var manifest = ExportManifest.ForWorkspaceExport(
+            completedJob,
+            inventory ?? new Dictionary<ExportResourceKind, int>
+            {
+                [ExportResourceKind.Session] = 2,
+                [ExportResourceKind.Scene] = 1,
+                [ExportResourceKind.ContentBlock] = 3,
+            },
+            SeedTime);
+
+        context.ExportManifests.Add(manifest);
+        await context.SaveChangesAsync();
+        return manifest;
     }
 
     /// <summary>
