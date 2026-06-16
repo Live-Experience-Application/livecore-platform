@@ -8,15 +8,34 @@ using Microsoft.AspNetCore.Mvc;
 namespace LiveCore.Api.Content;
 
 /// <summary>
-/// HTTP endpoints of the Content module's scene content APIs. The CREATE route is CORE-SCENE-003
-/// ("Implement scene content APIs"); the DELETE route is CORE-LIFE-004 ("Implement content block
-/// deletion", the "Resource Lifecycle and Deletion" epic). Both realize the documented request flow
-/// end-to-end for a by-scene-id route: "authentication middleware -> tenant/workspace context resolver
-/// -> endpoint -> authorization policy" (docs/02_ARCHITECTURE.md), mirroring
-/// <see cref="Sessions.SessionEndpoints"/>'s by-session-id routes exactly.
+/// HTTP endpoints of the Content module's scene content APIs. The LIST and by-id READ routes are
+/// CORE-CB-001 ("Add the content block list and read endpoints", the "Vertical Authoring and Read API
+/// Completeness" epic); the CREATE route is CORE-SCENE-003 ("Implement scene content APIs"); the DELETE
+/// route is CORE-LIFE-004 ("Implement content block deletion", the "Resource Lifecycle and Deletion"
+/// epic). All realize the documented request flow end-to-end for a by-scene-id route: "authentication
+/// middleware -> tenant/workspace context resolver -> endpoint -> authorization policy"
+/// (docs/02_ARCHITECTURE.md), mirroring <see cref="Sessions.SessionEndpoints"/>'s by-session-id routes
+/// exactly.
 ///
 /// Routes owned here (csv/api_routes.csv):
 /// <list type="bullet">
+///   <item><c>GET /api/v1/scenes/{sceneId}/content-blocks</c> — module Content, roles "workspace members"
+///   (CORE-CB-001). Lists the route scene's content blocks in the deterministic (UUIDv7) id order via
+///   <see cref="IContentBlockRepository.ListBySceneAsync"/>, PROJECTED BY the caller's workspace role
+///   (<see cref="ContentBlockProjection"/>). A content block IS content, so the host-content roles
+///   (Owner/Admin/Host/CoHost) receive the full host shape (<see cref="ContentBlockResponse"/>, with the
+///   body) and every other role (the audience roles Participant/Observer, the audit role Auditor and any
+///   undefined value) receives the body-stripped participant shape
+///   (<see cref="ParticipantContentBlockResponse"/>) — the "View host-only content" row of docs/06. Only
+///   the per-block SHAPE changes by role — every member still receives ALL of the scene's blocks; deciding
+///   WHICH block BODIES an audience may actually see is the session-scoped Visibility module's concern, not
+///   this projection (threat T2).</item>
+///   <item><c>GET /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}</c> — module Content, roles
+///   "workspace members" (CORE-CB-001). Reads ONE content block within the route's scene via
+///   <see cref="IContentBlockRepository.FindByIdAsync(System.Guid, System.Guid, System.Guid, System.Guid, System.Threading.CancellationToken)"/>
+///   (tenant-, workspace- AND scene-scoped), then PROJECTS it BY ROLE through the SAME
+///   <see cref="ContentBlockProjection"/> the list uses, so the by-id read can never diverge from the
+///   list's host-vs-participant DTO split. A foreign/unknown block is a hidden <c>404</c>.</item>
 ///   <item><c>POST /api/v1/scenes/{sceneId}/content-blocks</c> — module Content, roles
 ///   "Host,CoHost,Owner,Admin" (CORE-SCENE-003). Creates a content block in the route's scene via
 ///   <see cref="ContentBlock.Create"/> + <see cref="IContentBlockRepository.AddAsync"/>
@@ -36,9 +55,9 @@ namespace LiveCore.Api.Content;
 /// surrogate id is known (threats T1/T5). The deletion CASCADES its dependents rather than blocking on them,
 /// consistently with the entity deletion (docs/adr/0012-resource-deletion-cascades-dependents.md).
 ///
-/// There is deliberately NO content-block list/get/update/revise endpoint here: no such
-/// route exists in csv/api_routes.csv, so they are out of scope (the revise capability
-/// lives on the aggregate for a later story).
+/// There is deliberately NO content-block update/revise endpoint here: no such route exists in
+/// csv/api_routes.csv, so it is out of scope (the revise capability lives on the aggregate for a later
+/// story). The SDK/contract types for the new read routes are a separate story (CORE-SDK-006).
 ///
 /// Tenant resolution (mirrors the session by-id routes): the route path carries only
 /// <c>{sceneId}</c>, so the target organization is supplied by a required
@@ -64,9 +83,13 @@ namespace LiveCore.Api.Content;
 ///   not a member of the scene's workspace is ALSO hidden as 404 (a non-member must not
 ///   learn the scene exists — the same object-level rule as the session start/end
 ///   routes; threats T1/T5), never 403.</item>
-///   <item>A known workspace member who lacks the content-create role is 403.
-///   <see cref="MembershipRole"/> is non-linear, so the role check is EXACT (Host,
-///   CoHost, Owner or Admin), never an ordering comparison.</item>
+///   <item>For the WRITE routes (create, delete), a known workspace member who lacks the content role is 403.
+///   "Create/delete content block" is "Host,CoHost,Owner,Admin" (csv/api_routes.csv).
+///   <see cref="MembershipRole"/> is non-linear, so the role check is EXACT (Host, CoHost, Owner or Admin),
+///   never an ordering comparison. The LIST/READ routes are allowed to ANY workspace member; the member's role
+///   then drives the host-vs-participant <see cref="ContentBlockProjection"/> — the host-content roles receive
+///   the body, every other role the body-stripped shape (threat T2). A foreign-tenant or wrong-scene block is
+///   hidden as 404 on the by-id read.</item>
 /// </list>
 ///
 /// Persistence dependency: like the session endpoints, this uses the repositories and
@@ -87,10 +110,188 @@ internal static class ContentBlockEndpoints
             .MapGroup("/api/v1/scenes")
             .RequireAuthorization();
 
+        group.MapGet("/{sceneId}/content-blocks", ListContentBlocksAsync);
         group.MapPost("/{sceneId}/content-blocks", CreateContentBlockAsync);
+        group.MapGet("/{sceneId}/content-blocks/{contentBlockId}", GetContentBlockByIdAsync);
         group.MapDelete("/{sceneId}/content-blocks/{contentBlockId}", DeleteContentBlockAsync);
 
         return endpoints;
+    }
+
+    // GET /api/v1/scenes/{sceneId}/content-blocks?organizationSlug={slug}
+    //
+    // Lists a scene's content blocks (CORE-CB-001), PROJECTED BY the caller's workspace role. The flow mirrors
+    // the create/delete handlers (the same fail-closed, load-then-authorize, hidden-404 shape) and the entity
+    // list route: the scene is resolved within the query-supplied organization FIRST, its own workspace is
+    // discovered from the loaded row AFTER the tenant boundary is enforced, the caller's membership in the
+    // scene's own workspace is loaded, and the blocks are then read through the tenant-, workspace- AND
+    // scene-scoped repository and projected by role. The list is allowed to ANY workspace member; the member's
+    // role then drives the host-vs-participant projection (a content block IS content, so the host-content
+    // roles get the full shape WITH the body and every other role the body-stripped audience shape; threat T2).
+    private static async Task<IResult> ListContentBlocksAsync(
+        HttpContext httpContext,
+        string sceneId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed scene id can never address a stored scene; treat it as hidden (404).
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Load the scene WITHIN the resolved tenant. The lookup leads with the organization id, so a scene in
+        // another tenant is never returned even when the surrogate id matches; a cross-tenant or unknown scene
+        // is hidden as 404 (threats T1/T5). The scene's own workspace id is then discovered from the loaded
+        // row, AFTER the tenant boundary has been enforced.
+        var scene = await deps.Scenes
+            .FindByIdInOrganizationAsync(context.OrganizationId, sceneGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (scene is null)
+        {
+            return HiddenScene();
+        }
+
+        // Object-level authorization: the caller must be a member of the SCENE'S workspace. The list is allowed
+        // to ANY membership role ("workspace members"), so any membership suffices; a non-member is hidden as
+        // 404 (not 403) so the scene's existence is not leaked (threats T1/T5). The member's actual workspace
+        // ROLE then drives the host-vs-participant projection below, so this loads the membership row.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, scene.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // The blocks are returned in the deterministic (UUIDv7) id order the repository enforces, PROJECTED BY
+        // ROLE: a content block IS content, so the host-content roles (Owner/Admin/Host/CoHost) receive the
+        // full host shape WITH the body and every other role (audience, audit, undefined) the body-stripped
+        // participant shape (ContentBlockProjection). The SET of blocks is unchanged — only the per-block SHAPE
+        // differs by role (deciding WHICH bodies an audience may see is the session-scoped Visibility concern,
+        // not this projection; threat T2).
+        var contentBlocks = await deps.ContentBlocks
+            .ListBySceneAsync(context.OrganizationId, scene.WorkspaceId, scene.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(ContentBlockProjection.Project(contentBlocks, member.Role));
+    }
+
+    // GET /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}?organizationSlug={slug}
+    //
+    // Reads ONE content block within the route's scene (CORE-CB-001), PROJECTED BY the caller's workspace role
+    // through the SAME projector the list uses, so the by-id read can never diverge from the list's
+    // host-vs-participant DTO split. The block is loaded through the tenant-, workspace- AND scene-scoped
+    // FindByIdAsync (the scene's own workspace, discovered from the loaded scene row), so a block in another
+    // scene, workspace or tenant is never returned even when its surrogate id is known; an unknown id is a
+    // hidden 404 (threats T1/T5).
+    private static async Task<IResult> GetContentBlockByIdAsync(
+        HttpContext httpContext,
+        string sceneId,
+        string contentBlockId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed scene or content block id can never address a stored row; treat each as hidden (404).
+        if (!Guid.TryParse(sceneId, out var sceneGuid) || sceneGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        if (!Guid.TryParse(contentBlockId, out var contentBlockGuid) || contentBlockGuid == Guid.Empty)
+        {
+            return HiddenScene();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (threat T5).
+            return HiddenScene();
+        }
+
+        var context = resolution.Context;
+
+        // Load the scene WITHIN the resolved tenant. The lookup leads with the organization id, so a scene in
+        // another tenant is never returned even when the surrogate id matches (threats T1/T5). The scene's own
+        // workspace id is then discovered from the loaded row, AFTER the tenant boundary has been enforced.
+        var scene = await deps.Scenes
+            .FindByIdInOrganizationAsync(context.OrganizationId, sceneGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (scene is null)
+        {
+            return HiddenScene();
+        }
+
+        // Object-level authorization: the caller must be a member of the SCENE'S workspace. The read is allowed
+        // to ANY membership role ("workspace members"); a non-member is hidden as 404 (not 403) so the scene's
+        // existence is not leaked (threats T1/T5). The member's role drives the projection below.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, scene.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenScene();
+        }
+
+        // Load the block through the tenant-, workspace- AND scene-scoped FindByIdAsync (it leads with
+        // organization_id then workspace_id then scene_id then the block id), so a block in another scene,
+        // workspace or tenant is never returned even when the surrogate id matches; an unknown id is a hidden
+        // 404 (threats T1/T5).
+        var contentBlock = await deps.ContentBlocks
+            .FindByIdAsync(context.OrganizationId, scene.WorkspaceId, scene.Id, contentBlockGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (contentBlock is null)
+        {
+            return HiddenScene();
+        }
+
+        // PROJECT BY ROLE through the SAME projector the list uses, so the by-id read can never diverge from the
+        // list's host-vs-participant DTO split (an undefined role falls closed to the body-stripped shape).
+        return Results.Ok(ContentBlockProjection.ProjectOne(contentBlock, member.Role));
     }
 
     // POST /api/v1/scenes/{sceneId}/content-blocks?organizationSlug={slug}

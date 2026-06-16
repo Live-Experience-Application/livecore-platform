@@ -70,7 +70,9 @@ GET    /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes
 POST   /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder
 GET    /api/v1/scenes/{sceneId}
+GET    /api/v1/scenes/{sceneId}/content-blocks
 POST   /api/v1/scenes/{sceneId}/content-blocks
+GET    /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}
 GET    /api/v1/workspaces/{workspaceId}/entities
 POST   /api/v1/workspaces/{workspaceId}/entities
 GET    /api/v1/workspaces/{workspaceId}/entities/{entityId}

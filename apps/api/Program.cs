@@ -1395,6 +1395,8 @@ app.MapSessionEventReplayEndpoints();
 app.MapSceneEndpoints();
 
 // Scene content-block endpoints: the Content module's HTTP routes,
+// GET  /api/v1/scenes/{sceneId}/content-blocks (list, CORE-CB-001),
+// GET  /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId} (read, CORE-CB-001),
 // POST /api/v1/scenes/{sceneId}/content-blocks (create, CORE-SCENE-003) and
 // DELETE /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId} (delete, CORE-LIFE-004). They live in an
 // authenticated route group and fail closed (503) when persistence is not configured, exactly like the
@@ -1403,13 +1405,15 @@ app.MapSceneEndpoints();
 // repository and the workspace member repository they consume are already registered above inside the
 // persistence conditional. The scene is resolved within the query-supplied organization, its own workspace
 // is discovered from the loaded row after the tenant boundary is enforced, and the request is authorized by
-// the caller's role in the scene's own workspace (every denial hidden as 404, an insufficient role as 403).
-// The create assigns the initial revision (1) server-side; the delete loads the content block through the
-// scene-, workspace- and tenant-scoped lookup, CASCADES its dependent visibility rules and asset links (its
-// inline revision history goes with the row) and appends a ContentBlockDeleted audit record, all atomically
-// (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md). Deleting a non-existent
-// content block is a safe 404. The host-vs-participant DTO projection (CORE-SCENE-004) and content
-// validation/size limits (CORE-SCENE-005) are later stories and are deliberately not built here.
+// the caller's role in the scene's own workspace (every denial hidden as 404, an insufficient WRITE role as
+// 403). CORE-CB-001 adds the read side: GET list and GET by-id (allowed to any workspace member, PROJECTED BY
+// ROLE — a content block IS content, so the host-content roles get the full shape WITH the body and every
+// other role the body-stripped audience-safe shape; threat T2), so a client can finally enumerate authored
+// content. The create assigns the initial revision (1) server-side; the delete loads the content block through
+// the scene-, workspace- and tenant-scoped lookup, CASCADES its dependent visibility rules and asset links
+// (its inline revision history goes with the row) and appends a ContentBlockDeleted audit record, all
+// atomically (cascade, not block; docs/adr/0012-resource-deletion-cascades-dependents.md). A foreign/unknown
+// block is a safe 404. The SDK/contract types for the new read routes are a separate story (CORE-SDK-006).
 app.MapContentBlockEndpoints();
 
 // Entity relationship removal endpoint (CORE-LIFE-002, the "Resource Lifecycle and Deletion" epic):
