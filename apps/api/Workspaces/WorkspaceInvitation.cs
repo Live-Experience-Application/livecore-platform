@@ -276,7 +276,10 @@ public sealed class WorkspaceInvitation
         var tokenHash = WorkspaceInvitationToken.Hash(token);
 
         var invitation = new WorkspaceInvitation(
-            Guid.CreateVersion7(),
+            // UUIDv7 id derived from the creation time so ordering by id
+            // (ListPendingByWorkspaceAsync) is chronological even for invitations
+            // created in the same millisecond, matching every other aggregate.
+            Guid.CreateVersion7(createdAt),
             organizationId,
             workspaceId,
             NormalizeEmail(invitedEmail),
