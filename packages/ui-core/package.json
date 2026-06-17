@@ -5,7 +5,11 @@
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Live-Experience-Application/livecore-platform.git"
+    "url": "git+https://github.com/Live-Experience-Application/livecore-platform.git",
+    "directory": "packages/ui-core"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "type": "module",
   "sideEffects": false,

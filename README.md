@@ -258,8 +258,8 @@ scripts/LiveCoreReleaseVersion.psm1 release-tag-vs-package-version gate logic: r
 scripts/assert-release-version.ps1  CLI the publish job runs to fail the publish when the release tag's version does not equal the packages' shared version (drift cannot ship, CORE-CMP-003)
 scripts/test-release-version.ps1    tests for the release-version gate (a matching tag passes; a mismatching tag, a non-release ref, or packages out of lockstep fail closed, CORE-CMP-003)
 scripts/LiveCorePackagePublish.psm1 release-gated npm publish logic: builds the fail-closed publish plan (reusing the release-version gate) and the immutability decision (is a version already published) (CORE-PUB-002)
-scripts/publish-packages.ps1   CLI the publish pipeline runs: dry-run packs all four packages on every push/PR; on a release tag it publishes them at the shared version and refuses to republish an existing version (CORE-PUB-002)
-scripts/test-package-publish.ps1    tests for the package-publish gate (a matching tag yields the four-package plan in dependency order; a mismatching tag, a non-release ref, packages out of lockstep, and a republish all fail closed, CORE-PUB-002)
+scripts/publish-packages.ps1   CLI the publish pipeline runs: dry-run packs all four packages on every push/PR; on a release tag it publishes them at the shared version with npm build provenance (--provenance) and refuses to republish an existing version (CORE-PUB-002, CORE-PUB-004)
+scripts/test-package-publish.ps1    tests for the package-publish gate (a matching tag yields the four-package plan in dependency order; a mismatching tag, a non-release ref, packages out of lockstep, and a republish all fail closed; the real publish requests --provenance and the dry-run does not, CORE-PUB-002/004)
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
 scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
@@ -4578,10 +4578,27 @@ release:
   repository secret, written to a runner-local `~/.npmrc` only at publish time; the
   job keeps the read-only repository token otherwise. Set `NPM_TOKEN` to an npm
   automation token with publish rights to the `@livecore` scope.
+- **npm build provenance (CORE-PUB-004).** The real publish runs with
+  `--provenance`, so each published `@livecore/*` version carries a verified
+  provenance attestation linking the tarball to this repository, the release commit
+  and the workflow run — the npm-side analogue of the attested container images. The
+  attestation is minted from a short-lived GitHub OIDC token, so the
+  `publish-packages` job adds `id-token: write` to its otherwise read-only
+  permissions; **only** that job has it (the per-PR dry-run does not, so the dry-run
+  publishes nothing and requests no provenance). Verify a published version with
+  `npm view @livecore/<name>@<version> --json` (a provenance / `dist.attestations`
+  block) or `npm audit signatures` in a consumer; the publish job's step summary
+  prints the same command.
+- **The remaining publish-shape (CORE-PUB-004).** Every `packages/*/package.json`
+  declares `engines` (the supported Node range, `>=22`) and `repository.directory`
+  (`packages/<name>`). The per-PR dry-run packs all four tarballs and the pack tests
+  assert each packed manifest carries both fields, and
+  `scripts/test-package-publish.ps1` asserts the publish CLI requests `--provenance`
+  on the real path and not on the dry-run, so a regression fails closed without a
+  registry push.
 
-npm build provenance and the remaining publish-shape fields are a follow-up
-(CORE-PUB-004). See `docs/23_PACKAGE_VERSIONING.md` ("The release-gated publish
-pipeline").
+See `docs/23_PACKAGE_VERSIONING.md` ("The release-gated publish pipeline" and "npm
+build provenance").
 
 ### Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)
 

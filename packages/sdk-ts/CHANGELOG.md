@@ -96,6 +96,13 @@ The Core SDK and UI packages are released together (lockstep), so every
   rewritten to the resolved shared version at publish time, so the tarball carries
   no `workspace:` protocol. The typed surface a consumer imports is unchanged. See
   `docs/23_PACKAGE_VERSIONING.md` ("Publishing").
+- The manifest now declares `engines` (`node >= 22`) and `repository.directory`
+  (`packages/sdk-ts`), completing the publish-shape, and the release publish runs
+  with npm build provenance (`--provenance` under a job-scoped `id-token: write`), so
+  each published version carries a verified provenance attestation linking the tarball
+  to this pipeline (CORE-PUB-004). Manifest metadata and publish process only — the
+  typed surface a consumer imports is unchanged. See
+  `docs/23_PACKAGE_VERSIONING.md` ("npm build provenance").
 
 ## [0.1.0] - 2026-06-13
 

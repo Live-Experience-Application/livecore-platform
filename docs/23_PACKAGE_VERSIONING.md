@@ -288,6 +288,10 @@ registry consumer relies on, and the LICENSE travels in the tarball (CORE-LIC-00
 - no `private` flag (the packages are no longer workspace-only);
 - `repository`, `license` (`AGPL-3.0-or-later`) and `sideEffects: false` (the
   packages are pure, so a consumer's bundler can tree-shake unused exports);
+- `engines` (the supported Node range, `>=22`, matching the workspace root and the
+  CI Node version) and `repository.directory` (`packages/<name>`, so the registry
+  links each package to its source subdirectory in this monorepo) — the remaining
+  publish-shape fields (CORE-PUB-004);
 - the entry points `main`, `module` and `types` plus a conditional `exports` map
   (`"."` resolving `types`/`import`/`default` to the built `dist/index.*`, and
   `"./package.json"`), so the package exposes one clean entry point and internal
@@ -347,9 +351,40 @@ gate passes**, asserts the release tag matches the shared version
 (`scripts/assert-release-version.ps1`), then publishes all four packages at that
 version with the republish refusal. It authenticates to the registry with the
 `NPM_TOKEN` repository secret, written to a runner-local `~/.npmrc` at publish
-time — **no registry credential lives in the repository**. npm build provenance
-and the remaining publish-shape fields (`engines`, `repository.directory`) are a
-follow-up (CORE-PUB-004).
+time — **no registry credential lives in the repository**. Each published version
+also carries npm build provenance (CORE-PUB-004, below).
+
+### npm build provenance (CORE-PUB-004)
+
+`NPM_TOKEN` proves the publisher had publish rights; it does not prove **what** was
+published or **where it was built**. npm build provenance closes that gap: it is the
+npm-side analogue of the signed/attested container images (CORE-SEC-008) and the
+lowest-cost way to make the `@livecore/*` tarballs verifiably built by this pipeline.
+
+- **The release publish runs with `--provenance`.** `scripts/publish-packages.ps1`
+  passes `--provenance` on the real publish (never on the `-DryRun` path), so each
+  published `@livecore/*` version carries a verified provenance attestation linking
+  the tarball to this repository, the release commit and the workflow run. The
+  registry verifies the attestation against the package's `repository.url` and
+  publishes it alongside the version; a mismatch is rejected.
+- **Scoped `id-token: write`.** Provenance is minted from a short-lived GitHub OIDC
+  token. The workflow default is `contents: read`; **only** the `publish-packages`
+  job adds `id-token: write`, so no other job (including the per-PR
+  `publish-packages-dry-run`) can request the token. This is why the dry-run does
+  **not** request provenance — it has no id-token, and a dry-run never produces a
+  published version to attest.
+- **Verification.** A consumer (or an auditor) confirms the attestation with
+  `npm view @livecore/<name>@<version> --json` (the version carries a provenance /
+  `dist.attestations` block) or by running `npm audit signatures` in a project that
+  installed the packages, which checks both the registry signature and the provenance
+  attestation. The CI publish job's step summary prints the same verification command.
+- **The dry-run still proves the publish-shape.** The per-PR
+  `publish-packages-dry-run` packs all four tarballs and the package pack tests
+  (`tests/<name>.pack.test.mjs`) assert each packed manifest declares `engines` and
+  `repository.directory`, and `scripts/test-package-publish.ps1` asserts the publish
+  CLI requests `--provenance` on the real path and not on the dry-run — so a
+  regression that drops provenance, or the publish-shape fields, fails closed on
+  every push and pull request without a registry push.
 
 ### Worked consumer example (CORE-PUB-003)
 

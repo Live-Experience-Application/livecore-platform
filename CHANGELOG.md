@@ -66,6 +66,15 @@ hosts are not published packages and are not versioned here. See
   VERSION discipline is unchanged, and the typed surface consumers import is
   unchanged. The registry decision is recorded in `docs/23_PACKAGE_VERSIONING.md`
   ("Publishing"); the release-gated CI publish job is a follow-up (CORE-PUB-002).
+- The publish-shape is completed and the release publish carries npm build provenance
+  (CORE-PUB-004). Every `packages/*/package.json` now declares `engines`
+  (`node >= 22`) and `repository.directory` (`packages/<name>`), and the
+  `publish-packages` job publishes with `--provenance` under a job-scoped
+  `id-token: write`, so each published `@livecore/*` version carries a verified
+  provenance attestation linking the tarball to this pipeline (the npm-side analogue
+  of the attested container images). Manifest metadata and publish process only — the
+  typed surface consumers import is unchanged. See `docs/23_PACKAGE_VERSIONING.md`
+  ("npm build provenance").
 
 ## [0.1.0] - 2026-06-13
 

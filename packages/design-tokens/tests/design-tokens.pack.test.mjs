@@ -101,6 +101,28 @@ test("the package declares a publishable surface, not private (CORE-PUB-001)", (
   assert.equal(manifest.exports["."].import, "./dist/index.js");
 });
 
+test("the manifest declares engines and repository.directory (CORE-PUB-004)", () => {
+  // engines and repository.directory pass through `pnpm pack`/`pnpm publish`
+  // verbatim (pnpm rewrites only workspace: deps), so the on-disk manifest is the
+  // packed manifest for these fields; the pack test below confirms package.json
+  // ships in the tarball.
+  assert.equal(
+    typeof manifest.engines?.node,
+    "string",
+    "the package must declare the supported Node range in engines.node",
+  );
+  assert.match(
+    manifest.engines.node,
+    />=?\s*\d+/,
+    "engines.node must declare a Node version lower bound (e.g. '>=22')",
+  );
+  assert.equal(
+    manifest.repository?.directory,
+    "packages/design-tokens",
+    "repository.directory must point at the package's path in the monorepo",
+  );
+});
+
 test("the packed tarball contains every declared entry point, types, CHANGELOG and LICENSE (CORE-PUB-001)", () => {
   const required = new Set(
     [

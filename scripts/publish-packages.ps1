@@ -5,7 +5,8 @@
     Release-gated package publish CLI (CORE-PUB-002): builds and publishes the
     four @livecore packages to the registry at the shared lockstep version on a
     release tag, and dry-runs the same path (packing all four, never pushing) on
-    every push and pull request.
+    every push and pull request. The real publish carries npm build provenance
+    (CORE-PUB-004).
 
 .DESCRIPTION
     The CI publish pipeline runs this script. It is fail-closed twice over:
@@ -27,7 +28,17 @@
     With -DryRun it runs `pnpm publish --dry-run` for all four packages, which
     builds and packs each tarball (rewriting the workspace:* dependency to the
     resolved version) without contacting the registry or pushing anything, so the
-    pipeline is proven on every push and pull request.
+    pipeline is proven on every push and pull request. The dry-run does NOT request
+    provenance: provenance generation needs the CI OIDC environment (the id-token
+    write token), which the per-PR dry-run and a local run do not have.
+
+    On a real publish it passes --provenance, so each published @livecore/* version
+    carries a verified npm build provenance attestation linking the tarball to this
+    pipeline, commit and workflow (CORE-PUB-004). Provenance requires the publish to
+    run in CI under a scoped `id-token: write` permission (granted only to the
+    publish-packages job) and the package's repository.url to match the building
+    repository; the npm registry verifies and displays the attestation. It is the
+    npm-side analogue of the signed/attested container images (CORE-SEC-008).
 
     Registry and access come from each package's publishConfig (the public npm
     registry under the @livecore scope, docs/23_PACKAGE_VERSIONING.md). No
@@ -115,8 +126,12 @@ try {
             throw "Refusing to republish an already-published immutable version: $($package.Name)@$($package.Version) is already on the registry. A release version is cut once and never overwritten (CORE-PUB-002)."
         }
 
-        Write-Host "Publishing $($package.Name)@$($package.Version)..." -ForegroundColor Green
-        & pnpm --filter $package.Name publish --no-git-checks
+        # --provenance: publish a verified npm build provenance attestation for the
+        # version (CORE-PUB-004). It needs the CI OIDC token (the publish-packages
+        # job's scoped `id-token: write`); the registry verifies it against this
+        # pipeline and the package's repository.url and rejects a mismatch.
+        Write-Host "Publishing $($package.Name)@$($package.Version) with build provenance..." -ForegroundColor Green
+        & pnpm --filter $package.Name publish --provenance --no-git-checks
         if ($LASTEXITCODE -ne 0) {
             throw "Publish failed for $($package.Name) (CORE-PUB-002)."
         }

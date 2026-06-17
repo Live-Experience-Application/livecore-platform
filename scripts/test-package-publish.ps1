@@ -20,6 +20,10 @@
     gate against the actual release tag in the publish job; the per-PR dry-run
     builds and packs all four packages.
 
+    It also guards CORE-PUB-004: the real publish requests npm build provenance
+    (--provenance) while the dry-run does not, so a regression that drops
+    provenance or leaks it into the credential-less dry-run fails the gate.
+
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-package-publish.ps1
 #>
@@ -153,6 +157,27 @@ AssertThrows { & $publishScript -Ref 'refs/tags/v99.99.99' -RepositoryRoot $repo
 AssertThrows { & $publishScript -Ref 'refs/heads/main' -RepositoryRoot $repoRoot -DryRun } `
     'the publish CLI fails closed for a non-release ref'
 
+# CORE-PUB-004: the real publish must request npm build provenance so each
+# published @livecore/* version carries a verified provenance attestation, and the
+# per-PR / local dry-run must NOT (provenance needs the CI OIDC id-token, absent
+# off the publish job). Assert the publish CLI requests --provenance on the real
+# publish path and never on the dry-run path. A static source check is the
+# release-time guard that the pipeline asks for provenance; the registry-side
+# verification step is documented in docs/23 and README.
+$publishScriptText = Get-Content -Path $publishScript -Raw
+$publishLines = $publishScriptText -split "`r?`n"
+$realPublishLines = @($publishLines | Where-Object { $_ -match 'pnpm .*\bpublish\b' -and $_ -notmatch '--dry-run' })
+$dryRunPublishLines = @($publishLines | Where-Object { $_ -match 'pnpm .*\bpublish\b' -and $_ -match '--dry-run' })
+
+AssertTrue ($realPublishLines.Count -ge 1) `
+    'the publish CLI has a real (non-dry-run) pnpm publish invocation'
+AssertTrue (@($realPublishLines | Where-Object { $_ -notmatch '--provenance' }).Count -eq 0) `
+    'the real publish requests --provenance (npm build provenance, CORE-PUB-004)'
+AssertTrue ($dryRunPublishLines.Count -ge 1) `
+    'the publish CLI has a dry-run pnpm publish invocation'
+AssertTrue (@($dryRunPublishLines | Where-Object { $_ -match '--provenance' }).Count -eq 0) `
+    'the dry-run does NOT request --provenance (no CI OIDC id-token off the publish job, CORE-PUB-004)'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Package publish gate tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -163,5 +188,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Package publish gate tests passed: only a release tag equal to the packages'' shared lockstep version publishes, and drift, lockstep breaks and a republish are refused fail-closed.' -ForegroundColor Green
+Write-Host 'Package publish gate tests passed: only a release tag equal to the packages'' shared lockstep version publishes, drift, lockstep breaks and a republish are refused fail-closed, and the real publish requests npm build provenance while the dry-run does not (CORE-PUB-004).' -ForegroundColor Green
 exit 0
