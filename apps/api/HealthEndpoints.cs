@@ -14,6 +14,12 @@ namespace LiveCore.Api;
 /// deliberately minimal: only the overall status. No version numbers,
 /// configuration values, host names or individual check details are exposed
 /// (see docs/07_SECURITY_THREAT_MODEL.md).
+///
+/// Both endpoints opt OUT of request rate limiting (<c>DisableRateLimiting</c>,
+/// CORE-SEC-007): orchestrator liveness/readiness probes hit them frequently from a
+/// single source, so the per-IP anonymous limiter must never throttle them into a
+/// restart loop. The surface is restricted at the reverse-proxy/network edge instead
+/// (docs/13_SELF_HOSTING_REQUIREMENTS.md), exactly like <c>/metrics</c>.
 /// </summary>
 internal static class HealthEndpoints
 {
@@ -34,7 +40,7 @@ internal static class HealthEndpoints
         {
             Predicate = _ => false,
             ResponseWriter = WriteStatusAsync,
-        });
+        }).DisableRateLimiting();
 
         // Readiness: the process is ready to receive traffic. Runs only the
         // checks tagged as readiness-relevant.
@@ -42,7 +48,7 @@ internal static class HealthEndpoints
         {
             Predicate = registration => registration.Tags.Contains(ReadinessTag),
             ResponseWriter = WriteStatusAsync,
-        });
+        }).DisableRateLimiting();
 
         return endpoints;
     }

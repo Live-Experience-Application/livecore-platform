@@ -546,9 +546,9 @@ for example `AllowedHosts=app.example.com` (semicolon-separated for several), so
 the host-filtering middleware rejects requests carrying an unexpected `Host`
 header.
 
-### Request rate limiting (`RateLimiting:*`) (CORE-SEC-001)
+### Request rate limiting (`RateLimiting:*`) (CORE-SEC-001, CORE-SEC-007)
 
-The API applies ASP.NET Core's built-in rate limiting (`UseRateLimiter`) as two
+The API applies ASP.NET Core's built-in rate limiting (`UseRateLimiter`) as
 complementary fixed-window limiters, **on by default** with safe, generous limits:
 
 - A **strict per-IP** limit on the anonymous store-notification webhooks
@@ -562,17 +562,26 @@ complementary fixed-window limiters, **on by default** with safe, generous limit
   over the cap is rejected `413` before it is buffered or parsed.
 - A **per-principal global** limit on the authenticated surface, partitioned on the
   OIDC issuer+subject pair so one caller's burst cannot exhaust another's allowance.
-  Defaults: `300` requests per `60` seconds per principal. Anonymous infrastructure
-  traffic (the `/health/*` and `/metrics` endpoints) is **not** throttled by the
-  global limiter, so probes/scrapes stay reachable.
+  Defaults: `300` requests per `60` seconds per principal.
+- A **per-IP limit on the anonymous NON-webhook surface** (CORE-SEC-007) — the
+  `/hubs/session` SignalR negotiate and any anonymous REST probe — so an
+  unauthenticated flood is bounded too. Defaults: `300` requests per `60` seconds
+  per IP. Anonymous **infrastructure** traffic (the `/health/*` and `/metrics`
+  endpoints) opts out (`DisableRateLimiting`), so orchestrator probes and Prometheus
+  scrapes from a single source are never throttled.
 
 - Every limit is runtime configuration: `RateLimiting__Global__PermitLimit` /
+  `__WindowSeconds` / `__QueueLimit`, `RateLimiting__Anonymous__PermitLimit` /
   `__WindowSeconds` / `__QueueLimit`, `RateLimiting__Webhooks__PermitLimit` /
   `__WindowSeconds` / `__QueueLimit` / `__MaxRequestBodyBytes`. A non-positive
   value falls back to the default (a misconfiguration never silently removes a
-  limit). Setting `RateLimiting__Enabled=false` turns the feature off entirely (for
-  a deployment that throttles at its edge instead); both limiters then become
-  no-ops.
+  limit). Setting `RateLimiting__Enabled=false` turns the configurable feature off
+  (for a deployment that throttles at its edge instead): the per-principal and
+  per-IP anonymous limiters become no-ops, **but** the anonymous webhook keeps a
+  **non-disableable request-rate floor** (`RateLimiting__Webhooks__FloorPermitLimit`
+  / `__FloorWindowSeconds`, defaults `600` per `60` seconds per IP — a non-positive
+  value falls back to the default, so it cannot be configured away) and its body-size
+  cap. So disabling the limiter can never fully remove webhook volume protection.
 - An excess request gets `429 Too Many Requests` as RFC 7807 Problem Details with a
   `Retry-After` header and no tenant/principal/resource detail (threat T7). Rate
   limiting is a coarse abuse ceiling layered **on top of** the OIDC/tenant
@@ -917,7 +926,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
 | `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
 | `HttpsSecurity:HttpsRedirection:Enabled` / `Hsts:Enabled` | `HttpsSecurity__HttpsRedirection__Enabled`, `HttpsSecurity__Hsts__Enabled` | no | only without a TLS-terminating proxy | API | Both OFF: the proxy owns the redirect/HSTS (CORE-SEC-005) |
-| `RateLimiting:Enabled` / `Global:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 60/60s per webhook IP (CORE-SEC-001) |
+| `RateLimiting:Enabled` / `Global:*` / `Anonymous:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, `RateLimiting__Anonymous__PermitLimit`, `RateLimiting__Webhooks__FloorPermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 300/60s per anonymous IP, 60/60s per webhook IP; non-disableable webhook floor 600/60s (CORE-SEC-001, CORE-SEC-007) |
 | `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |

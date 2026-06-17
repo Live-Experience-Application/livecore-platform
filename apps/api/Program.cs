@@ -144,22 +144,23 @@ builder.Services.AddLiveCoreHttpsSecurity(builder.Configuration);
 // setting, so it is configured at the proxy rather than here.
 builder.Services.AddLiveCoreGracefulShutdown(builder.Configuration);
 
-// Request rate limiting (CORE-SEC-001, the "Security Hardening" epic). Before this story the pipeline applied
-// NO rate limiting anywhere, leaving two abuse/DoS surfaces unbounded: the two AllowAnonymous store-notification
-// webhooks (which do DB work and run a deployment-supplied external parser per call — a ledger-amplification and
-// enumeration surface anyone can POST to) and every authenticated endpoint (no per-caller ceiling). This wires
-// ASP.NET Core's built-in rate limiting (UseRateLimiter, added to the pipeline below; part of the shared
-// framework, NO new dependency) as two complementary fixed-window limiters: a STRICT per-IP limit on the
-// anonymous webhooks (the named WebhookPolicyName the webhook route group opts into) and a PER-PRINCIPAL GLOBAL
-// limiter on the authenticated surface (partitioned on the OIDC issuer+subject pair so one caller's burst cannot
-// exhaust another's allowance; threats T5/T1). Anonymous infrastructure traffic (health/metrics) is left
-// unthrottled by the global limiter so probes/scrapes stay reachable. Every limit is read from configuration
-// only (RateLimiting:*; docs/13_SELF_HOSTING_REQUIREMENTS.md) with safe, generous defaults so normal traffic is
-// unaffected, and the whole feature can be disabled (RateLimiting:Enabled=false) for a deployment that throttles
-// at its edge. A rejected request gets 429 as RFC 7807 Problem Details with a Retry-After header and no tenant /
-// principal / resource detail (threat T7). Rate limiting is a coarse abuse ceiling layered ON TOP OF the
-// OIDC/tenant authorization every endpoint already enforces; it never widens authorization
-// (docs/07_SECURITY_THREAT_MODEL.md), exactly like the CORS allow-list.
+// Request rate limiting (CORE-SEC-001, extended by CORE-SEC-007). This wires ASP.NET Core's built-in rate
+// limiting (UseRateLimiter, added to the pipeline below; part of the shared framework, NO new dependency) as
+// complementary fixed-window limiters: a STRICT per-IP limit on the anonymous store-notification webhooks (the
+// named WebhookPolicyName the webhook route group opts into — which do DB work and run a deployment-supplied
+// parser per call, a ledger-amplification/enumeration surface anyone can POST to) and a GLOBAL limiter that is
+// per-principal on the authenticated surface (partitioned on the OIDC issuer+subject pair so one caller's burst
+// cannot exhaust another's; threats T5/T1) AND per-IP on the anonymous NON-webhook surface — the /hubs/session
+// negotiate and any anonymous REST probe — so an unauthenticated flood is bounded too (CORE-SEC-007, threats
+// T9/T5). The infrastructure endpoints (/health/*, /metrics) opt out with DisableRateLimiting so probes/scrapes
+// stay reachable. Every limit is read from configuration only (RateLimiting:*;
+// docs/13_SELF_HOSTING_REQUIREMENTS.md) with safe, generous defaults so normal traffic is unaffected, and the
+// feature can be disabled (RateLimiting:Enabled=false) for a deployment that throttles at its edge — but the
+// anonymous webhook then keeps a NON-DISABLEABLE request-rate floor (and its body-size cap), so disabling the
+// limiter can never fully remove webhook volume protection. A rejected request gets 429 as RFC 7807 Problem
+// Details with a Retry-After header and no tenant/principal/resource detail (threat T7). Rate limiting is a
+// coarse abuse ceiling layered ON TOP OF the OIDC/tenant authorization every endpoint already enforces; it never
+// widens authorization (docs/07_SECURITY_THREAT_MODEL.md), exactly like the CORS allow-list.
 builder.Services.AddLiveCoreRateLimiting(builder.Configuration);
 
 // In-process mobile API gateway (CORE-MON-009, the Monetization v1 epic). The store/entitlement routes are
@@ -1284,12 +1285,13 @@ app.UseAuthentication();
 // or PII (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
 app.UseMiddleware<RequestLogContextMiddleware>();
 
-// Rate limiting (CORE-SEC-001) runs AFTER authentication so the per-principal global limiter can partition on the
-// authenticated principal (and an anonymous request is left unthrottled by it), and AFTER the request-log scope
-// so a throttled request is still logged with its request context, but BEFORE authorization and the endpoints so
-// an excess request is rejected with 429 before any per-call database work or the webhook's external parser runs.
-// Routing has already matched the endpoint (the WebApplication adds routing at the top of the pipeline), so the
-// store-notification webhook group's RequireRateLimiting(WebhookPolicyName) per-IP policy is applied here too.
+// Rate limiting (CORE-SEC-001, CORE-SEC-007) runs AFTER authentication so the global limiter can partition an
+// authenticated request on its principal and an anonymous request per-IP, and AFTER the request-log scope so a
+// throttled request is still logged with its request context, but BEFORE authorization and the endpoints so an
+// excess request is rejected with 429 before any per-call database work, the webhook's external parser or the
+// hub negotiate runs. Routing has already matched the endpoint (the WebApplication adds routing at the top of the
+// pipeline), so the store-notification webhook group's RequireRateLimiting(WebhookPolicyName) per-IP policy — and
+// the /health/* and /metrics DisableRateLimiting opt-outs — are honored here too.
 app.UseRateLimiter();
 
 // RateLimit-Limit/Remaining/Reset on the SUCCESS path (CORE-DX-005). Registered immediately AFTER

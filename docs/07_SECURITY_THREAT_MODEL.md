@@ -118,7 +118,14 @@ Controls:
 
 - ASP.NET Core rate limiting (`UseRateLimiter`, CORE-SEC-001): a strict per-IP limit on the anonymous webhooks
   and a per-principal global limit on the authenticated surface; excess requests get `429`
+- a per-IP limit on the anonymous NON-webhook surface — the `/hubs/session` negotiate and any anonymous REST
+  probe — so an unauthenticated flood is bounded too, while the infrastructure endpoints (`/health/*`,
+  `/metrics`) opt out so probes/scrapes stay reachable (CORE-SEC-007)
 - a hard request-body-size cap on the anonymous webhooks beyond the application-level payload cap
+- the anonymous webhook additionally keeps a NON-DISABLEABLE request-rate floor: turning the limiter off
+  (`RateLimiting:Enabled=false`) drops it to a generous floor rather than removing the limit, so disabling the
+  global limiter can never fully remove webhook volume protection (the body-size cap likewise survives;
+  CORE-SEC-007)
 - all limits configurable; `429` Problem Details carry no tenant/principal/resource detail (T7)
 - the limiter emits the IETF draft `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` headers on an
   admitted response and on the `429` (with `Retry-After`), so a browser SDK can back off before it is throttled
@@ -375,6 +382,41 @@ Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "App-level HSTS and HTTPS redi
 - the header and the redirect carry no tenant/principal/resource detail (threat T7), and transport security is a
   coarse edge defense layered ON TOP OF the OIDC/tenant authorization every endpoint already enforces — it never
   widens authorization, exactly like the CORS allow-list and the rate limiter.
+
+## Closing the rate-limiting gaps on anonymous surfaces (CORE-SEC-007)
+
+CORE-SEC-001 bounded the two highest-risk surfaces — the anonymous store-notification webhooks (a strict per-IP
+limit plus a hard body-size cap) and the authenticated surface (a per-principal global limit). But two gaps
+remained on the **anonymous** side, both abuse/DoS surfaces (threat T9):
+
+- the per-principal global limiter left **every other anonymous surface** unthrottled — most notably the
+  `/hubs/session` SignalR **negotiate** (which an unauthenticated client can POST to repeatedly) and any
+  anonymous REST probe (invite-token / `organizationSlug` enumeration), since "no principal" resolved to
+  "no limiter";
+- turning the limiter off (`RateLimiting:Enabled=false`, for a deployment that throttles at its edge) made
+  **both** limiters no-ops, so it removed the webhook's request-rate protection entirely — only the body-size
+  cap survived.
+
+This story closes both, reusing the existing fixed-window per-IP machinery (no new limiter type, no new
+dependency):
+
+- **A per-IP limit on the anonymous non-webhook surface.** The global limiter now partitions an anonymous
+  request **per client IP** (the real client restored by `UseForwardedHeaders` from a trusted proxy) instead of
+  leaving it unthrottled, so a flood of the negotiate or an anonymous probe is bounded with `429`. The anonymous
+  webhook is left to its own named per-IP policy (not double-charged), and the infrastructure endpoints
+  (`/health/*`, `/metrics`) opt OUT with `DisableRateLimiting` so orchestrator probes and Prometheus scrapes from
+  a single source are never throttled into a restart loop.
+- **A non-disableable webhook floor.** The webhook's named policy no longer becomes a no-op when the limiter is
+  disabled; it drops to a generous, configurable-but-non-disableable request-rate **floor** (a non-positive
+  configured floor falls back to the default, so it can never be set away to nothing). Together with the
+  body-size cap — which was already independent of the toggle — disabling the global limiter can never fully
+  remove webhook volume protection.
+
+Every limit stays runtime configuration (`RateLimiting:Anonymous:*`, `RateLimiting:Webhooks:Floor*`;
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`) with safe, generous defaults, and the `429` Problem Details (and the
+`RateLimit-*` headers) carry no tenant, principal or resource detail — a generic message and a numeric ceiling
+only (threat T7). Rate limiting remains a coarse abuse ceiling layered ON TOP OF the OIDC/tenant authorization
+every endpoint already enforces; it never widens authorization.
 
 ## Required test categories
 

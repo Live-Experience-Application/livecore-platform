@@ -29,6 +29,7 @@ namespace LiveCore.Api.IntegrationTests;
 public sealed class RateLimitingEndpointTests
 {
     private const string _appleRoute = "/api/v1/store-notifications/apple";
+    private const string _negotiatePath = "/hubs/session/negotiate?negotiateVersion=1";
     private const string _issuer = TestAuthenticationHandler.DefaultIssuer;
 
     // ====================================================================
@@ -44,9 +45,14 @@ public sealed class RateLimitingEndpointTests
         Assert.Equal(RateLimitingConfiguration.DefaultGlobalPermitLimit, settings.GlobalPermitLimit);
         Assert.Equal(RateLimitingConfiguration.DefaultGlobalWindowSeconds, settings.GlobalWindowSeconds);
         Assert.Equal(0, settings.GlobalQueueLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultAnonymousPermitLimit, settings.AnonymousPermitLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultAnonymousWindowSeconds, settings.AnonymousWindowSeconds);
+        Assert.Equal(0, settings.AnonymousQueueLimit);
         Assert.Equal(RateLimitingConfiguration.DefaultWebhookPermitLimit, settings.WebhookPermitLimit);
         Assert.Equal(RateLimitingConfiguration.DefaultWebhookWindowSeconds, settings.WebhookWindowSeconds);
         Assert.Equal(0, settings.WebhookQueueLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultWebhookFloorPermitLimit, settings.WebhookFloorPermitLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultWebhookFloorWindowSeconds, settings.WebhookFloorWindowSeconds);
         Assert.Equal(RateLimitingConfiguration.DefaultWebhookMaxRequestBodyBytes, settings.WebhookMaxRequestBodyBytes);
     }
 
@@ -60,9 +66,14 @@ public sealed class RateLimitingEndpointTests
                 ["RateLimiting:Global:PermitLimit"] = "12",
                 ["RateLimiting:Global:WindowSeconds"] = "30",
                 ["RateLimiting:Global:QueueLimit"] = "5",
+                ["RateLimiting:Anonymous:PermitLimit"] = "20",
+                ["RateLimiting:Anonymous:WindowSeconds"] = "10",
+                ["RateLimiting:Anonymous:QueueLimit"] = "3",
                 ["RateLimiting:Webhooks:PermitLimit"] = "4",
                 ["RateLimiting:Webhooks:WindowSeconds"] = "15",
                 ["RateLimiting:Webhooks:QueueLimit"] = "2",
+                ["RateLimiting:Webhooks:FloorPermitLimit"] = "40",
+                ["RateLimiting:Webhooks:FloorWindowSeconds"] = "20",
                 ["RateLimiting:Webhooks:MaxRequestBodyBytes"] = "4096",
             })
             .Build();
@@ -73,9 +84,14 @@ public sealed class RateLimitingEndpointTests
         Assert.Equal(12, settings.GlobalPermitLimit);
         Assert.Equal(30, settings.GlobalWindowSeconds);
         Assert.Equal(5, settings.GlobalQueueLimit);
+        Assert.Equal(20, settings.AnonymousPermitLimit);
+        Assert.Equal(10, settings.AnonymousWindowSeconds);
+        Assert.Equal(3, settings.AnonymousQueueLimit);
         Assert.Equal(4, settings.WebhookPermitLimit);
         Assert.Equal(15, settings.WebhookWindowSeconds);
         Assert.Equal(2, settings.WebhookQueueLimit);
+        Assert.Equal(40, settings.WebhookFloorPermitLimit);
+        Assert.Equal(20, settings.WebhookFloorWindowSeconds);
         Assert.Equal(4096, settings.WebhookMaxRequestBodyBytes);
     }
 
@@ -83,11 +99,16 @@ public sealed class RateLimitingEndpointTests
     [InlineData("RateLimiting:Global:PermitLimit", "0")]
     [InlineData("RateLimiting:Global:PermitLimit", "-5")]
     [InlineData("RateLimiting:Global:WindowSeconds", "0")]
+    [InlineData("RateLimiting:Anonymous:PermitLimit", "0")]
+    [InlineData("RateLimiting:Anonymous:WindowSeconds", "-3")]
     [InlineData("RateLimiting:Webhooks:PermitLimit", "-1")]
+    [InlineData("RateLimiting:Webhooks:FloorPermitLimit", "0")]
+    [InlineData("RateLimiting:Webhooks:FloorWindowSeconds", "-2")]
     [InlineData("RateLimiting:Webhooks:MaxRequestBodyBytes", "0")]
     public void Read_falls_back_to_the_default_for_a_non_positive_limit(string key, string value)
     {
         // A misconfiguration must never silently REMOVE a limit; a non-positive value falls back to the default.
+        // The webhook FLOOR is the same way: it cannot be configured away to nothing (CORE-SEC-007).
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { [key] = value })
             .Build();
@@ -96,7 +117,11 @@ public sealed class RateLimitingEndpointTests
 
         Assert.Equal(RateLimitingConfiguration.DefaultGlobalPermitLimit, settings.GlobalPermitLimit);
         Assert.Equal(RateLimitingConfiguration.DefaultGlobalWindowSeconds, settings.GlobalWindowSeconds);
+        Assert.Equal(RateLimitingConfiguration.DefaultAnonymousPermitLimit, settings.AnonymousPermitLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultAnonymousWindowSeconds, settings.AnonymousWindowSeconds);
         Assert.Equal(RateLimitingConfiguration.DefaultWebhookPermitLimit, settings.WebhookPermitLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultWebhookFloorPermitLimit, settings.WebhookFloorPermitLimit);
+        Assert.Equal(RateLimitingConfiguration.DefaultWebhookFloorWindowSeconds, settings.WebhookFloorWindowSeconds);
         Assert.Equal(RateLimitingConfiguration.DefaultWebhookMaxRequestBodyBytes, settings.WebhookMaxRequestBodyBytes);
     }
 
@@ -130,6 +155,129 @@ public sealed class RateLimitingEndpointTests
         Assert.NotEqual(HttpStatusCode.TooManyRequests, first.StatusCode);
         Assert.NotEqual(HttpStatusCode.TooManyRequests, second.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+    }
+
+    // ====================================================================
+    // The anonymous SignalR negotiate (and other anonymous non-webhook
+    // surfaces) are throttled per-IP with 429 (CORE-SEC-007, threats T9/T5).
+    // ====================================================================
+
+    [Fact]
+    public async Task Anonymous_hub_negotiate_is_throttled_past_the_per_ip_threshold()
+    {
+        // The /hubs/session negotiate is anonymous (it challenges 401 without a token), does NOT carry the
+        // webhook named policy, and so is bounded by the per-IP ANONYMOUS global limiter. With a limit of 2, the
+        // first two anonymous negotiates reach authorization (401); the third crosses the per-IP ceiling and is
+        // rejected 429 before authorization runs — an unauthenticated flood of the negotiate is bounded.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Anonymous:PermitLimit"] = "2",
+            ["RateLimiting:Anonymous:WindowSeconds"] = "60",
+        });
+        using var client = factory.CreateAnonymousClient();
+
+        var first = await client.PostAsync(_negotiatePath, content: null);
+        var second = await client.PostAsync(_negotiatePath, content: null);
+        var third = await client.PostAsync(_negotiatePath, content: null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, second.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_throttled_anonymous_surface_carries_no_tenant_principal_or_resource_detail()
+    {
+        // The anonymous 429 (threat T7) carries the generic rate-limit Problem Details and the numeric ceiling
+        // headers only — never the throttled route, a resource id, or any tenant/principal detail.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Anonymous:PermitLimit"] = "1",
+            ["RateLimiting:Anonymous:WindowSeconds"] = "60",
+        });
+        using var client = factory.CreateAnonymousClient();
+
+        var allowed = await client.PostAsync(_negotiatePath, content: null);
+        Assert.Equal(HttpStatusCode.Unauthorized, allowed.StatusCode);
+
+        var throttled = await client.PostAsync(_negotiatePath, content: null);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
+        Assert.Equal("application/problem+json", throttled.Content.Headers.ContentType?.MediaType);
+        Assert.True(throttled.Headers.Contains("Retry-After"), "A 429 must carry a Retry-After header.");
+        Assert.Equal("1", Single(throttled, RateLimitingConfiguration.RateLimitLimitHeaderName));
+        Assert.Equal("0", Single(throttled, RateLimitingConfiguration.RateLimitRemainingHeaderName));
+
+        var body = await throttled.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("hubs", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("session", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("negotiate", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ====================================================================
+    // With the limiter disabled, the anonymous webhook keeps a
+    // non-disableable floor and its body-size cap (CORE-SEC-007).
+    // ====================================================================
+
+    [Fact]
+    public async Task With_the_limiter_disabled_the_webhook_still_enforces_a_request_rate_floor()
+    {
+        // RateLimiting:Enabled=false turns the configurable limiter OFF (a deployment that throttles at its edge),
+        // but the anonymous webhook keeps a NON-DISABLEABLE per-IP request-rate floor: with the floor set to 2,
+        // the first two reach the handler (503, no parser configured) and the third crosses the floor and is 429.
+        // Disabling the global limiter cannot fully remove webhook volume protection.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Enabled"] = "false",
+            ["RateLimiting:Webhooks:FloorPermitLimit"] = "2",
+            ["RateLimiting:Webhooks:FloorWindowSeconds"] = "60",
+        });
+        using var client = factory.CreateAnonymousClient();
+
+        var first = await PostWebhookAsync(client, "payload-1");
+        var second = await PostWebhookAsync(client, "payload-2");
+        var third = await PostWebhookAsync(client, "payload-3");
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, first.StatusCode);
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, second.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+    }
+
+    [Fact]
+    public async Task With_the_limiter_disabled_a_non_webhook_anonymous_surface_is_not_throttled()
+    {
+        // The floor is specific to the high-risk webhook. With the limiter disabled, the per-IP anonymous limiter
+        // becomes a no-op, so the negotiate surface is bounded only at the edge (the operator's choice) — a burst
+        // well past the default anonymous ceiling is not throttled in-app here.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Enabled"] = "false",
+            ["RateLimiting:Anonymous:PermitLimit"] = "2",
+        });
+        using var client = factory.CreateAnonymousClient();
+
+        for (var i = 0; i < 5; i++)
+        {
+            var response = await client.PostAsync(_negotiatePath, content: null);
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, response.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task With_the_limiter_disabled_the_webhook_body_size_cap_still_rejects_413()
+    {
+        // The body-size cap is independent of the limiter toggle: with RateLimiting:Enabled=false an oversize
+        // webhook body is still rejected 413 (the floor is generous by default, so a single request never hits
+        // it). Both the floor and the body cap survive a disabled limiter.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Enabled"] = "false",
+            ["RateLimiting:Webhooks:MaxRequestBodyBytes"] = "32",
+        });
+        using var client = factory.CreateAnonymousClient();
+
+        var oversize = await PostWebhookAsync(client, new string('x', 256));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversize.StatusCode);
     }
 
     // ====================================================================

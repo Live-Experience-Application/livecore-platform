@@ -30,7 +30,10 @@ public static class MetricsEndpointRouteBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(endpoints);
 
-        endpoints.MapPrometheusScrapingEndpoint();
+        // Opt OUT of request rate limiting (CORE-SEC-007): a Prometheus server scrapes this from a single source,
+        // so the per-IP anonymous limiter must never throttle scrapes; the surface is restricted at the
+        // reverse-proxy/network edge instead, exactly like /health/* (docs/13_SELF_HOSTING_REQUIREMENTS.md).
+        endpoints.MapPrometheusScrapingEndpoint().DisableRateLimiting();
         return endpoints;
     }
 }

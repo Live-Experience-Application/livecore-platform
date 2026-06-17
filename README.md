@@ -1399,23 +1399,30 @@ so **no new dependency** is added:
   get a hard request-body-size cap beyond the application-level payload cap
   (`StoreNotificationEnvelope.MaxRawPayloadLength`): a body over the cap is rejected `413`
   before it is buffered or handed to the parser.
-- A **per-principal global** limiter on the authenticated surface
-  (`RateLimiterOptions.GlobalLimiter`), partitioned on the authenticated principal's OIDC
-  issuer+subject pair (subjects are unique only per issuer), so one caller's burst cannot
-  exhaust another's allowance (threats T5/T1). Anonymous infrastructure traffic (the
-  `/health/*` and `/metrics` endpoints) is intentionally **not** throttled by the global
-  limiter, so orchestration probes and the Prometheus scrape stay reachable.
+- A **global** limiter (`RateLimiterOptions.GlobalLimiter`) that is **per-principal** on the
+  authenticated surface — partitioned on the OIDC issuer+subject pair (subjects are unique
+  only per issuer), so one caller's burst cannot exhaust another's allowance (threats
+  T5/T1) — and **per-IP on the anonymous non-webhook surface** (CORE-SEC-007): the
+  `/hubs/session` SignalR negotiate and any anonymous REST probe, so an unauthenticated flood
+  is bounded too (threats T9/T5). The anonymous webhook is left to its own named policy
+  (not double-charged), and the infrastructure endpoints (`/health/*`, `/metrics`) opt out
+  with `DisableRateLimiting`, so orchestration probes and the Prometheus scrape from a single
+  source stay reachable.
 
-Rate limiting runs after authentication (so the per-principal partition sees the principal)
-and before authorization and the endpoints (so an excess request is rejected before any
-per-call database work or the webhook's external parser runs). Every limit is **runtime
-configuration** (`RateLimiting:*`, fail-safe to the default on a non-positive value) with
-safe, generous defaults so normal traffic is unaffected — 300 requests / 60s per principal,
-60 / 60s per webhook IP — and the whole feature can be disabled
+Rate limiting runs after authentication (so the global limiter sees the principal, or
+partitions an anonymous request per-IP) and before authorization and the endpoints (so an
+excess request is rejected before any per-call database work, the webhook's external parser
+or the hub negotiate runs). Every limit is **runtime configuration** (`RateLimiting:*`,
+fail-safe to the default on a non-positive value) with safe, generous defaults so normal
+traffic is unaffected — 300 requests / 60s per principal, 300 / 60s per anonymous IP, 60 /
+60s per webhook IP — and the configurable feature can be disabled
 (`RateLimiting__Enabled=false`) for a deployment that throttles at its edge instead, in
-which case both limiters become no-ops and the middleware is inert. An excess request gets
-`429 Too Many Requests` as RFC 7807 Problem Details with a `Retry-After` header and no
-tenant/principal/resource detail (threat T7).
+which case the per-principal and per-IP anonymous limiters become no-ops — **but** the
+anonymous webhook keeps a **non-disableable request-rate floor** (default 600 / 60s per IP,
+configurable but never removable) and its body-size cap, so disabling the limiter can never
+fully remove webhook volume protection. An excess request gets `429 Too Many Requests` as
+RFC 7807 Problem Details with a `Retry-After` header and no tenant/principal/resource detail
+(threat T7).
 
 The limiter also emits the IETF draft **`RateLimit-Limit`/`RateLimit-Remaining`/
 `RateLimit-Reset`** headers (CORE-DX-005) on **both** an admitted response (on the

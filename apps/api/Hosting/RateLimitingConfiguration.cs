@@ -19,19 +19,25 @@ namespace LiveCore.Api.Hosting;
 /// can POST to — and every authenticated endpoint could be hammered without a per-caller ceiling.
 ///
 /// This wires ASP.NET Core's built-in rate limiting (<c>Microsoft.AspNetCore.RateLimiting</c> /
-/// <c>System.Threading.RateLimiting</c>, part of the shared framework — NO new dependency) in two complementary
-/// shapes, both fixed-window and both FAIL-CLOSED-friendly:
+/// <c>System.Threading.RateLimiting</c>, part of the shared framework — NO new dependency) in complementary
+/// fixed-window shapes, all FAIL-CLOSED-friendly:
 /// <list type="bullet">
 ///   <item>A STRICT PER-IP limit on the anonymous webhooks, applied by the named <see cref="WebhookPolicyName"/>
 ///   policy the webhook route group opts into with <c>RequireRateLimiting</c>. The partition key is the real
 ///   client IP — restored by <c>UseForwardedHeaders</c> (which runs first in the pipeline) from a TRUSTED proxy,
-///   so the limit follows the actual caller, not the proxy hop (threat T7).</item>
-///   <item>A PER-PRINCIPAL GLOBAL limiter on the authenticated surface, applied as the
-///   <see cref="RateLimiterOptions.GlobalLimiter"/>. It partitions on the authenticated principal's issuer+subject
-///   pair (subjects are unique only per issuer, <see cref="OidcClaimTypes"/>), so one caller's burst cannot
-///   exhaust another's allowance (threat T5). Anonymous traffic (the health/metrics endpoints and the anonymous
-///   webhooks) is intentionally NOT throttled by the global limiter — the webhook per-IP policy guards the
-///   anonymous webhook surface, and the infrastructure endpoints stay reachable for probes/scrapes.</item>
+///   so the limit follows the actual caller, not the proxy hop (threat T7). The webhook is anonymous, does
+///   database work and runs a deployment-supplied parser per call, so this policy keeps a NON-DISABLEABLE
+///   request-rate FLOOR (CORE-SEC-007): turning the limiter off (<c>RateLimiting:Enabled=false</c>) drops the
+///   webhook to a generous floor rather than removing the limit, so disabling the global limiter can never fully
+///   remove webhook volume protection (the hard body-size cap likewise survives).</item>
+///   <item>A PER-PRINCIPAL / PER-IP GLOBAL limiter applied as the <see cref="RateLimiterOptions.GlobalLimiter"/>.
+///   An authenticated request partitions on the principal's issuer+subject pair (subjects are unique only per
+///   issuer, <see cref="OidcClaimTypes"/>), so one caller's burst cannot exhaust another's allowance (threat T5).
+///   An ANONYMOUS non-webhook request — the <c>/hubs/session</c> negotiate and any anonymous REST probe — instead
+///   partitions PER-IP so an unauthenticated flood is bounded too (CORE-SEC-007, threats T9/T5); the anonymous
+///   webhook surface is left to its own named policy above (not double-charged here), and the infrastructure
+///   endpoints (<c>/health/*</c>, <c>/metrics</c>) opt OUT with <c>DisableRateLimiting</c> so probes/scrapes stay
+///   reachable.</item>
 /// </list>
 ///
 /// Every rejected request gets <c>429 Too Many Requests</c> as RFC 7807 Problem Details (the documented
@@ -39,9 +45,10 @@ namespace LiveCore.Api.Hosting;
 /// principal or resource detail in the body (threat T7). Every limit is CONFIGURABLE from configuration only
 /// (<c>RateLimiting:*</c>; docs/13_SELF_HOSTING_REQUIREMENTS.md), with safe, generous defaults so normal traffic
 /// is unaffected, and the whole feature can be turned off (<c>RateLimiting:Enabled=false</c>) for a deployment
-/// that throttles at its edge instead — in which case both limiters become no-ops and the middleware is inert.
-/// A misconfigured non-positive limit/window falls back to the default rather than crashing the limiter
-/// (fail-safe to the documented ceiling, never to "no limit").
+/// that throttles at its edge instead — in which case the per-principal and per-IP anonymous limiters become
+/// no-ops, but the anonymous webhook keeps its non-disableable floor (and body-size cap). A misconfigured
+/// non-positive limit/window falls back to the default rather than crashing the limiter (fail-safe to the
+/// documented ceiling, never to "no limit").
 ///
 /// Rate limiting is a coarse abuse/DoS ceiling layered ON TOP OF the OIDC/tenant authorization every endpoint
 /// already enforces server-side; it never widens authorization (docs/07_SECURITY_THREAT_MODEL.md), exactly as
@@ -81,11 +88,32 @@ public static class RateLimitingConfiguration
     /// <summary>Default per-principal global window, in seconds.</summary>
     public const int DefaultGlobalWindowSeconds = 60;
 
+    /// <summary>
+    /// Default per-IP ceiling for the anonymous NON-webhook surface (the <c>/hubs/session</c> negotiate and any
+    /// anonymous REST probe): permits per window. Generous, so legitimate anonymous traffic is unaffected while
+    /// an unauthenticated flood is bounded (CORE-SEC-007).
+    /// </summary>
+    public const int DefaultAnonymousPermitLimit = 300;
+
+    /// <summary>Default per-IP anonymous non-webhook window, in seconds.</summary>
+    public const int DefaultAnonymousWindowSeconds = 60;
+
     /// <summary>Default per-IP webhook ceiling: permits per window.</summary>
     public const int DefaultWebhookPermitLimit = 60;
 
     /// <summary>Default per-IP webhook window, in seconds.</summary>
     public const int DefaultWebhookWindowSeconds = 60;
+
+    /// <summary>
+    /// Default per-IP webhook FLOOR ceiling: the non-disableable permit limit the anonymous webhook keeps when
+    /// the configurable limiter is turned off (<c>RateLimiting:Enabled=false</c>). Deliberately MORE generous
+    /// than <see cref="DefaultWebhookPermitLimit"/> — a deployment that disables in-app limiting throttles at its
+    /// edge, so the floor is a backstop against an egregious flood, not the primary ceiling (CORE-SEC-007).
+    /// </summary>
+    public const int DefaultWebhookFloorPermitLimit = 600;
+
+    /// <summary>Default per-IP webhook floor window, in seconds.</summary>
+    public const int DefaultWebhookFloorWindowSeconds = 60;
 
     /// <summary>
     /// Default hard request-body-size cap on the webhooks, in bytes. Set BEYOND
@@ -108,9 +136,14 @@ public static class RateLimitingConfiguration
         int GlobalPermitLimit,
         int GlobalWindowSeconds,
         int GlobalQueueLimit,
+        int AnonymousPermitLimit,
+        int AnonymousWindowSeconds,
+        int AnonymousQueueLimit,
         int WebhookPermitLimit,
         int WebhookWindowSeconds,
         int WebhookQueueLimit,
+        int WebhookFloorPermitLimit,
+        int WebhookFloorWindowSeconds,
         long WebhookMaxRequestBodyBytes)
     {
         /// <summary>
@@ -131,9 +164,14 @@ public static class RateLimitingConfiguration
                 GlobalPermitLimit: PositiveOrDefault(section.GetValue<int?>("Global:PermitLimit"), DefaultGlobalPermitLimit),
                 GlobalWindowSeconds: PositiveOrDefault(section.GetValue<int?>("Global:WindowSeconds"), DefaultGlobalWindowSeconds),
                 GlobalQueueLimit: NonNegativeOrDefault(section.GetValue<int?>("Global:QueueLimit"), 0),
+                AnonymousPermitLimit: PositiveOrDefault(section.GetValue<int?>("Anonymous:PermitLimit"), DefaultAnonymousPermitLimit),
+                AnonymousWindowSeconds: PositiveOrDefault(section.GetValue<int?>("Anonymous:WindowSeconds"), DefaultAnonymousWindowSeconds),
+                AnonymousQueueLimit: NonNegativeOrDefault(section.GetValue<int?>("Anonymous:QueueLimit"), 0),
                 WebhookPermitLimit: PositiveOrDefault(section.GetValue<int?>("Webhooks:PermitLimit"), DefaultWebhookPermitLimit),
                 WebhookWindowSeconds: PositiveOrDefault(section.GetValue<int?>("Webhooks:WindowSeconds"), DefaultWebhookWindowSeconds),
                 WebhookQueueLimit: NonNegativeOrDefault(section.GetValue<int?>("Webhooks:QueueLimit"), 0),
+                WebhookFloorPermitLimit: PositiveOrDefault(section.GetValue<int?>("Webhooks:FloorPermitLimit"), DefaultWebhookFloorPermitLimit),
+                WebhookFloorWindowSeconds: PositiveOrDefault(section.GetValue<int?>("Webhooks:FloorWindowSeconds"), DefaultWebhookFloorWindowSeconds),
                 WebhookMaxRequestBodyBytes: PositiveOrDefault(section.GetValue<long?>("Webhooks:MaxRequestBodyBytes"), DefaultWebhookMaxRequestBodyBytes));
         }
 
@@ -172,7 +210,8 @@ public static class RateLimitingConfiguration
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.OnRejected = (rejected, token) => WriteRateLimitedProblemAsync(rejected, settings, token);
 
-            // Per-principal global limiter on the authenticated surface.
+            // Global limiter: per-principal on the authenticated surface, per-IP on the anonymous non-webhook
+            // surface.
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
             {
                 if (!settings.Enabled)
@@ -181,35 +220,52 @@ public static class RateLimitingConfiguration
                 }
 
                 var principalKey = TryGetPrincipalPartitionKey(context);
-                if (principalKey is null)
+                if (principalKey is not null)
                 {
-                    // Anonymous traffic (health/metrics, the anonymous webhooks) is not throttled here; the
-                    // webhook per-IP policy below guards the anonymous webhook surface.
+                    return RateLimitPartition.GetFixedWindowLimiter(principalKey, _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = settings.GlobalPermitLimit,
+                        Window = TimeSpan.FromSeconds(settings.GlobalWindowSeconds),
+                        QueueLimit = settings.GlobalQueueLimit,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    });
+                }
+
+                // Anonymous request. An endpoint that opts into its OWN named per-IP policy (the anonymous
+                // store-notification webhooks → WebhookPolicyName) is guarded by that policy below, so it is not
+                // also charged here. The infrastructure endpoints (/health/*, /metrics) opt OUT entirely with
+                // DisableRateLimiting, so they never reach this partitioner — probes/scrapes stay reachable.
+                if (HasNamedRateLimitingPolicy(context))
+                {
                     return RateLimitPartition.GetNoLimiter(_unthrottledPartitionKey);
                 }
 
-                return RateLimitPartition.GetFixedWindowLimiter(principalKey, _ => new FixedWindowRateLimiterOptions
+                // Every other anonymous surface — the /hubs/session negotiate and any anonymous REST probe — gets
+                // a strict PER-IP fixed-window limit so an unauthenticated flood is bounded (CORE-SEC-007, threats
+                // T9/T5). The IP is the real client restored by UseForwardedHeaders from a trusted proxy.
+                return RateLimitPartition.GetFixedWindowLimiter(GetClientIpPartitionKey(context), _ => new FixedWindowRateLimiterOptions
                 {
-                    PermitLimit = settings.GlobalPermitLimit,
-                    Window = TimeSpan.FromSeconds(settings.GlobalWindowSeconds),
-                    QueueLimit = settings.GlobalQueueLimit,
+                    PermitLimit = settings.AnonymousPermitLimit,
+                    Window = TimeSpan.FromSeconds(settings.AnonymousWindowSeconds),
+                    QueueLimit = settings.AnonymousQueueLimit,
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
             });
 
-            // Strict per-IP limit on the anonymous store-notification webhooks. Always registered (even when
-            // disabled) so the route group's RequireRateLimiting(WebhookPolicyName) always resolves a policy.
+            // Strict per-IP limit on the anonymous store-notification webhooks. Always registered (even when the
+            // limiter is disabled) so the route group's RequireRateLimiting(WebhookPolicyName) always resolves a
+            // policy — and when disabled it drops to a generous, NON-DISABLEABLE request-rate FLOOR rather than a
+            // no-op, so turning the global limiter off can never fully remove webhook volume protection
+            // (CORE-SEC-007; the hard body-size cap on the same surface likewise survives a disabled limiter).
             options.AddPolicy(WebhookPolicyName, context =>
             {
-                if (!settings.Enabled)
-                {
-                    return RateLimitPartition.GetNoLimiter(_unthrottledPartitionKey);
-                }
+                var permitLimit = settings.Enabled ? settings.WebhookPermitLimit : settings.WebhookFloorPermitLimit;
+                var windowSeconds = settings.Enabled ? settings.WebhookWindowSeconds : settings.WebhookFloorWindowSeconds;
 
                 return RateLimitPartition.GetFixedWindowLimiter(GetClientIpPartitionKey(context), _ => new FixedWindowRateLimiterOptions
                 {
-                    PermitLimit = settings.WebhookPermitLimit,
-                    Window = TimeSpan.FromSeconds(settings.WebhookWindowSeconds),
+                    PermitLimit = permitLimit,
+                    Window = TimeSpan.FromSeconds(windowSeconds),
                     QueueLimit = settings.WebhookQueueLimit,
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
@@ -243,15 +299,26 @@ public static class RateLimitingConfiguration
     }
 
     /// <summary>
-    /// Builds the per-IP partition key for the webhook policy. Uses the connection's remote IP — restored to the
-    /// real client by <c>UseForwardedHeaders</c> when behind a trusted proxy — falling back to a shared key when
-    /// the address is unavailable (so an address-less peer is still bounded, never unlimited).
+    /// Builds the per-IP partition key for the webhook policy and the anonymous global partition. Uses the
+    /// connection's remote IP — restored to the real client by <c>UseForwardedHeaders</c> when behind a trusted
+    /// proxy — falling back to a shared key when the address is unavailable (so an address-less peer is still
+    /// bounded, never unlimited).
     /// </summary>
     private static string GetClientIpPartitionKey(HttpContext context)
     {
         var address = context.Connection.RemoteIpAddress;
         return address is null ? "ip:unknown" : $"ip:{address}";
     }
+
+    /// <summary>
+    /// Whether the matched endpoint opts into its OWN named rate-limiting policy (the anonymous
+    /// store-notification webhooks → <see cref="WebhookPolicyName"/>, via <c>RequireRateLimiting</c>). The global
+    /// anonymous per-IP partition defers such an endpoint to its policy instead of double-charging it, and the
+    /// rejection writer uses the same signal to report the webhook's ceiling. An unmatched request (no endpoint)
+    /// has no named policy, so it falls under the anonymous per-IP limit.
+    /// </summary>
+    private static bool HasNamedRateLimitingPolicy(HttpContext context)
+        => context.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>() is not null;
 
     /// <summary>
     /// Writes the fail-closed <c>429</c> response: an RFC 7807 Problem Details body (the same shape every other
@@ -272,12 +339,27 @@ public static class RateLimitingConfiguration
             return ValueTask.CompletedTask;
         }
 
-        // Map the rejection back to the limit that applied: the per-principal global limiter only ever throttles
-        // an authenticated principal, the per-IP webhook policy only the anonymous webhooks, so the principal
-        // check selects the right ceiling/window without leaking which partition was hit.
-        var isPrincipal = TryGetPrincipalPartitionKey(httpContext) is not null;
-        var limit = isPrincipal ? settings.GlobalPermitLimit : settings.WebhookPermitLimit;
-        var resetSeconds = isPrincipal ? settings.GlobalWindowSeconds : settings.WebhookWindowSeconds;
+        // Map the rejection back to the limit that applied, without leaking which partition was hit: an
+        // authenticated principal is the per-principal global ceiling; an anonymous webhook request is its named
+        // per-IP policy (the configured limit when enabled, the non-disableable floor when disabled); any other
+        // anonymous request is the per-IP anonymous ceiling.
+        int limit;
+        int resetSeconds;
+        if (TryGetPrincipalPartitionKey(httpContext) is not null)
+        {
+            limit = settings.GlobalPermitLimit;
+            resetSeconds = settings.GlobalWindowSeconds;
+        }
+        else if (HasNamedRateLimitingPolicy(httpContext))
+        {
+            limit = settings.Enabled ? settings.WebhookPermitLimit : settings.WebhookFloorPermitLimit;
+            resetSeconds = settings.Enabled ? settings.WebhookWindowSeconds : settings.WebhookFloorWindowSeconds;
+        }
+        else
+        {
+            limit = settings.AnonymousPermitLimit;
+            resetSeconds = settings.AnonymousWindowSeconds;
+        }
 
         // The lease's RetryAfter is the exact seconds until the window rolls; it is both the Retry-After value
         // and the RateLimit-Reset value for a rejected request.
