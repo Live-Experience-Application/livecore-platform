@@ -303,6 +303,17 @@ sets `Access-Control-Expose-Headers` to exactly this set:
 | `RateLimit-Remaining` | admitted response and `429` | permits remaining in the current window (`0` on a `429`) |
 | `RateLimit-Reset` | admitted response and `429` | seconds until the window resets |
 | `X-Request-Id` | every response (CORE-OBS-005) | per-request correlation/trace id |
+| `traceparent` | every traced response (CORE-OBS-005) | the request span's W3C trace context (`00-<trace-id>-<span-id>-<flags>`) |
+
+The correlation headers (CORE-OBS-005) let a consumer correlate a failed call with the
+server's logs and traces. `X-Request-Id` carries the per-request correlation id — a
+well-formed inbound `X-Request-Id` the caller supplied (the optional client-generated
+request header above, honored only when short and made of a log-safe character set), else
+the request's trace id — and it is the **same** value every server log line carries as
+`request_id`. `traceparent` is the standard W3C trace context of the request span, so a
+caller (or a downstream service) can look the request up in a trace backend; an inbound
+`traceparent` is honored, so the server continues the caller's trace. Both are
+non-sensitive identifiers (threat T7).
 
 The rate limiter (CORE-SEC-001) emits the IETF draft `RateLimit-Limit`,
 `RateLimit-Remaining` and `RateLimit-Reset` headers on **both** an admitted response

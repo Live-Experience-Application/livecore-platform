@@ -64,8 +64,11 @@ internal sealed class RequestLogContextMiddleware
             return;
         }
 
-        // request_id: always available, the correlation id ASP.NET Core assigns to the request.
-        logContext.SetRequestId(context.TraceIdentifier);
+        // request_id: the per-request correlation id (CORE-OBS-005), the SAME value the X-Request-Id response
+        // header carries (the well-formed inbound client id, else the active trace id, else the framework
+        // TraceIdentifier), so a caller can correlate a failed response with these log lines. Resolved once and
+        // cached on HttpContext.Items, so the header and the log scope can never disagree.
+        logContext.SetRequestId(RequestCorrelation.Resolve(context));
 
         // user_id: the authenticated principal's issuer-local subject, mapped fail-closed and read with no
         // database access. An anonymous or unmappable caller carries no user_id (fail-safe).

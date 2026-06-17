@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- `ResponseHeaders.TraceParent` (`traceparent`, CORE-OBS-005): the W3C trace context
+  the server now returns on every traced response so a consumer can look the request up
+  in a trace backend, alongside the existing `X-Request-Id` correlation id. Both are
+  CORS-exposed so a cross-origin browser SDK can read them. An additive, optional
+  response-header constant (a MINOR change). The inbound `traceparent` request header is
+  honored, so the server continues the caller's trace.
 - `SessionEventReplayResponse.nextSequence` (CORE-PERF-002): the reconnect-replay
   route now returns at most one bounded page of events, and `nextSequence` carries
   the cursor to pass back as `afterSequence` to fetch the next page (or `null` when

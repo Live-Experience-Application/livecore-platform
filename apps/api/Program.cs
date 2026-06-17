@@ -1347,6 +1347,16 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // tracer/exporter is listening, starting the span is a no-op, so this is free when tracing is off.
 app.UseMiddleware<RequestTracingMiddleware>();
 
+// Correlation id response headers (CORE-OBS-005). Registered immediately AFTER RequestTracingMiddleware so the
+// request span exists and Activity.Current carries the trace context: it writes X-Request-Id (the same value
+// RequestLogContextMiddleware stamps as request_id on every log line) and the W3C traceparent (the request
+// span's trace context) on EVERY response from an OnStarting callback, so the correlation id survives the
+// Response.Clear() the global exception / concurrency-conflict middleware perform and rides on a 500/409
+// Problem Details too. It sits INSIDE the request tracing span and OUTSIDE the exception/conflict handlers, so
+// a caller can correlate even a failed call with the server's traces and logs. The values are non-sensitive
+// identifiers (threat T7) and the CORS policy exposes them to browser SDKs (CORE-DX-005).
+app.UseMiddleware<CorrelationHeaderMiddleware>();
+
 // Global Problem Details exception handler (CORE-RES-001). It wraps the whole endpoint pipeline and turns
 // ANY exception that reaches it unhandled into a fail-closed RFC 7807 Problem Details 500 carrying the
 // documented internal_error code (CORE-DX-001), instead of the bare framework 500 the host returned before.

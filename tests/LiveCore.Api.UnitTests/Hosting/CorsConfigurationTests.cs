@@ -81,6 +81,7 @@ public class CorsConfigurationTests
                 "Location",
                 "Retry-After",
                 "X-Request-Id",
+                "traceparent",
                 "RateLimit-Limit",
                 "RateLimit-Remaining",
                 "RateLimit-Reset",

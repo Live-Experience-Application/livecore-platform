@@ -123,6 +123,7 @@ test("the browser-consumer response headers are exported (CORE-DX-005)", () => {
   assert.equal(ResponseHeaders.Location, "Location");
   assert.equal(ResponseHeaders.RetryAfter, "Retry-After");
   assert.equal(ResponseHeaders.RequestId, "X-Request-Id");
+  assert.equal(ResponseHeaders.TraceParent, "traceparent");
   assert.equal(ResponseHeaders.RateLimitLimit, "RateLimit-Limit");
   assert.equal(ResponseHeaders.RateLimitRemaining, "RateLimit-Remaining");
   assert.equal(ResponseHeaders.RateLimitReset, "RateLimit-Reset");

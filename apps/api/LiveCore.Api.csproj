@@ -103,6 +103,40 @@
          configuration only; none lives in source, and the spans carry only low-cardinality, non-sensitive
          attributes, never content (threat T7). Version-aligned to the OpenTelemetry SDK above (1.16.0). -->
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
+    <!-- OpenTelemetry auto-instrumentation for the framework, outbound HTTP and EF Core (CORE-OBS-005).
+         docs/15_OBSERVABILITY.md requires that a consumer can correlate a failed call with server traces, but
+         CORE-OBS-003 only AddSource'd the hand-rolled LiveCore source, so a request trace held just the three
+         hand-rolled spans (http.server.request -> reveal -> publish) and the work that actually fails — the DB
+         query, the outbound HTTP call to the OIDC provider / a store API, the framework's own request handling —
+         was INVISIBLE. These are the OpenTelemetry-maintained, CNCF-standard instrumentations that turn the
+         framework's ASP.NET Core request, every System.Net.Http outbound call and every EF Core database command
+         into spans on the SAME TracerProvider the OTLP exporter already drains, so a DB query and an outbound
+         HTTP call nest as child spans under the request span automatically. Reimplementing DiagnosticSource
+         subscription + span shaping for three subsystems by hand would duplicate a correctness-sensitive
+         subsystem. A justified new dependency. They add NO new exporter, endpoint or configuration: they feed the
+         existing pipeline, the OTLP exporter is still attached only when Tracing:Otlp:Endpoint is configured, and
+         the spans carry only low-cardinality, non-sensitive attributes — the AspNetCore span is filtered to skip
+         the /health and /metrics infrastructure paths (as the hand-rolled middleware already is), the EF Core
+         span never captures SQL text or parameters (SetDbStatementForText defaults off) and no span carries a
+         token, tenant identifier or content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md). Version-aligned to
+         the latest stable instrumentation releases compatible with the 1.16.0 OpenTelemetry SDK above. -->
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
+    <!-- Prerelease justification (CORE-CMP-002; AGENTS.md "no new dependencies without explicit justification"
+         applies equally to keeping a -beta in a release build), mirroring the Prometheus exporter above. The EF
+         Core trace instrumentation is pinned to 1.15.1-beta.1 — a -beta alongside the stable AspNetCore/Http
+         instrumentations — and that is deliberate: OpenTelemetry.Instrumentation.EntityFrameworkCore has NO
+         stable release. It ships on the same train as its stable siblings but keeps the -beta suffix because the
+         upstream OpenTelemetry database-semantic-conventions are not yet declared stable; the suffix reflects
+         that spec's status, not instability of this package (it is the OpenTelemetry-maintained instrumentation,
+         not an unofficial fork). It cannot be swapped for a "stable release" because none exists, and a
+         hand-rolled EF Core command-event subscription would be the very duplication the SDK exists to avoid. The
+         supply-chain risk a prerelease would otherwise carry is contained exactly as the Prometheus exporter's
+         is: the exact build is pinned and restored in locked mode against the committed packages.lock.json
+         (CORE-DEP-003), CI verifies that same locked restore over the whole solution, and the release images are
+         SBOM- and CVE-scanned before publish. Revisit the pin when a stable
+         OpenTelemetry.Instrumentation.EntityFrameworkCore is published. -->
+    <PackageReference Include="OpenTelemetry.Instrumentation.EntityFrameworkCore" Version="1.15.1-beta.1" />
   </ItemGroup>
 
 </Project>

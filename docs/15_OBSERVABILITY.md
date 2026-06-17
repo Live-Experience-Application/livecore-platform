@@ -32,7 +32,7 @@ The keys are populated by the **authoritative owner** of each identifier, never 
 
 | Key               | Set by                          | Source                                                        |
 | ----------------- | ------------------------------- | ------------------------------------------------------------- |
-| `request_id`      | `RequestLogContextMiddleware`   | the per-request correlation id (`HttpContext.TraceIdentifier`) |
+| `request_id`      | `RequestLogContextMiddleware`   | the per-request correlation id (CORE-OBS-005: a well-formed inbound `X-Request-Id`, else the active trace id, else `HttpContext.TraceIdentifier`) |
 | `user_id`         | `RequestLogContextMiddleware`   | the authenticated principal's OIDC issuer-local subject        |
 | `workspace_id`    | `RequestLogContextMiddleware`   | the matched route value (a surrogate `Guid` only)              |
 | `session_id`      | `RequestLogContextMiddleware`   | the matched route value (a surrogate `Guid` only)              |
@@ -252,7 +252,55 @@ coarse `operation` name; the publish span with the stable session-event **type**
 identifier, participant id, asset coordinate or resource content is ever attached to a span. The frequently
 polled, context-free infrastructure endpoints (`/health/*`, `/metrics`) are not traced. The background
 **worker** is not yet instrumented for tracing (it owns no request/reveal flow); extending tracing to its jobs
-and adding cross-service context propagation are follow-ups.
+is a follow-up.
+
+### Auto-instrumentation and request/trace correlation (CORE-OBS-005)
+
+CORE-OBS-003 subscribed only the hand-rolled `LiveCore` source, so a request trace held just the three
+hand-rolled spans and the work that actually fails — a DB query, an outbound HTTP call, the framework's own
+request handling — was **invisible**, and nothing returned the trace id to the caller, so a consumer could not
+correlate a failed call with the server work behind it. CORE-OBS-005 closes both gaps.
+
+**Auto-instrumentation.** Three OpenTelemetry-maintained instrumentations are added to the **same**
+`TracerProvider` the OTLP exporter already drains (one new package each in `apps/api`:
+`OpenTelemetry.Instrumentation.AspNetCore`, `.Http` and the prerelease `.EntityFrameworkCore` — justified in
+`apps/api/LiveCore.Api.csproj` exactly as the Prometheus exporter's prerelease pin is, CORE-CMP-002):
+
+| Subsystem            | Span kind | Produced by                                                           |
+| -------------------- | --------- | --------------------------------------------------------------------- |
+| ASP.NET Core request | Server    | `AddAspNetCoreInstrumentation` (the framework request span)           |
+| Outbound HTTP        | Client    | `AddHttpClientInstrumentation` (every `System.Net.Http` call)         |
+| EF Core database     | Client    | `AddEntityFrameworkCoreInstrumentation` (every database command)      |
+
+Because they parent to `Activity.Current`, a DB query and an outbound HTTP call nest as **child spans under the
+request span automatically**, so a trace now shows the request → {db, http, reveal → publish} tree a collector
+reconstructs. They add **no** new exporter or endpoint — the OTLP exporter is still attached only when
+`Tracing:Otlp:Endpoint` is configured. The same threat-T7 posture holds: the ASP.NET Core span is **filtered**
+to skip the `/health` and `/metrics` infrastructure paths (the same paths the hand-rolled middleware skips); the
+EF Core span never captures the SQL text or its parameters (`SetDbStatementForText` defaults off); and no span
+carries a token, tenant identifier or content.
+
+**Inbound propagation.** The ASP.NET Core hosting layer adopts an inbound **W3C `traceparent`** (the default
+`DistributedContextPropagator`), so a request **continues the caller's trace** rather than starting a fresh one
+— the precondition for end-to-end correlation across services.
+
+**Returning the id to the caller.** `CorrelationHeaderMiddleware` writes two response headers on **every**
+response (an authenticated JSON body, a Problem Details error, a fail-closed `401`/`403`, a `500` alike), from
+an `OnStarting` callback so they survive the `Response.Clear()` an error path performs:
+
+| Header          | Value                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| `X-Request-Id`  | the per-request correlation id (a well-formed inbound `X-Request-Id`, else the trace id)   |
+| `traceparent`   | the request span's full W3C trace context (`00-<trace-id>-<span-id>-<flags>`)              |
+
+The correlation id is resolved **once** per request (`RequestCorrelation`, cached on `HttpContext.Items`) and
+is the **same value** `RequestLogContextMiddleware` stamps as `request_id` on every log line, so the id a caller
+reads off a failed response finds the matching server log lines, and the `traceparent` finds the matching
+server trace. An inbound `X-Request-Id` is caller-controlled, so it is honored only when it is short and made of
+a log-safe character set (ASCII letters/digits and `-`/`.`/`_`); anything else falls back to the trusted trace
+id, so a correlation token can never forge a log line or smuggle content (threat T7). Both headers are
+non-sensitive identifiers and the CORS policy **exposes** them so a browser/PWA SDK can read them (CORE-DX-005;
+`docs/08_API_CONTRACTS.md`).
 
 ## Health checks
 

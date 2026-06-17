@@ -73,9 +73,16 @@ export const ResponseHeaders = {
   /**
    * Per-request correlation/trace id the server returns so a consumer can correlate
    * a failed call with server logs/traces (CORE-OBS-005). Mirrors the optional
-   * {@link RequestHeaders.RequestId} a client may send.
+   * {@link RequestHeaders.RequestId} a client may send, and is the same value every
+   * server log line carries as `request_id`.
    */
   RequestId: "X-Request-Id",
+  /**
+   * The request span's W3C trace context (`00-<trace-id>-<span-id>-<flags>`) the server
+   * returns (CORE-OBS-005), so a consumer can look the request up in a trace backend.
+   * An inbound `traceparent` is honored, so the server continues the caller's trace.
+   */
+  TraceParent: "traceparent",
   /**
    * The request quota (permit ceiling) for the caller's current rate-limit window —
    * the IETF draft `RateLimit` header family (CORE-DX-005). Emitted on an admitted

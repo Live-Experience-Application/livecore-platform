@@ -46,16 +46,24 @@ public static class CorsConfiguration
     public const string RequestIdHeaderName = "X-Request-Id";
 
     /// <summary>
+    /// Name of the standard W3C Trace Context response header (CORE-OBS-005) the API echoes so a browser SDK can
+    /// read the full <c>trace-id</c>/<c>span-id</c> of the server span and look the request up in a trace
+    /// backend. It carries only the request's trace context (trace id, span id, flags), never content (threat
+    /// T7).
+    /// </summary>
+    public const string TraceParentHeaderName = "traceparent";
+
+    /// <summary>
     /// The response headers a cross-origin browser/PWA SDK must be able to READ (CORE-DX-005). By default a
     /// <c>fetch</c> from a different origin can read only the CORS "simple" response headers; any other header
     /// is invisible to the SDK unless CORS explicitly exposes it (the <c>Access-Control-Expose-Headers</c>
     /// response header). Without this list a browser SDK silently cannot read the weak optimistic-concurrency
     /// <c>ETag</c> (CORE-DX-002), the <c>Retry-After</c> and <c>RateLimit-*</c> rate-limit signals
-    /// (CORE-SEC-001 / CORE-DX-005), the <c>Location</c> of a freshly created resource, the request-id
-    /// correlation header (CORE-OBS-005), or the <c>Deprecation</c>/<c>Sunset</c> retirement signal on a
-    /// deprecated route (CORE-DX-006). None of these leak tenant/principal content (threat T7): they are an
-    /// opaque version validator, a numeric ceiling/remaining/reset, a created-resource path, a correlation id and
-    /// a route's own retirement schedule.
+    /// (CORE-SEC-001 / CORE-DX-005), the <c>Location</c> of a freshly created resource, the request-id and W3C
+    /// <c>traceparent</c> correlation headers (CORE-OBS-005), or the <c>Deprecation</c>/<c>Sunset</c> retirement
+    /// signal on a deprecated route (CORE-DX-006). None of these leak tenant/principal content (threat T7): they
+    /// are an opaque version validator, a numeric ceiling/remaining/reset, a created-resource path, a correlation
+    /// id, a trace context and a route's own retirement schedule.
     /// </summary>
     public static readonly IReadOnlyList<string> ExposedResponseHeaders =
     [
@@ -63,6 +71,7 @@ public static class CorsConfiguration
         "Location",
         "Retry-After",
         RequestIdHeaderName,
+        TraceParentHeaderName,
         RateLimitingConfiguration.RateLimitLimitHeaderName,
         RateLimitingConfiguration.RateLimitRemainingHeaderName,
         RateLimitingConfiguration.RateLimitResetHeaderName,
