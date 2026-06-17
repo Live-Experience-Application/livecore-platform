@@ -9,6 +9,8 @@
  * idempotency. Reuse one key for one logical reveal across all its retries.
  */
 import type {
+  HideRequest,
+  HideResponse,
   ParticipantVisibleFeedResponse,
   RevealRequest,
   RevealResponse,
@@ -22,6 +24,15 @@ export interface RevealOptions {
   /**
    * The retry-safety key sent as the `Idempotency-Key` header. Reuse the SAME
    * value for every retry of one logical reveal.
+   */
+  idempotencyKey: string;
+}
+
+/** Options for the hide command. */
+export interface HideOptions {
+  /**
+   * The retry-safety key sent as the `Idempotency-Key` header. Reuse the SAME
+   * value for every retry of one logical hide.
    */
   idempotencyKey: string;
 }
@@ -42,6 +53,27 @@ export class VisibilityClient {
     return this.http.send<RevealResponse>({
       method: "POST",
       path: `/sessions/${encodeURIComponent(sessionId)}/reveal`,
+      body: request,
+      idempotencyKey: options.idempotencyKey,
+    });
+  }
+
+  /**
+   * `POST /api/v1/sessions/{sessionId}/hide` — hide / un-reveal a resource from the
+   * audience (or from one selected participant), idempotently; emits `ContentHidden`.
+   * It mirrors {@link reveal} with the opposite visibility sense: the organization
+   * slug travels in the request body and the retry-safety key is a required header,
+   * because a fresh key on every retry would defeat idempotency. Reuse one key for
+   * one logical hide across all its retries.
+   */
+  hide(
+    sessionId: Uuid,
+    request: HideRequest,
+    options: HideOptions,
+  ): Promise<HideResponse> {
+    return this.http.send<HideResponse>({
+      method: "POST",
+      path: `/sessions/${encodeURIComponent(sessionId)}/hide`,
       body: request,
       idempotencyKey: options.idempotencyKey,
     });

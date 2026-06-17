@@ -16,6 +16,13 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- The typed SDK now covers every implemented v1 route (CORE-SDK-006).
+  `@livecore/sdk-ts` exposes a client method for every route in
+  `csv/api_routes.csv` (provider-facing store-notification webhooks excepted) —
+  adding the previously-missing `identity`, `organizations`, `audit`, `templates`
+  and `recaps` resource groups and the missing lifecycle/delete methods across the
+  existing groups — and `@livecore/contracts` gains the curated request/response
+  DTOs those methods are typed against. See the package changelogs for detail.
 - `@livecore/contracts` is now OpenAPI-derived (CORE-OAS-002): its `src/openapi.ts`
   types are generated from the committed OpenAPI 3 document
   (`openapi/livecore-v1.json`, CORE-OAS-001) with `openapi-typescript` and exposed

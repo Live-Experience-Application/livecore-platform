@@ -52,6 +52,30 @@ export type WorkspaceInvitationStatus =
   (typeof WorkspaceInvitationStatuses)[number];
 
 /**
+ * Lifecycle status of a participant (`Active` until a host removes it). A removed
+ * participant is a soft delete retained for history and holds no standing.
+ */
+export const ParticipantStatuses = ["Active", "Removed"] as const;
+
+/** A participant lifecycle status name. */
+export type ParticipantStatus = (typeof ParticipantStatuses)[number];
+
+/**
+ * Outcome of a host-driven participant presence command. `Joined` admits a
+ * participant, `Left` removes a present one (delivering `ParticipantLeft`), and
+ * `AlreadyLeft` is the idempotent no-op for a participant that had already left.
+ */
+export const ParticipantPresenceOutcomes = [
+  "Joined",
+  "Left",
+  "AlreadyLeft",
+] as const;
+
+/** A participant presence command outcome name. */
+export type ParticipantPresenceOutcome =
+  (typeof ParticipantPresenceOutcomes)[number];
+
+/**
  * Lifecycle status of a session (`Prepared` → `Live` → `Ended`). A host may also
  * `cancel` a not-yet-started (`Prepared`) session, which moves it to the soft,
  * terminal `Cancelled` status instead of deleting it (CORE-LIFE-010).
@@ -90,6 +114,16 @@ export const RevealOutcomes = ["Applied", "AlreadyApplied"] as const;
 
 /** A reveal command outcome name. */
 export type RevealOutcome = (typeof RevealOutcomes)[number];
+
+/**
+ * Whether a hide command newly applied the change or recognized an idempotent
+ * retry. Both outcomes leave the resource hidden (the command is idempotent); it
+ * mirrors {@link RevealOutcome} with the opposite visibility sense.
+ */
+export const HideOutcomes = ["Applied", "AlreadyApplied"] as const;
+
+/** A hide command outcome name. */
+export type HideOutcome = (typeof HideOutcomes)[number];
 
 /** Lifecycle status of an asset (`Pending` until its upload is confirmed). */
 export const AssetStatuses = ["Pending", "Available"] as const;
@@ -137,6 +171,16 @@ export const QuotaUnits = ["Count", "Bytes"] as const;
 
 /** A quota unit name. */
 export type QuotaUnit = (typeof QuotaUnits)[number];
+
+/**
+ * Whether an effective entitlement is a boolean capability flag or a numeric
+ * quota cap (docs/21_ENTITLEMENTS_QUOTAS_AND_STORE_RECEIPTS.md). A flag carries a
+ * boolean value; a quota carries a numeric limit (or `null` for unlimited).
+ */
+export const EntitlementValueKinds = ["Flag", "Quota"] as const;
+
+/** An entitlement value-kind name. */
+export type EntitlementValueKind = (typeof EntitlementValueKinds)[number];
 
 /**
  * The external store infrastructure provider that verifies a purchase. These are

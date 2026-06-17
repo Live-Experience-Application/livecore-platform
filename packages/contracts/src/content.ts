@@ -5,7 +5,10 @@ import type { IsoDateTimeString, Uuid } from "./scalars.js";
  * Content module contracts (CORE-SDK-001). A content block carries only its
  * generic kind and payload; whether a participant may see it is computed
  * server-side by the Visibility module (docs/05_MODULE_CONTRACTS.md), never
- * decided by this contract.
+ * decided by this contract. The list and by-id read are projected by the caller's
+ * workspace role: the host-content roles receive the full {@link ContentBlockResponse}
+ * (with the body), every other role the stripped {@link ParticipantContentBlockResponse}
+ * (CORE-SDK-006; docs/08_API_CONTRACTS.md "Host DTOs and Participant DTOs are different").
  */
 
 /**
@@ -40,4 +43,20 @@ export interface ContentBlockResponse {
   createdAt: IsoDateTimeString;
   /** When the content block was last updated (UTC). */
   updatedAt: IsoDateTimeString;
+}
+
+/**
+ * Audience-safe response projection of a content block returned to the audience
+ * roles (Participant/Observer) and the audit role (Auditor) by the list and by-id
+ * read routes. It deliberately omits the host-only fields — most importantly the
+ * {@link ContentBlockResponse.body} content (which stays host content until a
+ * separate reveal; threat T2) — and the tenant/workspace/scene boundary ids, the
+ * revision number and the host preparation timestamps, carrying only the
+ * non-sensitive id and generic kind.
+ */
+export interface ParticipantContentBlockResponse {
+  /** Surrogate id of the content block; a non-sensitive handle. */
+  id: Uuid;
+  /** Generic kind name of the block (`Text`/`Media`/`Data`); not the content payload. */
+  type: ContentBlockType;
 }

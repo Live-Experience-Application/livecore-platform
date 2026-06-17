@@ -494,6 +494,493 @@ test("constructing without a baseUrl fails fast", () => {
   );
 });
 
+// --- CORE-SDK-006: the completed SDK covers every implemented v1 route. ----------
+// Per-resource transport assertions for the new methods: the method/path/verb the
+// request carries, the bearer token on every call, the body/query forwarding, and
+// the `204 No Content` deletes resolving to `undefined`. Plus fail-closed negative
+// checks that a server denial on a new, security-relevant route surfaces as a typed
+// error, never a success value.
+
+const OK_OBJECT = () => jsonResponse(200, {});
+const NO_CONTENT = () => jsonResponse(204, undefined);
+
+test("identity.getCurrentPrincipal reads GET /me with the bearer token and no query", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, { user: { id: "u-1" }, memberships: [] }),
+  });
+
+  const me = await client.identity.getCurrentPrincipal();
+
+  assert.equal(me.user.id, "u-1");
+  assert.equal(calls[0].url, "https://core.example.test/api/v1/me");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer test-access-token");
+});
+
+test("organizations resource maps list/create/delete/erase/export to the right verbs and paths", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.organizations.list();
+  assert.equal(calls[0].url, "https://core.example.test/api/v1/organizations");
+  assert.equal(calls[0].init.method, "GET");
+
+  await client.organizations.create({ slug: "acme", name: "Acme" });
+  assert.equal(calls[1].url, "https://core.example.test/api/v1/organizations");
+  assert.equal(calls[1].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    slug: "acme",
+    name: "Acme",
+  });
+
+  await client.organizations.exportMemberPersonalData("acme", "m-1");
+  assert.equal(
+    calls[2].url,
+    "https://core.example.test/api/v1/organizations/acme/members/m-1/personal-data-export",
+  );
+  assert.equal(calls[2].init.method, "GET");
+});
+
+test("organizations deletes use DELETE and a 204 resolves to undefined", async () => {
+  const { client, calls } = makeClient({ handler: NO_CONTENT });
+
+  assert.equal(await client.organizations.delete("acme"), undefined);
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/organizations/acme",
+  );
+  assert.equal(calls[0].init.method, "DELETE");
+  assert.equal(calls[0].init.body, undefined);
+
+  assert.equal(
+    await client.organizations.eraseMemberPersonalData("acme", "m-1"),
+    undefined,
+  );
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/organizations/acme/members/m-1/personal-data",
+  );
+  assert.equal(calls[1].init.method, "DELETE");
+});
+
+test("audit.list reads GET /audit-logs with the org slug and paging", async () => {
+  const page = {
+    organizationId: "org-1",
+    offset: 0,
+    limit: 50,
+    hasMore: false,
+    entries: [],
+  };
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, page),
+  });
+
+  const result = await client.audit.list({
+    organizationSlug: "acme",
+    limit: 25,
+    offset: 50,
+  });
+
+  assert.deepEqual(result, page);
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/audit-logs?organizationSlug=acme&limit=25&offset=50",
+  );
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("templates resource maps list/get/create/delete to org-scoped paths", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.templates.list("acme");
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/organizations/acme/templates",
+  );
+  assert.equal(calls[0].init.method, "GET");
+
+  await client.templates.get("acme", "t-1");
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/organizations/acme/templates/t-1",
+  );
+
+  await client.templates.create("acme", { templateKey: "k", definition: "{}" });
+  assert.equal(calls[2].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[2].init.body), {
+    templateKey: "k",
+    definition: "{}",
+  });
+
+  const { client: c2, calls: d } = makeClient({ handler: NO_CONTENT });
+  assert.equal(await c2.templates.delete("acme", "t-1"), undefined);
+  assert.equal(d[0].init.method, "DELETE");
+  assert.equal(
+    d[0].url,
+    "https://core.example.test/api/v1/organizations/acme/templates/t-1",
+  );
+});
+
+test("recaps.getSessionRecap reads GET /sessions/{id}/recap with the org slug", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, { id: "r-1", sessionId: "sess-1" }),
+  });
+
+  await client.recaps.getSessionRecap("sess-1", { organizationSlug: "acme" });
+
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/sessions/sess-1/recap?organizationSlug=acme",
+  );
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("workspace archive POSTs with the org slug and honors an optional If-Match", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, { id: "ws-1", version: "9" }),
+  });
+
+  await client.workspaces.archive("ws-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/archive?organizationSlug=acme",
+  );
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.headers["If-Match"], undefined);
+
+  await client.workspaces.archive(
+    "ws-1",
+    { organizationSlug: "acme" },
+    { ifMatch: 'W/"9"' },
+  );
+  assert.equal(calls[1].init.headers["If-Match"], 'W/"9"');
+});
+
+test("workspace invitations: list pages, accept POSTs the token body, revoke/remove are 204 DELETEs", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.workspaces.listInvitations("ws-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/invitations?organizationSlug=acme",
+  );
+  assert.equal(calls[0].init.method, "GET");
+
+  await client.workspaces.acceptInvitation("ws-1", {
+    organizationSlug: "acme",
+    token: "plain-token",
+  });
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/invitations/accept",
+  );
+  assert.equal(calls[1].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    organizationSlug: "acme",
+    token: "plain-token",
+  });
+
+  const { client: c2, calls: d } = makeClient({ handler: NO_CONTENT });
+  assert.equal(
+    await c2.workspaces.revokeInvitation("ws-1", "inv-1", {
+      organizationSlug: "acme",
+    }),
+    undefined,
+  );
+  assert.equal(d[0].init.method, "DELETE");
+  assert.equal(
+    d[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/invitations/inv-1?organizationSlug=acme",
+  );
+
+  assert.equal(
+    await c2.workspaces.removeMember("ws-1", "m-1", {
+      organizationSlug: "acme",
+    }),
+    undefined,
+  );
+  assert.equal(
+    d[1].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/members/m-1?organizationSlug=acme",
+  );
+});
+
+test("sessions: list/create/get and participant join/leave map to the right routes", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.sessions.list("ws-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/sessions?organizationSlug=acme",
+  );
+
+  await client.sessions.create("ws-1", {
+    organizationSlug: "acme",
+    title: "Demo",
+  });
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/sessions",
+  );
+  assert.equal(calls[1].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    organizationSlug: "acme",
+    title: "Demo",
+  });
+
+  await client.sessions.get("sess-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[2].url,
+    "https://core.example.test/api/v1/sessions/sess-1?organizationSlug=acme",
+  );
+
+  await client.sessions.joinParticipant("sess-1", "p-1", {
+    organizationSlug: "acme",
+  });
+  assert.equal(
+    calls[3].url,
+    "https://core.example.test/api/v1/sessions/sess-1/participants/p-1/join?organizationSlug=acme",
+  );
+  assert.equal(calls[3].init.method, "POST");
+
+  await client.sessions.leaveParticipant("sess-1", "p-1", {
+    organizationSlug: "acme",
+  });
+  assert.equal(
+    calls[4].url,
+    "https://core.example.test/api/v1/sessions/sess-1/participants/p-1/leave?organizationSlug=acme",
+  );
+});
+
+test("scenes: get/reorder/delete map to the right verbs and paths", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.scenes.get("sc-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/scenes/sc-1?organizationSlug=acme",
+  );
+
+  await client.scenes.reorder("ws-1", "sc-1", {
+    organizationSlug: "acme",
+    targetIndex: 2,
+  });
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/scenes/sc-1/reorder",
+  );
+  assert.equal(calls[1].init.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].init.body), {
+    organizationSlug: "acme",
+    targetIndex: 2,
+  });
+
+  const { client: c2, calls: d } = makeClient({ handler: NO_CONTENT });
+  assert.equal(
+    await c2.scenes.delete("ws-1", "sc-1", { organizationSlug: "acme" }),
+    undefined,
+  );
+  assert.equal(d[0].init.method, "DELETE");
+  assert.equal(
+    d[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/scenes/sc-1?organizationSlug=acme",
+  );
+});
+
+test("content: list/read/delete map to scene-scoped content-block routes", async () => {
+  const { client, calls } = makeClient({ handler: OK_OBJECT });
+
+  await client.content.listBlocks("sc-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/scenes/sc-1/content-blocks?organizationSlug=acme",
+  );
+
+  await client.content.getBlock("sc-1", "cb-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/scenes/sc-1/content-blocks/cb-1?organizationSlug=acme",
+  );
+
+  const { client: c2, calls: d } = makeClient({ handler: NO_CONTENT });
+  assert.equal(
+    await c2.content.deleteBlock("sc-1", "cb-1", { organizationSlug: "acme" }),
+    undefined,
+  );
+  assert.equal(d[0].init.method, "DELETE");
+  assert.equal(
+    d[0].url,
+    "https://core.example.test/api/v1/scenes/sc-1/content-blocks/cb-1?organizationSlug=acme",
+  );
+});
+
+test("entities: entity delete and entity-relationship delete are 204 DELETEs", async () => {
+  const { client, calls } = makeClient({ handler: NO_CONTENT });
+
+  assert.equal(
+    await client.entities.delete("ws-1", "e-1", { organizationSlug: "acme" }),
+    undefined,
+  );
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/entities/e-1?organizationSlug=acme",
+  );
+  assert.equal(calls[0].init.method, "DELETE");
+
+  assert.equal(
+    await client.entities.deleteRelationship("ws-1", "rel-1", {
+      organizationSlug: "acme",
+    }),
+    undefined,
+  );
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/workspaces/ws-1/entity-relationships/rel-1?organizationSlug=acme",
+  );
+});
+
+test("visibility.hide POSTs the body and sends the Idempotency-Key header", async () => {
+  const { client, calls } = makeClient({
+    handler: () =>
+      jsonResponse(200, {
+        resourceType: "Scene",
+        resourceId: "sc-1",
+        visible: false,
+        outcome: "Applied",
+        participantId: null,
+      }),
+  });
+
+  const result = await client.visibility.hide(
+    "sess-1",
+    { organizationSlug: "acme", resourceType: "Scene", resourceId: "sc-1" },
+    { idempotencyKey: "hide-key-1" },
+  );
+
+  assert.equal(result.visible, false);
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/sessions/sess-1/hide",
+  );
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.headers["Idempotency-Key"], "hide-key-1");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    organizationSlug: "acme",
+    resourceType: "Scene",
+    resourceId: "sc-1",
+  });
+});
+
+test("assets: link delete and asset delete are 204 DELETEs", async () => {
+  const { client, calls } = makeClient({ handler: NO_CONTENT });
+
+  assert.equal(
+    await client.assets.deleteLink("a-1", "l-1", { organizationSlug: "acme" }),
+    undefined,
+  );
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/assets/a-1/links/l-1?organizationSlug=acme",
+  );
+  assert.equal(calls[0].init.method, "DELETE");
+
+  assert.equal(
+    await client.assets.delete("a-1", { organizationSlug: "acme" }),
+    undefined,
+  );
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/assets/a-1?organizationSlug=acme",
+  );
+});
+
+test("entitlements.getMyEntitlements reads GET /me/entitlements", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, { entitlements: [] }),
+  });
+
+  await client.entitlements.getMyEntitlements();
+
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/me/entitlements",
+  );
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("a non-privileged audit read surfaces a 403 as a LiveCoreApiError, never a page", async () => {
+  // Fail-closed: a role that may not read the audit log is denied server-side; the
+  // SDK never turns that denial into an empty/success page.
+  const { client } = makeClient({
+    handler: () =>
+      jsonResponse(403, {
+        title: "Forbidden",
+        status: 403,
+        code: "permission_denied",
+      }),
+  });
+
+  await assert.rejects(
+    () => client.audit.list({ organizationSlug: "acme" }),
+    (error) => {
+      assert.ok(isLiveCoreApiError(error));
+      assert.equal(error.status, 403);
+      return true;
+    },
+  );
+});
+
+test("a foreign-tenant organization delete surfaces a 404 as a LiveCoreApiError", async () => {
+  // Fail-closed: a tenant the caller cannot see is hidden as 404; the destructive
+  // delete must surface that as a typed error, never a silent success.
+  const { client } = makeClient({
+    handler: () =>
+      jsonResponse(404, { title: "Not Found", status: 404, code: "not_found" }),
+  });
+
+  await assert.rejects(
+    () => client.organizations.delete("foreign-org"),
+    (error) => {
+      assert.ok(isLiveCoreApiError(error));
+      assert.equal(error.status, 404);
+      return true;
+    },
+  );
+});
+
+test("a personal-data export to an unentitled member surfaces a 403 as a LiveCoreApiError", async () => {
+  const { client } = makeClient({
+    handler: () =>
+      jsonResponse(403, {
+        title: "Forbidden",
+        status: 403,
+        code: "permission_denied",
+      }),
+  });
+
+  await assert.rejects(
+    () => client.organizations.exportMemberPersonalData("acme", "m-1"),
+    (error) => {
+      assert.ok(isLiveCoreApiError(error));
+      assert.equal(error.status, 403);
+      return true;
+    },
+  );
+});
+
+test("fail closed: a destructive delete sends no request when no token is available", async () => {
+  const { client, calls } = makeClient({ getAccessToken: () => "" });
+
+  await assert.rejects(
+    () => client.organizations.delete("acme"),
+    (error) => {
+      assert.ok(error instanceof LiveCoreError);
+      assert.ok(!(error instanceof LiveCoreApiError));
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0);
+});
+
 // --- Package versioning and changelog process (CORE-SDK-005). ------------------
 // The runtime VERSION, the package manifest and the CHANGELOG must all agree, so
 // a release cannot ship with the version constant, package.json or the changelog

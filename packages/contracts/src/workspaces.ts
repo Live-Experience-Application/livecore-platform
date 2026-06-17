@@ -94,3 +94,66 @@ export interface WorkspaceInvitationResponse {
   /** The one-time plaintext scoped token. Returned exactly once. */
   token: string;
 }
+
+/**
+ * PII-safe response projection of a PENDING workspace invitation, returned by
+ * `GET /api/v1/workspaces/{workspaceId}/invitations` (CORE-SDK-006). The
+ * {@link invitedEmail} is the only personal datum; the token hash is never
+ * projected and the one-time plaintext token is never returned on a read — only the
+ * creation response carries a token, exactly once (threats T6/T7).
+ */
+export interface PendingWorkspaceInvitationResponse {
+  /** Surrogate id of the invitation. */
+  id: Uuid;
+  /** Tenant the invitation belongs to. */
+  organizationId: Uuid;
+  /** Workspace the invite grants admission to. */
+  workspaceId: Uuid;
+  /** Email of the invitee (the only personal datum; data, not a credential). */
+  invitedEmail: string;
+  /** Generic role the invite will grant on redemption. */
+  role: MembershipRole;
+  /** Lifecycle status of the invitation (always `Pending` for this list). */
+  status: WorkspaceInvitationStatus;
+  /** When the scoped token expires (UTC). */
+  expiresAt: IsoDateTimeString;
+  /** When the invitation was created (UTC). */
+  createdAt: IsoDateTimeString;
+}
+
+/**
+ * Request body for `POST /api/v1/workspaces/{workspaceId}/invitations/accept`
+ * (CORE-SDK-006). The scoped invite token is a BEARER grant: the authenticated
+ * caller becomes the member with the invited role. The plaintext token is carried
+ * in the BODY (never the URL); the server stores and matches only its hash
+ * (threats T6/T7).
+ */
+export interface AcceptWorkspaceInvitationRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /** The one-time plaintext scoped invite token (carried in the body only). */
+  token: string;
+}
+
+/**
+ * Response projection of a workspace membership, returned when an invitation is
+ * redeemed (CORE-SDK-006). Generic and product-neutral: identifiers, the granted
+ * generic role and server timestamps only. It carries no invited email, no token
+ * and no internal authorization rationale (data minimization; threats T6/T7).
+ */
+export interface WorkspaceMemberResponse {
+  /** Surrogate id of the membership. */
+  id: Uuid;
+  /** Tenant the membership belongs to. */
+  organizationId: Uuid;
+  /** Workspace the membership grants standing in. */
+  workspaceId: Uuid;
+  /** Subject (the caller who redeemed the token) the membership is for. */
+  userProfileId: Uuid;
+  /** Generic role the membership grants. */
+  role: MembershipRole;
+  /** When the membership was created (UTC). */
+  createdAt: IsoDateTimeString;
+  /** When the membership was last updated (UTC). */
+  updatedAt: IsoDateTimeString;
+}

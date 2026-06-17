@@ -16,6 +16,21 @@ export interface CreateSceneRequest {
   title: string;
 }
 
+/**
+ * Request body for `POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder`
+ * (CORE-SDK-006). It carries only a desired {@link targetIndex} — a 0-based LIST
+ * POSITION, not an absolute order value. The server moves the scene to the
+ * requested position and re-packs every scene to a contiguous, gap-free ordering,
+ * so a client can never choose, skip or collide an absolute position. A target
+ * index at or beyond the end moves the scene to the last position.
+ */
+export interface ReorderSceneRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /** The desired 0-based position of the scene within its workspace's ordered list. */
+  targetIndex: number;
+}
+
 /** Full host-facing response projection of a scene. */
 export interface SceneResponse {
   /** Surrogate id of the scene. */

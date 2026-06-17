@@ -446,19 +446,24 @@ including the OpenAPI drift gate — with the Node built-in test runner.
 call the Core API (CORE-SDK-002). It wraps the implemented `/api/v1` routes with
 methods that return the exact `@livecore/contracts` response types, grouped into
 resource clients that mirror the Core server modules
-(`client.workspaces`, `client.sessions`, `client.scenes`, `client.content`,
-`client.visibility`, `client.realtime`, `client.assets`, `client.entitlements`,
-`client.store`). Its only dependency is `@livecore/contracts`; transport uses the
-global `fetch` (Node 22+, browsers), so it adds no runtime dependency, and a
-`fetch` implementation can be injected for testing or a custom transport.
+(`client.identity`, `client.organizations`, `client.audit`, `client.templates`,
+`client.workspaces`, `client.sessions`, `client.scenes`, `client.content`,
+`client.entities`, `client.entityTypes`, `client.visibility`, `client.realtime`,
+`client.recaps`, `client.assets`, `client.exports`, `client.entitlements`,
+`client.store`). The client covers a method for every implemented route in
+`csv/api_routes.csv` — the provider-facing store-notification webhooks excepted
+(CORE-SDK-006) — so a vertical never hand-writes `fetch` for a Core route. Its only
+dependency is `@livecore/contracts`; transport uses the global `fetch` (Node 22+,
+browsers), so it adds no runtime dependency, and a `fetch` implementation can be
+injected for testing or a custom transport.
 
 The SDK is OIDC-first and product-neutral: the caller supplies an access-token
 provider (the SDK never holds a password and never mints a token), and every
 method carries only generic Core vocabulary. Authorization stays server-side —
 the SDK is a typed transport, not a security boundary
 (`docs/07_SECURITY_THREAT_MODEL.md`). It fails closed when no token is available
-(no request is sent), reuses a caller-supplied `Idempotency-Key` for the reveal
-command (never a fresh key per retry), and turns a non-success response into a
+(no request is sent), reuses a caller-supplied `Idempotency-Key` for the reveal and
+hide commands (never a fresh key per retry), and turns a non-success response into a
 typed `LiveCoreApiError` carrying the HTTP status and the RFC 7807 Problem
 Details — never the access token or request body, so a `404` hidden resource or a
 `403` denial surfaces as an error rather than a value. Its `test` script builds

@@ -12,6 +12,26 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Contract types for the previously-unmodeled routes so the completed typed SDK can
+  route every implemented `/api/v1` route in terms of curated contracts (CORE-SDK-006):
+  identity (`CurrentPrincipalResponse`, `CurrentUserResponse`,
+  `OrganizationMembershipResponse`), organizations (`CreateOrganizationRequest`,
+  `OrganizationResponse`), audit (`AuditLogEntryView`, `AuditLogPageResponse`),
+  templates (`CreateTemplateRequest`, `TemplateResponse`), recaps (the role-projected
+  `RecapView` / `RecapSummaryView`), and the GDPR data-subject access/portability
+  export (`PersonalDataExportResponse` and its subject/membership/participant/invitation
+  records). Existing modules gain `CreateSessionRequest` and `ParticipantPresenceResponse`
+  (sessions), `ReorderSceneRequest` (scenes), `ParticipantContentBlockResponse` (the
+  audience-safe content-block shape), `PendingWorkspaceInvitationResponse` /
+  `AcceptWorkspaceInvitationRequest` / `WorkspaceMemberResponse` (workspaces),
+  `HideRequest` / `HideResponse` (visibility) and `MeEntitlementsResponse` /
+  `EntitlementItem` (entitlements), plus the new enum vocabularies
+  `ParticipantStatus`, `ParticipantPresenceOutcome`, `HideOutcome` and
+  `EntitlementValueKind` (each as a string-literal union and an `as const` tuple).
+  The six request DTOs the package previously left as `OpenApi.components[...]` only
+  (`AcceptWorkspaceInvitationRequest`, `CreateOrganizationRequest`,
+  `CreateSessionRequest`, `CreateTemplateRequest`, `HideRequest`, `ReorderSceneRequest`)
+  now have curated aliases validated against the generated OpenAPI schemas.
 - OpenAPI-derived contract types (CORE-OAS-002): the package now generates
   `src/openapi.ts` from the committed OpenAPI 3 document
   (`openapi/livecore-v1.json`, itself generated from the running route table and

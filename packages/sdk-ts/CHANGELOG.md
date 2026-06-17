@@ -12,6 +12,26 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Full route coverage (CORE-SDK-006): the typed client now exposes a method for
+  EVERY implemented `/api/v1` route in `csv/api_routes.csv` (the provider-facing
+  store-notification webhooks excepted), so a vertical no longer hand-writes `fetch`
+  for the majority of the API. Five new resource groups are added to `LiveCoreClient`:
+  `identity` (`getCurrentPrincipal`, `GET /me`), `organizations` (`list`, `create`,
+  `delete`, `removeMember`, `eraseMemberPersonalData`, `exportMemberPersonalData` —
+  tenant offboarding plus the GDPR erasure and data-subject access/portability
+  export), `audit` (`list`, the tenant's append-only audit log page), `templates`
+  (`list`, `get`, `create`, `delete`) and `recaps` (`getSessionRecap`, role-projected).
+  Existing groups gain the previously-missing methods: `workspaces.archive`/
+  `listInvitations`/`acceptInvitation`/`revokeInvitation`/`removeMember`;
+  `sessions.list`/`create`/`get`/`joinParticipant`/`leaveParticipant`;
+  `scenes.get`/`reorder`/`delete`; `content.listBlocks`/`getBlock`/`deleteBlock`;
+  `entities.delete`/`deleteRelationship`; `visibility.hide` (idempotent, mirroring
+  `reveal`, with a new `HideOptions`); `assets.deleteLink`/`delete`; and
+  `entitlements.getMyEntitlements`. Role-projected reads return the host-vs-participant
+  union, and a `204 No Content` delete resolves to `void`. Every method is typed in
+  terms of `@livecore/contracts` and routed through the existing fail-closed,
+  bearer-authenticated transport; a server denial still surfaces as a typed
+  `LiveCoreApiError`.
 - Rate-limit signals on the error type (CORE-DX-005): `LiveCoreApiError` now
   surfaces `retryAfter` (seconds, from the `Retry-After` header) and `rateLimit`
   (`RateLimitInfo { limit, remaining, reset }`, from the `RateLimit-*` headers)

@@ -17,46 +17,65 @@
 import { HttpClient } from "./http.js";
 import type { LiveCoreClientOptions } from "./options.js";
 import { AssetsClient } from "./resources/assets.js";
+import { AuditClient } from "./resources/audit.js";
 import { ContentClient } from "./resources/content.js";
 import { EntitiesClient } from "./resources/entities.js";
 import { EntityTypesClient } from "./resources/entity-types.js";
 import { EntitlementsClient } from "./resources/entitlements.js";
 import { ExportsClient } from "./resources/exports.js";
+import { IdentityClient } from "./resources/identity.js";
+import { OrganizationsClient } from "./resources/organizations.js";
 import { RealtimeClient } from "./resources/realtime.js";
+import { RecapsClient } from "./resources/recaps.js";
 import { ScenesClient } from "./resources/scenes.js";
 import { SessionsClient } from "./resources/sessions.js";
 import { StoreClient } from "./resources/store.js";
+import { TemplatesClient } from "./resources/templates.js";
 import { VisibilityClient } from "./resources/visibility.js";
 import { WorkspacesClient } from "./resources/workspaces.js";
 
 export class LiveCoreClient {
-  /** Workspace create/read/update and member-invite routes. */
+  /** The authenticated caller's principal-context read (`GET /api/v1/me`). */
+  readonly identity: IdentityClient;
+  /** Organization tenant create/list and offboarding/data-protection routes. */
+  readonly organizations: OrganizationsClient;
+  /** The tenant's append-only audit log read. */
+  readonly audit: AuditClient;
+  /** Organization-scoped template create, list, read and delete routes. */
+  readonly templates: TemplatesClient;
+  /** Workspace create/read/update, archive, member and invitation routes. */
   readonly workspaces: WorkspacesClient;
-  /** Session start/end lifecycle commands. */
+  /** Session list/create/read, lifecycle commands and participant presence. */
   readonly sessions: SessionsClient;
-  /** Scene list and create routes. */
+  /** Scene list, create, read, reorder and delete routes. */
   readonly scenes: ScenesClient;
-  /** Content block create route. */
+  /** Content block list, read, create and delete routes. */
   readonly content: ContentClient;
-  /** Generic entity create, list and by-id read routes. */
+  /** Generic entity create, list, read, delete and relationship-delete routes. */
   readonly entities: EntitiesClient;
   /** Generic entity-type define, list and by-id read routes. */
   readonly entityTypes: EntityTypesClient;
-  /** Reveal command and the participant-visible feed. */
+  /** Reveal/hide commands and the participant-visible feed. */
   readonly visibility: VisibilityClient;
   /** Reconnect replay of the durable session event stream. */
   readonly realtime: RealtimeClient;
-  /** Asset upload-intent, signed-download and linking flows. */
+  /** Session recap read (role-projected). */
+  readonly recaps: RecapsClient;
+  /** Asset upload-intent, signed-download, linking and delete flows. */
   readonly assets: AssetsClient;
   /** Completed workspace export read/download. */
   readonly exports: ExportsClient;
-  /** Quota status and ad-eligibility reads. */
+  /** Quota status, effective-entitlements and ad-eligibility reads. */
   readonly entitlements: EntitlementsClient;
   /** Purchase verification submissions. */
   readonly store: StoreClient;
 
   constructor(options: LiveCoreClientOptions) {
     const http = new HttpClient(options);
+    this.identity = new IdentityClient(http);
+    this.organizations = new OrganizationsClient(http);
+    this.audit = new AuditClient(http);
+    this.templates = new TemplatesClient(http);
     this.workspaces = new WorkspacesClient(http);
     this.sessions = new SessionsClient(http);
     this.scenes = new ScenesClient(http);
@@ -65,6 +84,7 @@ export class LiveCoreClient {
     this.entityTypes = new EntityTypesClient(http);
     this.visibility = new VisibilityClient(http);
     this.realtime = new RealtimeClient(http);
+    this.recaps = new RecapsClient(http);
     this.assets = new AssetsClient(http);
     this.exports = new ExportsClient(http);
     this.entitlements = new EntitlementsClient(http);

@@ -8,6 +8,7 @@
  * checks live in `contracts.build.test.mjs`.
  */
 import type {
+  AcceptWorkspaceInvitationRequest,
   AdEligibilityResponse,
   AppleTransactionVerificationRequest,
   AssetStatus,
@@ -16,16 +17,21 @@ import type {
   CreateContentBlockRequest,
   CreateEntityRequest,
   CreateEntityTypeRequest,
+  CreateOrganizationRequest,
   CreateSceneRequest,
+  CreateSessionRequest,
+  CreateTemplateRequest,
   CreateUploadIntentRequest,
   CreateWorkspaceRequest,
   GoogleTokenVerificationRequest,
+  HideRequest,
   InviteWorkspaceMemberRequest,
   MembershipRole,
   PageResponse,
   ProblemCode,
   ProblemDetails,
   PurchaseProvider,
+  ReorderSceneRequest,
   RevealRequest,
   SessionResponse,
   SessionStatus,
@@ -261,6 +267,30 @@ export type GoogleTokenVerificationRequestMatchesSchema = Assert<
     Schemas["GoogleTokenVerificationRequest"]
   >
 >;
+// The six request DTOs CORE-SDK-006 added a curated alias for, so the completed
+// typed SDK can route them in terms of @livecore/contracts. Each must carry exactly
+// the property names of its generated schema, same as the DTOs above.
+export type AcceptWorkspaceInvitationRequestMatchesSchema = Assert<
+  SameKeys<
+    AcceptWorkspaceInvitationRequest,
+    Schemas["AcceptWorkspaceInvitationRequest"]
+  >
+>;
+export type CreateOrganizationRequestMatchesSchema = Assert<
+  SameKeys<CreateOrganizationRequest, Schemas["CreateOrganizationRequest"]>
+>;
+export type CreateSessionRequestMatchesSchema = Assert<
+  SameKeys<CreateSessionRequest, Schemas["CreateSessionRequest"]>
+>;
+export type CreateTemplateRequestMatchesSchema = Assert<
+  SameKeys<CreateTemplateRequest, Schemas["CreateTemplateRequest"]>
+>;
+export type HideRequestMatchesSchema = Assert<
+  SameKeys<HideRequest, Schemas["HideRequest"]>
+>;
+export type ReorderSceneRequestMatchesSchema = Assert<
+  SameKeys<ReorderSceneRequest, Schemas["ReorderSceneRequest"]>
+>;
 
 // The generated ProblemDetails schema carries exactly the fields the curated
 // `ProblemDetails` models. The curated type adds an index signature for the RFC 7807
@@ -274,12 +304,11 @@ export type ProblemDetailsSchemaFieldsAreModeled = Assert<
 >;
 
 // The generated surface covers EVERY request body the server's OpenAPI document
-// declares — including the six the package does not (yet) model with a curated alias
-// (AcceptWorkspaceInvitationRequest, CreateOrganizationRequest, CreateSessionRequest,
-// CreateTemplateRequest, HideRequest, ReorderSceneRequest), which a consumer can still
-// reach as `OpenApi.components["schemas"][...]`. Adding or removing a server request
-// schema changes this set and fails the assertion (and the byte-diff gate), so the
-// generated contract surface cannot silently drift from the server.
+// declares. Each is now modeled with a curated alias and validated above (CORE-SDK-006
+// added the last six so the typed SDK routes every request in terms of the curated
+// contracts), and each is also reachable as `OpenApi.components["schemas"][...]`. Adding
+// or removing a server request schema changes this set and fails the assertion (and the
+// byte-diff gate), so the generated contract surface cannot silently drift from the server.
 export type GeneratedSchemaSetIsExact = Assert<
   Equal<
     keyof Schemas,

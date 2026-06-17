@@ -9,6 +9,7 @@ import type {
   CreateSceneRequest,
   PageResponse,
   ParticipantSceneResponse,
+  ReorderSceneRequest,
   SceneResponse,
   Uuid,
 } from "@livecore/contracts";
@@ -55,6 +56,58 @@ export class ScenesClient {
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/scenes`,
       body: request,
+    });
+  }
+
+  /**
+   * `GET /api/v1/scenes/{sceneId}` — one scene by id, projected by the caller's
+   * role (the same host-vs-participant split as {@link list}); a foreign-tenant,
+   * unknown scene or non-member is hidden as `404`.
+   */
+  get(
+    sceneId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<SceneResponse | ParticipantSceneResponse> {
+    return this.http.send<SceneResponse | ParticipantSceneResponse>({
+      method: "GET",
+      path: `/scenes/${encodeURIComponent(sceneId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `POST /api/v1/workspaces/{workspaceId}/scenes/{sceneId}/reorder` — move a scene
+   * to a target list position. The server re-packs every scene to a contiguous,
+   * gap-free order (no client-trusted absolute order) and returns the re-packed
+   * scene list. Authorized to the host-capable roles, so the list is the full host
+   * {@link SceneResponse} shape; a concurrent reorder is `409`.
+   */
+  reorder(
+    workspaceId: Uuid,
+    sceneId: Uuid,
+    request: ReorderSceneRequest,
+  ): Promise<SceneResponse[]> {
+    return this.http.send<SceneResponse[]>({
+      method: "POST",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/scenes/${encodeURIComponent(sceneId)}/reorder`,
+      body: request,
+    });
+  }
+
+  /**
+   * `DELETE /api/v1/workspaces/{workspaceId}/scenes/{sceneId}` — delete a scene,
+   * cascading its content blocks, visibility rules and asset links and re-packing
+   * the remaining scene ordering without gaps. Audited. Responds `204 No Content`.
+   */
+  delete(
+    workspaceId: Uuid,
+    sceneId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/scenes/${encodeURIComponent(sceneId)}`,
+      query: { organizationSlug: params.organizationSlug },
     });
   }
 }

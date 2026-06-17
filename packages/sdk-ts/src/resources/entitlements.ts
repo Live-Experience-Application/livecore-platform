@@ -6,6 +6,7 @@
  */
 import type {
   AdEligibilityResponse,
+  MeEntitlementsResponse,
   QuotaStatusResponse,
   Uuid,
 } from "@livecore/contracts";
@@ -49,6 +50,18 @@ export class EntitlementsClient {
     return this.http.send<AdEligibilityResponse>({
       method: "GET",
       path: "/me/ad-eligibility",
+    });
+  }
+
+  /**
+   * `GET /api/v1/me/entitlements` — the current user's effective server
+   * entitlements (generic key+value only). Empty when the subject holds none (the
+   * fail-closed default); a service-account caller is denied server-side.
+   */
+  getMyEntitlements(): Promise<MeEntitlementsResponse> {
+    return this.http.send<MeEntitlementsResponse>({
+      method: "GET",
+      path: "/me/entitlements",
     });
   }
 }

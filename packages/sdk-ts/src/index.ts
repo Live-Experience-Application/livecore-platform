@@ -45,6 +45,10 @@ export type {
 export type { SdkResponse } from "./http.js";
 export type { PageParams } from "./resources/pagination.js";
 
+export { IdentityClient } from "./resources/identity.js";
+export { OrganizationsClient } from "./resources/organizations.js";
+export { AuditClient } from "./resources/audit.js";
+export { TemplatesClient } from "./resources/templates.js";
 export { WorkspacesClient } from "./resources/workspaces.js";
 export type { ConditionalWriteOptions } from "./resources/workspaces.js";
 export { SessionsClient } from "./resources/sessions.js";
@@ -53,9 +57,10 @@ export { ContentClient } from "./resources/content.js";
 export { EntitiesClient } from "./resources/entities.js";
 export { EntityTypesClient } from "./resources/entity-types.js";
 export { VisibilityClient } from "./resources/visibility.js";
-export type { RevealOptions } from "./resources/visibility.js";
+export type { HideOptions, RevealOptions } from "./resources/visibility.js";
 export { RealtimeClient } from "./resources/realtime.js";
 export type { SessionEventReplayParams } from "./resources/realtime.js";
+export { RecapsClient } from "./resources/recaps.js";
 export { AssetsClient } from "./resources/assets.js";
 export { ExportsClient } from "./resources/exports.js";
 export { EntitlementsClient } from "./resources/entitlements.js";

@@ -65,4 +65,34 @@ export class AssetsClient {
       body: request,
     });
   }
+
+  /**
+   * `DELETE /api/v1/assets/{assetId}/links/{linkId}` — unlink an asset from a
+   * content block or entity: remove only the link row (the asset and its target are
+   * unaffected). Responds `204 No Content`; an unknown link is hidden as `404`.
+   */
+  deleteLink(
+    assetId: Uuid,
+    linkId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/assets/${encodeURIComponent(assetId)}/links/${encodeURIComponent(linkId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `DELETE /api/v1/assets/{assetId}` — delete an asset: remove its links and the
+   * underlying storage object (object before row). Audited; `503` if storage is
+   * unconfigured. Responds `204 No Content`; an unknown asset is hidden as `404`.
+   */
+  delete(assetId: Uuid, params: { organizationSlug: string }): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/assets/${encodeURIComponent(assetId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
 }

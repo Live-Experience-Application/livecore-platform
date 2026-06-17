@@ -6,12 +6,15 @@
  * (docs/06_AUTHORIZATION_MATRIX.md).
  */
 import type {
+  AcceptWorkspaceInvitationRequest,
   CreateWorkspaceRequest,
   InviteWorkspaceMemberRequest,
   PageResponse,
+  PendingWorkspaceInvitationResponse,
   UpdateWorkspaceRequest,
   Uuid,
   WorkspaceInvitationResponse,
+  WorkspaceMemberResponse,
   WorkspaceResponse,
 } from "@livecore/contracts";
 
@@ -109,6 +112,26 @@ export class WorkspacesClient {
   }
 
   /**
+   * `POST /api/v1/workspaces/{workspaceId}/archive` — archive a workspace (a soft,
+   * terminal `Active` → `Archived` transition; Owner-only). Pass
+   * {@link ConditionalWriteOptions.ifMatch} to make the archive conditional on the
+   * version last read (a stale value is refused with `412`); omit it to archive
+   * unconditionally. Returns the archived workspace with its new version.
+   */
+  archive(
+    workspaceId: Uuid,
+    params: { organizationSlug: string },
+    options?: ConditionalWriteOptions,
+  ): Promise<WorkspaceResponse> {
+    return this.http.send<WorkspaceResponse>({
+      method: "POST",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/archive`,
+      query: { organizationSlug: params.organizationSlug },
+      ifMatch: options?.ifMatch,
+    });
+  }
+
+  /**
    * `POST /api/v1/workspaces/{workspaceId}/members` — create a member invitation.
    * The one-time plaintext token is on the response exactly once; treat it as a
    * secret and never log it (docs/07_SECURITY_THREAT_MODEL.md threat T6).
@@ -121,6 +144,79 @@ export class WorkspacesClient {
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/members`,
       body: request,
+    });
+  }
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/invitations` — the workspace's PENDING
+   * invitations, as a bounded page (Owner/Admin). The projection is PII-safe (the
+   * invited email is the only personal datum) and never the token hash (threats
+   * T6/T7). Pass optional `limit`/`offset` to page.
+   */
+  listInvitations(
+    workspaceId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<PendingWorkspaceInvitationResponse>> {
+    return this.http.send<PageResponse<PendingWorkspaceInvitationResponse>>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
+   * `POST /api/v1/workspaces/{workspaceId}/invitations/accept` — redeem a scoped
+   * invitation. The token is a bearer grant: the authenticated caller becomes the
+   * member with the invited role. The plaintext token travels in the body, never
+   * the URL (threat T7); an invalid/expired/revoked/foreign token is hidden as
+   * `404`, an already-a-member is `409`. Returns the created membership.
+   */
+  acceptInvitation(
+    workspaceId: Uuid,
+    request: AcceptWorkspaceInvitationRequest,
+  ): Promise<WorkspaceMemberResponse> {
+    return this.http.send<WorkspaceMemberResponse>({
+      method: "POST",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/invitations/accept`,
+      body: request,
+    });
+  }
+
+  /**
+   * `DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}` — revoke a
+   * pending invitation so its scoped token can never be redeemed (a `Pending` →
+   * `Revoked` transition, not a delete; Owner/Admin). Only a pending invitation may
+   * be revoked (already-accepted/revoked is `409`). Responds `204 No Content`.
+   */
+  revokeInvitation(
+    workspaceId: Uuid,
+    invitationId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}` — remove a
+   * workspace member, revoking their access (Owner/Admin). The last Owner cannot be
+   * removed. Audited. Responds `204 No Content`.
+   */
+  removeMember(
+    workspaceId: Uuid,
+    memberId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(memberId)}`,
+      query: { organizationSlug: params.organizationSlug },
     });
   }
 }

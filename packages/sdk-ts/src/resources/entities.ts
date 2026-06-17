@@ -78,4 +78,39 @@ export class EntitiesClient {
       body: request,
     });
   }
+
+  /**
+   * `DELETE /api/v1/workspaces/{workspaceId}/entities/{entityId}` — delete an
+   * entity, cascading its dependent relationship edges, visibility rules and asset
+   * links. Audited. Responds `204 No Content`.
+   */
+  delete(
+    workspaceId: Uuid,
+    entityId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `DELETE /api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId}`
+   * — remove a directed entity relationship edge (workspace-scoped). The edge's
+   * endpoints are unaffected. Responds `204 No Content`; an unknown edge is hidden
+   * as `404`.
+   */
+  deleteRelationship(
+    workspaceId: Uuid,
+    relationshipId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<void> {
+    return this.http.send<void>({
+      method: "DELETE",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/entity-relationships/${encodeURIComponent(relationshipId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
 }

@@ -1,10 +1,14 @@
-import type { RevealOutcome, VisibilityResourceType } from "./enums.js";
+import type {
+  HideOutcome,
+  RevealOutcome,
+  VisibilityResourceType,
+} from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
 
 /**
- * Visibility module contracts (CORE-SDK-001): the reveal command and the
- * participant-visible feed. The reveal command is idempotent — a retry with the
- * same `Idempotency-Key` header produces no duplicate effect
+ * Visibility module contracts (CORE-SDK-001): the reveal/hide commands and the
+ * participant-visible feed. The reveal and hide commands are idempotent — a retry
+ * with the same `Idempotency-Key` header produces no duplicate effect
  * (docs/08_API_CONTRACTS.md).
  */
 
@@ -40,6 +44,44 @@ export interface RevealResponse {
   /**
    * The participant the resource was revealed to (a selected-participant reveal),
    * or `null` when it was revealed to the whole audience.
+   */
+  participantId: Uuid | null;
+}
+
+/**
+ * Request body for `POST /api/v1/sessions/{sessionId}/hide` (CORE-SDK-006). It
+ * mirrors {@link RevealRequest} exactly with the opposite visibility sense; the
+ * client's retry-safety token is the `Idempotency-Key` request header, not a body
+ * field.
+ */
+export interface HideRequest {
+  /** Canonical slug of the organization that owns the session's workspace. */
+  organizationSlug: string;
+  /** The kind of resource to hide (`Scene`/`ContentBlock`/`Entity`). */
+  resourceType: VisibilityResourceType;
+  /** The surrogate id of the resource to hide. */
+  resourceId: Uuid;
+  /**
+   * Optional target of a selected-participant hide. When set, the resource is
+   * hidden only for that participant; when omitted, it is hidden from the whole
+   * audience.
+   */
+  participantId?: Uuid;
+}
+
+/** Response body of the hide command. Mirrors {@link RevealResponse} inverted. */
+export interface HideResponse {
+  /** The kind of resource that was hidden. */
+  resourceType: VisibilityResourceType;
+  /** The surrogate id of the resource that was hidden. */
+  resourceId: Uuid;
+  /** Always `false` after a successful hide. */
+  visible: boolean;
+  /** Whether the hide was newly applied or recognized as an idempotent retry. */
+  outcome: HideOutcome;
+  /**
+   * The participant the resource was hidden for (a selected-participant hide), or
+   * `null` when it was hidden from the whole audience.
    */
   participantId: Uuid | null;
 }
