@@ -796,19 +796,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (503) when persistence is off.
     builder.Services.AddScoped<ISessionEventRepository, SessionEventRepository>();
 
-    // Recipient-specific event projection (CORE-RT-004): the Realtime module's recipient resolver
-    // computes the per-recipient deliveries of an event (which server-computed groups receive it and the
-    // host vs audience projection each gets), FANNING an audience-wide event out to each active
-    // participant's group and gating every recipient through the central Visibility engine
-    // (IEventRecipientVisibility above + the participant repository), so realtime delivery never leaks a
-    // hidden event (threat T3; docs/11_REALTIME_SYNC.md "Events are never broadcast blindly"). The
-    // publisher composes the repository, the recipient resolver and the IRealtimeBackplane (CORE-RT-006,
-    // registered above) to persist an event and then forward each computed delivery over the scale-out seam
-    // ("persist event -> compute recipients -> project payload -> send to recipient groups",
-    // docs/11_REALTIME_SYNC.md). The reveal
-    // command is the first producer (the ContentRevealed event, carrying the revealed resource as its
-    // visibility subject); the SessionStarted/Ended events and reconnect replay (CORE-RT-005) are later
-    // stories.
+    // Recipient-specific event projection (CORE-RT-004; CORE-PERF-001 collapse): the Realtime module's
+    // recipient resolver computes the per-recipient deliveries of an event (which server-computed groups
+    // receive it and the host vs audience projection each gets), gating every recipient through the central
+    // Visibility engine (IEventRecipientVisibility above), so realtime delivery never leaks a hidden event
+    // (threat T3; docs/11_REALTIME_SYNC.md "Events are never broadcast blindly"). An AUDIENCE-WIDE event the
+    // whole audience may see is delivered to the shared session-audience group with ONE backplane publish,
+    // resolved from a SINGLE rule lookup (no per-participant query or publish, CORE-PERF-001); per-participant
+    // lookups/groups are reserved for selected-participant events, so it no longer depends on the participant
+    // repository. The publisher composes the repository, the recipient resolver and the IRealtimeBackplane
+    // (CORE-RT-006, registered above) to persist an event and then forward each computed delivery over the
+    // scale-out seam ("persist event -> compute recipients -> project payload -> send to recipient groups",
+    // docs/11_REALTIME_SYNC.md). The reveal command is the first producer (the ContentRevealed event,
+    // carrying the revealed resource as its visibility subject).
     builder.Services.AddScoped<ISessionEventRecipientResolver, SessionEventRecipientResolver>();
     builder.Services.AddScoped<ISessionEventPublisher, SessionEventPublisher>();
 

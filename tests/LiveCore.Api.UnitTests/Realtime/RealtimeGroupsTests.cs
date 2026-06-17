@@ -27,7 +27,21 @@ public sealed class RealtimeGroupsTests
         Assert.Equal(
             $"session:{_session}:participant:{_participant}",
             RealtimeGroups.SessionParticipant(_session, _participant));
+        Assert.Equal($"session:{_session}:audience", RealtimeGroups.SessionAudience(_session));
         Assert.Equal($"session:{_session}:observers", RealtimeGroups.SessionObservers(_session));
+    }
+
+    [Fact]
+    public void The_shared_audience_group_is_session_keyed_and_distinct_per_session()
+    {
+        // CORE-PERF-001: every active participant of a session joins the SAME shared audience group, so an
+        // audience-wide event is one publish; but the group is session-keyed, so two concurrent sessions of
+        // one workspace have DISTINCT audience groups (no cross-session leak, threat T5/T3).
+        var otherSession = Guid.Parse("66666666-6666-6666-6666-666666666666");
+
+        Assert.NotEqual(
+            RealtimeGroups.SessionAudience(_session),
+            RealtimeGroups.SessionAudience(otherSession));
     }
 
     [Fact]
@@ -48,6 +62,7 @@ public sealed class RealtimeGroupsTests
         Assert.Throws<ArgumentException>(() => RealtimeGroups.SessionHosts(Guid.Empty));
         Assert.Throws<ArgumentException>(() => RealtimeGroups.SessionParticipant(Guid.Empty, _participant));
         Assert.Throws<ArgumentException>(() => RealtimeGroups.SessionParticipant(_session, Guid.Empty));
+        Assert.Throws<ArgumentException>(() => RealtimeGroups.SessionAudience(Guid.Empty));
         Assert.Throws<ArgumentException>(() => RealtimeGroups.SessionObservers(Guid.Empty));
     }
 }

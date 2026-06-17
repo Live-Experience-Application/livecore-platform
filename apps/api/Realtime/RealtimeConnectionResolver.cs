@@ -38,10 +38,14 @@ namespace LiveCore.Api.Realtime;
 /// exposure, so a later event delivered to a group can never reach an unrelated connection, threat T3):
 /// <list type="bullet">
 ///   <item>A PARTICIPANT — the caller owns an ACTIVE participant record (the supplied participant id) in
-///   the session's own workspace — joins ONLY <c>session:{id}:participant:{participantId}</c>. The
-///   participant must be linked to the caller's user (an anonymous participant has no owner, so anonymous
-///   realtime is deferred) and be in the session's workspace; otherwise denied (mirrors the visible-feed
-///   own-feed rule).</item>
+///   the session's own workspace — joins its own <c>session:{id}:participant:{participantId}</c> group
+///   (for private, selected-participant events) AND the shared <c>session:{id}:audience</c> group
+///   (CORE-PERF-001), so an audience-wide event the whole audience may see reaches it through ONE shared
+///   group rather than a per-participant fan-out. The participant must be linked to the caller's user (an
+///   anonymous participant has no owner, so anonymous realtime is deferred) and be in the session's
+///   workspace; otherwise denied (mirrors the visible-feed own-feed rule). Joining the shared audience
+///   group never lets the caller see another participant's private reveal — selected-participant events
+///   are routed to the individual participant group, never the shared one (threat T3).</item>
 ///   <item>A HOST-capable workspace member (Owner/Admin/Host/CoHost, via
 ///   <see cref="VisibilityRoles.ViewsHostOnlyContent"/> — reused, not re-listed) joins the org, the
 ///   workspace-hosts and the session-hosts groups.</item>
@@ -146,7 +150,8 @@ internal sealed class RealtimeConnectionResolver
 
     /// <summary>
     /// Admits a PARTICIPANT connection: the caller must own an ACTIVE participant (the supplied id) in
-    /// the session's own workspace. Joins only that participant's group.
+    /// the session's own workspace. Joins that participant's own group (for selected-participant events)
+    /// and the shared session-audience group (for audience-wide events, CORE-PERF-001).
     /// </summary>
     private async Task<RealtimeConnectionAdmission> ResolveParticipantAsync(
         TenantContext context,
@@ -172,6 +177,7 @@ internal sealed class RealtimeConnectionResolver
         return RealtimeConnectionAdmission.Admit(
             [
                 RealtimeGroups.SessionParticipant(session.Id, participant.Id),
+                RealtimeGroups.SessionAudience(session.Id),
             ],
             new RealtimeConnectionSubject(
                 context.OrganizationId,

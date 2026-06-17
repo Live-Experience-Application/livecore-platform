@@ -23,16 +23,19 @@ namespace LiveCore.Api.Visibility;
 internal interface IEventRecipientVisibility
 {
     /// <summary>
-    /// Whether the AUDIENCE (the audience roles — participants/observers — at large) may receive an event
-    /// about the given subject resource: true iff a visibility rule makes the resource visible to the
-    /// whole audience. Used to gate the observers group delivery of an audience-wide event. The lookup is
-    /// tenant-, workspace- AND SESSION-scoped (CORE-SVIS-001): only the rules of the event's own session
-    /// are consulted, so a reveal in a concurrent session of the same workspace can never make this
-    /// event's subject visible here (the cross-session leak; threat T5/T3). An unrecognized subject kind
-    /// yields <see langword="false"/> (fail-closed).
+    /// Resolves an AUDIENCE-WIDE event's recipients about the given subject resource from a SINGLE rule
+    /// lookup (CORE-PERF-001): whether the WHOLE audience may see it (an audience-wide visible rule) AND the
+    /// participants made visible only by a rule scoped to exactly them (a selected-participant reveal on the
+    /// same resource), so the Realtime resolver gates the observers + shared session-audience group and any
+    /// individually-entitled participant WITHOUT one query per participant. Replaces the old per-participant
+    /// audience fan-out, so per-reveal DB load no longer grows with audience size. The lookup is tenant-,
+    /// workspace- AND SESSION-scoped (CORE-SVIS-001): only the rules of the event's own session are
+    /// consulted, so a reveal in a concurrent session of the same workspace can never make this event's
+    /// subject visible here (the cross-session leak; threat T5/T3). An unrecognized/empty subject yields
+    /// <see cref="AudienceVisibility.None"/> (fail-closed — no audience, no participants).
     /// </summary>
     /// <exception cref="ArgumentException">The organization id, workspace id or session id is empty.</exception>
-    Task<bool> CanAudienceReceiveAsync(
+    Task<AudienceVisibility> ResolveAudienceRecipientsAsync(
         Guid organizationId,
         Guid workspaceId,
         Guid sessionId,

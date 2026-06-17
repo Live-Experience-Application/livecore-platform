@@ -2106,11 +2106,12 @@ resolver (the Realtime module stays the sole owner of delivery — these flows d
 duplicate the anti-leak routing). Like the CORE-EVT-001 `SessionStarted`/`SessionEnded`
 events they are **subjectless audience events** (no visibility subject, no selected
 participant), so the resolver delivers each to the whole session audience: the hosts
-(**always — host-visible**, `docs/06_AUTHORIZATION_MATRIX.md`), the observers and every
-active participant (the configurable audience of `docs/09_EVENT_CATALOG.md`). Because the
-leave performs `Participant.Remove` **before** publishing, the just-departed participant is
-no longer in the active-participant fan-out, so a leaver never receives their own removal
-(the optional participant feed).
+(**always — host-visible**, `docs/06_AUTHORIZATION_MATRIX.md`), the observers and the shared
+`session:{sessionId}:audience` group (CORE-PERF-001). `ParticipantLeft` is a **public**
+presence announcement, not a private feed item: the leaver's **own** participant group is
+never addressed by it (the optional participant feed), and the leave re-authorizes the
+realtime layer immediately afterward, evicting the leaver's still-open socket from the shared
+audience group so it receives no further events (CORE-RTC-002).
 
 The payloads are **identifier-only**: each carries the participant's surrogate **id** and
 nothing else — never the display name or any other participant PII (threat T7). The
@@ -2241,8 +2242,8 @@ visibility subject**: the resource is now hidden, so a subject-gated projection
 would (correctly, for a reveal) exclude the very recipients who must be told to
 remove it. Instead the event is routed by its coarse target — a selected-participant
 hide reaches only that participant (plus hosts), an audience-wide hide reaches the
-observers and every active participant — carrying resource **identifiers only**,
-never resolved content.
+observers and the shared session-audience group (CORE-PERF-001) — carrying resource
+**identifiers only**, never resolved content.
 
 ### Scene and content lifecycle session events
 
@@ -2930,18 +2931,38 @@ the Realtime recipient resolver turns it into a set of deliveries:
   hosts), and only when they may see the subject; observers and other participants are
   never targeted (a non-selected participant is neither in that group nor passes the
   per-participant gate — the crown jewel).
-- An **audience-wide** event is delivered to the **observers** group when the audience
-  may see the subject, and is **fanned out to each active participant** of the session's
-  workspace whose own per-participant visibility allows it (the connection model has no
-  all-participants group, so the audience reaches participants only through their
-  individual groups). The **audience** projection omits the routing target, so a
-  participant never learns who else was targeted.
+- An **audience-wide** event the whole audience may see is delivered to the **observers**
+  group and the shared **`session:{sessionId}:audience`** group — one publish each
+  (CORE-PERF-001 below) — reaching every active participant through the shared group. The
+  **audience** projection omits the routing target, so a participant never learns who else
+  was targeted. When the audience-at-large may **not** see the subject but a
+  participant-scoped visible rule exists (a selected-participant reveal on the same
+  resource), the event still reaches exactly those participants through their **own**
+  groups.
 
 Every per-recipient and audience decision is delegated to the central Visibility engine
-(`CanViewResource` / `CanParticipantViewResource`, reused — not duplicated), so the
-realtime recipient set can never diverge from the REST visibility decision. An event with
-no visibility subject (an unconditional audience event such as `SessionStarted`/`SessionEnded`,
-CORE-EVT-001) is not gated: the whole audience receives it.
+(`CanViewResource` / `CanParticipantViewResource` / `ResolveAudienceVisibility`, reused —
+not duplicated), so the realtime recipient set can never diverge from the REST visibility
+decision. An event with no visibility subject (an unconditional audience event such as
+`SessionStarted`/`SessionEnded`, CORE-EVT-001) is not gated: the whole audience receives it
+through the observers and shared `:audience` groups.
+
+**Collapsed audience delivery (CORE-PERF-001).** An audience-wide reveal used to enumerate
+the workspace's active participants and run **one visibility-rule lookup per participant**,
+then **publish to each participant's group individually** — `1+N` identical lookups and `N`
+backplane publishes per event, all awaited inside the host reveal request, so reveal latency
+and DB/backplane load grew **linearly with audience size**. The recipient computation now
+collapses that to a **single rule lookup and a shared group**: for an audience-wide event the
+Visibility engine resolves the audience from **one** session-scoped lookup
+(`ResolveAudienceVisibility`) — deciding in memory both whether the whole audience may see the
+subject and which participants are entitled only by a participant-scoped rule — and the event
+is delivered to the shared `session:{sessionId}:audience` group with **one** publish (every
+active participant joins that group on connect). Per-participant lookups/groups are reserved
+for **selected-participant** events. So per-reveal query and backplane load no longer grow with
+audience size, while visibility correctness is unchanged: the shared group is gated by the same
+audience-wide decision and only ever carries events the whole audience is entitled to, and the
+participant-scoped set reaches exactly the individually-entitled participants — the same
+recipient set the old fan-out produced.
 
 **Reconnect replay with filtering (CORE-RT-005).** A client that reconnects rebuilds its
 live state from the durable stream over a REST route, with the same per-recipient filter
@@ -3035,9 +3056,10 @@ Realtime story (`docs/11_REALTIME_SYNC.md`).
 **Connection re-authorization / eviction (CORE-RTC-002).** A connection's server-managed groups are resolved
 **once**, at connect, so a caller whose standing changes **mid-session** would keep receiving events their old
 standing allowed until they reconnected: a removed participant's still-open socket stays in its participant
-group, and a demoted host keeps the host/observer group deliveries (the participant audience fan-out is
-re-gated per event by the recipient resolver — it enumerates only **active** participants — but group
-**membership** is not). The Realtime module now closes that gap with an **eviction** seam
+**and shared `:audience`** groups, and a demoted host keeps the host/observer group deliveries (with the
+collapsed audience delivery, CORE-PERF-001, the shared `:audience` group is sent to as a whole, so audience
+delivery is no longer additionally re-gated per event by active status — eviction is what takes a departed
+participant out of the audience). The Realtime module now closes that gap with an **eviction** seam
 (`IRealtimeConnectionEvictor`, backed by a singleton `RealtimeConnectionRegistry`): the hub records each
 admitted connection's server-computed authorized facts + an abort handle on connect (and clears it on
 disconnect), and a removal/role-change command raises the seam to **abort** exactly the affected connections —
@@ -3053,10 +3075,11 @@ can never widen an audience (threat T3). The authoritative re-admission stays th
 an evicted client that reconnects is authorized from scratch (a demoted host re-joins only its new role's
 groups; a removed participant is denied), so this reuses the single authorization path rather than duplicating
 it. The registry tracks the connections of the instance it runs on (the abort handle is an in-process
-`HubCallerContext.Abort`), so it evicts on **that** instance immediately; the always-on cross-instance backstop
-is the per-event recipient computation that already re-gates the participant audience fan-out, and propagating
-the host/observer eviction signal across instances is a documented follow-up — the same single-instance posture
-as the in-process backplane (`docs/11_REALTIME_SYNC.md`).
+`HubCallerContext.Abort`), so it evicts on **that** instance immediately; propagating the eviction signal
+across instances (for the shared `:audience` group and for host/observer connections alike) is a documented
+follow-up — the same single-instance posture as the in-process backplane (`docs/11_REALTIME_SYNC.md`). The
+session-keyed groups and the per-event visibility gate still bound delivery to the correct session and rules
+on every instance, so a hidden event is never delivered regardless of instance count.
 
 ## Assets, storage and background jobs
 

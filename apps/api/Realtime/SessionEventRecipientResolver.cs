@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
-using LiveCore.Api.Participants;
 using LiveCore.Api.Visibility;
 
 namespace LiveCore.Api.Realtime;
@@ -31,25 +30,39 @@ namespace LiveCore.Api.Realtime;
 ///   only when they may see the subject. A non-selected participant is not in that group AND would fail
 ///   the per-participant visibility gate, so a private event can never leak to them (THE crown jewel,
 ///   threat T3).</item>
-///   <item>An AUDIENCE-WIDE event is delivered to the OBSERVERS group when the audience may see the
-///   subject, and is FANNED OUT to EACH active participant of the session's workspace whose own
-///   per-participant visibility allows it (docs/11_REALTIME_SYNC.md has no all-participants group, so the
-///   audience reaches participants only through their individual groups). The audience projection
-///   (<see cref="SessionEventEnvelope.ForAudience"/>) omits the routing target, so a participant never
-///   learns who else was targeted (threats T2/T7).</item>
+///   <item>An AUDIENCE-WIDE event is delivered to the OBSERVERS group AND the shared SESSION-AUDIENCE group
+///   (<see cref="RealtimeGroups.SessionAudience"/>, CORE-PERF-001) when the audience may see the subject —
+///   ONE backplane publish each, reaching every active participant through the shared group instead of one
+///   publish per participant. The audience projection (<see cref="SessionEventEnvelope.ForAudience"/>)
+///   omits the routing target, so a participant never learns who else was targeted (threats T2/T7). When
+///   the audience-at-large may NOT see the subject but a participant-SCOPED visible rule exists (a
+///   selected-participant reveal on the same resource), that one event still reaches exactly those
+///   participants through their OWN groups — derived in memory from the SAME single lookup, never one
+///   query per participant.</item>
 /// </list>
+///
+/// THE FAN-OUT IS COLLAPSED TO A SINGLE LOOKUP + SHARED GROUP (CORE-PERF-001). An audience-wide event used
+/// to enumerate the workspace's active participants and run one visibility query (and one backplane
+/// publish) PER participant — 1+N queries and N publishes per event, growing linearly with audience size.
+/// Now the audience decision is resolved from ONE session-scoped rule lookup
+/// (<see cref="IEventRecipientVisibility.ResolveAudienceRecipientsAsync"/>), and a visible audience event
+/// is delivered to the shared session-audience group with ONE publish; only a SELECTED-participant event
+/// uses a per-participant lookup/group. So per-reveal DB and backplane load no longer grow with audience
+/// size, and visibility correctness is unchanged: the shared group is gated by the same audience-wide
+/// decision and only ever carries events the whole audience is entitled to, while the participant-scoped
+/// visible set reaches exactly the individually-entitled participants (the same recipient set the old
+/// fan-out produced).
 ///
 /// THE RECIPIENT SET IS BOUNDED BY THE EVENT'S SESSION (CORE-SVIS-001). EVERY group this resolver emits is
 /// keyed by <see cref="SessionEvent.SessionId"/> (<see cref="RealtimeGroups.SessionHosts"/> /
-/// <see cref="RealtimeGroups.SessionObservers"/> / <see cref="RealtimeGroups.SessionParticipant"/>), and
-/// every visibility gate below is the SESSION-SCOPED decision (it passes the event's session, so only the
-/// reveal rules of THAT session are consulted). So a reveal in one session can never be delivered into a
-/// concurrent session of the same workspace: a connection joins only its own session's groups
-/// (<see cref="RealtimeConnectionResolver"/>), so even though the audience fan-out ENUMERATES the
-/// workspace's active participants (the audience candidate set — see below), a delivery addressed to
-/// <c>session:{thisSession}:participant:{p}</c> reaches a participant only when they are connected to
-/// THIS session, and the session-scoped gate independently confirms the subject is revealed in this
-/// session (the cross-session leak; threat T5/T3).
+/// <see cref="RealtimeGroups.SessionObservers"/> / <see cref="RealtimeGroups.SessionAudience"/> /
+/// <see cref="RealtimeGroups.SessionParticipant"/>), and every visibility gate below is the SESSION-SCOPED
+/// decision (it passes the event's session, so only the reveal rules of THAT session are consulted). So a
+/// reveal in one session can never be delivered into a concurrent session of the same workspace: a
+/// connection joins only its own session's groups (<see cref="RealtimeConnectionResolver"/>), so the shared
+/// audience group of one session reaches only the participants connected to THAT session, and the
+/// session-scoped gate independently confirms the subject is revealed in this session (the cross-session
+/// leak; threat T5/T3).
 ///
 /// THE VISIBILITY GATE is the central Visibility engine, NOT a parallel copy: every per-recipient and
 /// audience decision is delegated to <see cref="IEventRecipientVisibility"/> (which reuses
@@ -57,27 +70,24 @@ namespace LiveCore.Api.Realtime;
 /// from the REST visibility decision (docs/05_MODULE_CONTRACTS.md: "Do not duplicate visibility logic
 /// elsewhere"). An event with NO visibility subject (<see cref="SessionEvent.HasVisibilitySubject"/>
 /// false — an unconditional audience event such as a later <c>SessionStarted</c>) is not gated: the
-/// audience and all active participants of the session receive it. The active-participant CANDIDATE set is
-/// the session's audience: participants are workspace-scoped (CORE-SES-001) and there is no persisted
-/// session-participant roster yet (the participant connection metadata is deferred — CORE-PRS-001 and the
-/// <see cref="LiveCore.Api.Sessions.SessionParticipantJoinService"/> note), so the candidates are the
-/// workspace's ACTIVE participants (<see cref="IParticipantRepository.ListActiveByWorkspaceAsync"/>), the
-/// same population a participant realtime connection is admitted from (CORE-RT-002), each gated by the
-/// session-scoped visibility above and addressed to its own session-keyed group.
+/// observers and the whole session audience (the shared group) receive it. The session's audience is its
+/// workspace's active participants — there is no persisted session-participant roster yet (the participant
+/// connection metadata is deferred — CORE-PRS-001 and the
+/// <see cref="LiveCore.Api.Sessions.SessionParticipantJoinService"/> note) — and each such participant
+/// joins the session-keyed shared audience group on connect (CORE-RT-002), so a delivery to that group
+/// reaches exactly the session's connected audience. A departed participant is taken out of the audience by
+/// the eviction seam (CORE-RTC-002, immediate on the instance holding the socket); unlike the old fan-out,
+/// audience delivery is no longer additionally re-gated per event by active status, so cross-instance
+/// eviction (a documented follow-up, docs/11_REALTIME_SYNC.md) now also covers the audience group.
 /// </summary>
 internal sealed class SessionEventRecipientResolver : ISessionEventRecipientResolver
 {
     private readonly IEventRecipientVisibility _visibility;
-    private readonly IParticipantRepository _participants;
 
-    public SessionEventRecipientResolver(
-        IEventRecipientVisibility visibility,
-        IParticipantRepository participants)
+    public SessionEventRecipientResolver(IEventRecipientVisibility visibility)
     {
         ArgumentNullException.ThrowIfNull(visibility);
-        ArgumentNullException.ThrowIfNull(participants);
         _visibility = visibility;
-        _participants = participants;
     }
 
     /// <inheritdoc />
@@ -113,7 +123,8 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
         if (sessionEvent.TargetParticipantId is { } selectedParticipantId)
         {
             // SELECTED / private: only the selected participant, and only if they may see the subject.
-            // No observers, no other participants.
+            // No observers, no shared audience group, no other participants. Per-participant lookups and
+            // groups are reserved for selected-participant events (CORE-PERF-001).
             if (await CanParticipantReceiveAsync(sessionEvent, selectedParticipantId, cancellationToken)
                 .ConfigureAwait(false))
             {
@@ -125,51 +136,57 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
             return deliveries;
         }
 
-        // AUDIENCE-WIDE: observers (gated), then a per-participant fan-out (each gated).
-        if (await CanAudienceReceiveAsync(sessionEvent, cancellationToken).ConfigureAwait(false))
+        // AUDIENCE-WIDE. An event with no visibility subject is unconditional: the observers and the whole
+        // session audience receive it through the shared group — one publish each, no per-participant
+        // fan-out (CORE-PERF-001).
+        if (!sessionEvent.HasVisibilitySubject)
         {
             deliveries.Add(new SessionEventDelivery(
-                RealtimeGroups.SessionObservers(sessionEvent.SessionId),
-                audienceEnvelope));
+                RealtimeGroups.SessionObservers(sessionEvent.SessionId), audienceEnvelope));
+            deliveries.Add(new SessionEventDelivery(
+                RealtimeGroups.SessionAudience(sessionEvent.SessionId), audienceEnvelope));
+            return deliveries;
         }
 
-        // The audience CANDIDATE set: the workspace's active participants (no persisted session-participant
-        // roster exists yet — see the type summary). Each candidate is gated by the SESSION-SCOPED
-        // visibility below and addressed to a group keyed by THIS event's session, so the recipient set is
-        // bounded to the event's session even though the candidate source is workspace-wide (CORE-SVIS-001).
-        var participants = await _participants
-            .ListActiveByWorkspaceAsync(sessionEvent.OrganizationId, sessionEvent.WorkspaceId, cancellationToken)
+        // Subject-gated audience event: ONE session-scoped rule lookup yields both the audience-wide
+        // decision and the participant-scoped visible set (CORE-PERF-001), so the recipient set is computed
+        // without a per-participant query.
+        var audience = await _visibility
+            .ResolveAudienceRecipientsAsync(
+                sessionEvent.OrganizationId,
+                sessionEvent.WorkspaceId,
+                sessionEvent.SessionId,
+                sessionEvent.VisibilitySubjectType!,
+                sessionEvent.VisibilitySubjectId!.Value,
+                cancellationToken)
             .ConfigureAwait(false);
 
-        foreach (var participant in participants)
+        if (audience.AudienceVisible)
         {
-            if (await CanParticipantReceiveAsync(sessionEvent, participant.Id, cancellationToken)
-                .ConfigureAwait(false))
+            // The whole audience may see it: observers + the shared session-audience group (one publish
+            // each). The shared group covers EVERY connected participant — including any with a
+            // participant-scoped rule — so no per-participant delivery is needed.
+            deliveries.Add(new SessionEventDelivery(
+                RealtimeGroups.SessionObservers(sessionEvent.SessionId), audienceEnvelope));
+            deliveries.Add(new SessionEventDelivery(
+                RealtimeGroups.SessionAudience(sessionEvent.SessionId), audienceEnvelope));
+        }
+        else
+        {
+            // The audience-at-large may NOT see it, but a participant-scoped visible rule still reaches
+            // exactly that participant (a selected-participant reveal on the same resource). Deliver to each
+            // such participant's OWN group — derived from the SAME single lookup, never a per-participant
+            // query — and never to the shared audience group or the observers (threat T3).
+            foreach (var participantId in audience.SelectedVisibleParticipantIds)
             {
                 deliveries.Add(new SessionEventDelivery(
-                    RealtimeGroups.SessionParticipant(sessionEvent.SessionId, participant.Id),
+                    RealtimeGroups.SessionParticipant(sessionEvent.SessionId, participantId),
                     audienceEnvelope));
             }
         }
 
         return deliveries;
     }
-
-    /// <summary>
-    /// Whether the audience may receive the event: an event with no visibility subject is unconditional;
-    /// otherwise the central Visibility engine decides (audience viewpoint).
-    /// </summary>
-    private async Task<bool> CanAudienceReceiveAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
-        => !sessionEvent.HasVisibilitySubject
-            || await _visibility
-                .CanAudienceReceiveAsync(
-                    sessionEvent.OrganizationId,
-                    sessionEvent.WorkspaceId,
-                    sessionEvent.SessionId,
-                    sessionEvent.VisibilitySubjectType!,
-                    sessionEvent.VisibilitySubjectId!.Value,
-                    cancellationToken)
-                .ConfigureAwait(false);
 
     /// <summary>
     /// Whether the given participant may receive the event: an event with no visibility subject is

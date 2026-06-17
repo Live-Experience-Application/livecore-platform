@@ -14,6 +14,7 @@ namespace LiveCore.Api.Realtime;
 /// workspace:{workspaceId}:hosts
 /// session:{sessionId}:hosts
 /// session:{sessionId}:participant:{participantId}
+/// session:{sessionId}:audience
 /// session:{sessionId}:observers
 /// </code>
 ///
@@ -45,6 +46,20 @@ internal static class RealtimeGroups
     /// </summary>
     public static string SessionParticipant(Guid sessionId, Guid participantId)
         => $"session:{Require(sessionId, nameof(sessionId))}:participant:{Require(participantId, nameof(participantId))}";
+
+    /// <summary>
+    /// The shared session-audience group <c>session:{sessionId}:audience</c> (CORE-PERF-001). EVERY active
+    /// participant connection of the session joins this ONE group in addition to its own
+    /// <see cref="SessionParticipant"/> group, so an AUDIENCE-WIDE event the whole audience may see is
+    /// delivered with a SINGLE backplane publish to this group instead of one publish per participant. It
+    /// is session-keyed (like every other group here), so a participant connected to a concurrent session
+    /// of the same workspace is in a DIFFERENT audience group and never receives this session's audience
+    /// events (the cross-session leak; threat T5/T3, CORE-SVIS-001). Private (selected-participant) events
+    /// are NOT routed here — they go to the individual <see cref="SessionParticipant"/> group — so the
+    /// shared group only ever carries events the whole audience is entitled to (threat T3).
+    /// </summary>
+    public static string SessionAudience(Guid sessionId)
+        => $"session:{Require(sessionId, nameof(sessionId))}:audience";
 
     /// <summary>The session observers group <c>session:{sessionId}:observers</c>.</summary>
     public static string SessionObservers(Guid sessionId)

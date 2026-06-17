@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
-using LiveCore.Api.Organizations;
-
 namespace LiveCore.Api.Visibility;
 
 /// <summary>
@@ -31,7 +29,7 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
     }
 
     /// <inheritdoc />
-    public async Task<bool> CanAudienceReceiveAsync(
+    public async Task<AudienceVisibility> ResolveAudienceRecipientsAsync(
         Guid organizationId,
         Guid workspaceId,
         Guid sessionId,
@@ -39,28 +37,26 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
         Guid subjectId,
         CancellationToken cancellationToken)
     {
-        // An unrecognized subject kind (or an empty id) can never be shown to the audience: fail closed.
+        // An unrecognized subject kind (or an empty id) can never be shown to the audience: fail closed
+        // (no audience, no individually-entitled participant).
         if (!TryParseSubjectType(subjectType, out var resourceType) || subjectId == Guid.Empty)
         {
-            return false;
+            return AudienceVisibility.None;
         }
 
-        // Reuse the canonical SESSION-SCOPED CanViewResource decision under the AUDIENCE viewpoint
-        // (Participant), exactly as the participant feed does, so the realtime audience gate equals the
-        // REST one AND is bounded by the event's own session (CORE-SVIS-001): a reveal in a concurrent
-        // session of the same workspace can never make this event's subject visible to the audience here.
-        var decision = await _policy
-            .CanViewResourceAsync(
+        // Reuse the canonical SESSION-SCOPED audience resolution (CORE-PERF-001): ONE rule lookup yields
+        // both the audience-wide decision and the participant-scoped visible set, bounded by the event's
+        // own session (CORE-SVIS-001), so the realtime audience gate equals the REST one and a reveal in a
+        // concurrent session of the same workspace can never make this event's subject visible here.
+        return await _policy
+            .ResolveAudienceVisibilityAsync(
                 organizationId,
                 workspaceId,
                 sessionId,
-                MembershipRole.Participant,
                 resourceType,
                 subjectId,
                 cancellationToken)
             .ConfigureAwait(false);
-
-        return decision.CanView;
     }
 
     /// <inheritdoc />

@@ -13,8 +13,14 @@ org:{organizationId}
 workspace:{workspaceId}:hosts
 session:{sessionId}:hosts
 session:{sessionId}:participant:{participantId}
+session:{sessionId}:audience
 session:{sessionId}:observers
 ```
+
+Every active participant connection joins BOTH its own `session:{sessionId}:participant:{participantId}`
+group (for private, selected-participant events) AND the shared `session:{sessionId}:audience` group, so an
+audience-wide event the whole audience may see is delivered with a single group send rather than one per
+participant (CORE-PERF-001, "Collapsed audience delivery" below).
 
 Do not let clients choose arbitrary group names.
 
@@ -42,9 +48,10 @@ session B of the same workspace (the cross-session leak; threats T5/T3 in
 `docs/07_SECURITY_THREAT_MODEL.md`). Two things enforce this together:
 
 - **Session-keyed groups.** Every group a delivery is addressed to is keyed by the event's session
-  (`session:{sessionId}:hosts` / `:observers` / `:participant:{participantId}`), and a connection joins
-  only the groups of the session it connected to. So a delivery for session A reaches only connections in
-  session A's groups.
+  (`session:{sessionId}:hosts` / `:observers` / `:audience` / `:participant:{participantId}`), and a
+  connection joins only the groups of the session it connected to. So a delivery for session A reaches only
+  connections in session A's groups — including its shared `:audience` group, which a participant connected
+  to a concurrent session B is NOT in.
 - **Session-scoped visibility gate.** The recipient resolver gates every audience and per-recipient
   delivery through the central Visibility engine **bounded by the event's session**, so the decision
   consults only the reveal rules of that session. The participant-visible feed
@@ -53,9 +60,45 @@ session B of the same workspace (the cross-session leak; threats T5/T3 in
   replay can never diverge.
 
 A participant is workspace-scoped and there is no persisted session-participant roster yet (deferred to
-the Presence epic), so the audience fan-out still enumerates the workspace's active participants as the
-candidate set; the session boundary is enforced by the session-keyed groups and the session-scoped gate
-above, not by a roster.
+the Presence epic), so the session's audience is its workspace's active participants — the population each
+participant connection is admitted from. The session boundary is enforced by the session-keyed groups (the
+shared `:audience` group included) and the session-scoped gate above, not by a roster.
+
+## Collapsed audience delivery (CORE-PERF-001)
+
+An audience-wide reveal used to resolve its recipients by **enumerating the workspace's active participants
+and running one visibility-rule lookup per participant**, then **publishing to each participant's group
+individually** — `1+N` identical `visibility_rules` lookups and `N` backplane publishes per event (and a
+Scene reveal emits two events, doubling both), all awaited inside the host's reveal HTTP request. Reveal
+latency and DB/backplane load therefore grew **linearly with audience size**.
+
+The recipient computation now collapses that to a **single rule lookup and a shared group**:
+
+- **One rule lookup, an in-memory gate.** For an audience-wide event the resolver asks the Visibility
+  engine to resolve the audience from **one** session-scoped `ListByResourceAsync` lookup
+  (`VisibilityPolicy.ResolveAudienceVisibilityAsync`): it decides **in memory** both whether the whole
+  audience may see the subject (an audience-wide visible rule) and which participants are entitled **only**
+  by a rule scoped to exactly them (a selected-participant reveal on the same resource). No per-participant
+  query runs, so the per-reveal query count is **independent of audience size**.
+- **One shared-group publish.** When the audience may see the subject, the event is delivered to the
+  observers group and the shared `session:{sessionId}:audience` group — **one backplane publish each** —
+  reaching every active participant through the shared group instead of `N` per-participant publishes. When
+  the audience-at-large may **not** see it but a participant-scoped visible rule exists, the event still
+  reaches exactly those participants through their **own** groups (derived from the same single lookup), so
+  the selected-participant guarantee is unchanged.
+- **Per-participant lookups/groups are reserved for selected-participant events.** A reveal targeted at one
+  participant (`TargetParticipantId` set) still uses a single per-participant gate and that participant's own
+  group — the path whose cost is inherently `O(1)` in the audience.
+
+**Visibility correctness is unchanged** and fail-closed: the shared `:audience` group is gated by the same
+audience-wide decision and only ever carries events the whole audience is entitled to (a private reveal is
+never routed there), the observers gate is independent, and the participant-scoped set reaches exactly the
+individually-entitled participants — the same recipient set the old per-participant fan-out produced. The
+collapsed audience decision reuses the **same** `VisibilityRule` predicates the REST `CanViewResource` /
+`CanParticipantViewResource` decisions use, so the realtime recipient set can never diverge from the REST
+one (`docs/05_MODULE_CONTRACTS.md`: visibility is decided in one place). Reconnect replay reuses the
+recipient resolver unchanged, so a participant — now also a member of the shared `:audience` group — replays
+exactly its live audience view.
 
 ## Per-session event sequence (CORE-RTC-001)
 
@@ -74,10 +117,12 @@ allocated at append time from a per-session counter inside the command's unit-of
 A connection's server-managed groups are resolved **once**, at connect (`RealtimeConnectionResolver` /
 `SessionHub.OnConnectedAsync`). Without a re-authorization hook a connection keeps those groups until it
 reconnects, so a caller whose standing changes **mid-session** would keep receiving events their old standing
-allowed: a removed participant's still-open socket stays in its participant group, and a demoted host keeps
-receiving the host/observer group deliveries (the participant audience fan-out is re-gated per event by the
-recipient resolver — it enumerates only **active** participants — but group **membership** is not). So a
-removal or a role change must re-authorize the live connection, not only the next one.
+allowed: a removed participant's still-open socket stays in its participant **and shared `:audience`**
+groups, and a demoted host keeps receiving the host/observer group deliveries. With the collapsed audience
+delivery (CORE-PERF-001) the shared `:audience` group is sent to as a whole, so audience delivery is no
+longer additionally re-gated per event by active status — taking a departed participant out of the audience
+is the eviction seam's job. So a removal or a role change must re-authorize the live connection, not only the
+next one.
 
 The Realtime module owns that re-authorization as an **eviction** seam (`IRealtimeConnectionEvictor`, backed by
 the `RealtimeConnectionRegistry`):
@@ -103,10 +148,13 @@ the `RealtimeConnectionRegistry`):
 **Single-instance scope.** The registry holds only the connections of the instance it runs on (the abort
 handle is an in-process `HubCallerContext.Abort`), so it evicts a connection on **that** instance immediately.
 In a multi-instance deployment a connection held by another instance is evicted when that instance handles the
-same command; the always-on backstop remains the per-event recipient computation, which already re-gates the
-participant audience fan-out to active participants on every instance. Cross-instance host/observer eviction
-(propagating the eviction signal over the backplane) is a documented follow-up — the same single-instance
-posture as the in-process backplane above.
+same command. With the collapsed audience delivery (CORE-PERF-001) a departed participant is taken out of the
+audience by **eviction** (immediate on the instance holding the socket) rather than by a per-event
+active-participant re-gate, so cross-instance eviction — propagating the eviction signal over the backplane —
+is the documented follow-up for the shared `:audience` group as well as for host/observer connections, the
+same single-instance posture as the in-process backplane above. The session-keyed groups still bound delivery
+to the correct session on every instance, and the per-event visibility gate still bounds it to the rules of
+that session, so a hidden event is never delivered regardless of instance count.
 
 ## Offline/reconnect
 

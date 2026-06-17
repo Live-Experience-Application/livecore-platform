@@ -21,9 +21,11 @@ namespace LiveCore.Api.Sessions;
 /// recipient resolver is not duplicated. It is a SUBJECTLESS audience event carrying the participant
 /// IDENTIFIER only — never a display name or any other PII (threat T7; see
 /// <see cref="ParticipantPresenceEvent"/>) — and a System-emitted event (no actor), so it reaches the session
-/// hosts (always — host-visible), the observers and the remaining active participants. Because the participant
-/// is removed BEFORE the event is published, the just-departed participant is no longer in the
-/// active-participant fan-out, so a leaver never receives their own removal (the optional participant feed).
+/// hosts (always — host-visible), the observers and the session audience (the shared session-audience group,
+/// CORE-PERF-001). It is a PUBLIC presence announcement, not a private feed item: the leaver's OWN participant
+/// group is never addressed by it (the optional participant feed), and the leaver's still-open socket is taken
+/// out of the shared audience group by the eviction that immediately follows (below), so it receives no
+/// FURTHER events.
 ///
 /// Fail-closed and tenant-isolated, exactly like the join service (threats T1/T5 in
 /// docs/07_SECURITY_THREAT_MODEL.md): the session and the participant are each loaded through their
@@ -162,8 +164,9 @@ public sealed class SessionParticipantLeaveService
         }
 
         // The participant actually leaves: soft-remove it (the Participants-owned transition) and persist the
-        // new status FIRST, so the participant is no longer active when the event fans out — a leaver never
-        // receives their own removal.
+        // new status FIRST, so a reconnect is denied and the participant no longer counts toward the audience;
+        // the ParticipantLeft below is a public presence announcement, and the still-open socket is evicted
+        // from the shared audience group right after (CORE-PERF-001/CORE-RTC-002).
         var now = _timeProvider.GetUtcNow();
         participant.Remove(now);
         await _participants.UpdateAsync(participant, cancellationToken).ConfigureAwait(false);

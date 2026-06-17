@@ -502,6 +502,133 @@ public sealed class VisibilityPolicyTests : IDisposable
         Assert.Equal("sessionId", participantException.ParamName);
     }
 
+    // --- Collapsed audience resolution (CORE-PERF-001) -------------------------
+
+    [Fact]
+    public async Task Audience_resolution_reports_the_whole_audience_for_an_audience_wide_visible_rule()
+    {
+        // An audience-wide visible rule means the WHOLE audience may see it, so there is no
+        // individually-entitled participant to list (the shared audience group covers them).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+        var audience = await policy.ResolveAudienceVisibilityAsync(
+            org, ws, session, VisibilityResourceType.Scene, resourceId, CancellationToken.None);
+
+        Assert.True(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
+    }
+
+    [Fact]
+    public async Task Audience_resolution_reports_no_one_for_a_hidden_or_ruleless_resource()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var hidden = Guid.NewGuid();
+        var ruleless = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, hidden, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        var hiddenAudience = await policy.ResolveAudienceVisibilityAsync(
+            org, ws, session, VisibilityResourceType.Entity, hidden, CancellationToken.None);
+        Assert.False(hiddenAudience.AudienceVisible);
+        Assert.Empty(hiddenAudience.SelectedVisibleParticipantIds);
+
+        var rulelessAudience = await policy.ResolveAudienceVisibilityAsync(
+            org, ws, session, VisibilityResourceType.Entity, ruleless, CancellationToken.None);
+        Assert.False(rulelessAudience.AudienceVisible);
+        Assert.Empty(rulelessAudience.SelectedVisibleParticipantIds);
+    }
+
+    [Fact]
+    public async Task Audience_resolution_names_only_the_individually_entitled_participants_when_the_audience_cannot_see_it()
+    {
+        // No audience-wide rule, but two participants each have a participant-scoped visible rule. The
+        // collapsed resolution reports the audience-at-large CANNOT see it and names EXACTLY those two
+        // participants — so the resolver delivers the audience-wide event to their groups alone, from ONE
+        // lookup, never to a third participant who has no rule (the crown jewel; threat T3).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        var entitledOne = (await SeedParticipantAsync(org, ws)).Id;
+        var entitledTwo = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, entitledOne, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, entitledTwo, VisibilityState.Visible);
+        var session = await SessionIdAsync(org, ws);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+        var audience = await policy.ResolveAudienceVisibilityAsync(
+            org, ws, session, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+
+        Assert.False(audience.AudienceVisible);
+        Assert.Equal(
+            new HashSet<Guid> { entitledOne, entitledTwo },
+            audience.SelectedVisibleParticipantIds.ToHashSet());
+    }
+
+    [Fact]
+    public async Task Audience_resolution_excludes_a_participant_whose_scoped_rule_is_hidden()
+    {
+        // A participant-scoped HIDDEN rule does not entitle the participant — only a visible scoped rule
+        // does (fail-closed; threat T3).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        var hiddenParticipant = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, hiddenParticipant, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+        var audience = await policy.ResolveAudienceVisibilityAsync(
+            org, ws, session, VisibilityResourceType.Entity, resourceId, CancellationToken.None);
+
+        Assert.False(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
+    }
+
+    [Fact]
+    public async Task Audience_resolution_is_session_scoped()
+    {
+        // A reveal in session A does not contribute to session B's audience resolution (CORE-SVIS-001).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible, sessionA.Id);
+
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+
+        Assert.True((await policy.ResolveAudienceVisibilityAsync(
+            org, ws, sessionA.Id, VisibilityResourceType.Scene, resourceId, CancellationToken.None)).AudienceVisible);
+        Assert.False((await policy.ResolveAudienceVisibilityAsync(
+            org, ws, sessionB.Id, VisibilityResourceType.Scene, resourceId, CancellationToken.None)).AudienceVisible);
+    }
+
+    [Fact]
+    public async Task Audience_resolution_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var policy = CreatePolicy(context);
+        var id = Guid.NewGuid();
+
+        var sessionException = await Assert.ThrowsAsync<ArgumentException>(() => policy.ResolveAudienceVisibilityAsync(
+            id, id, Guid.Empty, VisibilityResourceType.Entity, id, CancellationToken.None));
+        Assert.Equal("sessionId", sessionException.ParamName);
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.ResolveAudienceVisibilityAsync(
+            Guid.Empty, id, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.ResolveAudienceVisibilityAsync(
+            id, Guid.Empty, id, VisibilityResourceType.Entity, id, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => policy.ResolveAudienceVisibilityAsync(
+            id, id, id, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
+    }
+
     // --- Guards ----------------------------------------------------------------
 
     [Fact]

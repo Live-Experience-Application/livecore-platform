@@ -371,10 +371,11 @@ public sealed class RevealEndpointTests
     [Fact]
     public async Task An_audience_wide_reveal_with_active_participants_present_succeeds_end_to_end()
     {
-        // CORE-RT-004: drive the full HTTP -> publish -> recipient-projection path with several active
-        // participants present, so the audience-wide FAN-OUT (enumerate active participants -> gate each
-        // through the real Visibility engine -> deliver) runs end-to-end. The audience-wide reveal makes
-        // the resource visible to the whole audience, so every active participant may see it.
+        // CORE-RT-004 / CORE-PERF-001: drive the full HTTP -> publish -> recipient-projection path with
+        // several active participants present, so the audience-wide delivery (one rule lookup -> the shared
+        // session-audience group, gated through the real Visibility engine) runs end-to-end. The
+        // audience-wide reveal makes the resource visible to the whole audience, so every active participant
+        // may see it (asserted below via the rule-level per-participant check).
         await using var factory = new WorkspaceApiFactory();
         const string subject = "host-a";
         var resourceId = Guid.CreateVersion7();
@@ -396,8 +397,8 @@ public sealed class RevealEndpointTests
         Assert.Equal("Entity", sessionEvent.VisibilitySubjectType);
         Assert.Equal(resourceId, sessionEvent.VisibilitySubjectId);
 
-        // Both active participants may see an audience-wide reveal (the per-participant gate the fan-out
-        // applies allows them).
+        // Both active participants may see an audience-wide reveal (the audience-wide visible rule the
+        // shared-group delivery is gated on allows them).
         Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, participantOne, VisibilityResourceType.Entity, resourceId));
         Assert.True(await ParticipantCanViewAsync(factory, seed.OrganizationId, seed.WorkspaceId, participantTwo, VisibilityResourceType.Entity, resourceId));
     }

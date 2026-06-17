@@ -128,7 +128,11 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), subjectType, resourceId, CancellationToken.None));
+        // Fail-closed: a malformed subject yields the empty audience resolution (no audience, no
+        // individually-entitled participant) and a false per-participant gate.
+        var audience = await service.ResolveAudienceRecipientsAsync(org, ws, await SessionIdAsync(org, ws), subjectType, resourceId, CancellationToken.None);
+        Assert.False(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
         Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, subjectType, resourceId, CancellationToken.None));
     }
 
@@ -141,7 +145,9 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", Guid.Empty, CancellationToken.None));
+        var audience = await service.ResolveAudienceRecipientsAsync(org, ws, await SessionIdAsync(org, ws), "Entity", Guid.Empty, CancellationToken.None);
+        Assert.False(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
         Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", Guid.Empty, CancellationToken.None));
     }
 
@@ -156,7 +162,11 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.True(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        // The whole audience may see it (an audience-wide visible rule), so no participant needs an
+        // individual delivery — the shared audience group covers them.
+        var audience = await service.ResolveAudienceRecipientsAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None);
+        Assert.True(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
         Assert.True(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", resourceId, CancellationToken.None));
     }
 
@@ -171,7 +181,9 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        var audience = await service.ResolveAudienceRecipientsAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None);
+        Assert.False(audience.AudienceVisible);
+        Assert.Empty(audience.SelectedVisibleParticipantIds);
         Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), participant, "Entity", resourceId, CancellationToken.None));
     }
 
@@ -179,7 +191,9 @@ public sealed class EventRecipientVisibilityTests : IDisposable
     public async Task A_participant_scoped_reveal_reaches_only_the_selected_participant()
     {
         // THE crown jewel at the realtime recipient layer: a reveal scoped to `selected` reaches only
-        // them — not the audience-at-large and not another participant.
+        // them — not the audience-at-large and not another participant. The audience resolution reports the
+        // audience-at-large CANNOT see it, and names ONLY `selected` in the individually-entitled set (so
+        // the resolver delivers to their group alone), while the per-participant gate agrees.
         var (org, ws) = await SeedWorkspaceAsync();
         var resourceId = Guid.NewGuid();
         var selected = await SeedParticipantAsync(org, ws);
@@ -189,7 +203,9 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         await using var context = CreateContext();
         var service = CreateService(context);
 
-        Assert.False(await service.CanAudienceReceiveAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None));
+        var audience = await service.ResolveAudienceRecipientsAsync(org, ws, await SessionIdAsync(org, ws), "Entity", resourceId, CancellationToken.None);
+        Assert.False(audience.AudienceVisible);
+        Assert.Equal(new[] { selected }, audience.SelectedVisibleParticipantIds);
         Assert.True(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), selected, "Entity", resourceId, CancellationToken.None));
         Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), other, "Entity", resourceId, CancellationToken.None));
     }

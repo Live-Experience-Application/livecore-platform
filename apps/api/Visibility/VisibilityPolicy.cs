@@ -174,6 +174,98 @@ internal sealed class VisibilityPolicy
     }
 
     /// <summary>
+    /// Resolves an AUDIENCE-WIDE event's recipients for the given resource IN THE GIVEN SESSION
+    /// (CORE-PERF-001) from a SINGLE rule lookup — the central engine's collapse of the old per-participant
+    /// fan-out. It reads the resource's session-scoped rules ONCE
+    /// (<see cref="IVisibilityRuleRepository.ListByResourceAsync"/>) and decides IN MEMORY both whether the
+    /// WHOLE audience may see it (an AUDIENCE-WIDE visible rule exists) and which participants are made
+    /// visible ONLY by a rule scoped to exactly them (a selected-participant reveal on the same resource),
+    /// so the realtime resolver can deliver to the shared session-audience group with one publish and reach
+    /// any individually-entitled participant without a per-participant query
+    /// (<see cref="AudienceVisibility"/>).
+    ///
+    /// It reuses the SAME aggregate predicates the role-level and per-participant decisions use
+    /// (<see cref="VisibilityRule.IsVisibleToAudience"/> + <see cref="VisibilityRule.IsAudienceWide"/> for
+    /// the audience case; a visible non-audience-wide rule names a selected participant), so the collapsed
+    /// audience decision can never diverge from <see cref="CanViewResourceAsync"/> /
+    /// <see cref="CanParticipantViewResourceAsync(Guid, Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>
+    /// — visibility stays decided in exactly ONE place (docs/05_MODULE_CONTRACTS.md). The lookup is tenant-,
+    /// workspace- AND SESSION-scoped (CORE-SVIS-001), so a reveal in a concurrent session of the same
+    /// workspace never contributes (the cross-session leak; threat T5/T3).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id, workspace id, session id or resource id is empty.</exception>
+    public Task<AudienceVisibility> ResolveAudienceVisibilityAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        CancellationToken cancellationToken)
+    {
+        // SESSION-SCOPED entry point (CORE-SVIS-001): the audience decision consults only the rules of THIS
+        // session. An empty session id can never address a real session, so fail fast (mirrors the other
+        // session-scoped entry points).
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        return ResolveAudienceVisibilityCoreAsync(
+            organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken);
+    }
+
+    /// <summary>
+    /// The single implementation of the collapsed audience-visibility resolution (CORE-PERF-001): ONE
+    /// session-scoped rule lookup, then the audience-wide decision and the participant-scoped visible set
+    /// computed in memory over those rules — so the per-reveal query count is independent of audience size.
+    /// </summary>
+    private async Task<AudienceVisibility> ResolveAudienceVisibilityCoreAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (resourceId == Guid.Empty)
+        {
+            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
+        }
+
+        // THE single lookup (CORE-PERF-001): read the resource's session-scoped rules ONCE, then gate the
+        // whole audience and the participant set in memory — never one query per participant.
+        var rules = await _rules
+            .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The whole audience may see it iff an AUDIENCE-WIDE visible rule exists — exactly the audience
+        // branch of CanViewResource (no divergence; both use the aggregate predicates).
+        var audienceVisible = rules.Any(rule => rule.IsVisibleToAudience() && rule.IsAudienceWide);
+
+        // Participants made visible ONLY by a rule scoped to exactly them (a selected-participant reveal): a
+        // visible, non-audience-wide rule names one participant. Distinct, so a participant with several such
+        // rules is addressed once. When the audience is visible these are already covered by the shared
+        // group, but resolving them here keeps the single-lookup contract regardless.
+        var selectedVisibleParticipantIds = rules
+            .Where(rule => rule.IsVisibleToAudience() && !rule.IsAudienceWide)
+            .Select(rule => rule.TargetParticipantId!.Value)
+            .Distinct()
+            .ToArray();
+
+        return new AudienceVisibility(audienceVisible, selectedVisibleParticipantIds);
+    }
+
+    /// <summary>
     /// Decides whether a SPECIFIC participant may see the given resource (CORE-VIS-005) — the
     /// participant-level visibility behind the participant-visible feed. A participant sees a resource
     /// iff some visibility rule makes it visible to THEM: either an AUDIENCE-WIDE visible rule (visible

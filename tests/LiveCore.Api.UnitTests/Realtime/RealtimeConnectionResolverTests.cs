@@ -246,8 +246,11 @@ public sealed class RealtimeConnectionResolverTests : IDisposable
     // --- Participant path (selected vs unselected) -----------------------------
 
     [Fact]
-    public async Task A_participant_joins_only_its_own_participant_group()
+    public async Task A_participant_joins_its_own_participant_group_and_the_shared_audience_group()
     {
+        // CORE-PERF-001: a participant joins its OWN participant group (for selected-participant events) AND
+        // the shared session-audience group (so an audience-wide event reaches it through one shared group).
+        // It still joins NO other participant's group — the own-feed guarantee is unchanged (threat T3).
         var org = await SeedOrganizationAsync(_orgSlugA);
         var workspace = await SeedWorkspaceAsync(org.Id, "summer-show");
         var session = await SeedSessionAsync(org.Id, workspace.Id);
@@ -257,7 +260,13 @@ public sealed class RealtimeConnectionResolverTests : IDisposable
         var admission = await ResolveAsync(Principal("participant", _orgSlugA), _orgSlugA, session.Id, participant.Id);
 
         Assert.True(admission.Admitted);
-        Assert.Equal(new[] { RealtimeGroups.SessionParticipant(session.Id, participant.Id) }, admission.Groups);
+        Assert.Equal(
+            new[]
+            {
+                RealtimeGroups.SessionParticipant(session.Id, participant.Id),
+                RealtimeGroups.SessionAudience(session.Id),
+            },
+            admission.Groups);
     }
 
     [Fact]

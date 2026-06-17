@@ -5,8 +5,10 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Visibility;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -32,8 +34,11 @@ namespace LiveCore.Api.IntegrationTests;
 /// <list type="bullet">
 ///   <item>SELECTED: a selected-participant reveal is delivered to the hosts group and ONLY that
 ///   participant's group — never to the unselected participant or the observers (the crown jewel).</item>
-///   <item>AUDIENCE-WIDE: an audience-wide reveal is delivered to hosts, observers and EACH active
-///   participant's group (the per-participant fan-out).</item>
+///   <item>AUDIENCE-WIDE (CORE-PERF-001): an audience-wide reveal is delivered to hosts, observers and the
+///   SHARED session-audience group — one publish, NOT one per participant.</item>
+///   <item>SCALE (CORE-PERF-001): the per-reveal rule-lookup count and the audience-group send shape are
+///   INDEPENDENT of audience size — a reveal to many participants issues the same single rule lookup and
+///   the same one audience-group send as a reveal to few, never N.</item>
 ///   <item>NEGATIVE AUTHORIZATION: a caller without the reveal role is 403 and a cross-tenant caller is
 ///   404 — and in both cases NO event is delivered (fail-closed: no command, no event, no send).</item>
 /// </list>
@@ -77,8 +82,11 @@ public sealed class RealtimeDeliveryEndpointTests
     }
 
     [Fact]
-    public async Task Audience_wide_reveal_is_delivered_to_hosts_observers_and_each_active_participant()
+    public async Task Audience_wide_reveal_is_delivered_to_hosts_observers_and_the_shared_audience_group()
     {
+        // CORE-PERF-001: an audience-wide reveal is delivered to hosts, observers and the SHARED
+        // session-audience group — ONE publish to the whole audience, NOT one per participant. The
+        // individual participant groups are NOT used (they are reserved for selected-participant events).
         await using var factory = new RecordingDeliveryApiFactory();
         const string subject = "host-a";
         var resourceId = Guid.CreateVersion7();
@@ -94,13 +102,64 @@ public sealed class RealtimeDeliveryEndpointTests
         var groups = factory.Backplane.Groups();
         Assert.Contains(HostsGroup(seed.SessionId), groups);
         Assert.Contains(ObserversGroup(seed.SessionId), groups);
-        Assert.Contains(ParticipantGroup(seed.SessionId, participantOne), groups);
-        Assert.Contains(ParticipantGroup(seed.SessionId, participantTwo), groups);
-        // Exactly hosts + observers + the two active participants (distinct recipient groups). CORE-EVT-003
+        Assert.Contains(AudienceGroup(seed.SessionId), groups);
+        // No per-participant fan-out: neither active participant's individual group is used.
+        Assert.DoesNotContain(ParticipantGroup(seed.SessionId, participantOne), groups);
+        Assert.DoesNotContain(ParticipantGroup(seed.SessionId, participantTwo), groups);
+        // Exactly hosts + observers + the shared audience group (distinct recipient groups). CORE-EVT-003
         // makes a reveal emit two subject-gated events (ContentRevealed + VisibilityRuleChanged) to the
         // SAME recipient groups, so we assert on the distinct group set.
-        Assert.Equal(4, groups.Distinct().Count());
+        Assert.Equal(3, groups.Distinct().Count());
     }
+
+    [Fact]
+    public async Task An_audience_reveal_issues_one_rule_lookup_and_one_audience_group_send_regardless_of_audience_size()
+    {
+        // CORE-PERF-001, the headline scale proof: an audience-wide reveal to a SMALL audience and to a
+        // MUCH LARGER one issue the SAME number of visibility-rule lookups and the SAME audience-group send
+        // shape — the cost does not grow with audience size (the old per-participant fan-out would have done
+        // 1+N lookups and N sends per event).
+        var few = await MeasureAudienceRevealAsync(participantCount: 2);
+        var many = await MeasureAudienceRevealAsync(participantCount: 12);
+
+        // The per-reveal rule-lookup count is independent of audience size.
+        Assert.Equal(few.RuleLookups, many.RuleLookups);
+
+        // Both deliver to exactly the SAME group shape — hosts + observers + the one shared audience group —
+        // and to NO individual participant group, regardless of how many participants are in the audience.
+        Assert.Equal(new[] { "hosts", "observers", "audience" }, few.GroupShape);
+        Assert.Equal(new[] { "hosts", "observers", "audience" }, many.GroupShape);
+    }
+
+    private static async Task<RevealMeasurement> MeasureAudienceRevealAsync(int participantCount)
+    {
+        await using var factory = new RecordingDeliveryApiFactory();
+        const string subject = "host-a";
+        var resourceId = Guid.CreateVersion7();
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        for (var index = 0; index < participantCount; index++)
+        {
+            await SeedParticipantAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+        }
+
+        // Only the reveal itself is measured — reset the rule-lookup counter after seeding.
+        factory.RuleLookups.Reset();
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRevealAsync(client, seed.SessionId, Body(_orgA, "Entity", resourceId), "key-1");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // Reduce the recorded group names to their session-relative "shape" (last segment), so the comparison
+        // is independent of the per-factory session id: hosts/observers/audience, never participant:{id}.
+        var shape = factory.Backplane.Groups()
+            .Select(group => group.Split(':').Last())
+            .Distinct()
+            .ToArray();
+
+        return new RevealMeasurement(factory.RuleLookups.Count, shape);
+    }
+
+    private readonly record struct RevealMeasurement(int RuleLookups, IReadOnlyList<string> GroupShape);
 
     [Fact]
     public async Task A_caller_without_the_reveal_role_is_forbidden_and_nothing_is_delivered()
@@ -154,6 +213,8 @@ public sealed class RealtimeDeliveryEndpointTests
     private static string HostsGroup(Guid sessionId) => $"session:{sessionId}:hosts";
 
     private static string ObserversGroup(Guid sessionId) => $"session:{sessionId}:observers";
+
+    private static string AudienceGroup(Guid sessionId) => $"session:{sessionId}:audience";
 
     private static string ParticipantGroup(Guid sessionId, Guid participantId)
         => $"session:{sessionId}:participant:{participantId}";
@@ -217,13 +278,18 @@ public sealed class RealtimeDeliveryEndpointTests
 
     /// <summary>
     /// A <see cref="WorkspaceApiFactory"/> that substitutes a recording <see cref="IRealtimeBackplane"/>
-    /// for the production in-process one, so the test can read which server-managed groups an event was
-    /// delivered to. Only the realtime transport seam is swapped; every other production behavior (auth,
-    /// tenant resolution, the publisher, the recipient resolver, the Visibility engine) runs unchanged.
+    /// for the production in-process one (so the test can read which server-managed groups an event was
+    /// delivered to) AND wraps the production <see cref="IVisibilityRuleRepository"/> with a decorator that
+    /// COUNTS its rule lookups (so the test can prove the per-reveal query count is independent of audience
+    /// size, CORE-PERF-001). Only those two seams are swapped; every other production behavior (auth, tenant
+    /// resolution, the publisher, the recipient resolver, the Visibility engine, the rule persistence) runs
+    /// unchanged — the decorator delegates to the real repository.
     /// </summary>
     private sealed class RecordingDeliveryApiFactory : WorkspaceApiFactory
     {
         public RecordingRealtimeBackplane Backplane { get; } = new();
+
+        public RuleLookupCounter RuleLookups { get; } = new();
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -233,8 +299,78 @@ public sealed class RealtimeDeliveryEndpointTests
             {
                 services.RemoveAll<IRealtimeBackplane>();
                 services.AddSingleton<IRealtimeBackplane>(Backplane);
+
+                // Wrap the production visibility-rule repository with a counting decorator so the test can
+                // assert how many rule lookups a reveal issues. It delegates every call to the real
+                // repository, so persistence behavior is unchanged.
+                services.RemoveAll<IVisibilityRuleRepository>();
+                services.AddScoped<IVisibilityRuleRepository>(sp =>
+                    new CountingVisibilityRuleRepository(
+                        new VisibilityRuleRepository(sp.GetRequiredService<LiveCoreDbContext>()),
+                        RuleLookups));
             });
         }
+    }
+
+    /// <summary>A thread-safe counter of rule lookups (<see cref="IVisibilityRuleRepository.ListByResourceAsync"/>).</summary>
+    private sealed class RuleLookupCounter
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public void Increment() => Interlocked.Increment(ref _count);
+
+        public void Reset() => Interlocked.Exchange(ref _count, 0);
+    }
+
+    /// <summary>
+    /// A pass-through <see cref="IVisibilityRuleRepository"/> that counts only the per-resource rule lookups
+    /// (<see cref="ListByResourceAsync"/>) — the query the reveal command and the realtime recipient
+    /// resolution both issue — and delegates everything else to the real repository unchanged.
+    /// </summary>
+    private sealed class CountingVisibilityRuleRepository : IVisibilityRuleRepository
+    {
+        private readonly IVisibilityRuleRepository _inner;
+        private readonly RuleLookupCounter _counter;
+
+        public CountingVisibilityRuleRepository(IVisibilityRuleRepository inner, RuleLookupCounter counter)
+        {
+            _inner = inner;
+            _counter = counter;
+        }
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourceAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            VisibilityResourceType resourceType,
+            Guid resourceId,
+            CancellationToken cancellationToken)
+        {
+            _counter.Increment();
+            return _inner.ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken);
+        }
+
+        public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
+            => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
+            => _inner.ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken);
+
+        public Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => _inner.AddAsync(rule, cancellationToken);
+
+        public Task UpdateAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => _inner.UpdateAsync(rule, cancellationToken);
+
+        public Task<int> RemoveByResourceAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            VisibilityResourceType resourceType,
+            Guid resourceId,
+            CancellationToken cancellationToken)
+            => _inner.RemoveByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken);
     }
 
     private sealed class RecordingRealtimeBackplane : IRealtimeBackplane
