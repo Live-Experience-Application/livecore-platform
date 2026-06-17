@@ -90,6 +90,36 @@ is minted before the metadata row is persisted, so an unconfigured storage backe
 fails closed (`503`) leaving no orphan pending asset — assets stay private by default
 even when storage is not configured.
 
+### Upload acceptance: content-type allowlist and size ceiling (CORE-AST-007)
+
+The upload-intent flow additionally validates the **declared** content type and size against a
+deployment-configurable **acceptance policy** (`AssetUploadConstraints`), abuse-surface hardening that
+is **independent of the workspace storage quota** (CORE-MON-006): the quota bounds a workspace's
+**total** stored bytes, while this policy bounds a **single** object's declared type and size.
+
+- **MIME allowlist.** The declared `contentType` must be on a configurable allowlist
+  (`Assets:Upload:AllowedContentTypes`, matched case-insensitively). A well-formed but disallowed type
+  is rejected with `422 Unprocessable Entity` (`unprocessable_entity`).
+- **Absolute per-object size ceiling.** The declared `sizeBytes` must be at most a configurable
+  absolute ceiling (`Assets:Upload:MaxObjectSizeBytes`, inclusive). An over-ceiling object is rejected
+  with `413 Payload Too Large` (`payload_too_large`); the response names only the byte ceiling.
+
+Both checks run **before** the storage quota is consulted and **before any signed upload URL is minted**,
+so a disallowed type or an over-ceiling object is rejected **fail-closed** with no quota consumed, no
+metadata row persisted and **no URL minted** — the rejected intent never reaches the storage adapter, and
+the response carries **no storage coordinate** (threats T4 "Asset leak"/T7). The privacy model (private
+bucket, signed URL only after authorization) is unchanged. The checks apply only **after** the
+server-side tenant/workspace/role authorization, so an unauthorized caller never receives request-shape
+feedback.
+
+Both settings ship **safe, already-hardened defaults** so an unconfigured deployment is not wide open:
+the allowlist defaults to a curated set of common safe media types (images, `application/pdf`, audio,
+video, `text/plain`) and the ceiling defaults to **1 GiB**. A deployment overrides either under
+`Assets:Upload:*`; an **absent** allowlist falls back to the curated default (a blank value never
+silently disables it), while an explicitly **empty** configured list disables the content-type
+restriction. A configured ceiling that is not strictly positive is rejected at startup. No value here is
+a secret (threat T7).
+
 ### Signed download flow (CORE-AST-004)
 
 The asset read route, `GET /api/v1/assets/{assetId}/download-url` (`csv/api_routes.csv`,
@@ -245,6 +275,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - buckets private by default
 - no public object listing
 - upload intent requires authorization
+- upload intent validates the declared content type against a configurable MIME allowlist and the declared size against a configurable absolute per-object ceiling, fail-closed before any signed URL is minted (CORE-AST-007)
 - download URL requires authorization
 - deletion requires authorization
 - signed URLs are short-lived

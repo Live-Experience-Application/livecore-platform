@@ -280,6 +280,23 @@ internal static class AssetEndpoints
             return StorageUnavailable();
         }
 
+        // CORE-AST-007 — the declared content type is not on the configurable MIME allowlist: 422, nothing
+        // consumed and nothing persisted. The command rejected it before any URL was minted, so the
+        // private-by-default storage posture is untouched and the response leaks no storage detail (threats
+        // T4/T7). Surfaced only to an authorized caller (the membership/role gates already passed).
+        if (result.Outcome == AssetUploadIntentOutcome.ContentTypeNotAllowed)
+        {
+            return ContentTypeNotAllowed();
+        }
+
+        // CORE-AST-007 — the declared object size exceeds the configurable absolute per-object ceiling
+        // (independent of the workspace quota): 413, nothing consumed and nothing persisted, rejected before any
+        // URL was minted. The detail names only the byte ceiling, never any storage coordinate (threats T4/T7).
+        if (result.Outcome == AssetUploadIntentOutcome.ObjectTooLarge)
+        {
+            return ObjectTooLarge(result.SizeCeilingBytes!.Value);
+        }
+
         // The upload would take the workspace over its asset.storage.bytes.max storage quota (CORE-MON-006):
         // 409, nothing consumed and nothing persisted. The caller is authorized by role; the limit, not the
         // caller, is the reason, so this is a 409 rather than a 403 — the same mapping the workspace-create and
@@ -1092,6 +1109,27 @@ internal static class AssetEndpoints
             code: ProblemCodes.QuotaExceeded,
             title: "Conflict",
             detail: $"This action would exceed the '{decision.EntitlementKey}' quota.");
+
+    // CORE-AST-007 — the declared content type is a well-formed token but is not on the deployment's configurable
+    // MIME allowlist: a 422 (well-formed but semantically unacceptable), reported only to an authorized caller.
+    // The command minted no URL and persisted no asset; the detail names no storage coordinate (threats T4/T7).
+    private static IResult ContentTypeNotAllowed()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status422UnprocessableEntity,
+            code: ProblemCodes.UnprocessableEntity,
+            title: "Unprocessable Entity",
+            detail: "The declared content type is not allowed.");
+
+    // CORE-AST-007 — the declared object size exceeds the deployment's configurable absolute per-object size
+    // ceiling (independent of the workspace storage quota): a 413, rejected fail-closed before any URL is minted.
+    // The detail names only the byte ceiling (a non-sensitive configuration value, like the rate-limit ceilings)
+    // — never any storage coordinate or the workspace quota (threats T4/T7).
+    private static IResult ObjectTooLarge(long maxObjectSizeBytes)
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status413PayloadTooLarge,
+            code: ProblemCodes.PayloadTooLarge,
+            title: "Payload Too Large",
+            detail: $"The declared object size exceeds the maximum allowed {maxObjectSizeBytes} bytes.");
 
     // Workspace existence is hidden: an empty/malformed workspace id, a workspace in a foreign or
     // non-entitled tenant, and a workspace the caller does not belong to are ALL reported as 404, never

@@ -75,12 +75,18 @@ public sealed class AssetUploadIntentServiceTests : IDisposable
     }
 
     // The service and every repository/quota dependency it composes MUST share one context instance so the
-    // explicit transaction enrols each SaveChanges and the guarded consume.
-    private static AssetUploadIntentService CreateService(LiveCoreDbContext context, IAssetStorage storage)
+    // explicit transaction enrols each SaveChanges and the guarded consume. The allowlist/ceiling policy
+    // (CORE-AST-007) defaults to the test-only Unrestricted policy so tests about another aspect of the command
+    // are not coupled to the production default acceptance policy; the CORE-AST-007 tests pass a restrictive one.
+    private static AssetUploadIntentService CreateService(
+        LiveCoreDbContext context,
+        IAssetStorage storage,
+        AssetUploadConstraints? constraints = null)
         => new(
             new AssetRepository(context),
             storage,
             _location,
+            constraints ?? AssetUploadConstraints.Unrestricted,
             new QuotaEnforcementService(
                 new QuotaDefinitionRepository(context),
                 new SubjectEntitlementResolver(new SubjectEntitlementRepository(context)),
@@ -337,6 +343,112 @@ public sealed class AssetUploadIntentServiceTests : IDisposable
             seed.OrganizationId, Guid.Empty, seed.UserId, "image/png", 10, _now, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => service.CreateAsync(
             seed.OrganizationId, seed.WorkspaceId, Guid.Empty, "image/png", 10, _now, CancellationToken.None));
+    }
+
+    // =====================================================================
+    // CORE-AST-007 — configurable MIME allowlist + absolute per-object size ceiling, enforced before any quota
+    // is consumed and before any signed upload URL is minted (fail-closed; the privacy model is unchanged).
+    // =====================================================================
+
+    /// <summary>A restrictive policy the hardening tests enforce against: only image/png, ceiling 1,000,000 bytes.</summary>
+    private static readonly AssetUploadConstraints _restrictedConstraints =
+        new(new[] { "image/png" }, maxObjectSizeBytes: 1_000_000);
+
+    [Fact]
+    public async Task CreateAsync_rejects_a_content_type_not_on_the_allowlist_and_persists_and_consumes_nothing()
+    {
+        // The workspace has ample headroom, but application/zip is not on the allowlist -> rejected before any
+        // quota is consumed or any URL is minted. Nothing is persisted and the recorded usage is unchanged.
+        var seed = await SeedWorkspaceAsync();
+        var quotaId = await SeedStorageQuotaAsync(seed.WorkspaceId, limit: 1_000_000, startingUsage: 100_000);
+
+        AssetUploadIntentResult result;
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context, new FakeSignedUrlAssetStorage(), _restrictedConstraints);
+            result = await service.CreateAsync(
+                seed.OrganizationId, seed.WorkspaceId, seed.UserId, "application/zip", 10, _now, CancellationToken.None);
+        }
+
+        Assert.Equal(AssetUploadIntentOutcome.ContentTypeNotAllowed, result.Outcome);
+        Assert.Null(result.Intent);
+
+        await using var verify = CreateContext();
+        Assert.Empty(await verify.Assets.AsNoTracking().ToListAsync());
+        // The allowlist check precedes the quota consume: the recorded usage is untouched.
+        Assert.Equal(100_000, await ReadUsageAsync(seed.WorkspaceId, quotaId));
+    }
+
+    [Fact]
+    public async Task CreateAsync_allows_a_content_type_on_the_allowlist_case_insensitively()
+    {
+        // The allowlist match is case-insensitive on the declared MIME token, so IMAGE/PNG is admitted.
+        var seed = await SeedWorkspaceAsync();
+
+        await using var context = CreateContext();
+        var service = CreateService(context, new FakeSignedUrlAssetStorage(), _restrictedConstraints);
+        var result = await service.CreateAsync(
+            seed.OrganizationId, seed.WorkspaceId, seed.UserId, "IMAGE/PNG", 500, _now, CancellationToken.None);
+
+        Assert.Equal(AssetUploadIntentOutcome.Created, result.Outcome);
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_an_object_over_the_ceiling_and_persists_and_consumes_nothing()
+    {
+        // The declared size (2,000,000) exceeds the absolute per-object ceiling (1,000,000), independent of the
+        // workspace quota -> rejected before any quota is consumed or any URL is minted. The result carries the
+        // (non-sensitive) ceiling so the endpoint can phrase the 413.
+        var seed = await SeedWorkspaceAsync();
+        var quotaId = await SeedStorageQuotaAsync(seed.WorkspaceId, limit: 100_000_000, startingUsage: 100_000);
+
+        AssetUploadIntentResult result;
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context, new FakeSignedUrlAssetStorage(), _restrictedConstraints);
+            result = await service.CreateAsync(
+                seed.OrganizationId, seed.WorkspaceId, seed.UserId, "image/png", 2_000_000, _now, CancellationToken.None);
+        }
+
+        Assert.Equal(AssetUploadIntentOutcome.ObjectTooLarge, result.Outcome);
+        Assert.Equal(1_000_000, result.SizeCeilingBytes);
+        Assert.Null(result.Intent);
+
+        await using var verify = CreateContext();
+        Assert.Empty(await verify.Assets.AsNoTracking().ToListAsync());
+        // The ceiling check precedes the quota consume: the recorded usage is untouched.
+        Assert.Equal(100_000, await ReadUsageAsync(seed.WorkspaceId, quotaId));
+    }
+
+    [Fact]
+    public async Task CreateAsync_admits_an_allowed_in_limit_upload_under_a_restrictive_policy()
+    {
+        // image/png is allowed and 1,000,000 is exactly at the ceiling (inclusive): the intent is created.
+        var seed = await SeedWorkspaceAsync();
+
+        await using var context = CreateContext();
+        var service = CreateService(context, new FakeSignedUrlAssetStorage(), _restrictedConstraints);
+        var result = await service.CreateAsync(
+            seed.OrganizationId, seed.WorkspaceId, seed.UserId, "image/png", 1_000_000, _now, CancellationToken.None);
+
+        Assert.Equal(AssetUploadIntentOutcome.Created, result.Outcome);
+        Assert.Equal(1_000_000, result.Intent!.Asset.SizeBytes);
+    }
+
+    [Fact]
+    public async Task CreateAsync_does_not_reach_the_storage_adapter_when_the_content_type_is_disallowed()
+    {
+        // A disallowed content type is rejected BEFORE the unit of work opens, so the storage adapter is never
+        // called: substituting the fail-closed UnconfiguredAssetStorage yields the rejection outcome, not a
+        // thrown AssetStorageNotConfiguredException. This proves no URL is minted for a rejected intent.
+        var seed = await SeedWorkspaceAsync();
+
+        await using var context = CreateContext();
+        var service = CreateService(context, new UnconfiguredAssetStorage(), _restrictedConstraints);
+        var result = await service.CreateAsync(
+            seed.OrganizationId, seed.WorkspaceId, seed.UserId, "application/zip", 10, _now, CancellationToken.None);
+
+        Assert.Equal(AssetUploadIntentOutcome.ContentTypeNotAllowed, result.Outcome);
     }
 
     // =====================================================================

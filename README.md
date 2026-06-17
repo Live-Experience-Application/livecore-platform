@@ -3217,6 +3217,16 @@ a member of the target workspace, is hidden as `404` (never `403`), and a known
 member who lacks the upload role is `403`. Only after authorization is the
 `contentType` validated (`400` if missing or malformed).
 
+The flow also enforces a deployment-configurable **upload-acceptance policy** (CORE-AST-007),
+abuse-surface hardening **independent of the workspace storage quota**: the declared `contentType`
+must be on a configurable **MIME allowlist** (`Assets:Upload:AllowedContentTypes`, else `422`) and the
+declared `sizeBytes` must be within a configurable **absolute per-object size ceiling**
+(`Assets:Upload:MaxObjectSizeBytes`, else `413`). Both are checked **fail-closed before any signed
+upload URL is minted** — a disallowed type or over-ceiling object consumes no quota, persists no asset
+and never reaches the storage adapter, and the rejection leaks no storage detail (threat T4). Both ship
+already-hardened defaults (a curated media-type allowlist and a 1 GiB ceiling), so an unconfigured
+deployment is not wide open; see `docs/12_STORAGE_ASSETS.md`.
+
 On success the command registers a new **`Pending`** `Asset` and returns `201` with
 the asset id, its status and a **short-lived, signed upload URL** (and its expiry)
 the client uploads the object to. The storage coordinates are minted **server-side**:

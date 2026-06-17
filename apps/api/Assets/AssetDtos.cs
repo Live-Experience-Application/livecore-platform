@@ -21,13 +21,17 @@ namespace LiveCore.Api.Assets;
 /// <param name="WorkspaceId">The workspace the new asset belongs to.</param>
 /// <param name="ContentType">
 /// The MIME content type of the object that will be uploaded (for example <c>image/png</c>). Validated as
-/// a well-formed content-type token; an invalid or oversize value is a 400.
+/// a well-formed content-type token (an invalid or oversize-token value is a 400) AND, for an authorized
+/// caller, against the deployment's configurable MIME allowlist (CORE-AST-007): a well-formed but disallowed
+/// type is rejected with a 422 before any signed upload URL is minted.
 /// </param>
 /// <param name="SizeBytes">
-/// The DECLARED size in bytes of the object that will be uploaded. It is reserved against the workspace's
-/// <c>asset.storage.bytes.max</c> storage quota at upload-intent (CORE-MON-006), so an upload that would take
-/// the workspace over its plan storage limit is rejected server-side before any URL is minted. A non-positive
-/// value is a 400.
+/// The DECLARED size in bytes of the object that will be uploaded. A non-positive value is a 400. It is
+/// additionally checked against the deployment's configurable absolute per-object size ceiling (CORE-AST-007,
+/// independent of the workspace quota): an over-ceiling object is rejected with a 413 before any URL is minted.
+/// It is then reserved against the workspace's <c>asset.storage.bytes.max</c> storage quota at upload-intent
+/// (CORE-MON-006), so an upload that would take the workspace over its plan storage limit is rejected
+/// server-side (409) before any URL is minted.
 /// </param>
 public sealed record CreateUploadIntentRequest(
     string? OrganizationSlug,

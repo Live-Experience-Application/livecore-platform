@@ -41,6 +41,17 @@ namespace LiveCore.Api.Assets;
 /// (<see cref="AssetDeletionService"/>) releases exactly them, and the recorded usage reflects the workspace's
 /// CURRENT stored bytes rather than a lifetime total.
 ///
+/// CONTENT-TYPE ALLOWLIST + ABSOLUTE SIZE CEILING (CORE-AST-007). Before the unit of work opens, the command
+/// evaluates the deployment's configurable <see cref="AssetUploadConstraints"/>: the declared content type must
+/// be on the MIME allowlist and the declared size must be within the absolute per-object ceiling. These are
+/// abuse-surface hardening INDEPENDENT of the workspace storage quota (the quota bounds a workspace's TOTAL
+/// bytes; the ceiling bounds a SINGLE object's declared size). A disallowed type
+/// (<see cref="AssetUploadIntentResult.ContentTypeNotAllowed"/>) or an over-ceiling object
+/// (<see cref="AssetUploadIntentResult.ObjectTooLarge"/>) is rejected FAIL-CLOSED before the quota is consulted
+/// and before any signed upload URL is minted — nothing is consumed, no asset is persisted and the rejection
+/// carries no storage coordinate (the story's acceptance criterion; threats T4/T7). The privacy model is
+/// unchanged: a rejected intent simply never reaches the storage adapter.
+///
 /// PRIVATE BY DEFAULT, FAIL-CLOSED, ATOMIC. The asset is created <see cref="AssetStatus.Pending"/> with no
 /// public affordance (the epic acceptance criterion: "Assets are private by default and accessed only through
 /// authorized signed URLs"; threat T4 "Asset leak"). The consume, the URL mint and the row persist run inside
@@ -57,6 +68,7 @@ internal sealed class AssetUploadIntentService
     private readonly IAssetRepository _assets;
     private readonly IAssetStorage _storage;
     private readonly AssetStorageLocation _location;
+    private readonly AssetUploadConstraints _constraints;
     private readonly QuotaEnforcementService _quotaEnforcement;
     private readonly TransactionalUnitOfWork _unitOfWork;
 
@@ -64,17 +76,20 @@ internal sealed class AssetUploadIntentService
         IAssetRepository assets,
         IAssetStorage storage,
         AssetStorageLocation location,
+        AssetUploadConstraints constraints,
         QuotaEnforcementService quotaEnforcement,
         TransactionalUnitOfWork unitOfWork)
     {
         ArgumentNullException.ThrowIfNull(assets);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(location);
+        ArgumentNullException.ThrowIfNull(constraints);
         ArgumentNullException.ThrowIfNull(quotaEnforcement);
         ArgumentNullException.ThrowIfNull(unitOfWork);
         _assets = assets;
         _storage = storage;
         _location = location;
+        _constraints = constraints;
         _quotaEnforcement = quotaEnforcement;
         _unitOfWork = unitOfWork;
     }
@@ -83,10 +98,14 @@ internal sealed class AssetUploadIntentService
     /// Registers a new pending asset in the given workspace (owned by the given organization), created by
     /// the given authenticated user, with the client-declared content type, atomically consuming the declared
     /// <paramref name="sizeBytes"/> against the workspace's storage quota and minting the short-lived signed
-    /// upload URL. The storage coordinates are assigned server-side. Returns <see cref="AssetUploadIntentResult.Created"/>
-    /// (the registered asset and the signed URL) when the workspace has storage headroom, or
-    /// <see cref="AssetUploadIntentResult.QuotaExceeded"/> when the declared size would take the workspace over
-    /// its <c>asset.storage.bytes.max</c> limit (nothing is consumed or persisted).
+    /// upload URL. The storage coordinates are assigned server-side. Returns
+    /// <see cref="AssetUploadIntentResult.ContentTypeNotAllowed"/> when the declared content type is not on the
+    /// configurable MIME allowlist, <see cref="AssetUploadIntentResult.ObjectTooLarge"/> when the declared size
+    /// exceeds the configurable absolute per-object ceiling (both CORE-AST-007, checked before any quota is
+    /// consumed or any URL is minted), <see cref="AssetUploadIntentResult.QuotaExceeded"/> when the declared size
+    /// would take the workspace over its <c>asset.storage.bytes.max</c> limit, or
+    /// <see cref="AssetUploadIntentResult.Created"/> (the registered asset and the signed URL) when the workspace
+    /// has storage headroom. Every rejection consumes and persists nothing.
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The workspace the asset belongs to (the storage-quota subject).</param>
@@ -136,6 +155,25 @@ internal sealed class AssetUploadIntentService
         if (sizeBytes <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(sizeBytes), sizeBytes, "A declared size must be strictly positive.");
+        }
+
+        // CORE-AST-007 — enforce the deployment's configurable MIME ALLOWLIST and absolute per-object SIZE
+        // CEILING, abuse-surface hardening that is INDEPENDENT of the workspace storage quota. Both are checked
+        // HERE, before the unit of work is opened, so a disallowed content type or an over-ceiling object is
+        // rejected FAIL-CLOSED before any quota is consumed and before any signed upload URL is minted (the
+        // story's acceptance criterion). A rejected intent never reaches the storage adapter and never returns a
+        // storage coordinate (threats T4/T7); the privacy model (private bucket, signed URL after authorization)
+        // is unchanged.
+        if (!_constraints.IsContentTypeAllowed(normalizedContentType))
+        {
+            return AssetUploadIntentResult.ContentTypeNotAllowed();
+        }
+
+        if (!_constraints.IsWithinSizeCeiling(sizeBytes))
+        {
+            // The ceiling is necessarily present here: IsWithinSizeCeiling only returns false when a ceiling is
+            // configured. Surface the (non-sensitive) ceiling so the endpoint can phrase the 413.
+            return AssetUploadIntentResult.ObjectTooLarge(_constraints.MaxObjectSizeBytes!.Value);
         }
 
         // Coordinates are minted server-side: the deployment's private provider/bucket plus a tenant- and

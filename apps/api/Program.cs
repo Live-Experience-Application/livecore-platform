@@ -837,6 +837,13 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // service consumes it.
     builder.Services.AddSingleton(AssetStorageLocation.FromConfiguration(builder.Configuration));
 
+    // Asset upload-acceptance policy (CORE-AST-007): the deployment's configurable MIME allowlist and absolute
+    // per-object size ceiling the upload-intent command enforces BEFORE minting a signed URL — abuse-surface
+    // hardening independent of the workspace storage quota. Read once from configuration (Assets:Upload:*) with
+    // safe, already-hardened curated defaults so an unconfigured deployment is not wide open. A singleton next to
+    // the storage location because the upload-intent service consumes it; it carries no secret (threat T7).
+    builder.Services.AddSingleton(AssetUploadConstraints.FromConfiguration(builder.Configuration));
+
     // Asset upload-intent command (CORE-AST-003 + the CORE-MON-006 storage-quota gate): registers a new
     // PENDING asset with server-minted storage coordinates (reusing the CORE-AST-001 Asset aggregate),
     // atomically consumes the client-declared object size against the workspace's asset.storage.bytes.max
