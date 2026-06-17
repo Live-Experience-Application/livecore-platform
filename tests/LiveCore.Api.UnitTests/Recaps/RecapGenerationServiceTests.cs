@@ -382,6 +382,14 @@ public sealed class RecapGenerationServiceTests
         public Task<IReadOnlyList<Recap>> ListBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        // The retention sweep (CORE-PRIV-003) is a different worker loop; the recap-generation tests never
+        // exercise it, so its repository members are unsupported here as a regression guard.
+        public Task<IReadOnlyList<Recap>> ListExpiredForRetentionAsync(DateTimeOffset generatedBefore, int maxCount, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeleteAsync(Recap recap, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         // ISessionEventRepository — the recap body's source (CORE-RCP-002) AND, since CORE-EVT-004, the sink
         // for the durable RecapGenerated event the job appends on each freshly produced recap. Capture the
         // appended events so the tests can assert the host-only, identifier-only emission.

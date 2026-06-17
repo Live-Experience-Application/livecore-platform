@@ -52,7 +52,7 @@ namespace LiveCore.Api.Assets;
 /// passed; the adapter is a dumb, secure signer. The endpoints, their role/tenant authorization and their
 /// negative-authorization (foreign-tenant / wrong-role) tests land with those flow stories.
 ///
-/// CLEANUP (CORE-AST-006). The port also exposes one SERVER-SIDE operation — <see cref="DeleteObjectAsync"/>
+/// CLEANUP (CORE-AST-006). The port also exposes one SERVER-SIDE operation — <see cref="DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/>
 /// — that hands no URL to any client: it removes an asset's object from its private bucket. The background
 /// asset cleanup job uses it to reclaim the orphaned objects of abandoned pending upload intents (an upload
 /// intent that was registered but never confirmed). Deletion only ever REMOVES access; it never widens it,
@@ -111,4 +111,25 @@ public interface IAssetStorage
     /// <exception cref="ArgumentNullException">The asset is null.</exception>
     /// <exception cref="AssetStorageNotConfiguredException">No object storage is configured (fail closed).</exception>
     Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the object at the given private-bucket COORDINATES directly with the deployment's own storage
+    /// credentials — no signed URL is produced and no bytes are served, so this can only ever REMOVE access
+    /// (threat T4 "Asset leak"). This is the coordinate-addressed counterpart of
+    /// <see cref="DeleteObjectAsync(Asset, CancellationToken)"/> (which deletes an asset's OWN object): it lets a
+    /// server-side maintenance job remove a NON-asset object whose lifecycle Core manages — the produced artifact
+    /// of a completed export (CORE-PRIV-003 data-retention sweep), addressed by the export's recorded artifact
+    /// bucket/object-key coordinates. The caller supplies already-validated storage coordinates that name an
+    /// object whose lifecycle it owns; the adapter is a dumb, secure deleter and decides nothing about access.
+    ///
+    /// Deletion is IDEMPOTENT (S3 <c>DeleteObject</c> succeeds for a missing key), so a retention sweep can purge
+    /// an export's artifact whether or not a blob was ever written — Core's manifest-only export pipeline writes
+    /// no blob, so the delete is a harmless no-op for it.
+    /// </summary>
+    /// <param name="bucket">The private bucket the object lives in (a validated storage token).</param>
+    /// <param name="objectKey">The object's key within the bucket (a validated storage token).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentException">The bucket or object key is blank.</exception>
+    /// <exception cref="AssetStorageNotConfiguredException">No object storage is configured (fail closed).</exception>
+    Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken);
 }

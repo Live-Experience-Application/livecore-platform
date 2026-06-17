@@ -406,4 +406,24 @@ public enum AuditAction
     /// key (<see cref="AuditLogEntry.ForOrganizationDeletion"/>).
     /// </summary>
     OrganizationDeleted = 26,
+
+    /// <summary>
+    /// A configurable data-retention sweep purged a terminal, past-its-window personal-data-bearing record — the
+    /// data-retention sweeps job (CORE-PRIV-003, the "Privacy and Data Lifecycle" epic, GDPR Art.5(1)(e) storage
+    /// limitation). The worker's retention sweep expires and purges terminal/old records that carry personal data:
+    /// completed/expired sessions (and their cascade-removed session events, recaps and session-scoped visibility
+    /// rules), generated recaps, completed export artifacts (the row and any object-storage blob) and
+    /// closed/expired/revoked invitations (their plaintext invited email). Recording the purge satisfies the
+    /// story's "purges are audited by id" criterion: it records WHICH record of WHICH generic kind was purged in
+    /// WHICH tenant/workspace. It is a SYSTEM action (no user actor), so the actor is null, and a purge is a
+    /// removal rather than a transition, so there is NO before/after state pair. The resource kind is passed as a
+    /// generic NAME string (e.g. <c>Session</c> / <c>Recap</c> / <c>ExportJob</c> / <c>WorkspaceInvitation</c>) so
+    /// the Audit module does not depend on the owning modules' types. The audit row carries ONLY identifiers —
+    /// never the purged record's content, the recap body, the export blob or the invited email (threat T7) — and
+    /// outlives the now-deleted record it references because the reference is a recorded fact, not a foreign key
+    /// (the same posture that makes erasure/deletion reconcilable with the immutable audit log; threats T1/T5/T7).
+    /// A tenant-scoped fact (it carries the tenant and workspace), recorded through
+    /// <see cref="AuditLogEntry.ForRetentionPurge"/>.
+    /// </summary>
+    RecordRetentionPurged = 27,
 }

@@ -59,6 +59,12 @@ public sealed class ExportJob
     /// </summary>
     public const int MaxFailureReasonLength = 512;
 
+    /// <summary>Maximum stored length of the produced artifact's storage bucket name (mirrors an asset bucket).</summary>
+    public const int MaxArtifactBucketLength = 256;
+
+    /// <summary>Maximum stored length of the produced artifact's storage object key (mirrors an asset object key).</summary>
+    public const int MaxArtifactObjectKeyLength = 1024;
+
     private ExportJob(
         Guid id,
         Guid organizationId,
@@ -209,6 +215,42 @@ public sealed class ExportJob
 
     /// <summary>When this export job's status last changed (UTC).</summary>
     public DateTimeOffset UpdatedAt { get; private set; }
+
+    /// <summary>
+    /// The private object-storage BUCKET that holds the completed export's downloadable ARTIFACT (its produced
+    /// blob), or <see langword="null"/> when the export has no object-storage artifact. Paired with
+    /// <see cref="ArtifactObjectKey"/>: both are set together by <see cref="RecordArtifact"/> or both null.
+    ///
+    /// <para>
+    /// WHY IT IS OPTIONAL. In the Core model a completed workspace export's produced artifact is its
+    /// <see cref="ExportManifest"/> — a durable DATABASE row of per-kind counts (CORE-EXP-001) — so Core's own
+    /// manifest-only export pipeline writes NO object-storage blob and leaves these coordinates null. The columns
+    /// exist so a deployment whose export pipeline DOES produce a downloadable blob can record WHERE that blob
+    /// lives, which is what lets the data-retention sweep (CORE-PRIV-003) purge the object together with the row
+    /// when the export is past its retention window (the "completed export artifacts (DB row + the S3 object)"
+    /// acceptance criterion). The coordinate is storage NAMING only (a private bucket + key, never a credential
+    /// and never a public URL; threat T4/T7) — the endpoint and credentials stay inside the deployment-supplied
+    /// <see cref="LiveCore.Api.Assets.IAssetStorage"/> adapter.
+    /// </para>
+    /// </summary>
+    public string? ArtifactBucket { get; private set; }
+
+    /// <summary>
+    /// The private object-storage OBJECT KEY of the completed export's downloadable artifact within
+    /// <see cref="ArtifactBucket"/>, or <see langword="null"/> when the export has no object-storage artifact.
+    /// Paired with <see cref="ArtifactBucket"/> (see that property for why the artifact is optional). It is a
+    /// storage coordinate only — never exported content and never a means to reach private content without an
+    /// authorized signed URL (threats T4/T7).
+    /// </summary>
+    public string? ArtifactObjectKey { get; private set; }
+
+    /// <summary>
+    /// Whether this export records an object-storage artifact (both <see cref="ArtifactBucket"/> and
+    /// <see cref="ArtifactObjectKey"/> are set). When <see langword="true"/> the data-retention sweep deletes
+    /// that object before it removes the export row (object-first-then-row), so a purged export never leaves an
+    /// orphaned object behind (mirrors the asset cleanup invariant).
+    /// </summary>
+    public bool HasArtifact => ArtifactBucket is not null && ArtifactObjectKey is not null;
 
     /// <summary>
     /// Whether the job has reached a terminal state (<see cref="ExportJobStatus.Completed"/> or
@@ -362,6 +404,61 @@ public sealed class ExportJob
         FailureReason = trimmedReason;
         UpdatedAt = updatedAt.ToUniversalTime();
     }
+
+    /// <summary>
+    /// Records the object-storage coordinates of the completed export's downloadable ARTIFACT (its produced
+    /// blob) so the artifact object can be purged with the row when the export reaches its retention window
+    /// (CORE-PRIV-003). The bucket and key are set TOGETHER (an artifact is a bucket + key pair); both are
+    /// validated as single storage tokens (non-blank, bounded, no whitespace or control characters), exactly
+    /// like an asset's storage coordinates, so a broken coordinate can never reach the row. The tenant,
+    /// workspace, requester, scope and status are unchanged — recording the artifact never moves the job or
+    /// widens its scope (threats T5/T8). The coordinate is storage NAMING only, never exported content and
+    /// never a credential (threats T4/T7).
+    /// </summary>
+    /// <param name="bucket">The private bucket the artifact object lives in.</param>
+    /// <param name="objectKey">The artifact object's key within the bucket.</param>
+    /// <param name="updatedAt">When the artifact was recorded.</param>
+    /// <exception cref="ArgumentException">The bucket or object key violates the storage-token invariants.</exception>
+    public void RecordArtifact(string bucket, string objectKey, DateTimeOffset updatedAt)
+    {
+        var trimmedBucket = bucket?.Trim() ?? string.Empty;
+        var trimmedObjectKey = objectKey?.Trim() ?? string.Empty;
+
+        if (!IsValidArtifactBucket(trimmedBucket))
+        {
+            throw new ArgumentException("Artifact bucket violates the storage-token invariants.", nameof(bucket));
+        }
+
+        if (!IsValidArtifactObjectKey(trimmedObjectKey))
+        {
+            throw new ArgumentException("Artifact object key violates the storage-token invariants.", nameof(objectKey));
+        }
+
+        ArtifactBucket = trimmedBucket;
+        ArtifactObjectKey = trimmedObjectKey;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// Whether the given value is a valid artifact bucket: a non-blank, bounded single storage token free of
+    /// whitespace and control characters (mirrors the asset bucket invariants).
+    /// </summary>
+    public static bool IsValidArtifactBucket(string? value) => IsStorageToken(value, MaxArtifactBucketLength);
+
+    /// <summary>
+    /// Whether the given value is a valid artifact object key: a non-blank, bounded single storage token free
+    /// of whitespace and control characters (an object key may carry '/' path separators but no spaces).
+    /// </summary>
+    public static bool IsValidArtifactObjectKey(string? value) => IsStorageToken(value, MaxArtifactObjectKeyLength);
+
+    /// <summary>
+    /// Whether the given value is a valid single storage token: non-blank, within the length bound and free of
+    /// any whitespace or control characters (storage coordinates carry no internal whitespace).
+    /// </summary>
+    private static bool IsStorageToken(string? value, int maxLength)
+        => !string.IsNullOrWhiteSpace(value)
+            && value.Length <= maxLength
+            && !value.Any(static c => char.IsWhiteSpace(c) || char.IsControl(c));
 
     /// <summary>
     /// Whether the given value is a defined <see cref="ExportScope"/>. Used to reject undefined enum values

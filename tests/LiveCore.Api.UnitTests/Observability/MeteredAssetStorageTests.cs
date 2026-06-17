@@ -96,6 +96,20 @@ public sealed class MeteredAssetStorageTests
         Assert.Equal(0, recorded.Count("livecore.asset.failures"));
     }
 
+    [Fact]
+    public async Task Coordinate_delete_is_delegated_transparently_and_not_part_of_the_upload_download_signal()
+    {
+        using var metrics = new LiveCoreMetrics();
+        using var recorded = new RecordedMetrics();
+        var inner = new FakeStorage();
+        var storage = new MeteredAssetStorage(inner, metrics);
+
+        await storage.DeleteObjectAsync("livecore-private-assets", "org/ws/export-artifact.bin", CancellationToken.None);
+
+        Assert.True(inner.CoordinateDeleteCalled);
+        Assert.Equal(0, recorded.Count("livecore.asset.failures"));
+    }
+
     private sealed class FakeStorage : IAssetStorage
     {
         public SignedAssetUrl? UploadResult { get; init; }
@@ -107,6 +121,8 @@ public sealed class MeteredAssetStorageTests
         public Exception? DownloadError { get; init; }
 
         public bool DeleteCalled { get; private set; }
+
+        public bool CoordinateDeleteCalled { get; private set; }
 
         public Task<SignedAssetUrl> CreateUploadUrlAsync(Asset asset, CancellationToken cancellationToken)
             => UploadError is not null
@@ -121,6 +137,12 @@ public sealed class MeteredAssetStorageTests
         public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
         {
             DeleteCalled = true;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+        {
+            CoordinateDeleteCalled = true;
             return Task.CompletedTask;
         }
     }

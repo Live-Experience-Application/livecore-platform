@@ -231,7 +231,7 @@ public class ExpiredPendingAssetCleanupServiceTests
 
     /// <summary>
     /// A configurable in-memory <see cref="IAssetStorage"/> for the cleanup tests. Its
-    /// <see cref="DeleteObjectAsync"/> records the deleted asset ids and can be made to throw per asset (via
+    /// <see cref="DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/> records the deleted asset ids and can be made to throw per asset (via
     /// the supplied callback) to simulate a transient failure. The signing operations are not exercised here.
     /// </summary>
     private sealed class ConfigurableAssetStorage(Func<Asset, Exception?>? onDelete = null) : IAssetStorage
@@ -257,6 +257,9 @@ public class ExpiredPendingAssetCleanupServiceTests
             => throw new NotSupportedException();
 
         public Task<SignedAssetUrl> CreateDownloadUrlAsync(Asset asset, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }
 

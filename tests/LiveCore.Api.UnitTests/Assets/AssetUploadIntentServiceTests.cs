@@ -440,6 +440,9 @@ public sealed class AssetUploadIntentServiceTests : IDisposable
             ArgumentNullException.ThrowIfNull(asset);
             return Task.CompletedTask;
         }
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

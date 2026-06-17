@@ -526,5 +526,8 @@ public sealed class AssetDeletionServiceTests : IDisposable
             DeletedObjectKeys.Add(asset.ObjectKey);
             return Task.CompletedTask;
         }
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+            => throw new NotSupportedException("The asset deletion flow never deletes by raw coordinates.");
     }
 }

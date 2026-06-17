@@ -43,4 +43,24 @@ internal sealed class UnconfiguredAssetStorage : IAssetStorage
         ArgumentNullException.ThrowIfNull(asset);
         throw new AssetStorageNotConfiguredException(AssetStorageOperation.Delete);
     }
+
+    /// <inheritdoc />
+    public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+    {
+        // Fail closed for the coordinate-addressed delete too (CORE-PRIV-003): with no configured adapter there
+        // is no object to delete, and the retention sweep must NOT remove an export row whose artifact object it
+        // could not delete (that would orphan the object once storage IS configured). Throwing here makes the
+        // sweep leave the record untouched rather than silently pretending success.
+        if (string.IsNullOrWhiteSpace(bucket))
+        {
+            throw new ArgumentException("Bucket must not be blank.", nameof(bucket));
+        }
+
+        if (string.IsNullOrWhiteSpace(objectKey))
+        {
+            throw new ArgumentException("Object key must not be blank.", nameof(objectKey));
+        }
+
+        throw new AssetStorageNotConfiguredException(AssetStorageOperation.Delete);
+    }
 }

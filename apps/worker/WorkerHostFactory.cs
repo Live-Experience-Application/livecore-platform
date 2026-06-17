@@ -3,6 +3,7 @@ using LiveCore.Api.Exports;
 using LiveCore.Api.Hosting;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Recaps;
+using LiveCore.Api.Retention;
 using LiveCore.Api.Store;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -119,6 +120,13 @@ public static class WorkerHostFactory
         // loop — "only runs when billing is configured" (fail-closed; billing is out of scope for Core v1).
         var storeReconciliationConfigured = builder.Services.AddStoreNotificationReconciliation(builder.Configuration);
 
+        // CORE-PRIV-003: gated on a configured database. The data-retention sweep expires and purges terminal/old
+        // personal-data-bearing records (sessions/recaps/exports/invitations) on configurable, per-family windows
+        // (each independently enabled; the surprising ones disabled by default), auditing every purge by id. The
+        // loop is registered whenever persistence is configured — disabled windows are skipped inside the sweep —
+        // so liveness can observe it even when only the default invitation-email window runs.
+        var dataRetentionConfigured = builder.Services.AddDataRetention(builder.Configuration);
+
         // The exact set of loops that are actually scheduled, so the per-loop liveness check (below) expects a
         // beat from precisely those loops — no more (a loop the deployment did not configure must not read as
         // "stalled") and no fewer (a configured loop that hangs must read as stalled).
@@ -141,6 +149,11 @@ public static class WorkerHostFactory
         if (storeReconciliationConfigured)
         {
             activeJobNames.Add(WorkerJobNames.StoreNotificationReconciliation);
+        }
+
+        if (dataRetentionConfigured)
+        {
+            activeJobNames.Add(WorkerJobNames.DataRetention);
         }
 
         // Per-loop liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003). Each loop beats its OWN file
@@ -182,6 +195,11 @@ public static class WorkerHostFactory
         if (storeReconciliationConfigured)
         {
             builder.Services.AddHostedService<StoreNotificationReconciliationBackgroundService>();
+        }
+
+        if (dataRetentionConfigured)
+        {
+            builder.Services.AddHostedService<DataRetentionSweepBackgroundService>();
         }
 
         var app = builder.Build();

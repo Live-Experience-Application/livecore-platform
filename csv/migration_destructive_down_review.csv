@@ -35,3 +35,5 @@ migration,operations,policy
 20260614090711_AddSessionEventSequence,DropColumn;DropTable,roll-forward-only
 20260614102027_AddBillingAccountLink,DropTable,roll-forward-only
 20260614153742_AddAuditLogTamperEvidence,DropColumn;DropTable,roll-forward-only
+20260617010526_AddIdempotencyKeyResultId,DropColumn,roll-forward-only
+20260617045517_AddExportArtifactCoordinates,DropColumn,roll-forward-only

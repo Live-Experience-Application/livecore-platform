@@ -26,7 +26,8 @@ namespace LiveCore.Api.Assets;
 ///   database cascade then remains as defence in depth (ADR 0012 step 2). Only the LINK rows are removed —
 ///   the linked content blocks / entities are untouched.</item>
 ///   <item><b>Its underlying storage object</b> is deleted through the <see cref="IAssetStorage"/> adapter
-///   port (<see cref="IAssetStorage.DeleteObjectAsync"/>, the same server-side delete the cleanup job uses) —
+///   port (<see cref="IAssetStorage.DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/>, the same
+///   server-side delete the cleanup job uses) —
 ///   the binary content lives in private object storage, never in PostgreSQL, so the metadata row's removal
 ///   does not by itself remove the object. Deleting it only ever REMOVES access; no signed URL is produced
 ///   and no bytes are served, so the private-by-default posture cannot be weakened (threat T4 "Asset leak").</item>

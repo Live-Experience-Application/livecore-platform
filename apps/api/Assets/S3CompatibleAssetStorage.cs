@@ -24,7 +24,7 @@ namespace LiveCore.Api.Assets;
 /// access.
 ///
 /// The pre-signed URL is produced LOCALLY by the SDK from the credentials and the request (SigV4 query
-/// signing) — minting a URL performs no network round-trip — while <see cref="DeleteObjectAsync"/> performs
+/// signing) — minting a URL performs no network round-trip — while <see cref="DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/> performs
 /// a real, server-side delete with the deployment's own credentials (no URL is handed to any client, so it
 /// can only ever REMOVE access; threat T4).
 /// </summary>
@@ -53,18 +53,36 @@ internal sealed class S3CompatibleAssetStorage : IAssetStorage
         => SignAsync(asset, AssetStorageOperation.Download, HttpVerb.GET, cancellationToken);
 
     /// <inheritdoc />
-    public async Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+    public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(asset);
 
+        // Delete the asset's OWN coordinates through the coordinate-addressed delete below; the asset is the
+        // already-resolved, tenant- and workspace-scoped metadata row, so this addresses only its own object.
+        return DeleteObjectAsync(asset.Bucket, asset.ObjectKey, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(bucket))
+        {
+            throw new ArgumentException("Bucket must not be blank.", nameof(bucket));
+        }
+
+        if (string.IsNullOrWhiteSpace(objectKey))
+        {
+            throw new ArgumentException("Object key must not be blank.", nameof(objectKey));
+        }
+
         // Server-side delete with the deployment's own credentials — no signed URL is produced (threat T4).
-        // S3 DeleteObject is idempotent: deleting a key that does not exist (a pending intent whose client
-        // never actually uploaded the bytes) returns success, so the cleanup job can reclaim a pending asset
-        // whether or not its object was ever written (CORE-AST-006).
+        // S3 DeleteObject is idempotent: deleting a key that does not exist (a pending intent whose client never
+        // uploaded, or an export with no produced blob) returns success, so the cleanup/retention jobs can
+        // reclaim a record whether or not its object was ever written (CORE-AST-006, CORE-PRIV-003).
         var request = new DeleteObjectRequest
         {
-            BucketName = asset.Bucket,
-            Key = asset.ObjectKey,
+            BucketName = bucket,
+            Key = objectKey,
         };
 
         await _s3.DeleteObjectAsync(request, cancellationToken).ConfigureAwait(false);

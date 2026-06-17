@@ -328,4 +328,35 @@ public class ExportJobTests
         var job = CreatePending();
         Assert.Contains($"requestedBy={_requestedBy}", job.ToString());
     }
+
+    // --- Artifact coordinates (CORE-PRIV-003) ----------------------------------
+
+    [Fact]
+    public void A_new_job_has_no_artifact()
+    {
+        var job = CreatePending();
+        Assert.False(job.HasArtifact);
+        Assert.Null(job.ArtifactBucket);
+        Assert.Null(job.ArtifactObjectKey);
+    }
+
+    [Fact]
+    public void RecordArtifact_sets_both_coordinates_together_and_trims_them()
+    {
+        var job = CreatePending();
+        job.RecordArtifact("  livecore-private-assets  ", $"  exports/{job.Id:N}  ", _finishedAt);
+
+        Assert.True(job.HasArtifact);
+        Assert.Equal("livecore-private-assets", job.ArtifactBucket);
+        Assert.Equal($"exports/{job.Id:N}", job.ArtifactObjectKey);
+    }
+
+    [Theory]
+    [InlineData("", "key")]
+    [InlineData("   ", "key")]
+    [InlineData("has space", "key")]
+    [InlineData("bucket", "")]
+    [InlineData("bucket", "has space")]
+    public void RecordArtifact_rejects_a_broken_coordinate(string bucket, string objectKey)
+        => Assert.Throws<ArgumentException>(() => CreatePending().RecordArtifact(bucket, objectKey, _finishedAt));
 }

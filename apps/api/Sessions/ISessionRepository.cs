@@ -153,4 +153,38 @@ public interface ISessionRepository
     /// lookup.
     /// </summary>
     Task UpdateAsync(Session session, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists up to <paramref name="maxCount"/> TERMINAL sessions (<see cref="SessionStatus.Ended"/> or
+    /// <see cref="SessionStatus.Cancelled"/>) created before <paramref name="createdBefore"/> — the candidates
+    /// for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). This is a SYSTEM
+    /// maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep is a system job,
+    /// not a tenant actor) and returns only TERMINAL sessions, so a live or still-prepared session is never a
+    /// candidate. The retention window is measured from the session's CREATION time (its age); ordering is by the
+    /// time-ordered surrogate id (UUIDv7, derived from the creation time), oldest first, and the creation-age
+    /// threshold is applied after materialization, so the bounded batch surfaces the oldest terminal sessions and
+    /// over repeated sweeps every past-window terminal session is covered. The caller (the retention sweep) then
+    /// re-loads and purges each within its own transaction, so this read takes no lock and grants no access.
+    /// </summary>
+    /// <param name="createdBefore">The exclusive creation-time threshold; only sessions created before it are returned.</param>
+    /// <param name="maxCount">The maximum number of sessions a single sweep examines (a positive batch size).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxCount"/> is not positive.</exception>
+    Task<IReadOnlyList<Session>> ListTerminalForRetentionAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES a terminal session row as part of the data-retention sweep (CORE-PRIV-003). The schema's
+    /// <c>ON DELETE CASCADE</c> foreign keys then remove the session's append-only <c>session_events</c> (and
+    /// their per-session sequence counter), its <c>recaps</c> and its session-scoped <c>visibility_rules</c>
+    /// (docs/10_DATABASE_SCHEMA.md) — the "completed/expired sessions and their session events" purge. The
+    /// <c>audit_logs</c> references the session as a recorded fact, not a foreign key, so the audit trail
+    /// SURVIVES the purge. The caller must have re-loaded the session through a tenant-scoped lookup inside the
+    /// purge transaction; a concurrent purge of the same row surfaces as a
+    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> (zero rows affected) which the
+    /// sweep treats as already-handled (concurrency-safe).
+    /// </summary>
+    Task DeleteAsync(Session session, CancellationToken cancellationToken);
 }

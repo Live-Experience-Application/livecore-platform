@@ -776,6 +776,72 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a data-retention purge (<see cref="AuditAction.RecordRetentionPurged"/>) — the audit fact written
+    /// when the worker's data-retention sweep purges a terminal, past-its-window personal-data-bearing record
+    /// (CORE-PRIV-003, the "Privacy and Data Lifecycle" epic, GDPR Art.5(1)(e) storage limitation). It is the
+    /// retention counterpart of the resource-deletion factories (e.g. <see cref="ForEntityDeletion"/>) and, like
+    /// them, a thin specialization of <see cref="Create"/> that pins the action and applies the producer's
+    /// stricter contract: the tenant, the workspace the purged record belonged to and the purged record (its
+    /// generic kind name and surrogate id) are all REQUIRED, where the generic factory leaves them optional. A
+    /// purge is a SYSTEM action (no user performs it), so there is NO actor (null), and it is a removal rather
+    /// than a transition, so there is NO before/after state pair (both null). The resource kind is passed as a
+    /// generic NAME string (e.g. <c>Session</c> / <c>Recap</c> / <c>ExportJob</c> / <c>WorkspaceInvitation</c>)
+    /// so the Audit module does not depend on the owning modules' types, exactly like
+    /// <see cref="ForEntityDeletion"/>. Every value is an identifier or a generic name — never the purged record's
+    /// content, the recap body, the export blob or the invited email (threat T7) — and the audit row outlives the
+    /// now-deleted record it references because the reference is a recorded fact, not a foreign key (the same
+    /// PII-free posture that makes erasure/deletion reconcilable with the immutable audit log; threats T1/T5/T7).
+    /// </summary>
+    /// <param name="organizationId">The tenant the purged record belonged to (required).</param>
+    /// <param name="workspaceId">The workspace the purged record belonged to (required for this action).</param>
+    /// <param name="resourceType">The purged record's generic kind name (e.g. Session / Recap / ExportJob / WorkspaceInvitation).</param>
+    /// <param name="resourceId">The purged record's surrogate id.</param>
+    /// <param name="createdAt">When the purge happened.</param>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or resource id is empty, or the resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForRetentionPurge(
+        Guid organizationId,
+        Guid workspaceId,
+        string resourceType,
+        Guid resourceId,
+        DateTimeOffset createdAt)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (string.IsNullOrWhiteSpace(resourceType))
+        {
+            throw new ArgumentException("Resource type must not be empty.", nameof(resourceType));
+        }
+
+        if (resourceId == Guid.Empty)
+        {
+            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.RecordRetentionPurged,
+            // SYSTEM action: the retention sweep is a background maintenance job, not a user, so no actor.
+            actorUserProfileId: null,
+            resourceType,
+            resourceId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a workspace invitation redemption (<see cref="AuditAction.MemberJoined"/>) — the audit fact
     /// written when an authenticated caller redeems a scoped invitation and gains the granted workspace
     /// membership (CORE-WS-006). It is the inverse of <see cref="ForMemberRemoval"/>: a thin specialization

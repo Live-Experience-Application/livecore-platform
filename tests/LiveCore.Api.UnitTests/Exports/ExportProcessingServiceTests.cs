@@ -349,6 +349,14 @@ public sealed class ExportProcessingServiceTests
         public Task<ExportJob?> FindByIdInOrganizationAsync(Guid organizationId, Guid id, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        // The retention sweep (CORE-PRIV-003) is a different worker loop; the export-processing tests never
+        // exercise it, so its repository members are unsupported here as a regression guard.
+        public Task<IReadOnlyList<ExportJob>> ListCompletedForRetentionAsync(DateTimeOffset createdBefore, int maxCount, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeleteAsync(ExportJob exportJob, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         // IWorkspaceExportInventoryReader ----------------------------------------------------------------------
 
         public Task<IReadOnlyDictionary<ExportResourceKind, int>> CountWorkspaceResourcesAsync(

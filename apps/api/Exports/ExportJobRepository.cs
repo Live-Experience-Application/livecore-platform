@@ -139,4 +139,54 @@ internal sealed class ExportJobRepository : IExportJobRepository
         _dbContext.ExportJobs.Update(exportJob);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<ExportJob>> ListCompletedForRetentionAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SYSTEM retention sweep (CORE-PRIV-003): the predicate filters on STATUS, so a pending, running or failed
+        // job is never returned even if it is old — only completed jobs (their produced artifact is downloadable
+        // and may carry an object-storage blob) are purge candidates. It deliberately spans all tenants/workspaces
+        // because the sweep is a system job, not a tenant actor.
+        //
+        // The order is the time-ordered surrogate id (UUIDv7 derived from the creation time, chronological and
+        // provider-independent — SQLite cannot ORDER BY or compare a DateTimeOffset), oldest first, so the OLDEST
+        // completed jobs sort first. The bounded batch (Take(maxCount)) therefore surfaces the most-aged jobs, and
+        // the creation-age threshold is applied AFTER materialization so a still-recent completed job that slips in
+        // is filtered out. Because id order tracks creation order, every past-window completed job is covered over
+        // repeated sweeps without starvation.
+        var oldestCompleted = await _dbContext.ExportJobs
+            .AsNoTracking()
+            .Where(job => job.Status == ExportJobStatus.Completed)
+            .OrderBy(job => job.Id)
+            .Take(maxCount)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return oldestCompleted
+            .Where(job => job.CreatedAt < createdBefore)
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(ExportJob exportJob, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(exportJob);
+
+        // Remove the completed export job row. The export_manifests.export_job_id foreign key cascades on delete,
+        // so the produced manifest is removed with the job (CORE-PRIV-003). The sweep already deleted the
+        // object-storage artifact (if any) before this call, so no orphaned object remains. The audit log
+        // references the job as a recorded fact (not a foreign key) and survives. A concurrent purge of the same
+        // row makes this SaveChanges affect zero rows and throw DbUpdateConcurrencyException, which the sweep
+        // treats as already-handled (concurrency-safe).
+        _dbContext.ExportJobs.Remove(exportJob);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

@@ -27,4 +27,7 @@ internal static class WorkerJobNames
 
     /// <summary>The billing-gated store-notification reconciliation loop (CORE-JOB-003).</summary>
     public const string StoreNotificationReconciliation = "store-notification-reconciliation";
+
+    /// <summary>The data-retention sweep loop (CORE-PRIV-003).</summary>
+    public const string DataRetention = "data-retention";
 }

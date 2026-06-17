@@ -162,4 +162,48 @@ public interface IWorkspaceInvitationRepository
         string invitedEmail,
         DateTimeOffset updatedAt,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists up to <paramref name="maxCount"/> TERMINAL invitations created before <paramref name="createdBefore"/>
+    /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). An
+    /// invitation is TERMINAL (closed/expired/revoked) when it is <see cref="WorkspaceInvitationStatus.Accepted"/>,
+    /// <see cref="WorkspaceInvitationStatus.Revoked"/>, or still <see cref="WorkspaceInvitationStatus.Pending"/>
+    /// but already EXPIRED at <paramref name="asOf"/> (its <see cref="WorkspaceInvitation.ExpiresAt"/> has passed,
+    /// so it can never be redeemed). A still-redeemable pending invitation is NEVER a candidate. The personal data
+    /// the purge removes is the plaintext <see cref="WorkspaceInvitation.InvitedEmail"/>; the invite TOKEN hash is
+    /// never read out here (threats T6/T7).
+    ///
+    /// <para>
+    /// This is a SYSTEM maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep
+    /// is a system job, not a tenant actor). The retention window is measured from the invitation's CREATION time
+    /// (its age); ordering is by the time-ordered surrogate id (UUIDv7, derived from the creation time), oldest
+    /// first, and BOTH the terminal-state check (which compares the expiry against <paramref name="asOf"/>) and the
+    /// creation-age threshold are applied after materialization (SQLite cannot ORDER BY or compare a
+    /// DateTimeOffset). Because id order tracks creation order and the window is measured from creation, every
+    /// past-window terminal invitation is covered over repeated sweeps; the only case not surfaced promptly is a
+    /// still-valid pending invitation with a custom validity longer than the retention window (it becomes a
+    /// candidate once it expires).
+    /// </para>
+    /// </summary>
+    /// <param name="createdBefore">The exclusive creation-time threshold; only invitations created before it are returned.</param>
+    /// <param name="asOf">The instant the expiry of a still-pending invitation is evaluated against.</param>
+    /// <param name="maxCount">The maximum number of invitations a single sweep examines (a positive batch size).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxCount"/> is not positive.</exception>
+    Task<IReadOnlyList<WorkspaceInvitation>> ListTerminalForRetentionAsync(
+        DateTimeOffset createdBefore,
+        DateTimeOffset asOf,
+        int maxCount,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES a terminal invitation row as part of the data-retention sweep (CORE-PRIV-003) — removing the
+    /// plaintext invited email it carries. The invitation's lifecycle audit facts (MemberInvited / MemberJoined /
+    /// MemberInvitationRevoked) are separate <c>audit_logs</c> rows that reference the invitation as a recorded
+    /// fact, not a foreign key, so the audit trail SURVIVES the purge. The caller must have re-loaded the
+    /// invitation through a tenant-scoped lookup inside the purge transaction; a concurrent purge of the same row
+    /// surfaces as a <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> which the sweep
+    /// treats as already-handled (concurrency-safe).
+    /// </summary>
+    Task DeleteAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken);
 }

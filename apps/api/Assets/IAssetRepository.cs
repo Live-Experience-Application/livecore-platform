@@ -151,7 +151,7 @@ public interface IAssetRepository
     /// (CORE-AST-006) once the asset's storage object has been deleted. The asset's links cascade away with
     /// it (the <c>asset_links.asset_id</c> foreign key cascades on delete), so the row leaves behind no
     /// dangling join. Deleting the metadata row does not, by itself, delete the stored object; the cleanup
-    /// job deletes the object FIRST through <see cref="IAssetStorage.DeleteObjectAsync"/> and only then
+    /// job deletes the object FIRST through <see cref="IAssetStorage.DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/> and only then
     /// removes the row, so a row is never deleted while its object remains (no orphaned object).
     /// </summary>
     Task DeleteAsync(Asset asset, CancellationToken cancellationToken);

@@ -274,4 +274,61 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return invitations.Count;
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceInvitation>> ListTerminalForRetentionAsync(
+        DateTimeOffset createdBefore,
+        DateTimeOffset asOf,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SYSTEM retention sweep (CORE-PRIV-003): deliberately spans all tenants/workspaces because the sweep is a
+        // system job, not a tenant actor. The order is the time-ordered surrogate id (UUIDv7 derived from
+        // CreatedAt, chronological and provider-independent — SQLite cannot ORDER BY or compare a DateTimeOffset),
+        // oldest first, so the OLDEST invitations sort first. The bounded batch (Take(maxCount)) surfaces the
+        // most-aged invitations; the terminal-state check (which compares ExpiresAt against asOf for a still-
+        // pending invitation) AND the creation-age threshold are applied AFTER materialization. A pending
+        // invitation whose token can still be redeemed (not expired at asOf) is NEVER returned — only
+        // closed/expired/revoked invitations are purged. The read is tracking-free (it never mutates); the
+        // returned aggregates carry the token hash, but the sweep purges by id and never reads it out (threats
+        // T6/T7).
+        var oldestInvitations = await _dbContext.WorkspaceInvitations
+            .AsNoTracking()
+            .OrderBy(invitation => invitation.Id)
+            .Take(maxCount)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return oldestInvitations
+            .Where(invitation => invitation.CreatedAt < createdBefore && IsTerminal(invitation, asOf))
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+
+        // Remove the terminal invitation row — the plaintext invited email goes with it (CORE-PRIV-003). The
+        // lifecycle audit facts reference the invitation as a recorded fact (not a foreign key) and survive. A
+        // concurrent purge of the same row makes this SaveChanges affect zero rows and throw
+        // DbUpdateConcurrencyException, which the sweep treats as already-handled (concurrency-safe).
+        _dbContext.WorkspaceInvitations.Remove(invitation);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether the invitation is TERMINAL (closed/expired/revoked) at <paramref name="asOf"/>: accepted, revoked,
+    /// or still pending but already past its expiry (so it can never be redeemed). A still-redeemable pending
+    /// invitation is NOT terminal. The status is a non-linear lifecycle, so this is exact membership, never an
+    /// ordering comparison.
+    /// </summary>
+    private static bool IsTerminal(WorkspaceInvitation invitation, DateTimeOffset asOf)
+        => invitation.Status != WorkspaceInvitationStatus.Pending
+            || invitation.ExpiresAt <= asOf;
 }

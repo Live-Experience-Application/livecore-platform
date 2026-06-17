@@ -72,6 +72,27 @@ public class UnconfiguredAssetStorageTests
     }
 
     [Fact]
+    public async Task DeleteObjectAsync_by_coordinates_fails_closed_when_storage_is_not_configured()
+    {
+        // The retention sweep (CORE-PRIV-003) deletes an export's artifact through the same coordinate-addressed
+        // port. With no adapter configured it must FAIL CLOSED so the sweep never removes an export row whose
+        // object it could not delete (which would orphan the object once storage is wired).
+        var exception = await Assert.ThrowsAsync<AssetStorageNotConfiguredException>(
+            () => _storage.DeleteObjectAsync("livecore-private-assets", "exports/org/ws/job.bin", CancellationToken.None));
+
+        Assert.Equal(AssetStorageOperation.Delete, exception.Operation);
+    }
+
+    [Fact]
+    public async Task DeleteObjectAsync_by_coordinates_rejects_blank_coordinates()
+    {
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _storage.DeleteObjectAsync(" ", "key", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => _storage.DeleteObjectAsync("bucket", " ", CancellationToken.None));
+    }
+
+    [Fact]
     public async Task The_fail_closed_delete_exception_message_leaks_no_storage_coordinate()
     {
         var exception = await Assert.ThrowsAsync<AssetStorageNotConfiguredException>(

@@ -501,12 +501,13 @@ listen URL (`Worker:Metrics:Url` / `Worker__Metrics__Url`, default `http://0.0.0
 - **`GET /health/live`** — the worker's **per-loop** liveness endpoint. Wire it to the
   orchestrator's liveness probe (restart on failure), exactly as for the API.
 
-The worker runs up to **four** job loops — asset cleanup (`AssetCleanupBackgroundService`),
+The worker runs up to **five** job loops — asset cleanup (`AssetCleanupBackgroundService`),
 recap generation (`RecapGenerationBackgroundService`, CORE-JOB-001), export processing
-(`ExportProcessingBackgroundService`, CORE-JOB-002) and the billing-gated
-store-notification reconciliation (`StoreNotificationReconciliationBackgroundService`,
-CORE-JOB-003). A loop is resilient to a sweep that _throws_, but a sweep that **hangs**
-(a stuck database or storage call) would leave the process alive yet doing no work.
+(`ExportProcessingBackgroundService`, CORE-JOB-002), the billing-gated store-notification
+reconciliation (`StoreNotificationReconciliationBackgroundService`, CORE-JOB-003) and the
+data-retention sweep (`DataRetentionSweepBackgroundService`, CORE-PRIV-003). A loop is
+resilient to a sweep that _throws_, but a sweep that **hangs** (a stuck database or storage
+call) would leave the process alive yet doing no work.
 
 Each loop writes the current UTC timestamp to its **own** heartbeat file on startup and
 after **every completed sweep tick**, and `/health/live` is healthy **only when every
@@ -522,7 +523,7 @@ aggregating endpoint make a **single** hung loop detectable.
   (`Worker__Heartbeat__StaleAfter`, a `TimeSpan`); the default is **2 hours**, a few of
   every loop's default 1-hour sweep interval (`Assets:Cleanup:SweepInterval` /
   `Recaps:Generation:SweepInterval` / `Exports:Processing:SweepInterval` /
-  `Store:Reconciliation:SweepInterval`). A loop whose file is older than this — or
+  `Store:Reconciliation:SweepInterval` / `Retention:SweepInterval`). A loop whose file is older than this — or
   missing — reads as **stalled** (fail-closed), and the worker reports not-live so
   orchestration restarts it.
 - Prefer the HTTP probe (`httpGet: /health/live`), which aggregates all loops in one
@@ -755,6 +756,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Worker:Heartbeat:StaleAfter`       | `Worker__Heartbeat__StaleAfter`    |   no   | no                      | worker      | `02:00:00`; a loop idle longer reads as hung -> worker not-live (CORE-DR-003) |
 | `Worker:Metrics:Url`                | `Worker__Metrics__Url`             |   no   | no                      | worker      | `http://0.0.0.0:9464` (worker `/metrics` + `/health/live`, CORE-DR-003) |
 | `Recaps:Generation:SweepInterval`   | `Recaps__Generation__SweepInterval` |  no   | no                      | worker      | `01:00:00` (recap generation cadence, CORE-JOB-001)     |
+| `Retention:<Family>:Enabled`        | `Retention__<Family>__Enabled`     |   no   | no                      | worker      | data-retention purge per family (`Sessions`/`Recaps`/`Exports` off, `Invitations` on by default, CORE-PRIV-003) |
 | `Backup:Encryption:Passphrase`      | `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`) | yes | for any backup/restore | backup scripts | Backup/restore refuse to run; nothing is written as plaintext (CORE-DR-001) |
 
 The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`),
@@ -763,7 +765,15 @@ The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`
 `Exports:Processing:SweepInterval`/`BatchSize`) are optional tuning with safe defaults (see CORE-OPS-006 /
 CORE-OPS-007 / CORE-DR-003 above). The billing-gated store-notification reconciliation loop is **off by default**
 and fail-closed: it runs only when a deployment sets `Store:Reconciliation:Enabled=true`
-(`Store__Reconciliation__Enabled`, with optional `:SweepInterval`/`:BatchSize`), per CORE-JOB-003. The repository-root
+(`Store__Reconciliation__Enabled`, with optional `:SweepInterval`/`:BatchSize`), per CORE-JOB-003. The
+**data-retention sweep** (CORE-PRIV-003) is configured under `Retention:*` — a global `SweepInterval`/`BatchSize`
+plus a per-family `Retention:<Family>:Enabled` flag and `Retention:<Family>:RetentionWindow` for each of
+`Sessions`, `Recaps`, `Exports` and `Invitations`. Its purges DELETE personal-data-bearing records past their
+window (storage limitation, GDPR Art.5(1)(e)), so the families whose deletion would be surprising — `Sessions`
+(and their cascade-removed events/recaps/visibility rules), `Recaps` and completed `Exports` — are **disabled by
+default** (enable them per family once you have confirmed the windows fit your retention obligations), while the
+clear privacy-hygiene `Invitations` purge (a terminal invitation's plaintext email) is **enabled by default**
+(30-day window). The repository-root
 [`.env.example`](../.env.example) lists every one of these names. The **store** purchase-verification and notification
 credentials (Apple/Google server keys, signing keys) are consumed by the deployment-supplied
 verification/notification **adapter**, not read from a fixed Core key; supply them to that adapter through your

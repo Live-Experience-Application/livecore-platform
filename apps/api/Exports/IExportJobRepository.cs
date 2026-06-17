@@ -90,4 +90,38 @@ public interface IExportJobRepository
     /// job through a tenant-scoped lookup.
     /// </summary>
     Task UpdateAsync(ExportJob exportJob, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists up to <paramref name="maxCount"/> COMPLETED export jobs created before <paramref name="createdBefore"/>
+    /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). This is
+    /// a SYSTEM maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep is a
+    /// system job, not a tenant actor) and returns only <see cref="ExportJobStatus.Completed"/> jobs, so a
+    /// still-pending, running or failed job is never a candidate. The retention window is measured from the job's
+    /// CREATION time (its age); ordering is by the time-ordered surrogate id (UUIDv7, derived from the creation
+    /// time), oldest first, and the creation-age threshold is applied after materialization (SQLite cannot ORDER
+    /// BY or compare a DateTimeOffset), so the bounded batch surfaces the oldest completed jobs and over repeated
+    /// sweeps every past-window job is covered without starvation. Each returned job carries its recorded artifact
+    /// coordinates (<see cref="ExportJob.ArtifactBucket"/> / <see cref="ExportJob.ArtifactObjectKey"/>, when set)
+    /// so the sweep can delete the object-storage blob before it removes the row.
+    /// </summary>
+    /// <param name="createdBefore">The exclusive creation-time threshold; only jobs created before it are returned.</param>
+    /// <param name="maxCount">The maximum number of jobs a single sweep examines (a positive batch size).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="System.ArgumentOutOfRangeException"><paramref name="maxCount"/> is not positive.</exception>
+    Task<IReadOnlyList<ExportJob>> ListCompletedForRetentionAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES a completed export job row as part of the data-retention sweep (CORE-PRIV-003). The
+    /// <c>export_manifests.export_job_id</c> foreign key cascades on delete, so the produced manifest is removed
+    /// with the job; the sweep deletes any object-storage artifact (the blob at the job's recorded artifact
+    /// coordinates) BEFORE calling this, so a removed export never leaves an orphaned object. The <c>audit_logs</c>
+    /// references the job as a recorded fact, not a foreign key, so the audit trail SURVIVES the purge. The caller
+    /// must have re-loaded the job through a tenant-scoped lookup inside the purge transaction; a concurrent purge
+    /// of the same row surfaces as a <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> which
+    /// the sweep treats as already-handled (concurrency-safe).
+    /// </summary>
+    Task DeleteAsync(ExportJob exportJob, CancellationToken cancellationToken);
 }

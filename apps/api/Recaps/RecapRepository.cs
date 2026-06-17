@@ -146,4 +146,47 @@ internal sealed class RecapRepository : IRecapRepository
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Recap>> ListExpiredForRetentionAsync(
+        DateTimeOffset generatedBefore,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SYSTEM retention sweep (CORE-PRIV-003): deliberately spans all tenants/workspaces because the sweep is a
+        // system job, not a tenant actor. The order is the time-ordered surrogate id (UUIDv7 derived from
+        // GeneratedAt, chronological and provider-independent — SQLite cannot ORDER BY or compare a
+        // DateTimeOffset), oldest first, so the OLDEST recaps sort first. The bounded batch (Take(maxCount))
+        // therefore surfaces the most-aged recaps, and the generation-age threshold is applied AFTER
+        // materialization so a still-recent recap that slips into the batch is filtered out. Because id order
+        // equals generation order, every past-window recap is covered over repeated sweeps without starvation.
+        var oldestRecaps = await _dbContext.Recaps
+            .AsNoTracking()
+            .OrderBy(recap => recap.Id)
+            .Take(maxCount)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return oldestRecaps
+            .Where(recap => recap.GeneratedAt < generatedBefore)
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(Recap recap, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(recap);
+
+        // Remove the recap row — the one removal path on the otherwise write-once recap (CORE-PRIV-003). The
+        // audit log references it as a recorded fact (not a foreign key) and survives. A concurrent purge of the
+        // same row makes this SaveChanges affect zero rows and throw DbUpdateConcurrencyException, which the sweep
+        // treats as already-handled (concurrency-safe).
+        _dbContext.Recaps.Remove(recap);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

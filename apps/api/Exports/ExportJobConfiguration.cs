@@ -106,6 +106,21 @@ internal sealed class ExportJobConfiguration : IEntityTypeConfiguration<ExportJo
             .HasColumnName("updated_at")
             .IsRequired();
 
+        // Optional object-storage coordinates of the completed export's downloadable artifact (its produced
+        // blob), recorded by ExportJob.RecordArtifact so the data-retention sweep (CORE-PRIV-003) can purge the
+        // object with the row. NULLABLE because Core's manifest-only export pipeline writes no blob (the artifact
+        // is the export_manifests row); both columns are storage NAMING only, never exported content or a
+        // credential (threats T4/T7), and are not indexed (they are never a lookup key, only a purge coordinate).
+        builder.Property(job => job.ArtifactBucket)
+            .HasColumnName("artifact_bucket")
+            .HasMaxLength(ExportJob.MaxArtifactBucketLength)
+            .IsRequired(false);
+
+        builder.Property(job => job.ArtifactObjectKey)
+            .HasColumnName("artifact_object_key")
+            .HasMaxLength(ExportJob.MaxArtifactObjectKeyLength)
+            .IsRequired(false);
+
         // Documented critical index export_jobs(workspace_id, id): workspace reads lead with the workspace
         // column (docs/10_DATABASE_SCHEMA.md critical indexes).
         builder.HasIndex(job => new { job.WorkspaceId, job.Id })

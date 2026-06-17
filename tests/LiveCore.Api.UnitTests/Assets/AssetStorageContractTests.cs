@@ -78,6 +78,23 @@ public class AssetStorageContractTests
     }
 
     [Fact]
+    public async Task DeleteObjectAsync_completes_for_explicit_coordinates_and_rejects_blank()
+    {
+        // The coordinate-addressed delete (CORE-PRIV-003) removes a NON-asset object whose lifecycle Core
+        // manages — a completed export's produced artifact — by its recorded bucket/key. Like the asset delete
+        // it hands back no URL and only ever removes access, so it cannot weaken the private-by-default posture.
+        // A conforming adapter completes the delete and still guards against blank coordinates.
+        IAssetStorage storage = new FakeSignedUrlAssetStorage(_now);
+
+        await storage.DeleteObjectAsync("livecore-private-assets", "org/ws/export-artifact.bin", CancellationToken.None);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => storage.DeleteObjectAsync(" ", "org/ws/export-artifact.bin", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => storage.DeleteObjectAsync("livecore-private-assets", " ", CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Each_asset_signs_its_own_object_so_one_assets_url_never_addresses_another()
     {
         IAssetStorage storage = new FakeSignedUrlAssetStorage(_now);
@@ -114,6 +131,23 @@ public class AssetStorageContractTests
             // Server-side delete (CORE-AST-006): hands back no URL, only ever removes access. Idempotent —
             // deleting an object that was never uploaded completes successfully.
             ArgumentNullException.ThrowIfNull(asset);
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+        {
+            // Coordinate-addressed server-side delete (CORE-PRIV-003): hands back no URL, only ever removes
+            // access, idempotent. Guards blank coordinates so a broken key can never address an object.
+            if (string.IsNullOrWhiteSpace(bucket))
+            {
+                throw new ArgumentException("Bucket must not be blank.", nameof(bucket));
+            }
+
+            if (string.IsNullOrWhiteSpace(objectKey))
+            {
+                throw new ArgumentException("Object key must not be blank.", nameof(objectKey));
+            }
+
             return Task.CompletedTask;
         }
 

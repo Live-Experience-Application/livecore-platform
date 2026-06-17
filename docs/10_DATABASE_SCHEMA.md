@@ -203,6 +203,50 @@ deployment-spanning; `subject_entitlements`/`quota_usage` are keyed by a polymor
 organization foreign key). An organization-subject entitlement/quota row therefore is not removed by the
 tenant cascade — it becomes unreachable residue rather than a dangling foreign key.
 
+## Configurable data-retention sweeps (CORE-PRIV-003)
+
+Until this story Core kept terminal/old personal-data-bearing records **forever**: a completed/cancelled
+session and its append-only `session_events`, a generated `recaps` row, a completed `export_jobs` row and its
+manifest, and a closed/expired/revoked `workspace_invitations` row (its plaintext `invited_email`) all lived for
+the deployment's lifetime. GDPR Art.5(1)(e) (storage limitation) wants those expired once they are no longer
+needed. The data-retention sweep — a worker loop (`apps/worker`) that reuses the asset-cleanup pattern — does
+that on configurable, **per-family** windows. No new table is added; the windows are deployment policy
+(`Retention:*`, see `docs/13_SELF_HOSTING_REQUIREMENTS.md`), not schema.
+
+The retention window of each family is measured from the record's **creation/generation time** (its age), which
+is also what its time-ordered UUIDv7 surrogate id encodes — so the sweep lists candidates ordered by id,
+bounded by a batch size, and applies the age threshold after materialization (the SQLite test provider cannot
+compare a `timestamptz`, exactly as the asset-cleanup sweep notes), which keeps the sweep provider-portable and
+free of starvation. The families and what a purge removes:
+
+- **Completed/expired sessions** (status `Ended` or `Cancelled`). Deleting the `sessions` row triggers the
+  existing `ON DELETE CASCADE` foreign keys into `sessions(id)`, so its `session_events` (and their
+  `session_event_sequences` counter), its `recaps` and its session-scoped `visibility_rules` are removed with
+  it — the "completed/expired sessions and their session events" purge. This is a deliberate exception to the
+  "NEVER delete append-only `session_events`" rule the session **cancel** command observed: cancel is a
+  lifecycle off-ramp that preserves history, whereas the retention sweep is the storage-limitation expiry of
+  history that is past its window.
+- **Generated recaps** (`recaps`). The one removal path on the otherwise write-once recap; the recap body is
+  host content (potentially personal data). Independently windowed, so a recap may be expired before (or kept
+  longer than) its session.
+- **Completed export artifacts** (`export_jobs` with status `Completed`). The new nullable
+  `export_jobs.artifact_bucket` / `export_jobs.artifact_object_key` columns record WHERE a completed export's
+  produced object-storage blob lives (Core's manifest-only export pipeline writes no blob and leaves them
+  `NULL`); the sweep deletes that **object first, then the row** (the `export_manifests.export_job_id` foreign
+  key cascades the manifest away), so a purged export never leaves an orphaned object. With storage unconfigured
+  the row is kept (fail-closed; threat T4).
+- **Closed/expired/revoked invitations** (`workspace_invitations` that are `Accepted`, `Revoked`, or `Pending`
+  but past `expires_at`). The purge removes the plaintext `invited_email`; the invitation's lifecycle audit
+  facts are separate `audit_logs` rows that survive.
+
+Every purge is **audited by id**: a tenant-scoped `audit_logs` `RecordRetentionPurged` fact records the tenant,
+workspace and the purged record's generic kind name + surrogate id, with **no actor** (a system job) and no
+content (threat T7). Because the audit reference is a recorded fact, not a foreign key, the audit row survives
+the purge and the per-tenant tamper-evident hash chain still verifies. Each purge (audit append + delete) commits
+in **one transaction** and re-loads its record tenant-scoped inside that transaction, so overlapping sweeps (or
+worker replicas) are idempotent and concurrency-safe — a record already purged is skipped, and a lost delete
+race rolls the audit append back with it.
+
 ## Session-scoped visibility rules (CORE-SVIS-001)
 
 `visibility_rules` is **session-scoped**: it carries a required `session_id` column (a foreign key into

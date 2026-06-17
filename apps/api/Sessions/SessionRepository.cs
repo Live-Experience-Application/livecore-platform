@@ -198,4 +198,55 @@ internal sealed class SessionRepository : ISessionRepository
         _dbContext.Sessions.Update(session);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Session>> ListTerminalForRetentionAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SYSTEM retention sweep (CORE-PRIV-003): the predicate filters on STATUS, so a Live or Prepared session
+        // is never returned even if it is old — only terminal (Ended/Cancelled) sessions are purge candidates. It
+        // deliberately spans all tenants/workspaces because the sweep is a system job, not a tenant actor; it
+        // returns rows the sweep then re-loads and purges under its own transaction (it grants no access here).
+        //
+        // The order is the time-ordered surrogate id (UUIDv7 derived from CreatedAt, chronological and
+        // provider-independent — SQLite cannot ORDER BY or compare a DateTimeOffset, so the threshold is applied
+        // AFTER materialization exactly as the asset cleanup does), oldest first, so the OLDEST terminal sessions
+        // sort first. The bounded batch (Take(maxCount)) therefore surfaces the most-aged sessions, and the
+        // creation-age threshold filters out any still-recent terminal session that slips in. Because id order
+        // tracks creation order and the window is measured from creation, every past-window terminal session is
+        // covered over repeated sweeps without starvation.
+        var oldestTerminal = await _dbContext.Sessions
+            .AsNoTracking()
+            .Where(session => session.Status == SessionStatus.Ended || session.Status == SessionStatus.Cancelled)
+            .OrderBy(session => session.Id)
+            .Take(maxCount)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return oldestTerminal
+            .Where(session => session.CreatedAt < createdBefore)
+            .ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(Session session, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        // Remove the terminal session row. The session_events, session_event_sequences, recaps and
+        // session-scoped visibility_rules foreign keys cascade on delete, so the session's append-only event
+        // stream, its recaps and its reveals are removed with it (docs/10); the audit log references it as a
+        // recorded fact (not a foreign key) and survives. A concurrent purge of the same row makes this
+        // SaveChanges affect zero rows and throw DbUpdateConcurrencyException, which the sweep treats as
+        // already-handled (concurrency-safe).
+        _dbContext.Sessions.Remove(session);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

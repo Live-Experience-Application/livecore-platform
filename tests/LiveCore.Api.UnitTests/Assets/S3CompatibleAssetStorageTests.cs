@@ -154,6 +154,34 @@ public class S3CompatibleAssetStorageTests
     }
 
     [Fact]
+    public async Task DeleteObjectAsync_by_coordinates_addresses_exactly_those_coordinates()
+    {
+        // The coordinate-addressed delete (CORE-PRIV-003) removes a NON-asset object — a completed export's
+        // produced artifact — by its recorded bucket/key. It hands back no URL and only ever removes access.
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+
+        await storage.DeleteObjectAsync("livecore-private-assets", "exports/org/ws/job.bin", CancellationToken.None);
+
+        var request = Assert.Single(client.Deletes);
+        Assert.Equal("livecore-private-assets", request.BucketName);
+        Assert.Equal("exports/org/ws/job.bin", request.Key);
+    }
+
+    [Fact]
+    public async Task DeleteObjectAsync_by_coordinates_rejects_blank_coordinates()
+    {
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => storage.DeleteObjectAsync(" ", "key", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => storage.DeleteObjectAsync("bucket", " ", CancellationToken.None));
+        Assert.Empty(client.Deletes);
+    }
+
+    [Fact]
     public async Task CreateUploadUrlAsync_rejects_a_null_asset()
     {
         using var client = new RecordingAmazonS3Client();

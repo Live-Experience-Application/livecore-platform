@@ -17,7 +17,7 @@ namespace LiveCore.Api.Observability;
 /// rethrown so the caller's behavior is identical.
 ///
 /// Only the two client-facing operations (<see cref="CreateUploadUrlAsync"/>/<see cref="CreateDownloadUrlAsync"/>)
-/// are the documented "upload/download" signal; <see cref="DeleteObjectAsync"/> (the background cleanup
+/// are the documented "upload/download" signal; <see cref="DeleteObjectAsync(Asset, System.Threading.CancellationToken)"/> (the background cleanup
 /// delete) is delegated transparently and is surfaced instead through the worker's background-job-failure
 /// metric.
 /// </summary>
@@ -48,6 +48,10 @@ internal sealed class MeteredAssetStorage : IAssetStorage
     /// <inheritdoc />
     public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
         => _inner.DeleteObjectAsync(asset, cancellationToken);
+
+    /// <inheritdoc />
+    public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+        => _inner.DeleteObjectAsync(bucket, objectKey, cancellationToken);
 
     /// <summary>
     /// Awaits the wrapped operation and, on a backend failure (anything other than the fail-closed

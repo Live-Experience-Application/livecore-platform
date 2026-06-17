@@ -102,4 +102,30 @@ public class WorkerSmokeTests
 
         Assert.DoesNotContain(hostedServices, service => service is ExportProcessingBackgroundService);
     }
+
+    [Fact]
+    public void WorkerHost_registers_the_data_retention_sweep_when_a_database_is_configured()
+    {
+        // CORE-PRIV-003: with a database configured the worker schedules the data-retention sweep alongside the
+        // other jobs. The connection string is supplied through configuration only (no connection is opened by
+        // building the host), exactly as the API host reads it.
+        using var host = WorkerHostFactory.Create(
+            ["--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored"]);
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.Contains(hostedServices, service => service is DataRetentionSweepBackgroundService);
+    }
+
+    [Fact]
+    public void WorkerHost_registers_no_data_retention_sweep_without_a_database()
+    {
+        // Persistence-gated, fail-safe: with no database configured the worker schedules no retention sweep loop
+        // (mirroring the other jobs' gating).
+        using var host = WorkerHostFactory.Create([]);
+
+        var hostedServices = host.Services.GetServices<IHostedService>();
+
+        Assert.DoesNotContain(hostedServices, service => service is DataRetentionSweepBackgroundService);
+    }
 }

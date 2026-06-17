@@ -120,6 +120,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Recap generation job](#recap-generation-job)
     - [Export processing job](#export-processing-job)
     - [Store notification reconciliation job](#store-notification-reconciliation-job)
+    - [Data-retention sweep](#data-retention-sweep)
     - [Worker liveness heartbeat](#worker-liveness-heartbeat)
     - [Asset deletion](#asset-deletion)
     - [Asset-link removal](#asset-link-removal)
@@ -3197,6 +3198,39 @@ convergence fails is logged and counted and left for the next sweep, without abo
 status is a revoked state the sweep **revokes** the buyer-linked `SubjectEntitlement` too (CORE-MON-004, the
 inverse of the grant chain — the missed-refund revoke path only reconciliation can apply); a SQL window-function
 candidate query for high-volume deployments remains a follow-up.
+
+### Data-retention sweep
+
+CORE-PRIV-003 adds the worker's data-retention sweep (`apps/worker`,
+`DataRetentionSweepBackgroundService`; the logic lives in the Retention module's
+`DataRetentionSweepService`), behind no HTTP route. Until now Core kept terminal/old
+personal-data-bearing records forever; storage limitation (GDPR Art.5(1)(e)) wants them
+expired once no longer needed. On a configurable cadence the sweep **expires and purges**, on
+**independent per-family windows**, the records that carry personal data:
+
+- **completed/expired sessions** — deleting the `sessions` row cascades its append-only
+  session events, recaps and session-scoped visibility rules (the "completed/expired sessions
+  and their session events" purge);
+- **generated recaps** — the recap body is host content;
+- **completed export artifacts** — the export row, its manifest (cascade) **and** any
+  object-storage blob, deleted **object-first-then-row** through the existing `IAssetStorage`
+  delete path so a purged export never orphans an object (and kept, fail-closed, when storage
+  is unconfigured);
+- **closed/expired/revoked invitations** — removing the plaintext invited email.
+
+Each window is measured from the record's age and is **independently enabled**. The deletions
+an operator would be surprised to lose — sessions, recaps, completed exports — are **disabled
+by default**; the clear privacy-hygiene invitation-email purge is **enabled by default**
+(`Retention:*`; see [`docs/13`](docs/13_SELF_HOSTING_REQUIREMENTS.md)). Every purge is
+**audited by id** — a tenant-scoped `RecordRetentionPurged` fact naming the tenant, workspace
+and purged record by id, with no actor and no content — and the audit reference is a recorded
+fact (not a foreign key), so it survives the purge and the tamper-evident audit chain still
+verifies. Each purge commits its audit append and delete in **one transaction** and re-loads
+the record tenant-scoped inside it, so the sweep is **idempotent and concurrency-safe**:
+overlapping sweeps (or worker replicas) never double-delete, double-audit or error. A new
+nullable `export_jobs.artifact_bucket` / `artifact_object_key` pair records where a completed
+export's blob lives (Core's manifest-only pipeline leaves it null), so the sweep can purge the
+object with the row.
 
 ### Worker liveness heartbeat
 

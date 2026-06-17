@@ -16,8 +16,11 @@ namespace LiveCore.Api.Recaps;
 /// and a recap in one tenant can never be read through another tenant's id (threat T5 in
 /// docs/07_SECURITY_THREAT_MODEL.md; threat T1 broken object-level authorization).
 ///
-/// A recap is write-once (the produced output of a session), so there is no update or delete method — only an
-/// append and tenant-scoped reads (mirrors the append-only audit log and the write-once export manifest).
+/// A recap is write-once (the produced output of a session), so there is an append and tenant-scoped reads but
+/// no UPDATE path (mirrors the write-once export manifest). The one removal path is the data-retention PURGE
+/// (<see cref="DeleteAsync"/>, CORE-PRIV-003): the recap body is host content (a session summary, potentially
+/// personal data), so a configurable retention window may expire and purge it — exactly the controlled
+/// exception the right-to-erasure made for the user profile (CORE-PRIV-001). There is still no in-place edit.
 /// </summary>
 public interface IRecapRepository
 {
@@ -87,4 +90,35 @@ public interface IRecapRepository
         Guid workspaceId,
         Guid sessionId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists up to <paramref name="maxCount"/> recaps generated before <paramref name="generatedBefore"/> — the
+    /// candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). This is a
+    /// SYSTEM maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep is a system
+    /// job, not a tenant actor). The retention window is measured from the recap's <c>generated_at</c> time, which
+    /// is also the time the time-ordered surrogate id (UUIDv7) encodes; ordering is by that id, oldest first, and
+    /// the generation-age threshold is applied after materialization (SQLite cannot ORDER BY or compare a
+    /// DateTimeOffset), so the bounded batch surfaces the oldest recaps and over repeated sweeps every past-window
+    /// recap is covered without starvation. The caller (the retention sweep) then re-loads and purges each within
+    /// its own transaction.
+    /// </summary>
+    /// <param name="generatedBefore">The exclusive generation-time threshold; only recaps generated before it are returned.</param>
+    /// <param name="maxCount">The maximum number of recaps a single sweep examines (a positive batch size).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="System.ArgumentOutOfRangeException"><paramref name="maxCount"/> is not positive.</exception>
+    Task<IReadOnlyList<Recap>> ListExpiredForRetentionAsync(
+        DateTimeOffset generatedBefore,
+        int maxCount,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-DELETES a recap row as part of the data-retention sweep (CORE-PRIV-003) — the one removal path on the
+    /// otherwise write-once recap. The recap body is host content that a configurable retention window may expire;
+    /// the <c>audit_logs</c> references the recap as a recorded fact, not a foreign key, so the audit trail
+    /// SURVIVES the purge. The caller must have re-loaded the recap through a tenant-scoped lookup inside the purge
+    /// transaction; a concurrent purge of the same row surfaces as a
+    /// <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/> which the sweep treats as
+    /// already-handled (concurrency-safe).
+    /// </summary>
+    Task DeleteAsync(Recap recap, CancellationToken cancellationToken);
 }
