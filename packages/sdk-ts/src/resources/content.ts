@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Content resource group (CORE-SDK-002, extended in CORE-SDK-006): listing,
  * reading, creating and deleting the content blocks shown within a scene. The

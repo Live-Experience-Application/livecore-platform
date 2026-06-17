@@ -106,13 +106,15 @@ $acronymSplitRegex = New-Object System.Text.RegularExpressions.Regex('([A-Z]+)([
 
 # Allowed compound phrases that incidentally contain a forbidden token but are
 # standard technical English, not the vertical term. "third-party" (as in
-# THIRD-PARTY-NOTICES, the dependency attribution inventory, CORE-LIC-003) contains
-# a forbidden gaming term only as part of that compound. These compounds are
-# stripped from each scanned line BEFORE term matching, so the legitimate compound
-# is never flagged while a bare occurrence of the token still is. Matches the
-# space/underscore/hyphen/concatenated variants the normalization below produces.
+# THIRD-PARTY-NOTICES, the dependency attribution inventory, CORE-LIC-003) and its
+# antonym "first-party" (the contributor IP policy / SPDX-header vocabulary,
+# CORE-LIC-004) each contain a forbidden gaming term only as part of that compound.
+# These compounds are stripped from each scanned line BEFORE term matching, so the
+# legitimate compound is never flagged while a bare occurrence of the token still
+# is. Matches the space/underscore/hyphen/concatenated variants the normalization
+# below produces.
 $allowedCompoundRegex = New-Object System.Text.RegularExpressions.Regex(
-    '\bthird[ _-]?part(?:y|ies)\b',
+    '\b(?:third|first)[ _-]?part(?:y|ies)\b',
     [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 
 # Enumerate TRACKED files only, via `git ls-files`. This is the whole point of

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Organizations resource group (CORE-SDK-006): the tenant-root create/list routes
  * and the tenant-offboarding/data-protection deletes (csv/api_routes.csv). The

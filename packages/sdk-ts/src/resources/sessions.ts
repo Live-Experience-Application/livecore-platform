@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Sessions resource group (CORE-SDK-002, extended in CORE-SDK-006): the workspace
  * session list/create, the by-session-id read, the lifecycle commands

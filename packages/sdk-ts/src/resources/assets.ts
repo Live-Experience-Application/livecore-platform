@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Assets resource group (CORE-SDK-002): the upload-intent, signed-download and
  * linking flows. Assets are private by default and reachable only through a

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Stable, product-neutral UI primitive variant vocabularies (CORE-SDK-004).
  *

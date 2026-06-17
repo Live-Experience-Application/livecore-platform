@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Identity & access resource group (CORE-SDK-006): the authenticated caller's
  * principal-context read (csv/api_routes.csv "Returns principal context only").

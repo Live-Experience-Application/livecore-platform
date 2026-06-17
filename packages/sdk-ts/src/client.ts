@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * The LiveCore SDK client (CORE-SDK-002): the typed entry point a vertical app
  * uses to call the Core API.

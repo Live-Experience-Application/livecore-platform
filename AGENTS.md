@@ -74,6 +74,31 @@ Forbidden terms may appear only in documentation explaining what is forbidden.
 - no new dependencies without explicit justification
 - no unrelated refactoring
 
+## Contributor IP policy and source headers (CORE-LIC-004)
+
+The Core is AGPL-3.0-or-later and dual-licensed (CORE-LIC-002), so contribution
+provenance must stay clean and license context must travel with the source. The
+full policy is in `CONTRIBUTING.md`; the rules an agent must follow:
+
+- **Sign off every commit (DCO).** Each commit needs a `Signed-off-by: Name
+<email>` trailer whose email matches the commit author (`git commit -s`). It
+  certifies the Developer Certificate of Origin (`DEVELOPER_CERTIFICATE_OF_ORIGIN`)
+  and, under `CONTRIBUTING.md`, the dual-license grant. CI fails an unsigned commit
+  (`scripts/lint-dco-signoff.ps1`).
+- **Add the SPDX header to new shipped source.** Every first-party `.cs`, `.ts`
+  and `.tsx` file that builds into an image or a published package must start with:
+
+    ```text
+    // SPDX-License-Identifier: AGPL-3.0-or-later
+    // Copyright (c) <year> The LiveCore Platform contributors
+    ```
+
+    Generated source (the EF migrations under `apps/api/Persistence/Migrations` and
+    the generated `packages/contracts/src/openapi.ts`), build output, `*.d.ts` and
+    non-shipped tooling (`scripts/`, `.mjs`) are out of scope. Run
+    `pwsh -NoProfile -File scripts/lint-license-headers.ps1 -Fix` to add any missing
+    headers; CI fails a headerless in-scope file.
+
 ## Required checks
 
 Every PR must include:
@@ -81,6 +106,7 @@ Every PR must include:
 - tests for new behavior
 - negative authorization tests where applicable
 - boundary scan for forbidden terms
+- DCO sign-off on every commit and SPDX headers on new shipped source (CORE-LIC-004)
 - docs update if contracts, events or schema changed
 
 ## Output expected from LLM

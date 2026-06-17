@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * RFC 7807 Problem Details — the error body every Core API endpoint returns on
  * failure (docs/08_API_CONTRACTS.md "Use Problem Details for errors";

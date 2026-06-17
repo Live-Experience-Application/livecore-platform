@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Shared paging-parameter helper for the bounded SDK list methods (CORE-DX-003).
  *

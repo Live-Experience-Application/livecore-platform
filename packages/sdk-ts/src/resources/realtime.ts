@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Realtime resource group (CORE-SDK-002, CORE-RT-007): the live SignalR session
  * stream AND the REST reconnect replay of the same durable event stream. Both

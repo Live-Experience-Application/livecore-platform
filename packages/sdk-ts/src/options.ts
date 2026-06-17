@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Configuration and transport-seam types for the LiveCore SDK client
  * (CORE-SDK-002).

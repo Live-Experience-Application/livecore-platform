@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Scenes resource group (CORE-SDK-002): listing and creating a workspace's
  * scenes. The list is projected server-side by the caller's workspace role —

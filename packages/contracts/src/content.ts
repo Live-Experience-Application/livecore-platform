@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 import type { ContentBlockType } from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
 

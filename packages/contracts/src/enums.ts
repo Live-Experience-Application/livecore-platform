@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Generic, product-neutral enumerations the Core API emits and accepts
  * (CORE-SDK-001), each as a stable string NAME on the wire — the server persists

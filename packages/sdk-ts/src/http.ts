@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * The internal HTTP transport shared by every SDK resource group (CORE-SDK-002).
  *

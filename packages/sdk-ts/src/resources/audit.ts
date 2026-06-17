@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Audit resource group (CORE-SDK-006): the tenant's append-only audit log read
  * (csv/api_routes.csv "Read the tenant's append-only audit log"). The target

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * The generic UI primitive prop contracts (CORE-SDK-004): the typed, stable
  * shape of the props each Core primitive accepts. Core owns this contract — the

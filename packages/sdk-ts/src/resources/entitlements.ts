@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Entitlements resource group (CORE-SDK-002): the server-calculated quota status
  * and ad-eligibility a mobile paywall or feature guard consumes. The premium and

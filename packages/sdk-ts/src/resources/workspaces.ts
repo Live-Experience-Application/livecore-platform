@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Workspaces resource group (CORE-SDK-002): the tenant-scoped workspace
  * create/read/update and member-invite routes (csv/api_routes.csv). The server

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Store resource group (CORE-SDK-002): submitting a purchase proof for
  * server-side verification before any entitlement is granted. The submitted

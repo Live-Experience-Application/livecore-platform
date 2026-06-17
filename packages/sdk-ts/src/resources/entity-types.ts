@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Entity-types resource group (CORE-ENT-007): listing, reading and defining a
  * workspace's generic entity types under

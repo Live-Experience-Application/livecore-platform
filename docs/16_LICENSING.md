@@ -170,6 +170,92 @@ owner** above. The dual-license model itself is **final and in effect now** (not
 deferred); only the relicensing of **contributed** code waits on the CLA
 (CORE-LIC-004).
 
+## Contributor IP policy and SPDX source headers (CORE-LIC-004)
+
+The dual-license decision (CORE-LIC-002, above) records that **a contributor IP
+policy is a prerequisite for ever relicensing contributed code**: the project may
+grant the commercial (non-AGPL) license only over code whose copyright it holds or
+has been granted the right to relicense. This section is that policy. The operative
+document for contributors is `CONTRIBUTING.md`; this is the licensing rationale.
+**This is not legal advice.**
+
+### The model: DCO sign-off plus a dual-license grant
+
+The project uses the **Developer Certificate of Origin (DCO) 1.1**
+(`DEVELOPER_CERTIFICATE_OF_ORIGIN`) — a lightweight, per-commit, machine-checkable
+certification — rather than a separately administered, signed CLA. Every commit
+must carry a `Signed-off-by: Name <email>` trailer whose email matches the commit
+author (`git commit -s`), certifying the contributor's right to submit the work
+under the project license. This gives clean, auditable **provenance**.
+
+A bare DCO certifies provenance but does **not**, by itself, grant the project the
+right to relicense a contribution. So `CONTRIBUTING.md` pairs the DCO sign-off with
+an explicit **contribution license grant**: by signing off under the policy, the
+contributor (a) contributes under AGPL-3.0-or-later (inbound = outbound) and (b)
+grants the LiveCore copyright holder the perpetual, non-exclusive, worldwide,
+royalty-free right to **also** license the contribution under the project's
+commercial license. The contributor keeps their copyright; the grant only preserves
+the project's ability to offer the **same** code under both the AGPL and the
+commercial license.
+
+This is what **discharges the CORE-LIC-002 prerequisite**: with the sign-off and
+grant in place, a third-party contribution is covered by the commercial license the
+same way first-party code is, so the dual-license model stays coherent as soon as
+contributions are accepted — no reimplementation required. A contribution made
+without the grant (stated explicitly in its pull request) stays AGPL-only and must
+be isolated, removed or reimplemented before it can ship under the commercial
+license.
+
+### SPDX source headers
+
+So that license context travels with a file even when it is copied out of the
+repository, every first-party, hand-authored **source file that ships in a
+distribution artifact** carries a two-line SPDX header:
+
+```text
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) <year> The LiveCore Platform contributors
+```
+
+The same `//` header is used for the **C# (`.cs`)** that builds the API/worker
+container images and the **TypeScript (`.ts`/`.tsx`)** that builds the published
+packages. The copyright line names a **collective holder** ("The LiveCore Platform
+contributors"): contributors retain their own copyright under the DCO, and the
+collective notice is the honest, future-proof attribution. The machine-readable
+`SPDX-License-Identifier` (rather than only a prose notice) makes every file's
+license unambiguous to scanners and to anyone who reuses the file.
+
+**Out of scope** (no header; the lint excludes them): generated source — the EF
+Core migrations under `apps/api/Persistence/Migrations` (scaffolded by the EF
+tooling) and the generated, drift-gated OpenAPI contract types
+(`packages/contracts/src/openapi.ts`, CORE-OAS-002); build output and `*.d.ts`
+declaration files; and first-party tooling that is **not shipped** in an artifact
+(the PowerShell scripts under `scripts/` and the `.mjs` build/test helpers). The
+exact scope is the single source of truth in
+`scripts/LiveCoreContributorPolicy.psm1`.
+
+### CI enforcement
+
+The `contributor-policy` CI job (`.github/workflows/ci.yml`) enforces both controls
+on every push and pull request, fail-closed:
+
+- **DCO sign-off** — `scripts/lint-dco-signoff.ps1` validates that every commit
+  introduced by the push/PR carries a matching `Signed-off-by` trailer (merge
+  commits exempt). It validates only the new commits (the base..head range), not the
+  project's whole history, so it binds new contributions without retroactively
+  failing pre-policy commits.
+- **SPDX headers** — `scripts/lint-license-headers.ps1` validates that every
+  in-scope shipped source file carries the header (and inserts missing headers with
+  `-Fix`).
+- **The gate logic is itself tested** — `scripts/test-contributor-policy.ps1`
+  proves on every run that an unsigned commit and a headerless source file are
+  rejected, and that a signed-off commit and a headered file pass (the CORE-LIC-004
+  acceptance test). All logic lives in `scripts/LiveCoreContributorPolicy.psm1`.
+
+Unlike the report-only supply-chain and coverage gates (`docs/17`), this gate is
+**blocking from the start**: provenance and headers are binary, low-risk checks
+with no transitive-dependency surprises to ramp in.
+
 ## AGPL section 13 source offer (CORE-CMP-001)
 
 Because the Core is AGPL-3.0-or-later and network-interactive (the SignalR hub and

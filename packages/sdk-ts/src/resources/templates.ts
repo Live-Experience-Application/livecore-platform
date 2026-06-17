@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Templates resource group (CORE-SDK-006): the organization-scoped template
  * create/list/by-id-read and delete routes under

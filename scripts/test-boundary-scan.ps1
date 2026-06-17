@@ -146,11 +146,14 @@ try {
     WriteFixtureFile -Root $fixtureRoot -RelativePath 'packages/contracts/index.ts' -Line 'export const VERSION = "0.1.0";'
 
     # Scanned (non-excluded) source legitimately using the "third-party" compound -
-    # the dependency attribution wiring (CORE-LIC-003) - must NOT be flagged, because
-    # the third-party compound is allowed even though it contains a forbidden token.
+    # the dependency attribution wiring (CORE-LIC-003) - and its antonym "first-party"
+    # - the contributor IP policy / SPDX-header vocabulary (CORE-LIC-004) - must NOT be
+    # flagged, because both compounds are allowed even though they contain a forbidden
+    # token.
     WriteFixtureFile -Root $fixtureRoot -RelativePath 'apps/api/Attribution.cs' -Line @(
         'namespace Fixture;'
         '// Ships the THIRD-PARTY-NOTICES.md third-party attribution inventory.'
+        '// Every first-party source file carries the SPDX header.'
         'public sealed class Attribution { }')
 
     # Documentation that legitimately names the terms: must NOT be flagged.
@@ -201,7 +204,7 @@ try {
     AssertTrue (-not $leak.Output.Contains('THIRD-PARTY-NOTICES.md')) `
         'the third-party NOTICE (root and per-package) is NOT flagged (license/attribution text, CORE-LIC-003)'
     AssertTrue (-not $leak.Output.Contains('apps/api/Attribution.cs')) `
-        'the "third-party" compound in scanned source is NOT flagged (allowed compound, CORE-LIC-003)'
+        'the "third-party" (CORE-LIC-003) and "first-party" (CORE-LIC-004) compounds in scanned source are NOT flagged (allowed compounds)'
     AssertTrue (-not $leak.Output.Contains('packages/contracts/index.ts')) 'a clean tracked file is not flagged'
 
     # --- Scenario 2: neutralizing the source makes the same tree scan clean. ---

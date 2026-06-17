@@ -4587,6 +4587,7 @@ run on `ubuntu-latest` and execute the commands documented above verbatim:
 | `typescript`              | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                         |
 | `boundary-scan`           | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                    |
 | `license-compliance`      | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003) |
+| `contributor-policy`      | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                       |
 | `backup-restore-drill`    | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                    |
 | `backup-restore-postgres` | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                 |
 | `powershell-lint`         | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                 |
@@ -4659,3 +4660,25 @@ treatment (CORE-LIC-001); the essentials:
   generated `THIRD-PARTY-NOTICES.md` that ships with both artifacts, and a CI
   license-compliance gate fails on a disallowed or unknown dependency license
   (CORE-LIC-003, "Third-party attribution and license compliance" above).
+
+### Contributing and source headers (CORE-LIC-004)
+
+Contributions follow a contributor IP policy that keeps provenance clean and keeps
+the dual-license option open ([`CONTRIBUTING.md`](CONTRIBUTING.md);
+`docs/16_LICENSING.md`, "Contributor IP policy and SPDX source headers"):
+
+- **Sign off every commit (DCO).** Each commit carries a `Signed-off-by: Name
+<email>` trailer matching its author (`git commit -s`), certifying the Developer
+  Certificate of Origin ([`DEVELOPER_CERTIFICATE_OF_ORIGIN`](DEVELOPER_CERTIFICATE_OF_ORIGIN))
+  and, under `CONTRIBUTING.md`, the grant that lets the project also license the
+  contribution under its commercial license — discharging the CORE-LIC-002
+  prerequisite for relicensing contributed code.
+- **SPDX source headers.** Every first-party `.cs` / `.ts` / `.tsx` file that ships
+  in an image or package starts with `// SPDX-License-Identifier: AGPL-3.0-or-later`
+  plus a copyright line, so a copied file keeps its license context (generated
+  sources, build output and non-shipped tooling are excluded). Run
+  `pwsh -NoProfile -File scripts/lint-license-headers.ps1 -Fix` to add missing headers.
+- **Enforced in CI.** The `contributor-policy` job fails an unsigned commit
+  (`scripts/lint-dco-signoff.ps1`) and a headerless in-scope source file
+  (`scripts/lint-license-headers.ps1`), and the gate logic is tested by
+  `scripts/test-contributor-policy.ps1`.

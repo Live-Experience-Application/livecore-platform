@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Visibility resource group (CORE-SDK-002): the idempotent reveal command and
  * the participant-visible feed.

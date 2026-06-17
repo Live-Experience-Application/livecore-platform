@@ -7,6 +7,7 @@
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
+#   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
@@ -268,6 +269,55 @@ jobs:
       - name: Drift-gate the third-party NOTICE inventory and its coverage
         shell: pwsh
         run: pwsh -NoProfile -File scripts/generate-third-party-notices.ps1
+
+  contributor-policy:
+    name: Contributor IP policy (DCO sign-off + SPDX headers, CORE-LIC-004)
+    runs-on: ubuntu-latest
+    # CORE-LIC-004: the Core is AGPL-3.0-or-later and dual-licensed (CORE-LIC-002),
+    # so contribution provenance must be clean and license context must travel with
+    # the source. This job enforces both controls and proves the gate logic:
+    #   1. test-contributor-policy.ps1 proves the pure logic on every run - a
+    #      headerless shipped source file and a commit with no matching sign-off are
+    #      rejected, and a headered file / signed-off commit pass;
+    #   2. lint-license-headers.ps1 verifies every in-scope first-party .cs/.ts/.tsx
+    #      source file (the C# that builds the images and the TypeScript that builds
+    #      the packages; generated EF migrations and the generated OpenAPI types are
+    #      excluded) carries the SPDX AGPL-3.0-or-later header;
+    #   3. lint-dco-signoff.ps1 validates that every commit introduced by THIS push
+    #      or pull request carries a Signed-off-by trailer matching its author
+    #      (merge commits exempt). It checks only the new commits, not the project's
+    #      whole history, so it binds new contributions without failing pre-policy
+    #      commits - hence fetch-depth: 0, so the base..head range is available.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Full history so the DCO lint can resolve the base..head commit range.
+          fetch-depth: 0
+
+      - name: Test the contributor-policy gate logic (a headerless file and an unsigned commit fail)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-contributor-policy.ps1
+
+      - name: Lint SPDX source headers on shipped first-party source
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/lint-license-headers.ps1
+
+      - name: Enforce DCO sign-off on the pushed/PR commits
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: |
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            pwsh -NoProfile -File scripts/lint-dco-signoff.ps1 -BaseSha $env:PR_BASE_SHA -HeadSha $env:PR_HEAD_SHA
+          }
+          else {
+            pwsh -NoProfile -File scripts/lint-dco-signoff.ps1 -BaseSha $env:PUSH_BEFORE_SHA -HeadSha $env:PUSH_AFTER_SHA
+          }
 
   migration-down-lint:
     name: Migration Down() review (CORE-DR-004)
@@ -894,6 +944,7 @@ jobs:
       - boundary-scan
       - spec-consistency
       - license-compliance
+      - contributor-policy
       - migration-down-lint
       - backup-restore-drill
       - backup-restore-postgres

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * The generic design-token contract (CORE-SDK-003): the typed shape of a theme
  * a vertical app supplies and a Core UI primitive consumes. Core owns this

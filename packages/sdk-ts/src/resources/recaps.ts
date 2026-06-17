@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Recaps resource group (CORE-SDK-006): the role-projected read of a session's
  * most-recently-generated recap (csv/api_routes.csv). The target organization is

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Exports resource group (CORE-EXP-001): the export read/download flow. A
  * completed workspace export's produced artifact is its manifest — the per-kind

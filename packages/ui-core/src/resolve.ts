@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * Variant resolution (CORE-SDK-004): the small, pure, framework-agnostic logic
  * that fills a partially-specified primitive variant with Core's stable

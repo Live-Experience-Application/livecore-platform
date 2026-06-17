@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 /**
  * The Core base theme (CORE-SDK-003): a complete, neutral set of design tokens
  * that satisfies the `Theme` contract. It exists so a vertical app can render

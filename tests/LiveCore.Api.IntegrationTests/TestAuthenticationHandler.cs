@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 The LiveCore Platform contributors
+
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using LiveCore.Api.IdentityAccess;
