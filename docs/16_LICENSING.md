@@ -6,7 +6,7 @@ Core may be licensed AGPL-3.0-or-later if you want a strong open-source/self-hos
 
 ## Important warning
 
-AGPL can affect network software and modified server-side deployments. If you want proprietary enterprise offerings, plan a dual-license strategy before public adoption.
+AGPL can affect network software and modified server-side deployments. The dual-license strategy for proprietary/enterprise offerings is no longer a "plan for later": it is **decided and recorded below** (the _Commercial and dual-license decision (CORE-LIC-002)_ section) — the Core is dual-licensed, with a commercial license available now for proprietary use.
 
 This is not legal advice.
 
@@ -14,7 +14,7 @@ This is not legal advice.
 
 ```text
 livecore-platform
-  AGPL-3.0-or-later + commercial dual-license option later
+  AGPL-3.0-or-later + commercial license available for proprietary use (CORE-LIC-002)
 
 arcanos-app
   AGPL if open source; commercial/license review if you want a closed commercial app
@@ -90,8 +90,9 @@ The following modes are **not** available under the AGPL grant and require a
 | **Embedding or redistributing** the Core inside a proprietary product conveyed to others | Conveying a work based on AGPL code obliges AGPL source disclosure to the recipients.                                          |
 
 The commercial/dual-license path itself — whether it is offered, by whom, and how to
-obtain terms — is decided and recorded by CORE-LIC-002; the `README.md` License
-section carries the current contact for commercial inquiries.
+obtain terms — is decided and recorded by CORE-LIC-002 (the _Commercial and
+dual-license decision_ section below); the `README.md` License section carries the
+current contact for commercial inquiries.
 
 ### Trademark: the AGPL grant does not license the LiveCore name
 
@@ -103,6 +104,71 @@ Core" or "compatible with LiveCore", but you may **not** use the LiveCore name o
 marks to brand your own product, as a product or company name, or in any way that
 implies endorsement. Any trademark permission is separate from, and is not implied
 by, the AGPL copyright grant.
+
+## Commercial and dual-license decision (CORE-LIC-002)
+
+This is the **single source of truth** for the Core's commercial/dual-license model
+— the decision the CORE-LIC-001 consumer section above defers to ("whether it is
+offered, by whom, and how to obtain terms"). It is a **dated decision record** in
+the style of the `docs/24_SPEC_CONSISTENCY.md` decision register. **This is not
+legal advice.**
+
+**Decision (recorded 2026-06-17): the Core adopts a dual-license model —
+AGPL-3.0-or-later by default, with a commercial license available on request.** The
+default, public license stays **AGPL-3.0-or-later** (`LICENSE`; the SPDX identifier
+on every first-party source file and on all four published packages). In addition, a
+**separate commercial license is offered** for the uses the AGPL grant does **not**
+permit — exactly the modes the CORE-LIC-001 table above lists as "not available under
+the AGPL grant":
+
+- a **closed-source / proprietary** vertical that imports any `@livecore/*` package;
+- **hosting** the Core (or a vertical built on it) as a service **without** offering
+  the AGPL section 13 Corresponding Source;
+- **embedding or redistributing** the Core inside a proprietary product conveyed to
+  others.
+
+The project is therefore **explicitly not AGPL-only**: a non-AGPL vertical has a
+**defined legal path**, not a documented "no".
+
+**The named non-AGPL vertical has a path, not a refusal.** The closed-commercial /
+enterprise case — a `scenarioos-enterprise`-style closed product, or a closed-source
+`arcanos-app` — that cannot accept the AGPL obligations obtains the **commercial
+license** instead of complying with the AGPL. That commercial license **is** the
+alternative grant. It is a **bespoke commercial agreement**, not a public,
+SPDX-expressible license, so it does **not** appear as an SPDX `LicenseRef` or
+alternative identifier on the source or the packages — those stay
+`AGPL-3.0-or-later`, and the alternative terms are granted privately by the terms
+owner. (This is why a reader sees only `AGPL-3.0-or-later` in the repository: the
+commercial grant lives in a signed agreement, not in an SPDX field.)
+
+- **Terms owner.** The **LiveCore copyright holder** — the project maintainer,
+  reachable at `singh.harwinder@outlook.com` — owns the upstream copyright and is the
+  **only** party that can grant a non-AGPL license. The terms owner sets, negotiates
+  and issues the commercial license agreement.
+- **Contact-to-terms path.** Commercial-licensing inquiries go to
+  **`singh.harwinder@outlook.com`** (the `README.md` License section carries the same
+  contact). The terms owner responds with the commercial license agreement; there is
+  no public price list or self-service portal — terms are issued per inquiry.
+
+**A contributor CLA (CORE-LIC-004) is a prerequisite for ever relicensing.** The
+project may grant a commercial (non-AGPL) license **only over code whose copyright it
+holds, or has been granted the right to relicense.** The codebase is **first-party
+today** (a single copyright holder), so the terms owner can already grant commercial
+terms over the whole of it. But the moment **third-party contributions** are
+accepted, offering them under non-AGPL terms requires each contributor to have
+**granted that relicensing right** in advance. A **contributor CLA (CORE-LIC-004)** —
+the contributor IP policy that secures that right — is therefore a **prerequisite for
+ever relicensing contributed code**. Until that CLA is in place and signed, the
+commercial license covers **first-party code only**; a third-party contribution must
+be **CLA-covered** (or removed/reimplemented) before it can be included under the
+commercial license. This is the conceptual dependency on CORE-LIC-004.
+
+**Scope and status.** This is a licensing **decision record**, documentation only: it
+adds no route, table, event, migration or Core source change, so the boundary scan and
+the doc/CSV spec-consistency checks stay green. Owner of the decision: the **terms
+owner** above. The dual-license model itself is **final and in effect now** (not
+deferred); only the relicensing of **contributed** code waits on the CLA
+(CORE-LIC-004).
 
 ## AGPL section 13 source offer (CORE-CMP-001)
 

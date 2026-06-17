@@ -149,6 +149,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
 - [License](#license)
+    - [Commercial and dual-license decision (CORE-LIC-002)](#commercial-and-dual-license-decision-core-lic-002)
     - [What the AGPL means if you build on the Core](#what-the-agpl-means-if-you-build-on-the-core)
 
 ## Quick start
@@ -4567,9 +4568,25 @@ Windows working copies.
 
 This project is licensed under the GNU Affero General Public License v3.0 or later.
 
-Commercial dual licensing may be offered in the future for organizations that require proprietary use, embedding, hosting, or distribution without AGPL obligations.
+### Commercial and dual-license decision (CORE-LIC-002)
 
-For commercial licensing inquiries, contact: singh.harwinder@outlook.com
+The Core is **dual-licensed** (decided 2026-06-17, CORE-LIC-002): AGPL-3.0-or-later by
+default, with a **commercial license available now** for organizations that require
+proprietary use, embedding, network hosting without the AGPL section 13 source offer,
+or distribution without AGPL obligations — the uses the AGPL grant does not permit (see
+[What the AGPL means if you build on the Core](#what-the-agpl-means-if-you-build-on-the-core)
+below and `docs/16_LICENSING.md`). The project is **not** AGPL-only: a non-AGPL vertical,
+including a closed-commercial/enterprise product, obtains the commercial license rather
+than complying with the AGPL.
+
+The **terms owner** is the LiveCore copyright holder — the only party that can grant a
+non-AGPL license. The commercial license is a bespoke agreement, not a public SPDX
+license, so the source and packages stay `AGPL-3.0-or-later`. For commercial-licensing
+inquiries (the contact-to-terms path), contact: **singh.harwinder@outlook.com**.
+
+Relicensing **contributed** code under the commercial license requires a contributor CLA
+(CORE-LIC-004); until that is in place the commercial license covers first-party code
+only. `docs/16_LICENSING.md` records the full decision.
 
 ### What the AGPL means if you build on the Core
 
