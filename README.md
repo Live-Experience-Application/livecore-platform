@@ -149,6 +149,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
 - [License](#license)
+    - [What the AGPL means if you build on the Core](#what-the-agpl-means-if-you-build-on-the-core)
 
 ## Quick start
 
@@ -4569,3 +4570,32 @@ This project is licensed under the GNU Affero General Public License v3.0 or lat
 Commercial dual licensing may be offered in the future for organizations that require proprietary use, embedding, hosting, or distribution without AGPL obligations.
 
 For commercial licensing inquiries, contact: singh.harwinder@outlook.com
+
+### What the AGPL means if you build on the Core
+
+The Core's AGPL-3.0-or-later license has concrete consequences for a **vertical app**
+that consumes it. `docs/16_LICENSING.md` is the authoritative, consumer-facing
+treatment (CORE-LIC-001); the essentials:
+
+- **Importing the packages links your app against AGPL code.** The four packages
+  (`@livecore/contracts`, `@livecore/sdk-ts`, `@livecore/ui-core`,
+  `@livecore/design-tokens`) are each declared `AGPL-3.0-or-later`, so importing any
+  of them — including the type-only `@livecore/contracts` — makes your vertical a work
+  based on the Core. By default you must license the vertical AGPL-3.0-or-later and
+  offer its complete Corresponding Source to its users.
+- **Deploying the Core API over a network triggers AGPL section 13.** The `/api/v1`
+  surface and the SignalR hub are network-interactive, so a hosted deployment must
+  offer remote users the Corresponding Source of the running version. The unmodified
+  upstream host discharges this with `GET /source` (above); a modified deployment must
+  offer its own source, and once your vertical imports the packages the obligation
+  covers the whole deployed app.
+- **Permitted under the AGPL vs. needs a commercial license.** Self-hosting (modified
+  or not), open-source verticals released under the AGPL, and internal-only use are
+  permitted under the AGPL grant alone. A **closed-source vertical** that imports any
+  package, and **hosting the Core or a vertical as a service without offering
+  Corresponding Source**, are not available under the AGPL and need a commercial
+  license (CORE-LIC-002). `docs/16_LICENSING.md` enumerates the full set.
+- **Trademark.** The AGPL is a copyright license and grants **no** rights to the
+  "LiveCore" name or marks. You may state factually that your product is built on the
+  LiveCore Core, but may not use the name to brand your own product or imply
+  endorsement.
