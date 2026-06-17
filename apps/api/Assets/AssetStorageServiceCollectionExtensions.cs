@@ -71,6 +71,11 @@ public static class AssetStorageServiceCollectionExtensions
     /// at the deployment's own S3-compatible endpoint (rather than an AWS region endpoint), and path-style
     /// addressing is the default for self-hosted backends. Static credentials are taken from configuration
     /// only (threat T7); constructing the client performs no network call.
+    ///
+    /// Outbound calls are BOUNDED (CORE-RES-005): the per-request <c>Timeout</c>, a bounded <c>MaxErrorRetry</c>
+    /// and a bounded <c>RetryMode</c> come from the configured (short, safe) defaults so a hung storage backend
+    /// fails fast — a real-network <c>DeleteObjectAsync</c> aborts at the configured timeout rather than blocking
+    /// a worker thread up to the AWS SDK's 100-second default — and a failing call cannot amplify unbounded.
     /// </summary>
     private static IAmazonS3 CreateClient(S3AssetStorageOptions options)
     {
@@ -86,6 +91,14 @@ public static class AssetStorageServiceCollectionExtensions
             ServiceURL = options.Endpoint,
             ForcePathStyle = options.ForcePathStyle,
             AuthenticationRegion = options.Region,
+
+            // Bound the one storage operation that makes a real network round-trip (DeleteObjectAsync) so a hung
+            // dependency fails fast instead of holding a thread up to the AWS SDK's 100-second default; the
+            // bounded retry count/mode keep a failing call from amplifying unbounded (CORE-RES-005). Minting a
+            // pre-signed URL is local (no round-trip), so these only ever affect the server-side delete.
+            Timeout = options.RequestTimeout,
+            MaxErrorRetry = options.MaxErrorRetry,
+            RetryMode = options.RetryMode,
         };
 
         var credentials = new BasicAWSCredentials(options.AccessKeyId, options.SecretAccessKey);

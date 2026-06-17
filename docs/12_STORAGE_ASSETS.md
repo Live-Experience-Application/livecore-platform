@@ -62,6 +62,17 @@ Optional settings: `Assets:Storage:Region` (default `us-east-1`),
 configuration (threat T7). `AWSSDK.S3` is a justified dependency: S3 SigV4
 pre-signing is security-sensitive crypto best left to the official SDK.
 
+**Bounded outbound calls (CORE-RES-005).** The one storage operation that makes a
+real network round-trip is `DeleteObjectAsync` (the worker cleanup/retention jobs;
+minting a pre-signed URL is local). The SDK client applies a short **per-request
+timeout** plus a **bounded retry** count and mode so a hung storage backend **fails
+fast** instead of holding a worker thread up to the AWS SDK's 100-second default:
+`Assets:Storage:RequestTimeout` (default `00:00:30`, validated `> 0`),
+`Assets:Storage:MaxErrorRetry` (default `2`, validated `≥ 0`) and
+`Assets:Storage:RetryMode` (default `Standard`; one of `Legacy`/`Standard`/`Adaptive`).
+A storage failure stays fail-closed and contained (threat T4) — these bounds never
+weaken the private-by-default posture, they only stop a slow dependency from stalling.
+
 ### Upload intent flow (CORE-AST-003)
 
 The first asset HTTP route, `POST /api/v1/assets/upload-intent`

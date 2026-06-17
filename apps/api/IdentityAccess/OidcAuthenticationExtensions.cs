@@ -47,6 +47,15 @@ namespace LiveCore.Api.IdentityAccess;
 /// tolerated (the same local-development latitude
 /// <c>RequireHttpsMetadata=false</c> allows), and the unconfigured-Authority case
 /// keeps its fail-closed handler unchanged.
+///
+/// Bounded backchannel (CORE-RES-005): when an Authority is configured the handler
+/// fetches the provider's discovery document and signing keys over HTTP. Those
+/// outbound calls are bounded by a short, configurable <c>BackchannelTimeout</c>
+/// plus tuned configuration-refresh intervals (<see cref="OidcBackchannelOptions"/>),
+/// so a slow or unreachable provider FAILS FAST rather than stalling token validation
+/// (which, with the global problem-details handler CORE-RES-001, would surface as a
+/// 500). The bound never relaxes validation — a token whose key cannot be fetched in
+/// time is still rejected, fail-closed.
 /// </summary>
 public static class OidcAuthenticationExtensions
 {
@@ -120,12 +129,31 @@ public static class OidcAuthenticationExtensions
         // self-hosted http Keycloak works locally; it is never hardcoded.
         var requireHttpsMetadata = section.GetValue("RequireHttpsMetadata", true);
 
+        // Bound the OIDC backchannel (CORE-RES-005): an Authority IS configured, so the handler will fetch the
+        // provider's discovery document and signing keys over HTTP to validate tokens. Read the short, safe
+        // timeout and tuned configuration-refresh intervals once (a present-but-malformed value is rejected at
+        // startup), so a slow or unreachable provider fails fast rather than stalling token validation (which,
+        // with CORE-RES-001, would otherwise surface as a 500).
+        var backchannel = OidcBackchannelOptions.FromConfiguration(section);
+
         services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
             {
                 options.Authority = authority;
                 options.RequireHttpsMetadata = requireHttpsMetadata;
+
+                // Outbound-call bounds (CORE-RES-005). BackchannelTimeout caps the per-request wait on the
+                // backchannel HttpClient the handler uses to fetch the discovery/JWKS document, so an
+                // unreachable provider fails fast. The refresh intervals tune how the cached configuration is
+                // kept fresh: AutomaticRefreshInterval picks up the provider's key rotation within a bounded
+                // window, and RefreshInterval is the floor that keeps a burst of validation failures from
+                // hammering the metadata endpoint. The framework applies these to the default backchannel and
+                // configuration manager it creates from the Authority below. None of this relaxes validation:
+                // a token whose key cannot be fetched in time is still rejected (fail-closed; threats T1/T5).
+                options.BackchannelTimeout = backchannel.BackchannelTimeout;
+                options.AutomaticRefreshInterval = backchannel.AutomaticRefreshInterval;
+                options.RefreshInterval = backchannel.RefreshInterval;
 
                 // Preserve the raw OIDC claim names for OidcPrincipalMapper
                 // (CORE-ID-001 carry-over requirement). Without this the handler

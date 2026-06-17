@@ -1,3 +1,4 @@
+using Amazon.Runtime;
 using Amazon.S3;
 using LiveCore.Api.Assets;
 using Microsoft.Extensions.Configuration;
@@ -70,6 +71,51 @@ public class AssetStorageServiceCollectionExtensionsTests
         Assert.Contains(services, d => d.ServiceType == typeof(IAmazonS3));
         Assert.Contains(services, d => d.ServiceType == typeof(S3AssetStorageOptions));
         Assert.Contains(services, d => d.ServiceType == typeof(TimeProvider));
+    }
+
+    [Fact]
+    public void AddAssetStorage_applies_the_configured_outbound_call_bounds_to_the_s3_client()
+    {
+        // The wired SDK S3 client must carry the configured per-request timeout and bounded retry count/mode
+        // (CORE-RES-005), so a hung storage delete fails fast rather than blocking up to the AWS SDK's
+        // 100-second default. Constructing the client performs no network call.
+        var services = new ServiceCollection();
+        services.AddAssetStorage(Configuration(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "access-key",
+            ["Assets:Storage:SecretAccessKey"] = "secret-key",
+            ["Assets:Storage:RequestTimeout"] = "00:00:07",
+            ["Assets:Storage:MaxErrorRetry"] = "1",
+            ["Assets:Storage:RetryMode"] = "Standard",
+        }));
+
+        using var provider = services.BuildServiceProvider();
+        var config = provider.GetRequiredService<IAmazonS3>().Config;
+
+        Assert.Equal(TimeSpan.FromSeconds(7), config.Timeout);
+        Assert.Equal(1, config.MaxErrorRetry);
+        Assert.Equal(RequestRetryMode.Standard, config.RetryMode);
+    }
+
+    [Fact]
+    public void AddAssetStorage_applies_the_safe_default_outbound_call_bounds_when_unset()
+    {
+        var services = new ServiceCollection();
+        services.AddAssetStorage(Configuration(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "access-key",
+            ["Assets:Storage:SecretAccessKey"] = "secret-key",
+        }));
+
+        using var provider = services.BuildServiceProvider();
+        var config = provider.GetRequiredService<IAmazonS3>().Config;
+
+        // A real ceiling well under the AWS SDK 100-second default, applied even with no storage tuning configured.
+        Assert.Equal(S3AssetStorageOptions.DefaultRequestTimeout, config.Timeout);
+        Assert.Equal(S3AssetStorageOptions.DefaultMaxErrorRetry, config.MaxErrorRetry);
+        Assert.Equal(S3AssetStorageOptions.DefaultRetryMode, config.RetryMode);
     }
 
     [Fact]

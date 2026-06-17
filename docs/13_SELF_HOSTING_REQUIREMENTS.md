@@ -407,6 +407,27 @@ To stop that foot-gun, the `Audience` is **effectively mandatory in production**
   fail-closed default scheme), and the audience guard does not apply because no token
   is ever accepted.
 
+### OIDC backchannel timeouts (CORE-RES-005)
+
+When an `Authority` is configured the API makes **outbound HTTP calls** to the
+identity provider to fetch and refresh the discovery document and signing keys (JWKS)
+it validates tokens against. Those calls are **bounded** so a slow or unreachable
+provider **fails fast** instead of stalling token validation — which, with the global
+problem-details handler (CORE-RES-001), would otherwise surface to the caller as a
+`500`. All three are runtime configuration with short, safe defaults; a
+present-but-malformed value is rejected at startup.
+
+| Key                                        | Default    | Purpose                                                                                  |
+| ------------------------------------------ | ---------- | ---------------------------------------------------------------------------------------- |
+| `Authentication__Oidc__BackchannelTimeout` | `00:00:30` | Per-request timeout on the backchannel HTTP client (shorter than the framework's 60s default), so an unreachable provider's fetch is aborted rather than hanging. |
+| `Authentication__Oidc__AutomaticRefreshInterval` | `06:00:00` | How often the cached configuration (discovery + signing keys) is refreshed, so the provider's key rotation is picked up within a bounded window. |
+| `Authentication__Oidc__RefreshInterval`    | `00:05:00` | Minimum interval between forced refreshes — the floor that keeps a burst of validation failures from hammering the provider's metadata endpoint. |
+
+The bound **never relaxes validation**: a token whose signing key cannot be fetched
+within the timeout is still **rejected** (fail-closed, threats T1/T5), so a slow
+dependency is contained without widening access. The unconfigured-`Authority` path has
+no backchannel and is unaffected.
+
 ### CORS allowed origins (`Cors:AllowedOrigins`)
 
 A browser/PWA front-end served from a different origin than the API (the Next.js
@@ -630,6 +651,9 @@ keys are runtime configuration only (threat T7):
 | `Assets__Storage__Region`        | no       | `us-east-1` | Region used in the SigV4 signature.                                 |
 | `Assets__Storage__ForcePathStyle` | no      | `true`      | Path-style addressing (`endpoint/bucket/key`); needed self-hosted.  |
 | `Assets__Storage__UrlLifetime`   | no       | `00:15:00`  | Signed-URL validity window; validated `> 0` and `≤ 1h`.             |
+| `Assets__Storage__RequestTimeout` | no      | `00:00:30`  | Per-request SDK `Timeout` so a hung delete fails fast (CORE-RES-005); validated `> 0`. |
+| `Assets__Storage__MaxErrorRetry` | no       | `2`         | Bounded SDK retry count (CORE-RES-005); validated `≥ 0`.            |
+| `Assets__Storage__RetryMode`     | no       | `Standard`  | Bounded SDK retry mode (`Legacy`/`Standard`/`Adaptive`) (CORE-RES-005). |
 | `Assets__Storage__Bucket`        | no       | `livecore-assets` | The private bucket new assets are stored in (per-asset naming). |
 | `Assets__Storage__Provider`      | no       | `s3`        | Provider identifier recorded on each asset row (per-asset naming).  |
 
@@ -638,6 +662,16 @@ concrete adapter to be wired; any one missing keeps the fail-closed default. The
 bucket named here must exist on the endpoint and be **private** (no public access,
 no public listing). The same configuration drives the worker, so the background
 cleanup job can delete the objects of abandoned upload intents.
+
+**Bounded outbound calls (CORE-RES-005).** The only storage operation that makes a
+real network round-trip (`DeleteObjectAsync`, used by the worker cleanup/retention
+jobs — minting a pre-signed URL is local) is bounded by `RequestTimeout`, `MaxErrorRetry`
+and `RetryMode` above, so a hung object-storage backend **fails fast** rather than
+blocking a worker thread up to the AWS SDK's 100-second default and amplifying through
+retries. Defaults are short and safe; a present-but-invalid value (a non-positive
+timeout, a negative retry count or an unrecognised retry mode) is rejected at startup.
+A storage failure stays **fail-closed and contained** — these bounds never weaken the
+private-by-default posture, they only stop a slow dependency from stalling (threat T4).
 
 Example (a self-hosted RustFS in the local Compose stack):
 

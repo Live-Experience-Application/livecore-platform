@@ -1,3 +1,4 @@
+using Amazon.Runtime;
 using LiveCore.Api.Assets;
 using Microsoft.Extensions.Configuration;
 
@@ -29,6 +30,21 @@ public class S3AssetStorageOptionsTests
         Assert.Equal(S3AssetStorageOptions.DefaultRegion, options.Region);
         Assert.True(options.ForcePathStyle);
         Assert.Equal(S3AssetStorageOptions.DefaultUrlLifetime, options.UrlLifetime);
+        // Outbound-call bounds (CORE-RES-005): short, safe defaults so a hung storage backend fails fast.
+        Assert.Equal(S3AssetStorageOptions.DefaultRequestTimeout, options.RequestTimeout);
+        Assert.Equal(S3AssetStorageOptions.DefaultMaxErrorRetry, options.MaxErrorRetry);
+        Assert.Equal(S3AssetStorageOptions.DefaultRetryMode, options.RetryMode);
+    }
+
+    [Fact]
+    public void Defaults_for_the_outbound_call_bounds_are_short_and_safe()
+    {
+        // The defaults must keep a real ceiling well below the AWS SDK's 100-second default, with a bounded,
+        // non-negative retry count and a defined retry mode (CORE-RES-005).
+        Assert.True(S3AssetStorageOptions.DefaultRequestTimeout > TimeSpan.Zero);
+        Assert.True(S3AssetStorageOptions.DefaultRequestTimeout < TimeSpan.FromSeconds(100));
+        Assert.True(S3AssetStorageOptions.DefaultMaxErrorRetry >= 0);
+        Assert.True(Enum.IsDefined(S3AssetStorageOptions.DefaultRetryMode));
     }
 
     [Fact]
@@ -103,6 +119,78 @@ public class S3AssetStorageOptionsTests
         });
 
         Assert.Equal(SignedAssetUrl.MaxLifetime, options.UrlLifetime);
+    }
+
+    [Fact]
+    public void FromConfiguration_reads_the_configured_outbound_call_bounds()
+    {
+        var options = FromValues(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "key",
+            ["Assets:Storage:SecretAccessKey"] = "secret",
+            ["Assets:Storage:RequestTimeout"] = "00:00:05",
+            ["Assets:Storage:MaxErrorRetry"] = "1",
+            ["Assets:Storage:RetryMode"] = "adaptive",
+        });
+
+        Assert.Equal(TimeSpan.FromSeconds(5), options.RequestTimeout);
+        Assert.Equal(1, options.MaxErrorRetry);
+        // The retry mode is parsed case-insensitively into the SDK enum.
+        Assert.Equal(RequestRetryMode.Adaptive, options.RetryMode);
+    }
+
+    [Fact]
+    public void FromConfiguration_allows_zero_max_error_retry_to_disable_retries()
+    {
+        var options = FromValues(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "key",
+            ["Assets:Storage:SecretAccessKey"] = "secret",
+            ["Assets:Storage:MaxErrorRetry"] = "0",
+        });
+
+        Assert.Equal(0, options.MaxErrorRetry);
+    }
+
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("-00:00:05")]
+    public void FromConfiguration_rejects_a_non_positive_request_timeout(string requestTimeout)
+    {
+        // A non-positive Timeout would let the SDK fall back to its 100-second default, defeating fail-fast.
+        Assert.Throws<ArgumentException>(() => FromValues(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "key",
+            ["Assets:Storage:SecretAccessKey"] = "secret",
+            ["Assets:Storage:RequestTimeout"] = requestTimeout,
+        }));
+    }
+
+    [Fact]
+    public void FromConfiguration_rejects_a_negative_max_error_retry()
+    {
+        Assert.Throws<ArgumentException>(() => FromValues(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "key",
+            ["Assets:Storage:SecretAccessKey"] = "secret",
+            ["Assets:Storage:MaxErrorRetry"] = "-1",
+        }));
+    }
+
+    [Fact]
+    public void FromConfiguration_rejects_an_unrecognised_retry_mode()
+    {
+        Assert.Throws<ArgumentException>(() => FromValues(new Dictionary<string, string?>
+        {
+            ["Assets:Storage:Endpoint"] = "https://storage.example.com",
+            ["Assets:Storage:AccessKeyId"] = "key",
+            ["Assets:Storage:SecretAccessKey"] = "secret",
+            ["Assets:Storage:RetryMode"] = "not-a-retry-mode",
+        }));
     }
 
     [Fact]
