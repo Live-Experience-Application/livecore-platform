@@ -452,6 +452,34 @@ public sealed class AssetUploadIntentServiceTests : IDisposable
     }
 
     // =====================================================================
+    // CORE-AST-008 — the command hands the storage adapter the DECLARED content type and size, so the adapter
+    // can bind them into the signed upload URL (the binding itself is covered by S3CompatibleAssetStorageTests).
+    // =====================================================================
+
+    [Fact]
+    public async Task CreateAsync_hands_the_storage_adapter_the_declared_content_type_and_size_to_bind()
+    {
+        // The S3 adapter binds the DECLARED content type and size into the signed upload URL (CORE-AST-008), so
+        // the command must hand it an asset carrying exactly those declared values — the same ones the
+        // CORE-AST-007 acceptance policy and the CORE-MON-006 quota already saw — so the bound storage conditions
+        // match what was authorized and a declare-small / upload-large bypass is impossible.
+        var seed = await SeedWorkspaceAsync();
+        await SeedStorageQuotaAsync(seed.WorkspaceId, limit: null, startingUsage: 0);
+
+        var capturing = new CapturingAssetStorage();
+        await using (var context = CreateContext())
+        {
+            var service = CreateService(context, capturing);
+            await service.CreateAsync(
+                seed.OrganizationId, seed.WorkspaceId, seed.UserId, "image/png", 4096, _now, CancellationToken.None);
+        }
+
+        var signedAsset = Assert.Single(capturing.UploadAssets);
+        Assert.Equal("image/png", signedAsset.ContentType);
+        Assert.Equal(4096, signedAsset.SizeBytes);
+    }
+
+    // =====================================================================
     // Seeding helpers.
     // =====================================================================
 
@@ -555,6 +583,36 @@ public sealed class AssetUploadIntentServiceTests : IDisposable
             ArgumentNullException.ThrowIfNull(asset);
             return Task.CompletedTask;
         }
+
+        public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// A conforming <see cref="IAssetStorage"/> that RECORDS the assets it is asked to mint an upload URL for,
+    /// so a test can assert the command handed the adapter the declared content type and size the adapter binds
+    /// into the signed URL (CORE-AST-008). It mints a valid short-lived signed URL like
+    /// <see cref="FakeSignedUrlAssetStorage"/>; it is not a production signer.
+    /// </summary>
+    private sealed class CapturingAssetStorage : IAssetStorage
+    {
+        private static readonly TimeSpan _lifetime = TimeSpan.FromMinutes(10);
+
+        public List<Asset> UploadAssets { get; } = [];
+
+        public Task<SignedAssetUrl> CreateUploadUrlAsync(Asset asset, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(asset);
+            UploadAssets.Add(asset);
+            var url = new Uri($"https://storage.example.com/{asset.Bucket}/{asset.ObjectKey}?op=put&signature=fake");
+            return Task.FromResult(SignedAssetUrl.Create(url, AssetStorageOperation.Upload, _now, _lifetime));
+        }
+
+        public Task<SignedAssetUrl> CreateDownloadUrlAsync(Asset asset, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task DeleteObjectAsync(Asset asset, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
 
         public Task DeleteObjectAsync(string bucket, string objectKey, CancellationToken cancellationToken)
             => throw new NotSupportedException();

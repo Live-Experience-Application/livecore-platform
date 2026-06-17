@@ -3238,6 +3238,17 @@ workspace's object (threats T5/T1). The asset is **private by default**: the onl
 access handed out is the single short-lived signed URL after the permission check
 (the epic acceptance criterion; threat T4 "Asset leak").
 
+The signed upload URL additionally **binds the declared `contentType` and `sizeBytes`**
+into the SigV4 signature (CORE-AST-008): the presigned `PUT` signs `content-type` and
+`content-length` as required headers, so the storage backend itself **rejects** an upload
+whose actual type or byte count differs from what was declared — closing the
+declare-small-then-upload-large bypass of both the workspace storage quota (CORE-MON-006)
+and the per-object ceiling/allowlist (CORE-AST-007), which only ever see the declared
+metadata. The client must therefore send a matching `Content-Type` (the returned
+`contentType`) and the declared number of bytes; the download URL is unchanged (it serves
+an already-stored object). The binding adds only signed request conditions — no storage
+coordinate reaches any caller surface and the privacy model is untouched (threats T4/T7).
+
 The signed URL is minted through the `IAssetStorage` adapter **before** the metadata
 row is persisted, so when no object storage is configured the fail-closed
 `UnconfiguredAssetStorage` makes the request `503` and **no** orphan pending asset is

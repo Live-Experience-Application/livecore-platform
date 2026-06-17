@@ -120,6 +120,33 @@ silently disables it), while an explicitly **empty** configured list disables th
 restriction. A configured ceiling that is not strictly positive is rejected at startup. No value here is
 a secret (threat T7).
 
+### Binding the declared type and size into the upload URL (CORE-AST-008)
+
+CORE-AST-007 validates the **declared** `contentType`/`sizeBytes` and CORE-MON-006 reserves `sizeBytes`
+against the workspace storage quota, but both only ever see the **declared** metadata. Until this story
+the minted presigned `PUT` bound only bucket/key/verb/expiry, so a client could declare 1 byte of an
+allowed MIME — passing the allowlist, the ceiling and the quota — and then `PUT` a multi-gigabyte object
+of **any** type, bypassing all three (the bytes that actually land in storage were never constrained).
+
+The upload URL now **binds the declared content type and content length into the SigV4 signature** so the
+storage backend itself enforces them on the real upload (`S3CompatibleAssetStorage`):
+
+- the presigned `PUT` signs **`content-type`** (`GetPreSignedUrlRequest.ContentType`) and
+  **`content-length`** (the declared `sizeBytes`, reserved against the quota) as required, signed headers —
+  they appear in the URL's `X-Amz-SignedHeaders`;
+- an upload whose actual `Content-Type` or byte count differs from the declared/reserved value fails the
+  SigV4 signature check and is **rejected by storage**, so a client can no longer declare-small-then-upload-large
+  to bypass the quota or the CORE-AST-007 ceiling/allowlist;
+- the client therefore sends a matching `Content-Type` (the `contentType` returned by the upload-intent
+  response) and the declared number of bytes; an **in-spec** upload still succeeds.
+
+The declared values live on the asset row itself (its content type is always set; its size is the bytes
+reserved against the quota), so binding them needs no extra input or contract change. Only the **upload**
+direction is bound — a **download** URL serves an already-stored object, so it signs nothing extra. The
+binding adds only signed **request conditions**: it mints no public affordance, surfaces no storage
+coordinate to any caller, and leaves the private-bucket / signed-URL-after-authorization model unchanged
+(threats T4 "Asset leak"/T7). The signature crypto is the official AWS SDK's (no new dependency).
+
 ### Signed download flow (CORE-AST-004)
 
 The asset read route, `GET /api/v1/assets/{assetId}/download-url` (`csv/api_routes.csv`,
@@ -276,6 +303,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - no public object listing
 - upload intent requires authorization
 - upload intent validates the declared content type against a configurable MIME allowlist and the declared size against a configurable absolute per-object ceiling, fail-closed before any signed URL is minted (CORE-AST-007)
+- the signed upload URL binds the declared content type and content length into the SigV4 signature, so storage rejects an upload whose actual type or byte count violates what was declared/reserved (CORE-AST-008)
 - download URL requires authorization
 - deletion requires authorization
 - signed URLs are short-lived
@@ -288,7 +316,8 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 
 ```text
 Create upload intent
-  -> client uploads to storage
+  -> client uploads to storage (the signed upload URL pins the declared
+     content type and content length, so storage rejects a non-conforming upload)
   -> client confirms upload
   -> Core stores asset metadata
   -> asset can be linked to ContentBlock or Entity

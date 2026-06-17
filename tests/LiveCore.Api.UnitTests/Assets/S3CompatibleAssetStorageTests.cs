@@ -69,6 +69,42 @@ public class S3CompatibleAssetStorageTests
             "image/png",
             _now);
 
+    private static Asset CreateAsset(string objectKey, string contentType, long sizeBytes)
+        => Asset.Create(
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            "s3",
+            _bucket,
+            objectKey,
+            contentType,
+            _now,
+            sizeBytes);
+
+    /// <summary>Reads a single query-string parameter from a pre-signed URL (its raw, still-escaped value).</summary>
+    private static string QueryValue(Uri url, string name)
+    {
+        var prefix = name + "=";
+        var pair = url.Query.TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(part => part.StartsWith(prefix, StringComparison.Ordinal));
+        return pair is null ? string.Empty : pair[prefix.Length..];
+    }
+
+    /// <summary>
+    /// The decoded set of headers a pre-signed URL signs (its <c>X-Amz-SignedHeaders</c> query value),
+    /// lower-cased. A header in this set is part of the SigV4 signature, so the storage backend rejects a
+    /// request whose corresponding header differs from the signed value.
+    /// </summary>
+    private static IReadOnlySet<string> SignedHeaders(Uri url)
+        => Uri.UnescapeDataString(QueryValue(url, "X-Amz-SignedHeaders"))
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static header => header.ToLowerInvariant())
+            .ToHashSet();
+
+    /// <summary>The SigV4 signature a pre-signed URL carries (its <c>X-Amz-Signature</c> query value).</summary>
+    private static string Signature(Uri url) => QueryValue(url, "X-Amz-Signature");
+
     private static S3CompatibleAssetStorage CreateStorage(IAmazonS3 client)
         => new(client, _options, new FixedTimeProvider(_now));
 
@@ -128,6 +164,109 @@ public class S3CompatibleAssetStorageTests
         Assert.DoesNotContain("org/ws/second.bin", firstUrl.Url.AbsoluteUri, StringComparison.Ordinal);
         Assert.Contains("org/ws/second.bin", secondUrl.Url.AbsoluteUri, StringComparison.Ordinal);
         Assert.DoesNotContain("org/ws/first.bin", secondUrl.Url.AbsoluteUri, StringComparison.Ordinal);
+    }
+
+    // =====================================================================
+    // CORE-AST-008 — the upload URL BINDS the declared content type and content length as SigV4 signed
+    // conditions, so the storage backend itself rejects an upload whose actual type or byte count violates what
+    // was declared at upload-intent. A download URL is unchanged (it serves an already-stored object).
+    // =====================================================================
+
+    [Fact]
+    public async Task CreateUploadUrlAsync_binds_the_declared_content_type_and_content_length_as_signed_conditions()
+    {
+        // The asset declares image/png and an exact size; the upload URL must SIGN both content-type and
+        // content-length, so an upload with a different type or a different (in particular larger) byte count
+        // fails the SigV4 signature check at storage and is rejected — closing the declare-small / upload-large
+        // quota-and-ceiling bypass (CORE-AST-008).
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+        var asset = CreateAsset("org/ws/bound-upload.bin", "image/png", sizeBytes: 12_345);
+
+        var signed = await storage.CreateUploadUrlAsync(asset, CancellationToken.None);
+
+        var headers = SignedHeaders(signed.Url);
+        Assert.Contains("content-type", headers);
+        Assert.Contains("content-length", headers);
+        // Still a genuine, asset-scoped, short-lived signed URL — the binding only adds signed conditions.
+        Assert.Equal(AssetStorageOperation.Upload, signed.Operation);
+        Assert.Contains("X-Amz-Signature", signed.Url.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains(asset.ObjectKey, signed.Url.AbsoluteUri, StringComparison.Ordinal);
+        Assert.False(signed.IsExpired(_now));
+        Assert.True(signed.ExpiresAt <= _now + SignedAssetUrl.MaxLifetime);
+    }
+
+    [Fact]
+    public async Task CreateUploadUrlAsync_signature_is_bound_to_the_declared_size_so_a_larger_upload_cannot_reuse_it()
+    {
+        // Two intents for the SAME object that differ ONLY in declared size produce DIFFERENT signatures: the
+        // content length is part of the signature, so a URL minted for N bytes can never be replayed to PUT more
+        // than N bytes (the quota/ceiling bypass this story closes). The shared object key isolates the size as
+        // the only difference.
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+        var small = CreateAsset("org/ws/same-object.bin", "image/png", sizeBytes: 1);
+        var large = CreateAsset("org/ws/same-object.bin", "image/png", sizeBytes: 1_000_000_000);
+
+        var smallUrl = await storage.CreateUploadUrlAsync(small, CancellationToken.None);
+        var largeUrl = await storage.CreateUploadUrlAsync(large, CancellationToken.None);
+
+        Assert.NotEqual(Signature(smallUrl.Url), Signature(largeUrl.Url));
+    }
+
+    [Fact]
+    public async Task CreateUploadUrlAsync_signature_is_bound_to_the_declared_content_type_so_another_type_cannot_reuse_it()
+    {
+        // Two intents for the SAME object and size that differ ONLY in declared content type produce DIFFERENT
+        // signatures: the content type is part of the signature, so a URL minted for image/png can never be
+        // replayed to PUT an object of a different (possibly disallowed) type.
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+        var png = CreateAsset("org/ws/same-object.bin", "image/png", sizeBytes: 512);
+        var zip = CreateAsset("org/ws/same-object.bin", "application/zip", sizeBytes: 512);
+
+        var pngUrl = await storage.CreateUploadUrlAsync(png, CancellationToken.None);
+        var zipUrl = await storage.CreateUploadUrlAsync(zip, CancellationToken.None);
+
+        Assert.NotEqual(Signature(pngUrl.Url), Signature(zipUrl.Url));
+    }
+
+    [Fact]
+    public async Task CreateUploadUrlAsync_in_spec_declared_upload_still_mints_a_well_formed_short_lived_url()
+    {
+        // The in-spec upload still succeeds: a declared-content-type-and-size intent mints an absolute,
+        // asset-scoped, not-yet-expired signed URL within the lifetime ceiling (the story's "an in-spec upload
+        // still succeeds").
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+        var asset = CreateAsset("org/ws/in-spec.bin", "application/pdf", sizeBytes: 2_048);
+
+        var signed = await storage.CreateUploadUrlAsync(asset, CancellationToken.None);
+
+        Assert.Equal(AssetStorageOperation.Upload, signed.Operation);
+        Assert.True(signed.Url.IsAbsoluteUri);
+        Assert.StartsWith(_endpoint, signed.Url.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains(asset.ObjectKey, signed.Url.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Contains("X-Amz-Signature", signed.Url.AbsoluteUri, StringComparison.Ordinal);
+        Assert.False(signed.IsExpired(_now));
+        Assert.Equal(_now + _options.UrlLifetime, signed.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task CreateDownloadUrlAsync_does_not_bind_content_type_or_content_length()
+    {
+        // A download serves an already-stored object, so there is nothing to constrain: the download URL must
+        // NOT sign content-type/content-length (over-constraining it would needlessly break legitimate
+        // downloads). The CORE-AST-008 binding applies to the UPLOAD direction only.
+        using var client = new RecordingAmazonS3Client();
+        var storage = CreateStorage(client);
+        var asset = CreateAsset("org/ws/download-unbound.bin", "image/png", sizeBytes: 12_345);
+
+        var signed = await storage.CreateDownloadUrlAsync(asset, CancellationToken.None);
+
+        var headers = SignedHeaders(signed.Url);
+        Assert.DoesNotContain("content-type", headers);
+        Assert.DoesNotContain("content-length", headers);
     }
 
     [Fact]
