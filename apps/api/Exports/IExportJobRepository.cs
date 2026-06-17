@@ -92,6 +92,27 @@ public interface IExportJobRepository
     Task UpdateAsync(ExportJob exportJob, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Re-reads the AUTHORITATIVE persisted state of an export job within the given organization and workspace,
+    /// DISCARDING any copy of it currently tracked by this unit of work (CORE-RES-002). It is the
+    /// reload-after-a-rolled-back-attempt primitive the worker uses for its dead-letter accounting: when a
+    /// processing attempt's atomic transaction fails and rolls back, the in-memory aggregate it touched is left
+    /// with the rolled-back transitions still applied (Running/Completed in memory while the committed row is
+    /// still Pending). Re-reading through <see cref="FindByIdAsync"/> would return that same stale tracked
+    /// instance from the change tracker's identity map, so this method first detaches it and then materializes a
+    /// fresh copy reflecting the durable row, leaving the unit of work clean so the failed attempt can be
+    /// recorded — and the job dead-lettered if its attempts are exhausted — in its own transaction without the
+    /// rolled-back transitions leaking into a later save. Like every other lookup it is tenant- AND
+    /// workspace-scoped (the organization boundary is checked before the workspace boundary), returning
+    /// <see langword="null"/> when no such job exists there (threat T5/T1).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id, workspace id or job id is empty.</exception>
+    Task<ExportJob?> ReloadAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists up to <paramref name="maxCount"/> COMPLETED export jobs created before <paramref name="createdBefore"/>
     /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). This is
     /// a SYSTEM maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep is a

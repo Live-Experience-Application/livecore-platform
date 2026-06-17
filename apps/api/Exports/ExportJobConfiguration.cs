@@ -23,7 +23,9 @@ namespace LiveCore.Api.Exports;
 /// always requested by an authenticated user, but the link SETS NULL when that user is deleted so the job
 /// (the audit trail of who requested an export) survives and is anonymized rather than cascade-deleted
 /// (mirrors <c>assets.created_by</c> and <c>participants.user_id</c>). The nullable <c>failure_reason</c>
-/// column is null unless the job failed.
+/// column is null unless the job failed. The <c>attempt_count</c> column (CORE-RES-002) records how many
+/// failed worker processing attempts the job has accumulated; it is required, defaults to 0 and is the bound
+/// the worker dead-letters on.
 ///
 /// Two indexes back the documented access patterns:
 /// <list type="bullet">
@@ -97,6 +99,15 @@ internal sealed class ExportJobConfiguration : IEntityTypeConfiguration<ExportJo
             .HasColumnName("failure_reason")
             .HasMaxLength(ExportJob.MaxFailureReasonLength)
             .IsRequired(false);
+
+        // Worker processing-attempt counter (CORE-RES-002): how many failed processing attempts the job has
+        // accumulated. Required and defaults to 0 so every existing and new row carries a concrete count (a
+        // freshly created job has made no attempts). It is the poison-pill bound the worker dead-letters on; a
+        // plain non-negative integer carrying no content (threat T7), never indexed (it is never a lookup key).
+        builder.Property(job => job.AttemptCount)
+            .HasColumnName("attempt_count")
+            .HasDefaultValue(0)
+            .IsRequired();
 
         builder.Property(job => job.CreatedAt)
             .HasColumnName("created_at")

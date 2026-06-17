@@ -58,11 +58,22 @@ namespace LiveCore.Api.Exports;
 /// </para>
 ///
 /// <para>
-/// RESILIENCE. The sweep is per-job resilient: a job whose processing fails (for example a foreign-key
-/// violation because its workspace was deleted between the queued read and processing, or a transient
-/// persistence error) is logged and counted, and that job is left non-terminal — no manifest was committed — so
-/// the next sweep retries it, rather than aborting the whole run. All logging is identifier-only (job and
-/// manifest ids and counts, never the requester or any content), so a sweep is safe to log (threat T7).
+/// RESILIENCE and DEAD-LETTERING (CORE-RES-002). The sweep is per-job resilient: a job whose processing fails
+/// (for example a foreign-key violation because its workspace was deleted between the queued read and
+/// processing, or a transient persistence error) is logged and counted, rather than aborting the whole run. A
+/// failed attempt is RECORDED on the job's <see cref="ExportJob.AttemptCount"/> in its OWN unit of work —
+/// separate from the rolled-back processing transaction (the processor reloads the durable row through
+/// <see cref="IExportJobRepository.ReloadAsync"/>, discarding the rolled-back in-memory transitions, then
+/// commits the increment), so a failed attempt is counted DURABLY even though the work did not commit. While
+/// the job has attempts left it is left non-terminal so the next sweep retries it; once it reaches the
+/// configured <see cref="ExportProcessingOptions.MaxAttempts"/> the processor DEAD-LETTERS it — drives it to
+/// the terminal <see cref="ExportJobStatus.Failed"/> via the aggregate's own <see cref="ExportJob.Fail"/>
+/// guard, with a generic product-neutral reason. Dead-lettering closes the poison-pill gap: a permanently
+/// failing low-id job used to be re-read and re-attempted every sweep, occupying a batch slot forever and
+/// starving newer work; now it becomes terminal, drops out of the queued read, and the broken export surfaces
+/// as failed to its requester instead of staying Pending forever. All logging is identifier-only (job and
+/// manifest ids, the attempt count and run counts, never the requester or any content), so a sweep is safe to
+/// log (threat T7).
 /// </para>
 /// </summary>
 public sealed class ExportProcessingService
@@ -107,12 +118,15 @@ public sealed class ExportProcessingService
     /// jobs (workspace-scoped, not terminal), processes each to completion (started, inventoried, completed and
     /// given a workspace export manifest) and returns the run's count-only summary. Idempotent (a terminal job
     /// is never eligible and a job's manifest is admitted at most once, so a job produces exactly one manifest)
-    /// and tenant-scoped (each job is re-resolved, inventoried and manifested with its own
-    /// tenant/workspace). The sweep is resilient: a per-job failure is logged and that job is left for the next
-    /// sweep to retry, rather than aborting the run.
+    /// and tenant-scoped (each job is re-resolved, inventoried and manifested with its own tenant/workspace).
+    /// The sweep is resilient and bounded (CORE-RES-002): a per-job failure is recorded on the job's attempt
+    /// counter and the job is left for the next sweep to retry, rather than aborting the run — UNLESS the
+    /// failure exhausts the configured <see cref="ExportProcessingOptions.MaxAttempts"/>, in which case the job
+    /// is dead-lettered (driven terminal <see cref="ExportJobStatus.Failed"/>) so a poison job stops consuming a
+    /// batch slot and newer work progresses.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token (the worker passes its stopping token).</param>
-    /// <returns>A summary of how many jobs were examined, processed and failed.</returns>
+    /// <returns>A summary of how many jobs were examined, processed, failed and dead-lettered.</returns>
     public async Task<ExportProcessingResult> ProcessQueuedExportsAsync(CancellationToken cancellationToken)
     {
         var queued = await _queuedExports
@@ -121,12 +135,13 @@ public sealed class ExportProcessingService
 
         if (queued.Count == 0)
         {
-            return new ExportProcessingResult(Examined: 0, Processed: 0, Failed: 0);
+            return new ExportProcessingResult(Examined: 0, Processed: 0, Failed: 0, DeadLettered: 0);
         }
 
         var examined = 0;
         var processed = 0;
         var failed = 0;
+        var deadLettered = 0;
 
         foreach (var queuedJob in queued)
         {
@@ -135,9 +150,19 @@ public sealed class ExportProcessingService
 
             try
             {
-                if (await ProcessOneAsync(queuedJob, cancellationToken).ConfigureAwait(false))
+                switch (await ProcessOneAsync(queuedJob, cancellationToken).ConfigureAwait(false))
                 {
-                    processed++;
+                    case ProcessOutcome.Processed:
+                        processed++;
+                        break;
+                    case ProcessOutcome.DeadLettered:
+                        deadLettered++;
+                        break;
+                    case ProcessOutcome.Failed:
+                        failed++;
+                        break;
+                        // NotProcessed (vanished, already terminal, or — defensively — not workspace-scoped) is
+                        // neither a success nor a failure, so it is examined but not otherwise counted.
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -147,10 +172,10 @@ public sealed class ExportProcessingService
             }
             catch (DbUpdateException exception)
             {
-                // A step failed to persist — the job's workspace/tenant may have been removed between the queued
-                // read and processing (a foreign-key violation), or a transient persistence error occurred. No
-                // manifest was committed and the job is left non-terminal, so the next sweep retries it, and we
-                // move on. The message carries only the job id, never the requester or any content (threat T7).
+                // A persistence failure escaped the per-job attempt accounting (for example the attempt-counter
+                // update itself could not be committed because the database is unavailable). The job is left
+                // non-terminal for the next sweep to retry, and we move on. The message carries only the job id,
+                // never the requester or any content (threat T7).
                 failed++;
                 _logger.LogWarning(
                     exception,
@@ -159,16 +184,18 @@ public sealed class ExportProcessingService
             }
         }
 
-        return new ExportProcessingResult(Examined: examined, Processed: processed, Failed: failed);
+        return new ExportProcessingResult(
+            Examined: examined, Processed: processed, Failed: failed, DeadLettered: deadLettered);
     }
 
     /// <summary>
-    /// Processes a single queued export job to completion: re-resolves it within its own tenant/workspace,
-    /// drives its guarded <see cref="ExportJob.Start"/>/<see cref="ExportJob.Complete"/> transitions, inventories
-    /// its workspace and produces and appends its workspace export manifest. Returns whether a job was processed
-    /// (false when the job has vanished, is already terminal, or is — defensively — not workspace-scoped).
+    /// Processes a single queued export job: re-resolves it within its own tenant/workspace, drives its guarded
+    /// <see cref="ExportJob.Start"/>/<see cref="ExportJob.Complete"/> transitions, inventories its workspace and
+    /// produces and appends its workspace export manifest. When the atomic work FAILS, the failed attempt is
+    /// recorded on the job's attempt counter and the job is dead-lettered if it has exhausted its attempt budget
+    /// (CORE-RES-002). Returns the per-job outcome.
     /// </summary>
-    private async Task<bool> ProcessOneAsync(QueuedExportJob queuedJob, CancellationToken cancellationToken)
+    private async Task<ProcessOutcome> ProcessOneAsync(QueuedExportJob queuedJob, CancellationToken cancellationToken)
     {
         // One processing timestamp for the whole job, taken from the injected clock so the behavior is
         // deterministic under test (the same TimeProvider the rest of the platform uses).
@@ -184,23 +211,47 @@ public sealed class ExportProcessingService
         {
             // The job vanished between the queued read and now (for example its workspace was deleted). Nothing
             // to process.
-            return false;
+            return ProcessOutcome.NotProcessed;
         }
 
         if (job.IsTerminal)
         {
-            // A concurrent worker already finished (or failed) it between the queued read and the load;
-            // idempotent no-op.
-            return false;
+            // A concurrent worker already finished (completed or dead-lettered) it between the queued read and
+            // the load; idempotent no-op.
+            return ProcessOutcome.NotProcessed;
         }
 
         if (job.Scope != ExportScope.Workspace)
         {
             // The reader only surfaces workspace-scoped jobs; this is defence in depth. A user-data export's
             // narrower manifest is a later story, never widened into a workspace inventory here (threat T8).
-            return false;
+            return ProcessOutcome.NotProcessed;
         }
 
+        try
+        {
+            return await ProcessWorkspaceExportAsync(job, processedAt, cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException workFailure)
+        {
+            // The atomic work failed to persist — the job's workspace/tenant may have been removed between the
+            // queued read and processing (a foreign-key violation), or a transient persistence error occurred. No
+            // manifest was committed and the work's in-memory transitions rolled back. Record this failed attempt
+            // durably and dead-letter the job if it has exhausted its attempt budget (CORE-RES-002), then move on.
+            return await RecordFailedAttemptAsync(queuedJob, processedAt, workFailure, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Drives the queued job's guarded Pending -&gt; Running -&gt; Completed transitions, inventories its
+    /// workspace and atomically commits the produced manifest together with those transitions (the happy path).
+    /// </summary>
+    private async Task<ProcessOutcome> ProcessWorkspaceExportAsync(
+        ExportJob job,
+        DateTimeOffset processedAt,
+        CancellationToken cancellationToken)
+    {
         // Drive the guarded status transitions on the aggregate: Pending -> Running -> Completed. They are
         // applied IN MEMORY and committed ATOMICALLY with the produced manifest by the single unit of work
         // below (the repositories share one EF DbContext per sweep scope). Start is guarded so a job re-surfaced
@@ -234,7 +285,7 @@ public sealed class ExportProcessingService
         // workers: a run that already produced the manifest is reported as a DUPLICATE, and because the commit
         // is atomic the losing attempt's status transitions roll back WITH it — the job is left exactly as the
         // winning attempt completed it, never half-applied. Any other persistence failure surfaces as a
-        // DbUpdateException, caught one level up so the job stays queued for the next sweep.
+        // DbUpdateException, caught by ProcessOneAsync so the failed attempt is recorded.
         var addResult = await _exportManifests.AddAsync(manifest, cancellationToken).ConfigureAwait(false);
 
         if (addResult == ExportManifestAddResult.Added)
@@ -256,6 +307,96 @@ public sealed class ExportProcessingService
                 job.Id);
         }
 
-        return true;
+        return ProcessOutcome.Processed;
+    }
+
+    /// <summary>
+    /// Records a failed processing attempt durably and dead-letters the job when it has reached the configured
+    /// <see cref="ExportProcessingOptions.MaxAttempts"/> (CORE-RES-002). The work's transaction has already
+    /// rolled back, so the job is re-read through <see cref="IExportJobRepository.ReloadAsync"/> (which discards
+    /// the rolled-back in-memory transitions and returns the durable row), its attempt counter is incremented,
+    /// and — if the budget is exhausted — it is driven to the terminal <see cref="ExportJobStatus.Failed"/> via
+    /// the aggregate's own <see cref="ExportJob.Fail"/> guard with a generic, product-neutral reason. The
+    /// increment (and any dead-letter) commit in their OWN unit of work, so a failed attempt is counted even
+    /// though the work did not commit. All logging is identifier-only (job id, attempt and run counts; threat T7).
+    /// </summary>
+    private async Task<ProcessOutcome> RecordFailedAttemptAsync(
+        QueuedExportJob queuedJob,
+        DateTimeOffset processedAt,
+        DbUpdateException workFailure,
+        CancellationToken cancellationToken)
+    {
+        var job = await _exportJobs
+            .ReloadAsync(queuedJob.OrganizationId, queuedJob.WorkspaceId, queuedJob.ExportJobId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (job is null || job.IsTerminal)
+        {
+            // The job vanished, or a concurrent worker already finished/dead-lettered it, between the failed
+            // attempt and the reload; there is nothing more to record. The work failure is still a failed run.
+            _logger.LogWarning(
+                workFailure,
+                "Failed to process queued export job {ExportJobId}; it stays queued and will be retried on the next sweep.",
+                queuedJob.ExportJobId);
+            return ProcessOutcome.Failed;
+        }
+
+        job.RecordAttempt(processedAt);
+        var exhausted = job.AttemptCount >= _options.MaxAttempts;
+        if (exhausted)
+        {
+            // Dead-letter: drive the job to the terminal Failed state through its own guard, with a generic,
+            // log-safe reason that names no content (threats T7/T8). A failed job is excluded from the queued
+            // read, so it stops re-consuming a batch slot and the broken export surfaces as failed to its
+            // requester instead of staying Pending forever.
+            job.Fail(DeadLetterReason(_options.MaxAttempts), processedAt);
+        }
+
+        // Commit the attempt increment (and any dead-letter transition) in its own unit of work, separate from
+        // the rolled-back work, so the failed attempt is durable.
+        await _exportJobs.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
+
+        if (exhausted)
+        {
+            _logger.LogWarning(
+                workFailure,
+                "Dead-lettered export job {ExportJobId} after {AttemptCount} failed processing attempts (max {MaxAttempts}); it is now terminal Failed.",
+                job.Id,
+                job.AttemptCount,
+                _options.MaxAttempts);
+            return ProcessOutcome.DeadLettered;
+        }
+
+        _logger.LogWarning(
+            workFailure,
+            "Failed to process queued export job {ExportJobId} (attempt {AttemptCount} of {MaxAttempts}); it stays queued and will be retried on the next sweep.",
+            job.Id,
+            job.AttemptCount,
+            _options.MaxAttempts);
+        return ProcessOutcome.Failed;
+    }
+
+    /// <summary>
+    /// The generic, product-neutral, log-safe reason recorded when a job is dead-lettered. It names only the
+    /// attempt bound — never any exported content or internal detail (threats T7/T8) — and is well within
+    /// <see cref="ExportJob.MaxFailureReasonLength"/>.
+    /// </summary>
+    private static string DeadLetterReason(int maxAttempts)
+        => $"The export could not be processed after {maxAttempts} attempts and was moved to the failed state.";
+
+    /// <summary>The outcome of processing a single queued export job in one sweep.</summary>
+    private enum ProcessOutcome
+    {
+        /// <summary>The job was vanished, already terminal, or — defensively — not workspace-scoped; nothing was done.</summary>
+        NotProcessed,
+
+        /// <summary>The job was processed to completion (or found already completed by a concurrent run).</summary>
+        Processed,
+
+        /// <summary>The attempt failed; the job stays queued with its attempt counter incremented for the next sweep.</summary>
+        Failed,
+
+        /// <summary>The attempt failed and exhausted the attempt budget, so the job was dead-lettered (terminal Failed).</summary>
+        DeadLettered,
     }
 }

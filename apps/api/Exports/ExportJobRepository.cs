@@ -141,6 +141,54 @@ internal sealed class ExportJobRepository : IExportJobRepository
     }
 
     /// <inheritdoc />
+    public async Task<ExportJob?> ReloadAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored job (ids are generated non-empty), so the lookup fails fast.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Export job id must not be empty.", nameof(id));
+        }
+
+        // Detach any copy of this job already tracked by this unit of work. After a rolled-back processing
+        // attempt the tracked instance still carries the rolled-back transitions (it is Running/Completed in
+        // memory while the committed row is still Pending); leaving it tracked would both return that stale
+        // state below (EF returns the identity-map instance) and risk flushing the rolled-back transitions in a
+        // later SaveChanges. Detaching it clears the identity map so the query materializes the durable row and
+        // a subsequent attempt-counter update commits cleanly (CORE-RES-002).
+        var tracked = _dbContext.ChangeTracker
+            .Entries<ExportJob>()
+            .FirstOrDefault(entry => entry.Entity.Id == id);
+        if (tracked is not null)
+        {
+            tracked.State = EntityState.Detached;
+        }
+
+        // Re-read the authoritative row, tenant- and workspace-scoped exactly like FindByIdAsync (the
+        // organization boundary leads, so another tenant's or workspace's job is never returned; threat T5/T1).
+        return await _dbContext.ExportJobs
+            .FirstOrDefaultAsync(
+                job => job.OrganizationId == organizationId
+                    && job.WorkspaceId == workspaceId
+                    && job.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<ExportJob>> ListCompletedForRetentionAsync(
         DateTimeOffset createdBefore,
         int maxCount,

@@ -14,8 +14,16 @@ namespace LiveCore.Api.Exports;
 /// </param>
 /// <param name="Failed">
 /// How many queued jobs could not be processed this run because a step failed (for example the job's workspace
-/// was deleted between the queued read and processing, or a transient persistence error occurred). Those jobs
-/// stay non-terminal — no manifest was committed — so the next sweep retries them; nothing is left in an
-/// inconsistent state.
+/// was deleted between the queued read and processing, or a transient persistence error occurred). Each failed
+/// attempt is recorded on the job's attempt counter; the job stays non-terminal — no manifest was committed —
+/// so the next sweep retries it, UNLESS the failure exhausted its attempt budget, in which case it is counted
+/// in <see cref="DeadLettered"/> instead. Nothing is left in an inconsistent state.
 /// </param>
-public readonly record struct ExportProcessingResult(int Examined, int Processed, int Failed);
+/// <param name="DeadLettered">
+/// How many queued jobs reached the configured maximum number of failed attempts this run and were
+/// DEAD-LETTERED — driven to the terminal <see cref="ExportJobStatus.Failed"/> state via
+/// <see cref="ExportJob.Fail"/> instead of being retried again (CORE-RES-002). A dead-lettered job is terminal,
+/// so it is no longer queued: it stops re-consuming a batch slot and newer work progresses past it, and the
+/// broken export surfaces as failed to its requester.
+/// </param>
+public readonly record struct ExportProcessingResult(int Examined, int Processed, int Failed, int DeadLettered);

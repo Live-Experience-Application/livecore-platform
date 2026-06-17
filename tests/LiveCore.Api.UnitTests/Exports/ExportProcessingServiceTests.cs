@@ -28,9 +28,11 @@ namespace LiveCore.Api.UnitTests.Exports;
 ///   <item>SCOPE-BOUNDED (threat T8): a user-data export job is never processed into a workspace manifest.</item>
 ///   <item>RECOVERY: a job left Running by a crashed worker is finished (its already-applied Start is skipped).</item>
 ///   <item>BATCH SIZE: the configured batch size bounds a single sweep.</item>
-///   <item>RESILIENT: a per-job failure is counted and the job stays non-terminal for the next sweep, without
-///   aborting the run.</item>
 /// </list>
+/// The RESILIENCE and DEAD-LETTERING behavior (CORE-RES-002 — a per-job failure increments the attempt counter
+/// and leaves the job for the next sweep, a poison job that exhausts its attempts is dead-lettered to Failed and
+/// stops consuming a batch slot, and newer jobs progress past it) needs real transaction rollback to be modeled
+/// faithfully, so it is exercised against SQLite in <c>ExportProcessingJobTests</c>.
 /// All fixtures are generic (AGENTS.md, csv/forbidden_core_terms.csv).
 /// </summary>
 public sealed class ExportProcessingServiceTests
@@ -209,29 +211,11 @@ public sealed class ExportProcessingServiceTests
         Assert.Empty(store.Manifests);
     }
 
-    [Fact]
-    public async Task Counts_a_failed_job_and_continues_processing_the_rest_of_the_batch()
-    {
-        // A persistence failure for one job (here its manifest insert throws — e.g. its workspace was deleted
-        // between the queued read and processing, a foreign-key violation) must NOT abort the sweep: it is
-        // counted failed and the other job is still processed to completion. In real persistence the failed
-        // SaveChanges rolls the job's transitions back, so it stays non-terminal and the next sweep re-surfaces
-        // it (the queued reader returns non-terminal jobs; verified in QueuedExportJobReaderTests).
-        var store = new FakeExportStore();
-        var failing = store.SeedPendingWorkspaceJob();
-        var succeeding = store.SeedPendingWorkspaceJob();
-        store.FailManifestAddFor.Add(failing.Id);
-        var service = CreateService(store);
-
-        var result = await service.ProcessQueuedExportsAsync(CancellationToken.None);
-
-        Assert.Equal(2, result.Examined);
-        Assert.Equal(1, result.Processed);
-        Assert.Equal(1, result.Failed);
-        // Only the succeeding job produced a manifest; the failing one committed nothing.
-        Assert.Equal(new[] { succeeding.Id }, store.Manifests.Select(m => m.ExportJobId).ToArray());
-        Assert.DoesNotContain(store.Manifests, m => m.ExportJobId == failing.Id);
-    }
+    // The failed-job / dead-letter accounting (CORE-RES-002) needs real transaction rollback to be modeled
+    // faithfully (the rolled-back work leaves the in-memory aggregate dirty; the worker reloads the durable row
+    // to record the attempt), so the "a poison job is counted failed and the batch continues", "the attempt
+    // counter increments and is bounded", and "a structurally-broken export is dead-lettered to Failed" cases
+    // are exercised against SQLite in ExportProcessingJobTests rather than over this in-memory fake.
 
     private static ExportProcessingService CreateService(FakeExportStore store)
         => new(
@@ -331,10 +315,19 @@ public sealed class ExportProcessingServiceTests
         }
 
         public Task UpdateAsync(ExportJob exportJob, CancellationToken cancellationToken)
-            // The processor commits a job's status transitions atomically through the manifest add's unit of
-            // work (the repositories share one EF DbContext), so it never calls UpdateAsync separately. Throwing
-            // here is a regression guard: reintroducing a separate, non-atomic status persist would surface as a
-            // failing test rather than silently risking a half-applied transition under a concurrent duplicate.
+            // The HAPPY-PATH processor commits a job's status transitions atomically through the manifest add's
+            // unit of work (the repositories share one EF DbContext), so the success path never calls UpdateAsync
+            // separately. The dead-letter / failed-attempt accounting (CORE-RES-002) DOES persist through
+            // UpdateAsync, but only after a rolled-back work transaction — a path that needs real persistence to
+            // model the rollback faithfully, so it is exercised in the SQLite ExportProcessingJobTests, not over
+            // this in-memory fake. Throwing here keeps the fake suite asserting only the happy/idempotent/scoping
+            // paths and guards against an accidental non-atomic status persist on the success path.
+            => throw new NotSupportedException();
+
+        public Task<ExportJob?> ReloadAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
+            // ReloadAsync is the worker's reload-after-a-rolled-back-attempt primitive (CORE-RES-002). The
+            // failed-attempt / dead-letter path it serves needs real transaction rollback to be modeled
+            // faithfully, so it is exercised against SQLite in ExportProcessingJobTests, not over this fake.
             => throw new NotSupportedException();
 
         public Task<ExportJobAddResult> AddAsync(ExportJob exportJob, CancellationToken cancellationToken)

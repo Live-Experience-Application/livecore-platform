@@ -151,6 +151,31 @@ follow-up — the instruments are export-agnostic.
 The worker also serves a per-loop `GET /health/live` endpoint (CORE-DR-003) backed by the same surface; see
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Worker liveness heartbeat").
 
+#### Worker max-attempt and dead-letter visibility (CORE-RES-002)
+
+Each export-processing job carries a durable **attempt counter** (`export_jobs.attempt_count`). When a job's
+processing transaction fails, the worker records the failed attempt in its own unit of work — so the count is
+durable even though the work rolled back — and retries it on the next sweep. Once the count reaches the
+configured maximum (`Exports:Processing:MaxAttempts`, default 5) the worker **dead-letters** the job: it drives
+it to the terminal `Failed` state via `ExportJob.Fail()` with a generic, content-free reason instead of
+re-attempting it forever. A dead-lettered job is terminal, so it drops out of the queued read — it stops
+re-consuming a batch slot every sweep, and newer work is no longer starved behind a permanently-failing
+("poison") low-id job.
+
+Dead-lettering is observable without a new metric (the dedicated dead-letter **metric** is `CORE-OBS-007`):
+
+- the job reaches the terminal `Failed` status with a generic failure reason on its `export_jobs` row, so a
+  broken export surfaces as **failed** rather than staying `Pending` forever — to its requester the export
+  read route (`GET /api/v1/exports/{id}`) returns a distinct `409` that says the export *failed* (disclosed
+  only after authorization, so the state never leaks to an unauthorized caller; threats T1/T5/T7/T8);
+- the worker emits an identifier-only **WARNING** log when it dead-letters a job (the job id, the attempt count
+  and the configured maximum — never the requester or any content, threat T7);
+- the export-processing sweep summary log counts how many jobs were `dead-lettered` this run alongside
+  `processed` and `failed`.
+
+The same bounded-retry/dead-letter posture is intended to generalize to the other worker loops; `CORE-OBS-007`
+adds the dead-letter metric and worker backlog/duration SLIs on top of this.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

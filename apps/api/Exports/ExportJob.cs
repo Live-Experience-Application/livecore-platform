@@ -210,6 +210,18 @@ public sealed class ExportJob
     /// </summary>
     public string? FailureReason { get; private set; }
 
+    /// <summary>
+    /// How many times the background worker has ATTEMPTED to process this job and failed (CORE-RES-002).
+    /// Starts at zero on creation and is incremented by <see cref="RecordAttempt"/> once per failed processing
+    /// attempt; a successful run leaves it untouched (a job that completes on its first try keeps a count of
+    /// zero). It is the poison-pill bound: when it reaches the worker's configured maximum the job is
+    /// DEAD-LETTERED — moved to the terminal <see cref="ExportJobStatus.Failed"/> state via <see cref="Fail"/>
+    /// instead of being retried forever — so a permanently-failing job stops re-consuming a batch slot every
+    /// sweep and newer work progresses past it. The count is a plain non-negative integer (no identifier or
+    /// content), safe for logs (threat T7).
+    /// </summary>
+    public int AttemptCount { get; private set; }
+
     /// <summary>When this export job was first requested (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
 
@@ -406,6 +418,32 @@ public sealed class ExportJob
     }
 
     /// <summary>
+    /// Records that the background worker has just ATTEMPTED to process this job and the attempt failed
+    /// (CORE-RES-002): increments <see cref="AttemptCount"/> by one and stamps <see cref="UpdatedAt"/>. The
+    /// worker calls this — in its OWN unit of work, separate from the rolled-back processing transaction — so a
+    /// failed attempt is recorded durably even though the work itself did not commit; once the count reaches
+    /// the worker's configured maximum the worker DEAD-LETTERS the job via <see cref="Fail"/>. An attempt is
+    /// only meaningful on a job that is still being worked, so recording one on a terminal
+    /// (<see cref="ExportJobStatus.Completed"/> or <see cref="ExportJobStatus.Failed"/>) job is an
+    /// <see cref="InvalidOperationException"/>, NOT a silent no-op: a finished job is never re-attempted. The
+    /// transition tenant, workspace, requester and scope are immutable, so recording an attempt never moves the
+    /// job or widens its scope (threats T5/T8), and the counter carries no content (threat T7).
+    /// </summary>
+    /// <param name="updatedAt">When the failed attempt was recorded.</param>
+    /// <exception cref="InvalidOperationException">The job is already terminal.</exception>
+    public void RecordAttempt(DateTimeOffset updatedAt)
+    {
+        if (IsTerminal)
+        {
+            throw new InvalidOperationException(
+                "A processing attempt cannot be recorded for a terminal export job.");
+        }
+
+        AttemptCount++;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
     /// Records the object-storage coordinates of the completed export's downloadable ARTIFACT (its produced
     /// blob) so the artifact object can be purged with the row when the export reaches its retention window
     /// (CORE-PRIV-003). The bucket and key are set TOGETHER (an artifact is a bucket + key pair); both are
@@ -491,5 +529,5 @@ public sealed class ExportJob
     public override string ToString()
         => $"ExportJob {Id} org={OrganizationId} ws={WorkspaceId} "
             + $"requestedBy={(RequestedByUserProfileId is { } requester ? requester.ToString() : "anonymized")} "
-            + $"scope={Scope} status={Status}";
+            + $"scope={Scope} status={Status} attempts={AttemptCount}";
 }

@@ -59,10 +59,13 @@ namespace LiveCore.Api.Exports;
 ///   Auditor all fail closed). This is the "non-authoring role 403" acceptance criterion: a participant-scoped
 ///   (audience) caller is denied outright, so a participant never receives any host-only export content.</item>
 ///   <item>Only AFTER authorization is the export's availability checked, so an unauthorized caller never learns
-///   its state: an export that is not <see cref="ExportJobStatus.Completed"/> (still pending/running, or failed)
-///   has no retrievable artifact and is 409 — and, defensively, a completed job whose manifest is not present is
-///   409 too. This is the "expired or incomplete export is rejected" acceptance criterion (mirrors the asset
-///   signed-download 409 for a still-pending asset).</item>
+///   its state: an export that is not <see cref="ExportJobStatus.Completed"/> has no retrievable artifact and is
+///   409 — and, defensively, a completed job whose manifest is not present is 409 too. This is the "expired or
+///   incomplete export is rejected" acceptance criterion (mirrors the asset signed-download 409 for a
+///   still-pending asset). A job the worker DEAD-LETTERED (terminal <see cref="ExportJobStatus.Failed"/>,
+///   CORE-RES-002) gets a DISTINCT 409 detail so a requester learns the export permanently failed rather than
+///   mistaking it for one still in progress — surfaced only to an authorized downloader, so the state is never
+///   disclosed to an unauthorized caller (threats T7/T8).</item>
 ///   <item>A downloadable, completed export is returned 200 as its artifact PROJECTED BY ROLE through the
 ///   existing <see cref="ExportManifestProjection"/> — defence in depth that keeps the export shape role-scoped
 ///   even though only full-view roles reach this point (threat T8 "export role-based projection").</item>
@@ -171,10 +174,20 @@ internal static class ExportEndpoints
         }
 
         // Authorized. Only NOW is the export's availability checked, so an unauthorized caller never learns its
-        // state. An export that has not settled Completed (still pending/running, or failed) has no retrievable
-        // artifact, so it is rejected 409 — the "expired or incomplete export is rejected" criterion, mirroring
-        // the asset signed-download 409 for a still-pending asset. The check is AFTER authorization, so only an
-        // authorized downloader ever learns the export is not yet downloadable.
+        // state. A job that the worker DEAD-LETTERED (terminal Failed, CORE-RES-002) is reported distinctly so a
+        // requester polling this route learns the export permanently FAILED — it surfaces as failed rather than
+        // looking the same as a still-processing export — instead of waiting on a job that is stuck Pending
+        // forever. Both responses are 409 (an out-of-state request) and disclosed only AFTER authorization, so
+        // an unauthorized caller still learns nothing of the export's state; the failure detail names no content
+        // or internal reason (threats T7/T8).
+        if (job.Status == ExportJobStatus.Failed)
+        {
+            return ExportFailed();
+        }
+
+        // An export that has not settled Completed (still pending/running) has no retrievable artifact yet, so it
+        // is rejected 409 — the "expired or incomplete export is rejected" criterion, mirroring the asset
+        // signed-download 409 for a still-pending asset.
         if (job.Status != ExportJobStatus.Completed)
         {
             return ExportNotDownloadable();
@@ -282,15 +295,26 @@ internal static class ExportEndpoints
             detail: "The requested resource was not found.");
 
     // An authorized downloader asked for an export that is not a retrievable completed artifact — it is still
-    // pending/running, it failed, or (defensively) it completed without a manifest. Reported as 409 (an
-    // out-of-state request) AFTER authorization, so only an authorized downloader ever learns the export is not
-    // available (mirrors the asset signed-download 409 for a still-pending asset).
+    // pending/running, or (defensively) it completed without a manifest. Reported as 409 (an out-of-state
+    // request) AFTER authorization, so only an authorized downloader ever learns the export is not available
+    // (mirrors the asset signed-download 409 for a still-pending asset).
     private static IResult ExportNotDownloadable()
         => CoreProblem.Create(
             statusCode: StatusCodes.Status409Conflict,
             code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The export is not available for download.");
+
+    // An authorized downloader asked for an export the worker DEAD-LETTERED (terminal Failed, CORE-RES-002).
+    // Reported as 409 (an out-of-state request) AFTER authorization with a distinct detail so the requester
+    // learns the export permanently FAILED rather than mistaking it for one still in progress. The detail names
+    // no content or internal failure reason (threats T7/T8).
+    private static IResult ExportFailed()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
+            title: "Conflict",
+            detail: "The export failed and is not available for download.");
 
     private readonly record struct ExportEndpointDependencies(
         TenantContextResolver Resolver,

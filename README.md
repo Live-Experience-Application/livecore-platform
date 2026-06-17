@@ -3217,7 +3217,22 @@ The processing logic lives in the Exports module (`ExportProcessingService`); th
 connection string** (no database -> the worker starts but runs no processing loop). The sweep is per-job
 **resilient**: a job whose processing fails (for example because its workspace was deleted between the queued
 read and processing) is logged and counted, and that job is left non-terminal for the next sweep to retry,
-without aborting the run. An export-request HTTP route and a user-data export pipeline remain follow-up stories.
+without aborting the run.
+
+**Max-attempt and dead-letter handling (CORE-RES-002).** A failing job is not retried forever. Each job carries
+a durable attempt counter (`export_jobs.attempt_count`): when its processing transaction fails, the worker
+records the failed attempt in its **own** unit of work — reloading the durable row so the rolled-back
+transitions never leak — so the attempt is counted even though the work did not commit. Once the count reaches
+`Exports:Processing:MaxAttempts` (default 5) the worker **dead-letters** the job, driving it to the terminal
+`Failed` state through the aggregate's own `ExportJob.Fail()` guard with a generic, content-free reason. Because
+a dead-lettered job is terminal it drops out of the queued read, so a permanently-failing ("poison") low-id job
+**stops re-consuming a batch slot** every sweep and newer work is no longer starved behind it. The broken
+export **surfaces as failed to its requester** — instead of staying `Pending` forever — and the export read
+route (`GET /api/v1/exports/{id}`) returns a distinct `409` that says the export *failed* (only after
+authorization, so the state never leaks to an unauthorized caller). Dead-lettered jobs are observable via that
+terminal state, the worker's identifier-only dead-letter WARNING log, and the sweep summary's `dead-lettered`
+count (`docs/15_OBSERVABILITY.md`; the dedicated dead-letter **metric** is CORE-OBS-007). An export-request HTTP
+route and a user-data export pipeline remain follow-up stories.
 
 ### Store notification reconciliation job
 

@@ -100,10 +100,11 @@ internal sealed class ExportProcessingBackgroundService : BackgroundService
             if (result.Examined > 0)
             {
                 _logger.LogInformation(
-                    "Export processing sweep complete: examined {Examined}, processed {Processed}, failed {Failed}.",
+                    "Export processing sweep complete: examined {Examined}, processed {Processed}, failed {Failed}, dead-lettered {DeadLettered}.",
                     result.Examined,
                     result.Processed,
-                    result.Failed);
+                    result.Failed,
+                    result.DeadLettered);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

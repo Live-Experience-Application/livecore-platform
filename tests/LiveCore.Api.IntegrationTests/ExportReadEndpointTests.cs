@@ -267,6 +267,64 @@ public sealed class ExportReadEndpointTests
     }
 
     [Fact]
+    public async Task Read_surfaces_a_dead_lettered_export_as_failed_to_an_authorized_requester()
+    {
+        // CORE-RES-002: a worker-dead-lettered export (terminal Failed) is reported to an authorized requester
+        // with a DISTINCT 409 detail saying it FAILED — so a requester polling the route learns the export
+        // permanently failed instead of mistaking it for one still in progress (or waiting on a job stuck Pending
+        // forever). It is the 409 "surfaces as failed to its requester" acceptance criterion.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid exportId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var (_, _, export, _) = await SeedExportAsync(db, subject, MembershipRole.Host, ExportJobStatus.Failed);
+            exportId = export;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/exports/{exportId}?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<ProblemDto>(_json);
+        Assert.NotNull(problem);
+        // The detail tells the requester the export FAILED (distinct from the generic "not available" a
+        // still-processing export returns), and it never leaks the internal failure reason or any content.
+        Assert.Contains("failed", problem.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Read_hides_a_dead_lettered_export_from_a_non_member_as_404_not_as_failed()
+    {
+        // The distinct "failed" disclosure is POST-authorization: a caller who is not a member of the export's
+        // workspace still gets 404 (existence hidden), never the failed-state 409 — so dead-lettering never leaks
+        // the export's state to an unauthorized caller (threats T1/T5).
+        await using var factory = new WorkspaceApiFactory();
+        const string outsiderSubject = "outsider";
+        Guid exportId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var outsider = await db.AddUserAsync(_issuer, outsiderSubject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, outsider.Id, MembershipRole.Owner);
+
+            // A separate workspace the outsider is NOT a member of, holding a dead-lettered (Failed) export.
+            var creator = await db.AddUserAsync(_issuer, "creator");
+            var ws = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, ws.Id, creator.Id, MembershipRole.Host);
+            var job = await db.AddExportJobAsync(org.Id, ws.Id, creator.Id, ExportScope.Workspace, ExportJobStatus.Failed);
+            exportId = job.Id;
+        });
+
+        using var client = factory.CreateClientFor(outsiderSubject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/exports/{exportId}?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Read_is_409_when_a_completed_export_has_no_manifest()
     {
         // Defensive: a completed job always has exactly one manifest (the worker commits them atomically), but if
@@ -471,4 +529,7 @@ public sealed class ExportReadEndpointTests
         int? TotalItemCount);
 
     private sealed record ExportEntryDto(string Kind, int ItemCount);
+
+    /// <summary>A minimal view of an RFC 7807 Problem Details body for asserting the failure disclosure.</summary>
+    private sealed record ProblemDto(string? Detail, string? Code);
 }

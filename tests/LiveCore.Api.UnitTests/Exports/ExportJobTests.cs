@@ -266,6 +266,85 @@ public class ExportJobTests
         Assert.Equal(ExportJobStatus.Pending, job.Status);
     }
 
+    // --- Attempt counting + dead-letter bound (CORE-RES-002) -------------------
+
+    [Fact]
+    public void Create_starts_with_a_zero_attempt_count()
+        => Assert.Equal(0, CreatePending().AttemptCount);
+
+    [Fact]
+    public void RecordAttempt_increments_the_counter_and_stamps_updated_at_without_changing_status()
+    {
+        var job = CreatePending();
+
+        job.RecordAttempt(_startedAt);
+
+        // A recorded attempt counts but does not move the lifecycle status (it is recorded after a rolled-back
+        // processing attempt, leaving the job queued for the next sweep).
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal(ExportJobStatus.Pending, job.Status);
+        Assert.False(job.IsTerminal);
+        Assert.Equal(_startedAt, job.UpdatedAt);
+
+        job.RecordAttempt(_finishedAt);
+        Assert.Equal(2, job.AttemptCount);
+        Assert.Equal(_finishedAt, job.UpdatedAt);
+    }
+
+    [Fact]
+    public void RecordAttempt_is_allowed_on_a_running_job()
+    {
+        var job = CreatePending();
+        job.Start(_startedAt);
+
+        job.RecordAttempt(_finishedAt);
+
+        Assert.Equal(1, job.AttemptCount);
+        Assert.Equal(ExportJobStatus.Running, job.Status);
+    }
+
+    [Fact]
+    public void RecordAttempt_then_dead_letter_via_fail_keeps_the_counter()
+    {
+        // The worker records the failed attempt then dead-letters the job via Fail once the bound is reached;
+        // the attempt counter is preserved on the now-terminal job (observable to its requester).
+        var job = CreatePending();
+        job.RecordAttempt(_startedAt);
+        job.RecordAttempt(_startedAt);
+        job.RecordAttempt(_startedAt);
+
+        job.Fail("dead-lettered after the maximum attempts", _finishedAt);
+
+        Assert.Equal(3, job.AttemptCount);
+        Assert.Equal(ExportJobStatus.Failed, job.Status);
+        Assert.True(job.IsTerminal);
+    }
+
+    [Fact]
+    public void RecordAttempt_on_a_completed_job_throws_and_does_not_mutate()
+    {
+        var job = CreatePending();
+        job.Start(_startedAt);
+        job.Complete(_finishedAt);
+
+        Assert.Throws<InvalidOperationException>(() => job.RecordAttempt(_finishedAt.AddHours(1)));
+
+        Assert.Equal(0, job.AttemptCount);
+        Assert.Equal(_finishedAt, job.UpdatedAt);
+    }
+
+    [Fact]
+    public void RecordAttempt_on_a_failed_job_throws_and_does_not_mutate()
+    {
+        var job = CreatePending();
+        job.Fail("first failure", _startedAt);
+
+        Assert.Throws<InvalidOperationException>(() => job.RecordAttempt(_finishedAt));
+
+        Assert.Equal(0, job.AttemptCount);
+        Assert.Equal(_startedAt, job.UpdatedAt);
+    }
+
     // --- Object-level boundary checks (fail-closed isolation) -------------------
 
     [Fact]
@@ -307,16 +386,18 @@ public class ExportJobTests
     public void ToString_is_log_safe_and_excludes_the_failure_reason()
     {
         var job = CreatePending(ExportScope.Workspace);
+        job.RecordAttempt(_startedAt);
         job.Fail("an internal diagnostic that must never reach logs", _startedAt);
 
         var rendered = job.ToString();
 
-        // Identifiers, scope and status are present; the free-form failure reason is NOT.
+        // Identifiers, scope, status and the attempt count are present; the free-form failure reason is NOT.
         Assert.Contains(job.Id.ToString(), rendered);
         Assert.Contains($"org={_organizationId}", rendered);
         Assert.Contains($"ws={_workspaceId}", rendered);
         Assert.Contains("scope=Workspace", rendered);
         Assert.Contains("status=Failed", rendered);
+        Assert.Contains("attempts=1", rendered);
         Assert.DoesNotContain("an internal diagnostic that must never reach logs", rendered);
     }
 

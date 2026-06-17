@@ -29,6 +29,12 @@ namespace LiveCore.Api.UnitTests.Exports;
 ///   <c>export_manifests(export_job_id)</c> index admits one manifest per job).</item>
 ///   <item>NEGATIVE TENANT ISOLATION (threat T5): a job in tenant A only ever counts tenant A's workspace
 ///   resources — never tenant B's — even when both tenants are swept together.</item>
+///   <item>MAX-ATTEMPT + DEAD-LETTER (CORE-RES-002): a structurally-broken export (its manifest insert always
+///   fails) increments its attempt counter on each sweep, is dead-lettered to the terminal <c>Failed</c> state
+///   once it reaches the configured maximum (its <c>Fail()</c> reason recorded, content-free), then stops being
+///   queued; a permanently-failing low-id job no longer blocks newer work in its batch; and a failed job in a
+///   batch is counted without aborting the rest of the run. The dead-letter path is exercised here, against real
+///   persistence, because it depends on a real rolled-back work transaction.</item>
 /// </list>
 /// All fixtures are generic (AGENTS.md, csv/forbidden_core_terms.csv).
 /// </summary>
@@ -184,8 +190,261 @@ public sealed class ExportProcessingJobTests : IDisposable
         Assert.Null(crossTenant);
     }
 
+    // ---- CORE-RES-002: max-attempt counting and dead-lettering -------------------------------------------------
+
+    [Fact]
+    public async Task A_structurally_broken_export_increments_its_attempt_counter_and_is_dead_lettered_to_failed()
+    {
+        // A structurally-broken export: its manifest insert ALWAYS fails (modeled by a manifest repository that
+        // throws for this job over the real, shared per-sweep context, so the work transaction really rolls
+        // back). It must not be retried forever: each sweep records one failed attempt durably, and once the
+        // attempt count reaches the configured maximum the worker dead-letters the job — ExportJob.Fail() is
+        // invoked so it ends terminal Failed (not Pending forever) and surfaces as failed to its requester.
+        var organization = await SeedOrganizationAsync("northwind-labs");
+        var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
+        var user = await SeedUserAsync("subject-a");
+        var job = await SeedPendingJobAsync(organization.Id, workspace.Id, user.Id);
+        const int maxAttempts = 3;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            var result = await RunFailingSweepAsync(maxAttempts, batchSize: 50, poisonJobId: job.Id);
+
+            Assert.Equal(1, result.Examined);
+            Assert.Equal(0, result.Processed);
+            if (attempt < maxAttempts)
+            {
+                // Below the bound: counted as a retryable failure, still queued.
+                Assert.Equal(1, result.Failed);
+                Assert.Equal(0, result.DeadLettered);
+            }
+            else
+            {
+                // The attempt that reaches the bound dead-letters the job.
+                Assert.Equal(0, result.Failed);
+                Assert.Equal(1, result.DeadLettered);
+            }
+
+            // The attempt counter increments by exactly one per sweep and stays non-terminal until the bound.
+            await using var checkContext = CreateContext();
+            var current = await new ExportJobRepository(checkContext)
+                .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+            Assert.NotNull(current);
+            Assert.Equal(attempt, current.AttemptCount);
+            Assert.Equal(
+                attempt < maxAttempts ? ExportJobStatus.Pending : ExportJobStatus.Failed,
+                current.Status);
+        }
+
+        // Dead-lettered: terminal Failed with a generic, content-free failure reason (never the requester or any
+        // exported content; threats T7/T8).
+        await using (var assertContext = CreateContext())
+        {
+            var deadLettered = await new ExportJobRepository(assertContext)
+                .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+            Assert.NotNull(deadLettered);
+            Assert.Equal(ExportJobStatus.Failed, deadLettered.Status);
+            Assert.Equal(maxAttempts, deadLettered.AttemptCount);
+            Assert.False(string.IsNullOrWhiteSpace(deadLettered.FailureReason));
+            Assert.DoesNotContain("subject-a", deadLettered.FailureReason!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("summer-show", deadLettered.FailureReason!, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // BOUNDED: a dead-lettered (terminal) job is no longer queued, so a further sweep examines nothing — it
+        // has stopped consuming a batch slot and the counter never climbs past the maximum.
+        var afterDeadLetter = await RunFailingSweepAsync(maxAttempts, batchSize: 50, poisonJobId: job.Id);
+        Assert.Equal(0, afterDeadLetter.Examined);
+
+        await using (var finalContext = CreateContext())
+        {
+            var final = await new ExportJobRepository(finalContext)
+                .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+            Assert.Equal(maxAttempts, final!.AttemptCount);
+        }
+    }
+
+    [Fact]
+    public async Task A_dead_lettered_poison_job_stops_consuming_a_batch_slot_so_newer_work_progresses()
+    {
+        // A batch size of one means a single sweep processes only the lowest-id queued job. A poison job that
+        // fails forever used to occupy that one slot every sweep, starving newer work; once it is dead-lettered
+        // it drops out of the queued read and the newer job is finally processed — newer work progresses past
+        // the poison item.
+        var organization = await SeedOrganizationAsync("northwind-labs");
+        var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
+        var user = await SeedUserAsync("subject-a");
+        await SeedSessionsAsync(organization.Id, workspace.Id, count: 1);
+        await SeedPendingJobAsync(organization.Id, workspace.Id, user.Id);
+        await SeedPendingJobAsync(organization.Id, workspace.Id, user.Id);
+
+        // The poison is whichever job sorts FIRST by the time-ordered surrogate id — the exact order the bounded
+        // queued read uses — so with a batch size of one it is the job read until it is dead-lettered. Determined
+        // by the database's own ordering (not a .NET Guid comparison, which differs from SQL ordering).
+        Guid poisonId;
+        Guid newerId;
+        await using (var idContext = CreateContext())
+        {
+            var ordered = await idContext.ExportJobs
+                .OrderBy(j => j.Id)
+                .Select(j => j.Id)
+                .ToListAsync(CancellationToken.None);
+            poisonId = ordered[0];
+            newerId = ordered[1];
+        }
+
+        const int maxAttempts = 2;
+
+        // Sweeps 1 and 2 read only the poison (the single batch slot); it fails, then dead-letters.
+        var sweep1 = await RunFailingSweepAsync(maxAttempts, batchSize: 1, poisonJobId: poisonId);
+        Assert.Equal(1, sweep1.Examined);
+        Assert.Equal(1, sweep1.Failed);
+
+        var sweep2 = await RunFailingSweepAsync(maxAttempts, batchSize: 1, poisonJobId: poisonId);
+        Assert.Equal(1, sweep2.Examined);
+        Assert.Equal(1, sweep2.DeadLettered);
+
+        // While the poison still held the slot the newer job was never touched.
+        await using (var midContext = CreateContext())
+        {
+            var newer = await new ExportJobRepository(midContext)
+                .FindByIdAsync(organization.Id, workspace.Id, newerId, CancellationToken.None);
+            Assert.Equal(ExportJobStatus.Pending, newer!.Status);
+            Assert.Equal(0, await midContext.ExportManifests.CountAsync(CancellationToken.None));
+        }
+
+        // Sweep 3: the poison is terminal, so the queued read now surfaces the NEWER job and processes it to
+        // completion — it progressed past the poison item that no longer consumes the slot.
+        var sweep3 = await RunFailingSweepAsync(maxAttempts, batchSize: 1, poisonJobId: poisonId);
+        Assert.Equal(1, sweep3.Examined);
+        Assert.Equal(1, sweep3.Processed);
+
+        await using (var assertContext = CreateContext())
+        {
+            var jobs = new ExportJobRepository(assertContext);
+            var newer = await jobs.FindByIdAsync(organization.Id, workspace.Id, newerId, CancellationToken.None);
+            Assert.Equal(ExportJobStatus.Completed, newer!.Status);
+            var poison = await jobs.FindByIdAsync(organization.Id, workspace.Id, poisonId, CancellationToken.None);
+            Assert.Equal(ExportJobStatus.Failed, poison!.Status);
+            var manifest = await new ExportManifestRepository(assertContext)
+                .FindByExportJobIdAsync(organization.Id, workspace.Id, newerId, CancellationToken.None);
+            Assert.NotNull(manifest);
+        }
+    }
+
+    [Fact]
+    public async Task A_failed_job_in_a_batch_is_counted_and_the_rest_of_the_batch_still_completes()
+    {
+        // A persistence failure for one job must NOT abort the sweep nor corrupt the others: the failing job is
+        // counted (and its attempt recorded), and the healthy job in the same batch still completes with its
+        // manifest. This also guards the shared per-sweep context: the failing job's rolled-back transitions must
+        // not leak into the healthy job's commit (the worker reloads the durable row to record the attempt).
+        var organization = await SeedOrganizationAsync("northwind-labs");
+        var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
+        var user = await SeedUserAsync("subject-a");
+        await SeedSessionsAsync(organization.Id, workspace.Id, count: 2);
+        await SeedPendingJobAsync(organization.Id, workspace.Id, user.Id);
+        await SeedPendingJobAsync(organization.Id, workspace.Id, user.Id);
+
+        // The poison is the lower-id job so it is processed BEFORE the healthy one in the same sweep (the queued
+        // read is ordered by id), which is the order that would expose any leak of its rolled-back state.
+        Guid poisonId;
+        Guid healthyId;
+        await using (var idContext = CreateContext())
+        {
+            var ordered = await idContext.ExportJobs
+                .OrderBy(j => j.Id)
+                .Select(j => j.Id)
+                .ToListAsync(CancellationToken.None);
+            poisonId = ordered[0];
+            healthyId = ordered[1];
+        }
+
+        var result = await RunFailingSweepAsync(maxAttempts: 3, batchSize: 50, poisonJobId: poisonId);
+
+        Assert.Equal(2, result.Examined);
+        Assert.Equal(1, result.Processed);
+        Assert.Equal(1, result.Failed);
+        Assert.Equal(0, result.DeadLettered);
+
+        await using var assertContext = CreateContext();
+        var jobs = new ExportJobRepository(assertContext);
+
+        // The healthy job completed with its manifest.
+        var healthy = await jobs.FindByIdAsync(organization.Id, workspace.Id, healthyId, CancellationToken.None);
+        Assert.Equal(ExportJobStatus.Completed, healthy!.Status);
+        var manifest = await new ExportManifestRepository(assertContext)
+            .FindByExportJobIdAsync(organization.Id, workspace.Id, healthyId, CancellationToken.None);
+        Assert.NotNull(manifest);
+
+        // The poison job stayed non-terminal with exactly one recorded attempt and produced no manifest — its
+        // rolled-back transitions did not leak into the healthy job's commit.
+        var poison = await jobs.FindByIdAsync(organization.Id, workspace.Id, poisonId, CancellationToken.None);
+        Assert.Equal(ExportJobStatus.Pending, poison!.Status);
+        Assert.Equal(1, poison.AttemptCount);
+        var poisonManifest = await new ExportManifestRepository(assertContext)
+            .FindByExportJobIdAsync(organization.Id, workspace.Id, poisonId, CancellationToken.None);
+        Assert.Null(poisonManifest);
+    }
+
+    /// <summary>
+    /// Runs one export processing sweep over a fresh per-sweep context (as a production DI scope would) with the
+    /// manifest insert forced to FAIL for <paramref name="poisonJobId"/> — modeling a structurally-broken export
+    /// whose manifest can never be produced — while every other collaborator is the real EF-backed implementation.
+    /// </summary>
+    private async Task<ExportProcessingResult> RunFailingSweepAsync(int maxAttempts, int batchSize, Guid poisonJobId)
+    {
+        await using var runContext = CreateContext();
+        var manifests = new FailingExportManifestRepository(new ExportManifestRepository(runContext), poisonJobId);
+        var service = new ExportProcessingService(
+            new QueuedExportJobReader(runContext),
+            new ExportJobRepository(runContext),
+            new WorkspaceExportInventoryReader(runContext),
+            manifests,
+            new ExportProcessingOptions(TimeSpan.FromHours(1), batchSize, maxAttempts),
+            new FixedTimeProvider(_processedAt),
+            NullLogger<ExportProcessingService>.Instance);
+        return await service.ProcessQueuedExportsAsync(CancellationToken.None);
+    }
+
     private static int EntryCount(ExportManifest manifest, ExportResourceKind kind)
         => manifest.Entries.Single(entry => entry.Kind == kind).ItemCount;
+
+    /// <summary>
+    /// A manifest repository decorator that throws a <see cref="DbUpdateException"/> from
+    /// <see cref="AddAsync"/> for a single designated export job id (a structurally-broken export whose manifest
+    /// can never be persisted), delegating every other call — and every other job's manifest add — to the real
+    /// repository over the same context. It throws BEFORE adding the manifest, so the in-flight work transaction
+    /// never commits and the job's transitions are left to roll back, exactly as a real persistence failure
+    /// would (CORE-RES-002).
+    /// </summary>
+    private sealed class FailingExportManifestRepository : IExportManifestRepository
+    {
+        private readonly IExportManifestRepository _inner;
+        private readonly Guid _poisonJobId;
+
+        public FailingExportManifestRepository(IExportManifestRepository inner, Guid poisonJobId)
+        {
+            _inner = inner;
+            _poisonJobId = poisonJobId;
+        }
+
+        public Task<ExportManifestAddResult> AddAsync(ExportManifest manifest, CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(manifest);
+            if (manifest.ExportJobId == _poisonJobId)
+            {
+                throw new DbUpdateException($"simulated structural persistence failure for export job {manifest.ExportJobId}");
+            }
+
+            return _inner.AddAsync(manifest, cancellationToken);
+        }
+
+        public Task<ExportManifest?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
+            => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
+
+        public Task<ExportManifest?> FindByExportJobIdAsync(Guid organizationId, Guid workspaceId, Guid exportJobId, CancellationToken cancellationToken)
+            => _inner.FindByExportJobIdAsync(organizationId, workspaceId, exportJobId, cancellationToken);
+    }
 
     // Seeding helpers --------------------------------------------------------------------------------------------
 
