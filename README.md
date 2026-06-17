@@ -365,6 +365,23 @@ logic is tested by `scripts/test-coverage-gate.ps1`. See
 
 ### TypeScript packages
 
+The four packages (`@livecore/contracts`, `@livecore/sdk-ts`,
+`@livecore/design-tokens`, `@livecore/ui-core`) are **publishable** to the public
+npm registry under the `@livecore` scope, so a vertical app in another repository
+installs them with its package manager (`pnpm add @livecore/sdk-ts`) and imports the
+typed surface (`import { LiveCoreClient } from "@livecore/sdk-ts"`). Each declares a
+complete published surface — `publishConfig` (public access + registry),
+`repository`, `license`, `sideEffects: false`, the `main`/`module`/`types`/`exports`
+entry points and a `files` list that ships only `dist`, `CHANGELOG.md`, `LICENSE`
+and `THIRD-PARTY-NOTICES.md` — so `pnpm pack` produces a complete, importable
+tarball and nothing internal/test/source-only leaks in. A package-build test per
+package packs the tarball and asserts exactly that. Inside this monorepo the
+`@livecore/sdk-ts → @livecore/contracts` dependency stays a `workspace:*` link
+(pnpm rewrites it to the resolved version only at publish time). Choosing the
+registry and the publish-shape is recorded in
+[`docs/23_PACKAGE_VERSIONING.md`](docs/23_PACKAGE_VERSIONING.md) ("Publishing"); the
+release-gated CI publish job that pushes them is a follow-up (CORE-PUB-002).
+
 Install dependencies:
 
 ```bash

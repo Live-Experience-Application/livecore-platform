@@ -211,6 +211,15 @@ The consistency of the process is enforced by tests, not convention:
   tarball. The `THIRD-PARTY-NOTICES.md` is generated and drift-gated; see
   `docs/16_LICENSING.md` ("Third-party attribution and the license-compliance
   gate").
+- A **package-build (pack) test** in each package (`tests/<name>.pack.test.mjs`,
+  CORE-PUB-001) packs the package with `pnpm pack --json` and asserts the resulting
+  tarball contains every declared entry point, the type declarations, the
+  `CHANGELOG.md` and the `LICENSE`, and excludes tests and non-shipping sources
+  (`src/`, `tests/`, `scripts/`, `tsconfig*.json`). It also asserts the manifest
+  declares a publishable surface — not `private`, with `publishConfig`
+  (access + registry), `repository`, `license`, `sideEffects` and the
+  `main`/`module`/`types`/`exports` entry points (see "Publishing" above) — so a
+  regression that re-privatizes a package or leaks internal source fails CI.
 - A **cross-package version lockstep test** (CORE-CMP-003,
   `tests/version-lockstep/version-lockstep.test.mjs`, run by `pnpm run test:versions`
   and the CI `typescript` job) checks that the four packages agree on **one**
@@ -249,7 +258,57 @@ release" above and the `v<version>` tag you push are the **same** value.
 
 ## Publishing
 
-The packages are currently marked `private` and consumed inside this workspace.
-Wiring an actual publish pipeline (a registry, release automation and removing
-`private`) is a follow-up; this document defines the versioning and changelog
-discipline that any such pipeline builds on.
+The four packages are **publishable**: each declares a complete published surface
+so a vertical app in another repository can install it from a registry, instead of
+being reachable only as a `workspace:*` link inside this monorepo (CORE-PUB-001).
+
+### Registry decision
+
+The packages publish to the **public npm registry** (`https://registry.npmjs.org/`)
+under the existing `@livecore` scope. The alternative considered was GitHub
+Packages, but GitHub Packages requires the package scope to match the repository
+owner's namespace (`@live-experience-application`), which would force a breaking
+rename of all four published package names; the public npm registry keeps the
+established `@livecore` scope, is the most consumable path for a vertical in any
+repository, and is the registry the publish pipeline (CORE-PUB-002) and npm build
+provenance (CORE-PUB-004) build on. Each package therefore declares:
+
+```jsonc
+"publishConfig": {
+  "access": "public",          // scoped packages default to restricted; publish them publicly
+  "registry": "https://registry.npmjs.org/"
+}
+```
+
+### Published surface
+
+Beyond `publishConfig`, each `packages/*/package.json` declares the surface a
+registry consumer relies on, and the LICENSE travels in the tarball (CORE-LIC-003):
+
+- no `private` flag (the packages are no longer workspace-only);
+- `repository`, `license` (`AGPL-3.0-or-later`) and `sideEffects: false` (the
+  packages are pure, so a consumer's bundler can tree-shake unused exports);
+- the entry points `main`, `module` and `types` plus a conditional `exports` map
+  (`"."` resolving `types`/`import`/`default` to the built `dist/index.*`, and
+  `"./package.json"`), so the package exposes one clean entry point and internal
+  `dist/` modules are not deep-importable;
+- `files` listing `dist`, `CHANGELOG.md`, `LICENSE` and `THIRD-PARTY-NOTICES.md`
+  only, so `pnpm pack` produces a complete, importable tarball and nothing
+  internal, test or source-only (`src/`, `tests/`, `scripts/`, `tsconfig*.json`)
+  leaks into the package.
+
+The `@livecore/sdk-ts` dependency on `@livecore/contracts` stays `workspace:*` in
+the repository, so the monorepo build keeps using the live package; pnpm rewrites
+it to the resolved shared version only at pack/publish time, so the published
+tarball carries no `workspace:` protocol.
+
+A **package-build test per package** (`tests/<name>.pack.test.mjs`) packs the
+package with `pnpm pack --json` and asserts the tarball contains the declared entry
+points, the types, the `CHANGELOG.md` and the `LICENSE`, and excludes tests and
+non-shipping sources; it also asserts the manifest declares the publishable surface
+above. The lockstep VERSION discipline (below) is unchanged.
+
+Wiring the release-gated CI publish job (building and pushing all four packages to
+the registry on a release tag, with a per-PR dry run) is a follow-up, CORE-PUB-002;
+this document defines the versioning, changelog and publish-shape discipline that
+the pipeline builds on.

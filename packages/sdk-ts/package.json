@@ -1,22 +1,39 @@
 {
   "name": "@livecore/sdk-ts",
   "version": "0.1.0",
-  "private": true,
   "description": "Typed TypeScript client for vertical apps consuming the LiveCore Core API. Wraps the implemented /api/v1 routes with methods returning @livecore/contracts types over an authenticated transport.",
   "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Live-Experience-Application/livecore-platform.git"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "CHANGELOG.md",
     "LICENSE",
     "THIRD-PARTY-NOTICES.md"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check:sdk-parity": "node scripts/route-parity-drift.mjs",
-    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test tests/sdk-ts.build.test.mjs tests/sdk-ts.route-parity.test.mjs"
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test tests/sdk-ts.build.test.mjs tests/sdk-ts.route-parity.test.mjs tests/sdk-ts.pack.test.mjs"
   },
   "dependencies": {
     "@livecore/contracts": "workspace:*"

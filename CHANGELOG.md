@@ -51,6 +51,22 @@ hosts are not published packages and are not versioned here. See
   the generated schemas, so the server's contract and the published types cannot
   silently diverge. See the package changelog for detail.
 
+### Changed
+
+- All four packages are now **publishable** to the public npm registry under the
+  `@livecore` scope, instead of being workspace-only `private` packages
+  (CORE-PUB-001). Each manifest drops `private` and declares a complete published
+  surface — `publishConfig` (public access + registry), `repository`,
+  `sideEffects: false`, a conditional `exports` map and a `module` entry alongside
+  `main`/`types` — with `files` shipping only `dist`, the per-package `CHANGELOG.md`,
+  the AGPL `LICENSE` and the `THIRD-PARTY-NOTICES.md`, so `pnpm pack` produces a
+  complete importable tarball and nothing internal/test/source-only leaks in. The
+  `@livecore/sdk-ts → @livecore/contracts` link stays `workspace:*` for local
+  development (rewritten to the resolved version at publish time), the lockstep
+  VERSION discipline is unchanged, and the typed surface consumers import is
+  unchanged. The registry decision is recorded in `docs/23_PACKAGE_VERSIONING.md`
+  ("Publishing"); the release-gated CI publish job is a follow-up (CORE-PUB-002).
+
 ## [0.1.0] - 2026-06-13
 
 First stable, documented release of the typed Core packages a vertical app

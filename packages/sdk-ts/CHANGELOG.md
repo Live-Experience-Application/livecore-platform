@@ -86,6 +86,16 @@ The Core SDK and UI packages are released together (lockstep), so every
   replaced by `afterSequence` (a number), sent as the `?afterSequence=` query
   parameter. A cursor of N replays N+1.. with no skips or duplicates
   (CORE-RTC-001).
+- The package is now **publishable** to the public npm registry instead of being a
+  workspace-only `private` package (CORE-PUB-001). `private` is removed and the
+  manifest declares the published surface — `publishConfig` (public access +
+  registry), `repository`, `sideEffects: false`, a conditional `exports` map and a
+  `module` entry alongside `main`/`types` — while `files` still ships only `dist`,
+  the `CHANGELOG.md`, the AGPL `LICENSE` and the `THIRD-PARTY-NOTICES.md`. The
+  `workspace:*` link to `@livecore/contracts` is kept for local development and
+  rewritten to the resolved shared version at publish time, so the tarball carries
+  no `workspace:` protocol. The typed surface a consumer imports is unchanged. See
+  `docs/23_PACKAGE_VERSIONING.md` ("Publishing").
 
 ## [0.1.0] - 2026-06-13
 

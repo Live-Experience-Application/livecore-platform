@@ -137,6 +137,14 @@ The Core SDK and UI packages are released together (lockstep), so every
 - The reconnect-replay cursor is now the per-session `sequence` number rather
   than the event id; `SessionEventReplayResponse.events` are in append (sequence)
   order.
+- The package is now **publishable** to the public npm registry instead of being a
+  workspace-only `private` package (CORE-PUB-001). `private` is removed and the
+  manifest declares the published surface — `publishConfig` (public access +
+  registry), `repository`, `sideEffects: false`, a conditional `exports` map and a
+  `module` entry alongside `main`/`types` — while `files` still ships only `dist`,
+  the `CHANGELOG.md`, the AGPL `LICENSE` and the `THIRD-PARTY-NOTICES.md`. The typed
+  surface a consumer imports is unchanged. See `docs/23_PACKAGE_VERSIONING.md`
+  ("Publishing").
 
 ## [0.1.0] - 2026-06-13
 
