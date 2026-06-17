@@ -2461,10 +2461,12 @@ and the chain stays gap-free; the unique `audit_logs(organization_id, sequence)`
 backstop.
 
 The **verification routine** (`AuditLogChainVerifier`) reads a tenant's chain in append order and reports
-whether it is intact, pinpointing the first altered/deleted/reordered entry. It is **tenant-scoped** (a break in
-one tenant never implicates another) and content-free (identifiers and counts only, threat T7). The **read
-contract is unchanged**: the existing append + tenant-scoped reads keep their shape; verification is a separate
-routine.
+whether it is intact, pinpointing the first altered/deleted/reordered entry. It **streams the chain in bounded
+ordered segments** via the `(organization_id, sequence)` cursor instead of materializing a tenant's whole chain in
+memory, so verification memory/time stay bounded as the audit log grows (CORE-PERF-005); detection is unchanged
+and stops at the first broken entry. It is **tenant-scoped** (a break in one tenant never implicates another) and
+content-free (identifiers and counts only, threat T7). The **read contract is unchanged**: the existing append +
+tenant-scoped reads keep their shape; verification is a separate routine.
 
 The chain is an **unsigned** SHA-256 chain (no secret key): it detects accidental corruption, an isolated row
 edit/deletion and a bypass of the append path. As **defence in depth**, a deployment also REVOKEs `UPDATE` and

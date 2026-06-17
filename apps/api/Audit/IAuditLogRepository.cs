@@ -75,18 +75,57 @@ public interface IAuditLogRepository
 
     /// <summary>
     /// Lists every audit entry of the given organization in APPEND (per-tenant <see cref="AuditLogEntry.Sequence"/>)
-    /// order — the order the tamper-evident hash chain is linked along (CORE-SEC-003), for
-    /// <see cref="AuditLogChainVerifier"/>. It differs from <see cref="ListByOrganizationAsync"/> ONLY in the
-    /// ordering key: that read orders by the event-time-ordered surrogate id (the chronological read contract,
-    /// unchanged), whereas the chain must be walked in the order entries were appended, which the gap-free
-    /// sequence captures even when a producer records an action out of event-time order. Tenant scope is
-    /// identical — the predicate matches <c>organization_id</c>, so a foreign tenant's records are NEVER returned
-    /// (threat T5) and a break in one tenant never implicates another.
+    /// order — the order the tamper-evident hash chain is linked along (CORE-SEC-003). It differs from
+    /// <see cref="ListByOrganizationAsync"/> ONLY in the ordering key: that read orders by the event-time-ordered
+    /// surrogate id (the chronological read contract, unchanged), whereas the chain must be walked in the order
+    /// entries were appended, which the gap-free sequence captures even when a producer records an action out of
+    /// event-time order. Tenant scope is identical — the predicate matches <c>organization_id</c>, so a foreign
+    /// tenant's records are NEVER returned (threat T5) and a break in one tenant never implicates another.
+    ///
+    /// This materializes a tenant's WHOLE chain. <see cref="AuditLogChainVerifier"/> no longer uses it: as the
+    /// audit log grows that materialization is unbounded, so verification now streams the chain in bounded ordered
+    /// segments via <see cref="ListChainSegmentByOrganizationAsync"/> (CORE-PERF-005). This full read remains for
+    /// callers that genuinely want the whole (bounded) chain in one list — the full counterpart of the paged
+    /// <see cref="ListPageByOrganizationAsync"/>, exactly as <see cref="ListByOrganizationAsync"/> is the full
+    /// counterpart of the time-ordered page.
     /// </summary>
     /// <param name="organizationId">The tenant whose chain is read (required, non-empty).</param>
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <exception cref="ArgumentException">The organization id is empty.</exception>
     Task<IReadOnlyList<AuditLogEntry>> ListChainByOrganizationAsync(
         Guid organizationId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists the NEXT bounded SEGMENT of the given organization's hash chain in APPEND
+    /// (per-tenant <see cref="AuditLogEntry.Sequence"/>) order, for the streaming
+    /// <see cref="AuditLogChainVerifier"/> (CORE-PERF-005). It is the cursored, bounded counterpart of
+    /// <see cref="ListChainByOrganizationAsync"/>: it returns at most <paramref name="limit"/> entries whose
+    /// sequence is strictly greater than <paramref name="afterSequence"/>, so the verifier walks an arbitrarily
+    /// long chain in ORDERED SEGMENTS via the <c>(organization_id, sequence)</c> cursor instead of materializing a
+    /// tenant's entire chain in memory — verification memory and time stay BOUNDED as the audit log grows.
+    ///
+    /// A <see langword="null"/> <paramref name="afterSequence"/> reads from the START of the chain (the genesis);
+    /// a set value reads only the strictly-later entries, so the caller advances the cursor to the last returned
+    /// entry's sequence to fetch the following segment, and a segment returned shorter than
+    /// <paramref name="limit"/> is the last one. Tenant scope is identical to the other reads — the predicate
+    /// matches <c>organization_id</c>, so a foreign tenant's records are NEVER returned (threat T5) — and the
+    /// ordering is the unique <c>audit_logs(organization_id, sequence)</c> index, so each segment is a contiguous,
+    /// gap-free, non-overlapping window of the chain. Mirrors the Realtime reconnect-replay cursor
+    /// (<c>ISessionEventRepository.ListBySessionAfterAsync</c>, CORE-PERF-002/CORE-RTC-001).
+    /// </summary>
+    /// <param name="organizationId">The tenant whose chain segment is read (required, non-empty).</param>
+    /// <param name="afterSequence">
+    /// The exclusive lower-bound cursor: only entries with a greater <see cref="AuditLogEntry.Sequence"/> are
+    /// returned. <see langword="null"/> reads from the start of the chain.
+    /// </param>
+    /// <param name="limit">The maximum number of entries to return (the segment size; at least one).</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <exception cref="ArgumentException">The organization id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="limit"/> is less than one.</exception>
+    Task<IReadOnlyList<AuditLogEntry>> ListChainSegmentByOrganizationAsync(
+        Guid organizationId,
+        long? afterSequence,
+        int limit,
         CancellationToken cancellationToken);
 }

@@ -422,7 +422,11 @@ of a tenant ever share a sequence, so the chain stays a single linear spine.
 The **verification routine** (`AuditLogChainVerifier`) reads a tenant's entries in append (sequence) order and
 checks, for every chained entry: its stored `entry_hash` recomputes from its content (detecting an edit), its
 `previous_hash` links to the prior entry's `entry_hash` (detecting an insertion/removal/reorder), and its
-`sequence` is contiguous with the prior entry's (detecting a deletion). It is tenant-scoped — a break in one
+`sequence` is contiguous with the prior entry's (detecting a deletion). It STREAMS the chain in bounded ordered
+segments via the `(organization_id, sequence)` cursor (`WHERE organization_id = X [AND sequence > cursor]
+ORDER BY sequence LIMIT n`, backed by the unique `audit_logs(organization_id, sequence)` index) rather than
+materializing a tenant's whole chain in memory, so verification memory/time stay bounded as the log grows
+(CORE-PERF-005); detection is unchanged and stops at the first broken entry. It is tenant-scoped — a break in one
 tenant never implicates another — and content-free.
 
 The chain is an **unsigned** SHA-256 chain (no secret key), so it detects accidental corruption, an isolated

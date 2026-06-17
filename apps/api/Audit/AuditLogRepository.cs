@@ -254,10 +254,59 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         // audit_logs(organization_id, sequence) index backs this ordering. NON-TRACKED (CORE-SEC-004): the
         // verifier only reads the chain, so detached entities are exactly right and a verification can never
         // accidentally write a row back.
+        //
+        // This materializes the WHOLE chain; the streaming verifier reads bounded segments via
+        // ListChainSegmentByOrganizationAsync (CORE-PERF-005) so its memory stays bounded as the log grows. This
+        // full read remains the full counterpart of the paged ListPageByOrganizationAsync.
         return await _dbContext.AuditLogs
             .AsNoTracking()
             .Where(entry => entry.OrganizationId == organizationId)
             .OrderBy(entry => entry.Sequence)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<AuditLogEntry>> ListChainSegmentByOrganizationAsync(
+        Guid organizationId,
+        long? afterSequence,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored tenant's records, so the lookup fails fast (mirrors the other
+        // reads).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (limit < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "The chain segment cap must be at least one.");
+        }
+
+        // STREAMED CHAIN VERIFICATION (CORE-PERF-005). The cursor and the cap are pushed into SQL: the predicate
+        // leads with the tenant column (threat T5), keeps only the rows AFTER the client cursor, orders by the
+        // per-tenant APPEND sequence (CORE-SEC-003) — the order the hash chain is linked along — and caps at the
+        // limit: WHERE organization_id = X [AND sequence > cursor] ORDER BY sequence LIMIT limit, backed by the
+        // unique audit_logs(organization_id, sequence) index. So the verifier walks an arbitrarily long chain in
+        // ORDERED SEGMENTS rather than loading a tenant's whole chain then verifying in memory, and verification
+        // memory/time stay bounded as the log grows. NON-TRACKED (CORE-SEC-004): the verifier only reads, so a
+        // verification can never write a row back. Mirrors the Realtime reconnect-replay cursor (CORE-PERF-002).
+        var query = _dbContext.AuditLogs
+            .AsNoTracking()
+            .Where(entry => entry.OrganizationId == organizationId);
+
+        // A null cursor reads from the start of the chain; a set cursor keeps only the strictly-later entries. The
+        // comparison is done SQL-side, never by loading then filtering.
+        if (afterSequence is { } cursor)
+        {
+            query = query.Where(entry => entry.Sequence > cursor);
+        }
+
+        return await query
+            .OrderBy(entry => entry.Sequence)
+            .Take(limit)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }

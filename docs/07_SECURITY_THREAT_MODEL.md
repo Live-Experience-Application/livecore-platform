@@ -209,6 +209,39 @@ This story closes that window by making the append itself transactional, paired 
 The result: many concurrent same-tenant audited actions produce a single unbroken, gap-free hash chain — no
 fork, and no false-positive tamper detection.
 
+## Streamed audit-chain verification (CORE-PERF-005)
+
+The per-tenant hash chain (CORE-SEC-003) is the security record's tamper-evidence control, and the
+`AuditLogChainVerifier` is the routine a deployment runs to check it. But the chain GROWS without bound as a
+tenant accumulates audited actions, and the verifier previously read it through
+`AuditLogRepository.ListChainByOrganizationAsync`, which materializes a tenant's ENTIRE chain into memory in one
+read. So the cost of asking "has this tenant's audit history been altered?" grew with the log: a long-lived,
+high-activity tenant could force the verification to load an unbounded result set, which both wastes memory and —
+because integrity checks are exactly the thing an operator wants to be able to run routinely — is itself a
+scale/abuse surface (threat T9).
+
+This story makes verification stream in BOUNDED segments without changing what it detects:
+
+- **Ordered segments via the `(organization_id, sequence)` cursor.** The verifier reads the chain through
+  `AuditLogRepository.ListChainSegmentByOrganizationAsync`, the cursored, bounded counterpart of the full read:
+  `WHERE organization_id = X [AND sequence > cursor] ORDER BY sequence LIMIT n`, backed by the unique
+  `audit_logs(organization_id, sequence)` index. It walks the chain one fixed-size window at a time, advancing the
+  cursor to the last entry of each segment, so at most one segment (plus O(1) running state) is ever held —
+  verification memory and time stay bounded as the audit log grows. This mirrors the Realtime reconnect-replay
+  cursor (CORE-PERF-002) and is tenant-scoped exactly like every other audit read (the predicate leads with
+  `organization_id`, so a foreign tenant's records are never read — threat T5).
+- **Detection is unchanged.** The per-entry checks (content integrity, linkage, contiguity) live in one
+  incremental accumulator (`AuditLogChainVerification`) that the streamed segments feed one entry at a time; the
+  in-memory `AuditLogChain.Verify` drives the SAME accumulator over a materialized list, so the streamed and the
+  materialized reads cannot drift apart. A tampered, deleted, inserted or reordered chain is still detected and
+  the result still pinpoints the FIRST broken entry — including a break that lies several segments in — and the
+  verifier stops reading further segments at the break (later entries cannot change the verdict). The result
+  carries only identifiers and counts, never recorded content (threat T7).
+
+The append path, the per-tenant chain and the `AuditLogChainVerifier` contract are otherwise unchanged; this is a
+read-shape change to the verification routine. It pairs with CORE-SEC-004 (the read stays non-tracked, so a
+verification can never write a row back) and CORE-PERF-003.
+
 ## Data-subject erasure (CORE-PRIV-001)
 
 A data subject has a right to erasure (GDPR Art.17), but until this story Core had **no** erasure path: the
