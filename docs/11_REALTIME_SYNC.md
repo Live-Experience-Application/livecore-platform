@@ -153,7 +153,34 @@ concurrent session, and a reveal scoped to a different participant are all exclu
 selected-participant guarantees; threats T5/T3). Because the gate reuses the central `VisibilityRule`
 predicates, the REST feed can never diverge from per-resource access or the realtime recipient set
 (`docs/05_MODULE_CONTRACTS.md`: visibility is decided in one place). The same in-memory gate is the one the
-audience-participant entity-search path reuses (CORE-PERF-008), so feed and search stay consistent.
+audience-participant entity-search path reuses (CORE-PERF-008, next), so feed and search stay consistent.
+
+## In-memory audience-filtered entity search (CORE-PERF-008)
+
+Entity search (`EntitySearchService`) filters a workspace's entities to what the caller may see: a
+host-capable role gets every matching entity, an audience participant gets only the entities revealed to them
+**in their session**, and any other caller fails closed to the empty view. The audience path used to mirror
+the pre-CORE-PERF-004 feed — for **every candidate entity** it asked the policy
+`CanParticipantViewResourceAsync`, which issued **another** `ListByResourceAsync` per candidate — so a search
+over `N` candidate entities did `N` `visibility_rules` lookups (the SAME `1+M` fan-out CORE-PERF-004 fixed for
+the feed, in a path that story did not name). The path is latent today — there is no entity HTTP route
+(deliberately absent per CORE-SPEC-003) — but CORE-ENT-006 (entity list/read) moves the audience-filter
+pattern toward a live path, so the cost is fixed before it ships.
+
+The audience path now reuses the **same** single-load in-memory gate the feed uses: it resolves the
+participant's visible set through `VisibilityPreviewService.GetVisibleResourcesForParticipantAsync` — one
+`ListByWorkspaceAsync` load, then `VisibilityPolicy.ComputeVisibleResourcesForParticipant` selecting the
+visible resources **over the rows already in memory** — and narrows the already-scoped candidate set to the
+entities in that set. So the per-search rule-lookup count is **one workspace load plus the entity load**,
+**independent of entity volume** (`O(1)`, not `O(N)`), and the visible set is **byte-for-byte** what the old
+per-candidate computation produced: the audience-wide, selected-participant, cross-session and host
+equivalences hold and the filter stays fail-closed — a Hidden rule, a reveal to a different participant and a
+reveal in a sibling session all grant nothing (the selected-participant and session-scope guarantees; threats
+T5/T3, and the query-volume abuse surface T9 in `docs/07_SECURITY_THREAT_MODEL.md`). Because both paths
+resolve visibility through the one gate, **the visible feed and entity search can never diverge** — visibility
+is decided in exactly one place (`docs/05_MODULE_CONTRACTS.md`; `docs/02_ARCHITECTURE.md`: entity visibility is
+not computed ad hoc in many places). No new schema, route or event: the single-resource read index and the
+`ListByWorkspaceAsync` load CORE-PERF-004 already established back this path unchanged.
 
 ## Per-session event sequence (CORE-RTC-001)
 

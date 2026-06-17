@@ -781,23 +781,26 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // entity-instance schema-conformance is wired here (all out of scope).
     builder.Services.AddScoped<TemplateEntityTypeLoader>();
 
-    // Entity search service (CORE-ENT-005, retrofitted by CORE-API-006 to apply the real audience
-    // filter): searches a workspace's entities for a given workspace role WITH VISIBILITY FILTERING.
-    // Registered here, inside the persistence conditional, because it depends on the entity repository
-    // and the central VisibilityPolicy above (exactly like the join service depends on the
-    // session/participant repositories and VisibilityPreviewService depends on the policy). It is a
-    // plain decision service: tenant id, workspace id, the caller's role, the calling participant and
-    // generic criteria in, the role-appropriate entity set out. The host-capable roles
-    // (Owner/Admin/Host/CoHost — "View host-only content" in docs/06_AUTHORIZATION_MATRIX.md) get every
-    // matching entity through the tenant- and workspace-scoped repository lookups (organization boundary
-    // before workspace boundary; threat T5); an audience PARTICIPANT (Participant/Observer with an
-    // identified participant) gets exactly the entities revealed to them, decided per candidate by
-    // VisibilityPolicy.CanParticipantViewResourceAsync — the SAME participant-aware primitive the
-    // participant-visible feed and realtime recipient resolver use, so entity search never diverges and
-    // visibility is decided in ONE place (docs/02_ARCHITECTURE.md, docs/05_MODULE_CONTRACTS.md); every
-    // other caller (the audit role, any undefined role, an audience role with no participant) fails
-    // closed to the empty view before any query. There is NO HTTP endpoint (csv/api_routes.csv defines
-    // no entity route) and NO parallel visibility engine in this story.
+    // Entity search service (CORE-ENT-005; CORE-API-006 real audience filter; CORE-PERF-008 single-load
+    // in-memory gate): searches a workspace's entities for a given workspace role WITH VISIBILITY
+    // FILTERING. Registered here, inside the persistence conditional, because it depends on the entity
+    // repository and the Visibility module's VisibilityPreviewService above (exactly like the join service
+    // depends on the session/participant repositories). It is a plain decision service: tenant id,
+    // workspace id, the caller's role, the calling participant and generic criteria in, the
+    // role-appropriate entity set out. The host-capable roles (Owner/Admin/Host/CoHost — "View host-only
+    // content" in docs/06_AUTHORIZATION_MATRIX.md) get every matching entity through the tenant- and
+    // workspace-scoped repository lookups (organization boundary before workspace boundary; threat T5); an
+    // audience PARTICIPANT (Participant/Observer with an identified participant and session) gets exactly
+    // the entities revealed to them, computed from a SINGLE workspace-rule load gated IN MEMORY by the SAME
+    // VisibilityPreviewService path the participant-visible feed uses (the CORE-PERF-004 gate
+    // VisibilityPolicy.ComputeVisibleResourcesForParticipant), so the rule-query count is independent of
+    // entity volume (one workspace-rule load plus the entity load, never the old 1+M per-candidate
+    // fan-out) and entity search can never diverge from the feed, per-resource access or the realtime
+    // recipient gate — visibility is decided in ONE place (docs/02_ARCHITECTURE.md,
+    // docs/05_MODULE_CONTRACTS.md); every other caller (the audit role, any undefined role, an audience
+    // role with no participant or no session) fails closed to the empty view before any query. There is NO
+    // HTTP endpoint (csv/api_routes.csv defines no entity route) and NO parallel visibility engine in this
+    // story.
     builder.Services.AddScoped<EntitySearchService>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal

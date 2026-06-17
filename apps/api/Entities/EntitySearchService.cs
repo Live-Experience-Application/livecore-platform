@@ -15,8 +15,8 @@ namespace LiveCore.Api.Entities;
 /// view), an audience participant gets exactly the entities REVEALED to them IN THAT SESSION, and every
 /// other role gets the fail-closed empty view.
 /// It is a plain, unit-testable application service over <see cref="IEntityRepository"/> and the
-/// central <see cref="VisibilityPolicy"/> taking explicit inputs, exactly like
-/// <see cref="VisibilityPreviewService"/> and <c>TenantContextResolver</c>; resolving the "current"
+/// Visibility module's <see cref="VisibilityPreviewService"/> taking explicit inputs, exactly like
+/// <c>TenantContextResolver</c>; resolving the "current"
 /// organization/workspace, role and participant from a request is the tenant context resolver and a
 /// later endpoint story (csv/api_routes.csv defines no entity route, so this story adds NO HTTP
 /// endpoint).
@@ -34,16 +34,23 @@ namespace LiveCore.Api.Entities;
 ///   participant is irrelevant on this path.</item>
 ///   <item>An AUDIENCE PARTICIPANT (a Participant/Observer role with an identified participant AND an
 ///   identified SESSION) gets the entities the central Visibility engine says are visible TO THEM IN
-///   THAT SESSION: each matching candidate is routed through
-///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/> over
-///   <see cref="VisibilityResourceType.Entity"/> — the SAME session-scoped participant-aware primitive
-///   <see cref="VisibilityPreviewService"/> and the realtime recipient resolver use, so entity search
-///   can never diverge from the participant-visible feed or per-resource access. An entity is kept iff
-///   an AUDIENCE-WIDE visible rule of that session, or a visible rule of that session scoped to EXACTLY
-///   this participant (a selected-participant private reveal), applies; an entity revealed only to a
-///   DIFFERENT participant, or only in a SIBLING session of the same workspace, is excluded — the
-///   selected-participant and cross-session guarantees, fail-closed (threats T1/T5/T3 in
-///   docs/07_SECURITY_THREAT_MODEL.md).</item>
+///   THAT SESSION, computed from a SINGLE workspace-rule load gated IN MEMORY (CORE-PERF-008): the
+///   participant's visible set is resolved through <see cref="VisibilityPreviewService"/> — the SAME
+///   path the participant-visible feed uses, which reads the workspace rules ONCE
+///   (<see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/>) and selects the visible resources
+///   over the central in-memory gate <see cref="VisibilityPolicy.ComputeVisibleResourcesForParticipant"/>
+///   (the CORE-PERF-004 companion to the per-resource
+///   <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>,
+///   over <see cref="VisibilityResourceType.Entity"/> among the others) — and the already-scoped candidate
+///   set is then narrowed to those visible entities. So the rule-query count is INDEPENDENT of entity
+///   volume (one workspace-rule load plus the entity load, never one policy query per candidate — the old
+///   1+M fan-out CORE-PERF-004 fixes for the visible feed), and entity search can never diverge from the
+///   participant-visible feed, per-resource access or the realtime recipient gate (visibility is decided
+///   in exactly ONE place). An entity is kept iff an AUDIENCE-WIDE visible rule of that session, or a
+///   visible rule of that session scoped to EXACTLY this participant (a selected-participant private
+///   reveal), applies; an entity revealed only to a DIFFERENT participant, or only in a SIBLING session
+///   of the same workspace, is excluded — the selected-participant and cross-session guarantees,
+///   fail-closed (threats T1/T5/T3 in docs/07_SECURITY_THREAT_MODEL.md).</item>
 ///   <item>EVERY OTHER caller — the audit role Auditor (audit-only on the content rows, never a live
 ///   content grant), any undefined role, and an audience role with NO identified participant or NO
 ///   identified session — gets the fail-closed EMPTY view. This path is short-circuited BEFORE any
@@ -71,14 +78,14 @@ namespace LiveCore.Api.Entities;
 internal sealed class EntitySearchService
 {
     private readonly IEntityRepository _entities;
-    private readonly VisibilityPolicy _policy;
+    private readonly VisibilityPreviewService _preview;
 
-    public EntitySearchService(IEntityRepository entities, VisibilityPolicy policy)
+    public EntitySearchService(IEntityRepository entities, VisibilityPreviewService preview)
     {
         ArgumentNullException.ThrowIfNull(entities);
-        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(preview);
         _entities = entities;
-        _policy = policy;
+        _preview = preview;
     }
 
     /// <summary>
@@ -200,36 +207,40 @@ internal sealed class EntitySearchService
         }
 
         // AUDIENCE-PARTICIPANT view: keep only the entities this participant may actually see IN THIS
-        // SESSION, decided by the central SESSION-SCOPED per-participant visibility primitive
-        // (CORE-VIS-005 + CORE-SVIS-001) — the SAME one the participant-visible feed
-        // (VisibilityPreviewService) and the realtime recipient resolver use, so entity search can never
-        // diverge (docs/05: do not duplicate visibility logic elsewhere). An entity is visible iff an
-        // audience-wide visible rule of this session, or a visible rule of this session scoped to EXACTLY
-        // this participant, applies; one revealed only to another participant — or only in a sibling
-        // session of the same workspace — is excluded (fail-closed; the selected-participant and
-        // cross-session guarantees, threats T5/T3). The lookup is tenant-, workspace- and session-scoped,
-        // so a rule in another tenant, workspace or session never reveals an entity here.
+        // SESSION (CORE-PERF-008). The participant's visible set is computed from a SINGLE workspace-rule
+        // load gated IN MEMORY by the SAME path the participant-visible feed uses
+        // (VisibilityPreviewService -> the CORE-PERF-004 in-memory gate
+        // VisibilityPolicy.ComputeVisibleResourcesForParticipant), NOT one policy query per candidate (the
+        // old 1+M fan-out, where every candidate re-fetched rows already loadable in one read). So the
+        // rule-query count is independent of entity volume — one workspace-rule load plus the entity load
+        // above — and entity search and the visible feed can never diverge: both resolve visibility through
+        // the one in-memory gate (docs/05_MODULE_CONTRACTS.md: do not duplicate visibility logic elsewhere;
+        // docs/02_ARCHITECTURE.md: entity visibility is not computed ad hoc in many places). The set is
+        // tenant-, workspace- and session-scoped and fails closed (an audience-wide visible rule of this
+        // session, or a visible rule of this session scoped to EXACTLY this participant; a Hidden rule, a
+        // reveal to a different participant or a reveal in a sibling session grants nothing — threats
+        // T5/T3).
         var participant = audienceParticipant!.Value;
         var session = audienceSessionId!.Value;
-        var visible = new List<Entity>(candidates.Count);
-        foreach (var entity in candidates)
-        {
-            var canView = await _policy
-                .CanParticipantViewResourceAsync(
-                    organizationId,
-                    workspaceId,
-                    session,
-                    participant,
-                    VisibilityResourceType.Entity,
-                    entity.Id,
-                    cancellationToken)
-                .ConfigureAwait(false);
 
-            if (canView)
-            {
-                visible.Add(entity);
-            }
-        }
+        var visibleResources = await _preview
+            .GetVisibleResourcesForParticipantAsync(organizationId, workspaceId, session, participant, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The visible set spans every resource KIND (Scene/ContentBlock/Entity); keep only the visible
+        // ENTITY ids, then narrow the already-scoped, already-ordered candidate set to the entities that
+        // are visible — exactly the entities the old per-candidate CanParticipantViewResourceAsync kept,
+        // preserving the repository's deterministic order. A visible id that does not name a candidate (an
+        // entity filtered out by name/type, or a dangling rule whose entity was deleted) is simply absent
+        // from the intersection, so nothing is over-disclosed.
+        var visibleEntityIds = visibleResources
+            .Where(resource => resource.ResourceType == VisibilityResourceType.Entity)
+            .Select(resource => resource.ResourceId)
+            .ToHashSet();
+
+        var visible = candidates
+            .Where(entity => visibleEntityIds.Contains(entity.Id))
+            .ToArray();
 
         return EntitySearchResult.Audience(visible);
     }

@@ -93,7 +93,21 @@ public sealed class EntitySearchServiceTests : IDisposable
     private EntitySearchService CreateService(LiveCoreDbContext context)
     {
         var rules = new VisibilityRuleRepository(context);
-        return new EntitySearchService(new EntityRepository(context), new VisibilityPolicy(rules));
+        var policy = new VisibilityPolicy(rules);
+        return new EntitySearchService(new EntityRepository(context), new VisibilityPreviewService(rules, policy));
+    }
+
+    /// <summary>
+    /// Builds the service over a COUNTING visibility-rule repository (CORE-PERF-008), so a test can prove
+    /// the audience path's rule-query shape: the WORKSPACE load (the single-load gate) vs the per-RESOURCE
+    /// load (the old per-candidate fan-out). The entity repository is the real one; only the rule lookups
+    /// are counted.
+    /// </summary>
+    private static EntitySearchService CreateServiceWithCounting(LiveCoreDbContext context, RuleLookupCounter counter)
+    {
+        var rules = new CountingVisibilityRuleRepository(new VisibilityRuleRepository(context), counter);
+        var policy = new VisibilityPolicy(rules);
+        return new EntitySearchService(new EntityRepository(context), new VisibilityPreviewService(rules, policy));
     }
 
     private async Task<Organization> SeedOrganizationAsync(string slug)
@@ -850,6 +864,161 @@ public sealed class EntitySearchServiceTests : IDisposable
         Assert.DoesNotContain(resultX.Items, e => e.Id == entityY.Id);
     }
 
+    // --- CORE-PERF-008: single-load in-memory gate (bounded query count + equivalence) ---
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(30)]
+    public async Task Audience_search_issues_a_bounded_rule_query_count_independent_of_entity_volume(int entityCount)
+    {
+        // CORE-PERF-008 headline scale proof: the audience path issues EXACTLY ONE workspace-rule load and
+        // ZERO per-resource loads, the SAME whether the session has 2 or 30 revealed entities. The old
+        // per-candidate path issued one ListByResource per candidate (1 + M lookups), so this asserts O(1)
+        // rule queries, not O(N).
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var session = await SessionIdAsync(org, ws);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+        for (var index = 0; index < entityCount; index++)
+        {
+            var entity = await SeedEntityAsync(org, ws, typeId, $"entity-{index}");
+            await SeedRuleInSessionAsync(org, ws, session, entity.Id, VisibilityState.Visible);
+        }
+
+        await using var context = CreateContext();
+        var counter = new RuleLookupCounter();
+        var service = CreateServiceWithCounting(context, counter);
+
+        var result = await service.SearchAsync(
+            org, ws, session, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None);
+
+        // The bound is not achieved by dropping entities from the result: every revealed entity is returned.
+        Assert.Equal(entityCount, result.Items.Count);
+
+        // Exactly one workspace-rule load and no per-resource loads, INDEPENDENT of entity volume.
+        Assert.Equal(1, counter.WorkspaceLoads);
+        Assert.Equal(0, counter.ResourceLoads);
+    }
+
+    [Fact]
+    public async Task Audience_search_matches_the_per_candidate_computation_for_a_mixed_workspace()
+    {
+        // CORE-PERF-008 equivalence: the single-load in-memory result is byte-for-byte the OLD per-candidate
+        // computation for a workspace mixing an audience-wide reveal, a selected-participant private reveal
+        // (the crown jewel), a private reveal to ANOTHER participant, a hidden reveal and an unruled entity —
+        // asserted for BOTH the selected participant and a different one.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var audienceWide = await SeedEntityAsync(org, ws, typeId, "wide");
+        var privateToSelected = await SeedEntityAsync(org, ws, typeId, "mine");
+        var privateToOther = await SeedEntityAsync(org, ws, typeId, "theirs");
+        var hidden = await SeedEntityAsync(org, ws, typeId, "hidden");
+        await SeedEntityAsync(org, ws, typeId, "unruled");
+        var selected = (await SeedParticipantAsync(org, ws)).Id;
+        var other = (await SeedParticipantAsync(org, ws)).Id;
+        await SeedRuleAsync(org, ws, audienceWide.Id, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, privateToSelected.Id, selected, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, privateToOther.Id, other, VisibilityState.Visible);
+        await SeedRuleAsync(org, ws, hidden.Id, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
+
+        foreach (var participant in new[] { selected, other })
+        {
+            await using var context = CreateContext();
+            var service = CreateService(context);
+
+            var actual = (await service.SearchAsync(
+                    org, ws, session, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None))
+                .Items.Select(entity => entity.Id).ToHashSet();
+
+            var expected = await PerCandidateVisibleEntityIdsAsync(org, ws, session, participant);
+
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
+    public async Task Audience_search_matches_the_per_candidate_computation_across_sessions()
+    {
+        // CORE-PERF-008 equivalence, cross-session: an entity revealed audience-wide in session A matches the
+        // per-candidate computation when searching A, and is equally absent (under both algorithms) when
+        // searching a sibling session B of the same workspace — the cross-session guarantee.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var revealed = await SeedEntityAsync(org, ws, typeId, "alpha");
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        await SeedRuleInSessionAsync(org, ws, sessionA, revealed.Id, VisibilityState.Visible);
+        var participant = (await SeedParticipantAsync(org, ws)).Id;
+
+        foreach (var session in new[] { sessionA, sessionB })
+        {
+            await using var context = CreateContext();
+            var service = CreateService(context);
+
+            var actual = (await service.SearchAsync(
+                    org, ws, session, MembershipRole.Participant, participant, EntitySearchCriteria.MatchAll, CancellationToken.None))
+                .Items.Select(entity => entity.Id).ToHashSet();
+
+            var expected = await PerCandidateVisibleEntityIdsAsync(org, ws, session, participant);
+
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
+    public async Task Host_search_returns_the_full_candidate_set_regardless_of_rules()
+    {
+        // CORE-PERF-008 equivalence, host case: the host path is unchanged by the refactor — it never
+        // consults the visibility gate, so it still returns every matching entity regardless of any reveal.
+        // Equivalence here is that the host result equals the full workspace candidate set.
+        var (org, ws, typeId) = await SeedWorkspaceWithTypeAsync();
+        var a = await SeedEntityAsync(org, ws, typeId, "alpha");
+        var b = await SeedEntityAsync(org, ws, typeId, "beta");
+        var c = await SeedEntityAsync(org, ws, typeId, "gamma");
+        // Rules of every flavour exist but must not affect the host view.
+        await SeedRuleAsync(org, ws, a.Id, VisibilityState.Visible);
+        await SeedRuleAsync(org, ws, b.Id, VisibilityState.Hidden);
+        var session = await SessionIdAsync(org, ws);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        var actual = (await service.SearchAsync(
+                org, ws, session, MembershipRole.Host, participantId: null, EntitySearchCriteria.MatchAll, CancellationToken.None))
+            .Items.Select(entity => entity.Id).ToHashSet();
+
+        Assert.Equal(new HashSet<Guid> { a.Id, b.Id, c.Id }, actual);
+    }
+
+    /// <summary>
+    /// The OLD per-candidate computation (CORE-API-006): every workspace entity routed individually through
+    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>
+    /// — the algorithm CORE-PERF-008 replaces with the single-load in-memory gate. Used as the equivalence
+    /// reference: the new result must match this set exactly.
+    /// </summary>
+    private async Task<HashSet<Guid>> PerCandidateVisibleEntityIdsAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Guid participantId)
+    {
+        await using var context = CreateContext();
+        var policy = new VisibilityPolicy(new VisibilityRuleRepository(context));
+        var entities = await new EntityRepository(context)
+            .ListByWorkspaceAsync(organizationId, workspaceId, CancellationToken.None);
+
+        var visible = new HashSet<Guid>();
+        foreach (var entity in entities)
+        {
+            var canView = await policy.CanParticipantViewResourceAsync(
+                organizationId, workspaceId, sessionId, participantId, VisibilityResourceType.Entity, entity.Id, CancellationToken.None);
+            if (canView)
+            {
+                visible.Add(entity.Id);
+            }
+        }
+
+        return visible;
+    }
+
     // --- Guards ---------------------------------------------------------------------
 
     [Fact]
@@ -882,5 +1051,92 @@ public sealed class EntitySearchServiceTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => service.SearchAsync(
             Guid.NewGuid(), Guid.NewGuid(), sessionId: null, MembershipRole.Owner, participantId: null, null!, CancellationToken.None));
+    }
+
+    // --- Counting visibility-rule repository (CORE-PERF-008 query-shape proof) -------
+
+    /// <summary>
+    /// Counts the WORKSPACE-level rule loads (the single-load gate) and the per-RESOURCE rule loads (the old
+    /// per-candidate fan-out) a search issues, so the bounded-query test can assert the audience path's
+    /// query shape. Thread-safe so it is robust even if a future change parallelizes the gate.
+    /// </summary>
+    private sealed class RuleLookupCounter
+    {
+        private int _workspaceLoads;
+        private int _resourceLoads;
+
+        public int WorkspaceLoads => Volatile.Read(ref _workspaceLoads);
+
+        public int ResourceLoads => Volatile.Read(ref _resourceLoads);
+
+        public void IncrementWorkspaceLoads() => Interlocked.Increment(ref _workspaceLoads);
+
+        public void IncrementResourceLoads() => Interlocked.Increment(ref _resourceLoads);
+    }
+
+    /// <summary>
+    /// Wraps a real <see cref="IVisibilityRuleRepository"/> and counts the rule lookups (delegating to the
+    /// real implementation), so a test can prove the search's query shape (CORE-PERF-008). The
+    /// workspace-scoped <see cref="ListByWorkspaceAsync"/> (the single-load gate) and the per-resource
+    /// <see cref="ListByResourceAsync"/> / <see cref="ListByResourcesAsync"/> (the old fan-out) are counted
+    /// separately; every other member delegates straight through.
+    /// </summary>
+    private sealed class CountingVisibilityRuleRepository : IVisibilityRuleRepository
+    {
+        private readonly IVisibilityRuleRepository _inner;
+        private readonly RuleLookupCounter _counter;
+
+        public CountingVisibilityRuleRepository(IVisibilityRuleRepository inner, RuleLookupCounter counter)
+        {
+            _inner = inner;
+            _counter = counter;
+        }
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByWorkspaceAsync(
+            Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
+        {
+            _counter.IncrementWorkspaceLoads();
+            return _inner.ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourceAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            VisibilityResourceType resourceType,
+            Guid resourceId,
+            CancellationToken cancellationToken)
+        {
+            _counter.IncrementResourceLoads();
+            return _inner.ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            IReadOnlyCollection<Guid> resourceIds,
+            CancellationToken cancellationToken)
+        {
+            _counter.IncrementResourceLoads();
+            return _inner.ListByResourcesAsync(organizationId, workspaceId, sessionId, resourceIds, cancellationToken);
+        }
+
+        public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
+            => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
+
+        public Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => _inner.AddAsync(rule, cancellationToken);
+
+        public Task UpdateAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => _inner.UpdateAsync(rule, cancellationToken);
+
+        public Task<int> RemoveByResourceAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            VisibilityResourceType resourceType,
+            Guid resourceId,
+            CancellationToken cancellationToken)
+            => _inner.RemoveByResourceAsync(organizationId, workspaceId, resourceType, resourceId, cancellationToken);
     }
 }

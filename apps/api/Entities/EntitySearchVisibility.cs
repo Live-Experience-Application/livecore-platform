@@ -23,9 +23,12 @@ namespace LiveCore.Api.Entities;
 /// evaluation, NO audience math and NO reveal state. It makes only the coarse, ROLE-level
 /// authorization decision — "which view of entities does this workspace role take?" — that gates
 /// WHICH path the search takes. The actual per-entity audience-visible decision is the central
-/// Visibility module's (CORE-VIS-005 <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>),
-/// which <see cref="EntitySearchService"/> routes each candidate through on the audience path — never
-/// re-derived here.
+/// Visibility module's, which <see cref="EntitySearchService"/> obtains on the audience path from the
+/// single-load in-memory gate <see cref="VisibilityPreviewService"/> /
+/// <see cref="VisibilityPolicy.ComputeVisibleResourcesForParticipant"/> (CORE-PERF-008, the same gate the
+/// participant-visible feed uses, the in-memory companion to the per-resource
+/// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>) —
+/// never re-derived here.
 ///
 /// Role -> view mapping, decided STRICTLY from the "View host-only content" row of
 /// docs/06_AUTHORIZATION_MATRIX.md (csv/authorization_matrix.csv): Owner/Admin/Host/CoHost =
