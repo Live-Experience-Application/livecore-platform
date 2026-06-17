@@ -18,9 +18,12 @@ namespace LiveCore.Api.UnitTests.Realtime;
 /// appends once and then forwards each computed delivery to the backplane unchanged. These tests pin
 /// exactly that. All fixtures are generic (AGENTS.md).
 ///
-/// CORE-OBS-001 additionally has the publisher record the "event delivery failures" metric when a transport
-/// send fails, WITHOUT changing the best-effort behavior (the failure still propagates); the last test pins
-/// that. The metric-listening tests share the serialized "LiveCore metrics" collection.
+/// CORE-OBS-001 has the publisher record the "event delivery failures" metric when a transport send fails;
+/// CORE-RES-001 makes that delivery GENUINELY best-effort — the failure is counted-and-DROPPED (swallowed),
+/// never rethrown, so a committed reveal/hide/session/participant operation still succeeds during a backplane
+/// outage. The last two tests pin that: a single failing delivery is swallowed-and-counted, and a per-delivery
+/// failure never suppresses the OTHER recipients' deliveries. The metric-listening tests share the serialized
+/// "LiveCore metrics" collection.
 /// </summary>
 [Collection(LiveCoreMetricsTestCollection.Name)]
 public sealed class SessionEventPublisherTests
@@ -77,11 +80,13 @@ public sealed class SessionEventPublisherTests
     }
 
     [Fact]
-    public async Task A_delivery_transport_failure_records_the_metric_and_still_propagates()
+    public async Task A_delivery_transport_failure_records_the_metric_and_is_swallowed()
     {
-        // CORE-OBS-001: a failed realtime transport send increments the "event delivery failures" metric, but
-        // the best-effort behavior is unchanged — the failure still propagates (the durable event is already
-        // appended, so a reconnecting client replays it later, CORE-RT-005).
+        // CORE-RES-001: a failed realtime transport send is GENUINELY best-effort — it increments the "event
+        // delivery failures" metric (CORE-OBS-001) and is SWALLOWED, never rethrown. The durable event is
+        // already appended (the source of truth), so the publish still completes successfully and a committed
+        // command does not surface a 500 during a backplane outage; a reconnecting client replays the missed
+        // push later (CORE-RT-005).
         using var metrics = new LiveCoreMetrics();
         using var recorded = new RecordedMetrics();
 
@@ -91,11 +96,36 @@ public sealed class SessionEventPublisherTests
         var resolver = new FixedRecipientResolver([delivery]);
         var publisher = new SessionEventPublisher(repository, new ThrowingBackplane(), resolver, metrics);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => publisher.PublishAsync(sessionEvent, CancellationToken.None));
+        // No exception escapes: the transport failure is swallowed.
+        await publisher.PublishAsync(sessionEvent, CancellationToken.None);
 
         // The durable event was still appended before the failed delivery, and the failure was counted.
         Assert.Single(repository.Appended);
+        Assert.True(recorded.Count("livecore.event.delivery.failures") >= 1);
+    }
+
+    [Fact]
+    public async Task A_failing_delivery_is_counted_and_dropped_without_suppressing_the_other_recipients()
+    {
+        // CORE-RES-001: swallowing is PER DELIVERY, so one recipient group's transport failure never suppresses
+        // the deliveries to the others. The first group's send throws (counted-and-dropped); the second group
+        // is still delivered, and the publish completes without throwing.
+        using var metrics = new LiveCoreMetrics();
+        using var recorded = new RecordedMetrics();
+
+        var repository = new RecordingEventRepository();
+        var sessionEvent = Event();
+        var failing = new SessionEventDelivery("session:hosts", SessionEventEnvelope.ForHost(sessionEvent));
+        var healthy = new SessionEventDelivery("session:participant:1", SessionEventEnvelope.ForAudience(sessionEvent));
+        var resolver = new FixedRecipientResolver([failing, healthy]);
+        var backplane = new SelectivelyThrowingBackplane(throwForGroup: "session:hosts");
+        var publisher = new SessionEventPublisher(repository, backplane, resolver, metrics);
+
+        await publisher.PublishAsync(sessionEvent, CancellationToken.None);
+
+        // The healthy recipient still received its delivery despite the earlier group's failure.
+        Assert.Equal(new[] { "session:participant:1" }, backplane.Delivered);
+        // The failed delivery was counted exactly once.
         Assert.True(recorded.Count("livecore.event.delivery.failures") >= 1);
     }
 
@@ -173,5 +203,26 @@ public sealed class SessionEventPublisherTests
     {
         public Task SendToGroupAsync(string group, string method, object payload, CancellationToken cancellationToken)
             => throw new InvalidOperationException("transport unavailable");
+    }
+
+    private sealed class SelectivelyThrowingBackplane : IRealtimeBackplane
+    {
+        private readonly string _throwForGroup;
+
+        public SelectivelyThrowingBackplane(string throwForGroup) => _throwForGroup = throwForGroup;
+
+        /// <summary>The groups that were delivered to successfully (the failing group throws before recording).</summary>
+        public List<string> Delivered { get; } = [];
+
+        public Task SendToGroupAsync(string group, string method, object payload, CancellationToken cancellationToken)
+        {
+            if (string.Equals(group, _throwForGroup, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("transport unavailable for this group");
+            }
+
+            Delivered.Add(group);
+            return Task.CompletedTask;
+        }
     }
 }

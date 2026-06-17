@@ -1162,6 +1162,18 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // tracer/exporter is listening, starting the span is a no-op, so this is free when tracing is off.
 app.UseMiddleware<RequestTracingMiddleware>();
 
+// Global Problem Details exception handler (CORE-RES-001). It wraps the whole endpoint pipeline and turns
+// ANY exception that reaches it unhandled into a fail-closed RFC 7807 Problem Details 500 carrying the
+// documented internal_error code (CORE-DX-001), instead of the bare framework 500 the host returned before.
+// It sits OUTSIDE (before) the concurrency-conflict middleware so that one still owns its 409 for a
+// DbUpdateConcurrencyException while every OTHER unhandled exception — including the ones that middleware
+// rethrows — funnels through here. It sits INSIDE the request metrics/tracing spans so the resulting 500 is
+// observed (a genuine server fault IS counted as a 5xx error), and it reuses the same CoreProblem helper every
+// endpoint uses so the body shape and stable code match. The exception is logged server-side for the operator;
+// the response body never carries the exception type, message, stack, resource, tenant or any internal state
+// (threat T7).
+app.UseMiddleware<UnhandledExceptionProblemDetailsMiddleware>();
+
 // Optimistic-concurrency conflict translation (CORE-CONC-001). The mutable
 // aggregates carry the PostgreSQL xmin row-version token, so an interleaved
 // read-modify-write makes the second SaveChanges throw a

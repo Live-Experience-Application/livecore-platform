@@ -43,8 +43,11 @@ public interface ISessionEventPublisher
     /// Delivers an ALREADY-APPENDED event's recipient-safe envelope to the SERVER-COMPUTED recipient groups
     /// ONLY (the realtime transport) — it does NOT append. A transactional command calls this AFTER its
     /// transaction commits (commit-then-publish, CORE-CONC-002), so a delivery failure cannot roll back the
-    /// committed state; delivery is best-effort and a reconnecting client replays a missed push later
-    /// (CORE-RT-005).
+    /// committed state. Delivery is GENUINELY best-effort (CORE-RES-001): a backplane (Redis/Valkey) transport
+    /// failure is RECORDED on the "event delivery failures" metric and SWALLOWED, never rethrown — so a
+    /// committed reveal/hide/session/participant operation still returns success during a backplane outage
+    /// instead of surfacing a <c>500</c>, and a reconnecting client replays the missed push from the durable
+    /// stream later (CORE-RT-005).
     /// </summary>
     /// <exception cref="ArgumentNullException">The event is null.</exception>
     Task DeliverAsync(SessionEvent sessionEvent, CancellationToken cancellationToken);

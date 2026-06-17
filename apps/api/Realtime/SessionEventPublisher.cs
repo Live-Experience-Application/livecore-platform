@@ -126,14 +126,19 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
                     .SendToGroupAsync(delivery.Group, SessionEventEnvelope.ClientMethod, delivery.Envelope, cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                // Record the docs/15_OBSERVABILITY.md "event delivery failures" signal (CORE-OBS-001), then
-                // rethrow unchanged: the durable event is already persisted, so behavior is unaltered and a
-                // reconnecting client replays it later (CORE-RT-005). Counting only — no event content is
-                // ever attached to the metric (threat T7).
+                // GENUINELY BEST-EFFORT (CORE-RES-001): a backplane (Redis/Valkey) transport failure is RECORDED
+                // and SWALLOWED, never rethrown. The durable event already committed (it is the source of truth),
+                // so a committed reveal/hide/session/participant operation must still return success during a
+                // backplane outage — counting-and-dropping the live push, not failing the request with a 500. A
+                // reconnecting client replays the missed push from the durable stream later (CORE-RT-005). The
+                // failure is counted on the docs/15_OBSERVABILITY.md "event delivery failures" signal
+                // (CORE-OBS-001); the metric counts only — no event content is ever attached to it (threat T7).
+                // Swallowing is PER DELIVERY, so one recipient group's transport hiccup never suppresses the
+                // deliveries to the others. A genuine cancellation is NOT a transport failure and is left to
+                // propagate (the request is being torn down anyway).
                 _metrics.RecordEventDeliveryFailure();
-                throw;
             }
         }
     }

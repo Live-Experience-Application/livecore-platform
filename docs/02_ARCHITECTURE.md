@@ -172,3 +172,31 @@ closes that gap:
 Use RFC 7807-style Problem Details for API errors.
 
 Never leak sensitive content in errors.
+
+### Global exception handler (CORE-RES-001)
+
+Every error a consumer sees is a Problem Details body — but a contract is only as good as its last-resort
+case. Before this story the pipeline (`apps/api/Program.cs`) registered no global handler: the only
+translating middleware (`Persistence/ConcurrencyConflictMiddleware`) turns a `DbUpdateConcurrencyException`
+into a `409` and **rethrows everything else**, so any other unhandled exception fell through to a bare
+framework `500` — not a Problem Details body, and a risk of leaking internal detail.
+
+`UnhandledExceptionProblemDetailsMiddleware` closes that gap. It wraps the whole endpoint pipeline and
+translates **any** exception that reaches it unhandled into a fail-closed RFC 7807 Problem Details `500`
+carrying the documented `internal_error` code (the same CORE-DX-001 catalog every other error uses, via the
+shared `CoreProblem` helper). The layering is deliberate:
+
+- it is registered **outside** (before) the concurrency-conflict middleware, so that one still owns its `409`
+  for a `DbUpdateConcurrencyException` while every **other** unhandled exception — including the ones that
+  middleware rethrows — funnels through the global handler;
+- it sits **inside** the request metrics/tracing spans, so the resulting `500` is observed and a genuine
+  server fault **is** counted as a `5xx` error (CORE-OBS-001), while the fail-closed `401`/`403`/`404`/`409`
+  the authorization and conflict paths return by design are not.
+
+**No content/PII leak (threat T7).** The exception — its type, message and stack — is logged **server-side**
+for the operator (with an identifier-only context: method, route TEMPLATE, correlation id — never the
+concrete path or any body content), never echoed to the caller. The response body carries only a generic
+title/detail and the stable code; it names no exception type, resource, tenant or internal state. If the
+response has already started (the status line is on the wire) the exception is rethrown so the failure stays
+loud rather than being half-swallowed, and a client-cancellation is rethrown untranslated so it is neither
+turned into a misleading `500` nor counted as a server error.

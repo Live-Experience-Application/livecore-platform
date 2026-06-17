@@ -97,6 +97,25 @@ status code; the others carry only a coarse `operation`/`job` name. The error co
 server errors (5xx); the fail-closed 401/403/404 the authorization model returns by design are client-side
 statuses and are not counted as errors.
 
+#### Best-effort realtime delivery (CORE-RES-001)
+
+The `livecore_event_delivery_failures_total` counter is the signal that makes the **best-effort** delivery
+contract observable. The durable, append-only session event is the source of truth: a reveal/hide and a
+session start/end append it **inside** the command's unit-of-work transaction and deliver it **after** the
+commit (commit-then-publish, CORE-CONC-002), and the participant join/leave path appends it before
+delivering. So once the state is committed a realtime push is a strictly best-effort extra — a reconnecting
+client replays a missed event from the durable stream (CORE-RT-005).
+
+The publisher (`SessionEventPublisher.DeliverAsync`) makes that genuine: a backplane (Redis/Valkey) transport
+failure is **recorded on this counter and SWALLOWED, not rethrown** (the swallow is per delivery, so one
+recipient group's transport hiccup never suppresses the deliveries to the others). A committed
+reveal/hide/session/participant operation therefore **still returns success during a backplane outage** —
+the live push is counted-and-dropped, never escalated into a `500` (a genuine cancellation is left to
+propagate). Before this story the publisher rethrew on any backplane failure and the commit-then-publish
+callers awaited it with no `try`/`catch`, so a backplane outage surfaced as a `500` on an
+already-committed operation — contradicting the best-effort design; CORE-RES-001 reconciles the code with it.
+The metric counts only — no event content is ever attached to it (threat T7).
+
 The `/metrics` endpoint is **unauthenticated by convention** — a Prometheus server scrapes it from inside the
 deployment network, exactly as orchestration probes the unauthenticated `/health/*` endpoints — and carries
 only aggregate series, never content. A deployment restricts it at the reverse-proxy/network edge
