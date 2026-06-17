@@ -299,6 +299,17 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (user-profile, participant, invitation, organization-member and audit-log).
     builder.Services.AddScoped<DataSubjectErasureService>();
 
+    // Data-subject access and portability export command (CORE-PRIV-004, GDPR Art.15 access / Art.20
+    // portability): the IdentityAccess module's read-side privacy command and the access counterpart of the
+    // erasure above. The entitled recipient — the data subject themselves or an Owner/Admin acting on their behalf
+    // (GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export, wired by
+    // MapOrganizationEndpoints) — obtains a machine-readable export of the subject's personal data gathered
+    // TENANT-SCOPED (their identity profile plus organization membership, workspace memberships, participant
+    // records and invited-email rows), auditing the access by id. Registered here inside the persistence
+    // conditional alongside the repositories it composes (user-profile, organization-member, workspace-member,
+    // participant, invitation and audit-log).
+    builder.Services.AddScoped<PersonalDataExportService>();
+
     // Authorized tenant organization deletion command (CORE-PRIV-002, tenant offboarding / data deletion): the
     // Organizations module's destructive teardown command. An authorized Owner (DELETE
     // /api/v1/organizations/{organizationSlug}, wired by MapOrganizationEndpoints) deletes a tenant — appending

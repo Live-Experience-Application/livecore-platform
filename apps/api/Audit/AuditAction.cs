@@ -426,4 +426,25 @@ public enum AuditAction
     /// <see cref="AuditLogEntry.ForRetentionPurge"/>.
     /// </summary>
     RecordRetentionPurged = 27,
+
+    /// <summary>
+    /// A data subject's personal data was disclosed in a machine-readable access/portability export on an
+    /// authorized request — the data-subject access and portability export command (CORE-PRIV-004, the "Privacy
+    /// and Data Lifecycle" epic, GDPR Art.15 access / Art.20 portability). It is the access counterpart of
+    /// <see cref="UserProfileErased"/> (the erasure half, CORE-PRIV-001): where an erasure REMOVES the subject's
+    /// personal data, an export READS it back to the entitled recipient (the data subject themselves, or an
+    /// Owner/Admin acting on their behalf). The export is distinct from the session/workspace Exports feature
+    /// (<see cref="AuditAction"/> has no Exports action; that is a content artifact, not a personal-data
+    /// disclosure). Disclosing personal data is security-relevant, so the access is recorded as an append-only
+    /// fact: it records WHO obtained the export (the actor) and WHOSE personal data was disclosed (the subject,
+    /// by id), in WHICH tenant. An export is an access, not a transition or a removal, so there is NO before/after
+    /// state pair; it is ORGANIZATION-level (no workspace), because the export is authorized within a tenant even
+    /// though the disclosed profile is a global identity, mirroring how <see cref="UserProfileErased"/> records an
+    /// organization-level erasure. The resource kind is passed as a generic NAME string (<c>UserProfile</c>) so
+    /// the Audit module does not depend on the IdentityAccess module's types. The audit row carries ONLY
+    /// identifiers — never the disclosed email, display names, invited emails or any of the exported personal data
+    /// itself (threats T1/T5/T7): the PII lives only in the export RESPONSE delivered to the entitled subject, not
+    /// in the audit log (<see cref="AuditLogEntry.ForPersonalDataExport"/>).
+    /// </summary>
+    PersonalDataExported = 28,
 }

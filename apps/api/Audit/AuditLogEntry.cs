@@ -707,6 +707,68 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a data-subject access/portability export (<see cref="AuditAction.PersonalDataExported"/>) — the
+    /// audit fact written when an authorized caller obtains a machine-readable export of a data subject's personal
+    /// data (CORE-PRIV-004, GDPR Art.15 access / Art.20 portability). It is the access counterpart of
+    /// <see cref="ForUserProfileErasure"/> (the erasure half) and, like it, a thin specialization of
+    /// <see cref="Create"/> that pins the action and applies the export producer's stricter contract: the tenant
+    /// the export was authorized in, the authenticated actor (the data subject themselves or an Owner/Admin acting
+    /// on their behalf) and the exported subject resource (its generic kind name and surrogate id) are all
+    /// REQUIRED, where the generic factory leaves them optional. An export is an ACCESS, not a transition or a
+    /// removal, so there is NO before/after state pair (both null). It is ORGANIZATION-level (no workspace),
+    /// because the export is authorized within a tenant even though the disclosed profile is a global identity, so
+    /// the fact records the tenant and NO workspace — exactly as <see cref="ForUserProfileErasure"/> records an
+    /// organization-level erasure. The resource kind is passed as a generic NAME string (e.g. <c>UserProfile</c>)
+    /// so the Audit module does not depend on the IdentityAccess module's types. Every value is an identifier or a
+    /// generic name — NEVER the disclosed email, display names, invited emails or any of the exported personal
+    /// data (threats T1/T5/T7): the PII lives only in the export RESPONSE delivered to the entitled subject, never
+    /// in the audit log, and the audit row outlives a later erasure of the subject it references because the
+    /// reference is a recorded fact, not a foreign key.
+    /// </summary>
+    /// <param name="organizationId">The tenant the export was authorized in (required).</param>
+    /// <param name="actorUserProfileId">The caller who obtained the export — the subject or an admin acting for them (required; the audited actor).</param>
+    /// <param name="subjectResourceType">The exported subject's generic kind name (e.g. UserProfile).</param>
+    /// <param name="exportedUserProfileId">The exported subject's user-profile surrogate id.</param>
+    /// <param name="createdAt">When the export happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the subject resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForPersonalDataExport(
+        Guid organizationId,
+        Guid actorUserProfileId,
+        string subjectResourceType,
+        Guid exportedUserProfileId,
+        DateTimeOffset createdAt)
+    {
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(subjectResourceType))
+        {
+            throw new ArgumentException("Subject resource type must not be empty.", nameof(subjectResourceType));
+        }
+
+        if (exportedUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Exported user profile id must not be empty.", nameof(exportedUserProfileId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId: null,
+            AuditAction.PersonalDataExported,
+            actorUserProfileId,
+            subjectResourceType,
+            exportedUserProfileId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an organization deletion (<see cref="AuditAction.OrganizationDeleted"/>) — the audit fact written
     /// when an authorized Owner deletes an organization, tearing the whole tenant down (CORE-PRIV-002, tenant
     /// offboarding / data deletion). It is the tenant-teardown counterpart of the resource-deletion factories

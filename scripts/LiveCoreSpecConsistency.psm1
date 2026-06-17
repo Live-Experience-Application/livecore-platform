@@ -674,6 +674,7 @@ function Get-LiveCoreKnownRoleDescriptor {
         'workspace members',
         'session audience',
         'Participant owner or Host',
+        'Data subject or Owner/Admin',
         'none (provider callback)'
     )
 }

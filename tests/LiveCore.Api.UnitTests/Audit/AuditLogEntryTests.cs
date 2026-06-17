@@ -860,6 +860,55 @@ public sealed class AuditLogEntryTests
         Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
     }
 
+    // --- Personal-data export factory (CORE-PRIV-004) --------------------------
+
+    [Fact]
+    public void ForPersonalDataExport_records_an_organization_level_fact_by_id_only()
+    {
+        // CORE-PRIV-004 (GDPR Art.15/20): the access export is audited by id only — actor + exported subject id —
+        // with no workspace and no before/after state, and never the disclosed PII (which lives only in the export
+        // response). It is a TENANT-scoped fact (it carries the organization).
+        var organizationId = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var exportedSubject = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForPersonalDataExport(
+            organizationId, actor, "UserProfile", exportedSubject, _now);
+
+        Assert.Equal(organizationId, entry.OrganizationId);
+        Assert.Equal(AuditAction.PersonalDataExported, entry.Action);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        Assert.Equal("UserProfile", entry.ResourceType);
+        Assert.Equal(exportedSubject, entry.ResourceId);
+        Assert.Null(entry.WorkspaceId);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.Null(entry.PreviousState);
+        Assert.Null(entry.NewState);
+    }
+
+    [Fact]
+    public void ForPersonalDataExport_rejects_an_empty_actor_subject_or_blank_resource_type()
+    {
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForPersonalDataExport(
+            Guid.NewGuid(), Guid.Empty, "UserProfile", Guid.NewGuid(), _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForPersonalDataExport(
+            Guid.NewGuid(), Guid.NewGuid(), "UserProfile", Guid.Empty, _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForPersonalDataExport(
+            Guid.NewGuid(), Guid.NewGuid(), " ", Guid.NewGuid(), _now));
+    }
+
+    [Fact]
+    public void ForPersonalDataExport_normalizes_created_at_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        var entry = AuditLogEntry.ForPersonalDataExport(
+            Guid.NewGuid(), Guid.NewGuid(), "UserProfile", Guid.NewGuid(), local);
+
+        Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
+    }
+
     // --- Organization deletion factory (CORE-PRIV-002) -------------------------
 
     [Fact]

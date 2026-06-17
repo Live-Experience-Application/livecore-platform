@@ -211,6 +211,53 @@ The orphaned-residue limitation (an organization-subject entitlement/quota row i
 subject pair with no organization foreign key, so it is not reached by the tenant cascade) is recorded in
 `docs/10_DATABASE_SCHEMA.md`.
 
+## Data-subject access and portability export (CORE-PRIV-004)
+
+A data subject has a right of access (GDPR Art.15) and a right to data portability (Art.20), but until this
+story Core had **no** path to assemble a subject's personal data for them: the only self-service route was
+`GET /api/v1/me`, which returns the caller's *principal context* (their profile id and the memberships they hold)
+— not the personal data Core actually stores about them, which is spread across the schema (the `users` profile,
+`organization_members`/`workspace_members` roles, `participants.display_name` records and the
+`workspace_invitations.invited_email` rows). The erasure command (CORE-PRIV-001) could already REMOVE that data,
+but nothing could READ it back.
+
+The export command (`GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export`)
+closes that gap and is the read-side counterpart of erasure:
+
+- it assembles a **machine-readable** export of the documented personal-data set — the subject's identity profile
+  (id, OIDC issuer/subject, display name, email) plus their organization membership, their workspace
+  memberships, their participant records and the invitations addressed to their email — reusing the same
+  user-profile/membership/participant/invitation repositories the erasure command uses (no parallel persistence
+  path);
+- it is **distinct from the session/workspace Exports feature** (`Exports` module, `export_jobs`): that exports
+  content artifacts a workspace produced; this discloses ONE subject's personal data for an Art.15/20 request;
+- it is **tenant-scoped** in BOTH authorization and data. Unlike erasure — whose EFFECT is global because a
+  subject's personal data must be erased everywhere (Art.17) — the export resolves a single tenant and every
+  collection is read scoped to that organization (the repositories lead their predicates with `organization_id`).
+  So an Owner/Admin exporting on the subject's behalf never learns of the subject's activity in a tenant they do
+  not control, and the subject reaches their data in other tenants only through those tenants' own export routes
+  (threat T5). The one GLOBAL datum is the subject's own user profile (a single deployment-wide identity) —
+  disclosed to the subject themselves or the tenant's data controller acting for them, exactly what Art.15
+  requires;
+- the **PII is delivered only to the entitled recipient**: the data subject THEMSELVES (self-service — the caller's
+  resolved user profile matches the target member's subject) OR an Owner/Admin acting on their behalf. Both paths
+  are tenant-scoped and fail-closed (threats T1/T5): a non-privileged tenant member who is not the subject — a
+  Host/CoHost/Participant/Observer/Auditor — is denied `403`, and a foreign-tenant/unknown organization or member
+  is hidden as `404` (the tenant context resolver requires the token's organization claim AND a persisted
+  membership, exactly as the erasure route does);
+- it is **audited by id** (`PersonalDataExported`, actor + exported subject id, in the tenant): disclosing
+  personal data is security-relevant, so the access is recorded — but the audit row carries ONLY identifiers,
+  never the disclosed email, display names, invited emails or any of the exported data (threat T7). The PII lives
+  only in the export RESPONSE; the **PII-free append-only hash chain still verifies** after an export, and the
+  audit row outlives a later erasure of the same subject (the references are recorded facts, not foreign keys) —
+  the same posture that makes erasure reconcilable with the immutable audit log;
+- the export response never carries a **secret**: no invitation token or token hash, no access token and no OIDC
+  credential (threats T6/T7). It carries the subject's personal data (the point of the export) and nothing
+  belonging to another subject or another tenant.
+
+The data-residency configuration, the controller/processor split for self-hosters and the retention windows
+remain in the privacy/data-protection documentation (CORE-PRIV-005).
+
 ## Supply chain integrity (CORE-DEP-003)
 
 The published API, worker and migrations images are part of the trusted computing base a deployment runs. An

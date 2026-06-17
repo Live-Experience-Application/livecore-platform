@@ -1351,13 +1351,14 @@ authorization rationale (threat T7).
 
 The Organizations module exposes the tenant create/read API (CORE-API-001):
 
-| Method   | Route                                                                       | Authorized callers                                               |
-| -------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `GET`    | `/api/v1/organizations`                                                     | any authenticated user (only the organizations they belong to)   |
-| `POST`   | `/api/v1/organizations`                                                     | any authenticated user (becomes the new tenant's `Owner`)        |
-| `DELETE` | `/api/v1/organizations/{organizationSlug}`                                  | organization `Owner` (delete the tenant — see below)             |
-| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}`               | organization `Owner` or `Admin` (remove member — see below)      |
-| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data` | organization `Owner` or `Admin` (erase data subject — see below) |
+| Method   | Route                                                                              | Authorized callers                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/v1/organizations`                                                            | any authenticated user (only the organizations they belong to)                                                          |
+| `POST`   | `/api/v1/organizations`                                                            | any authenticated user (becomes the new tenant's `Owner`)                                                               |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}`                                         | organization `Owner` (delete the tenant — see below)                                                                    |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}`                      | organization `Owner` or `Admin` (remove member — see below)                                                             |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data`        | organization `Owner` or `Admin` (erase data subject — see below)                                                        |
+| `GET`    | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export` | the data subject themselves, or organization `Owner` or `Admin` on their behalf (access/portability export — see below) |
 
 The create and list routes are user-tenant operations, so a service-account principal is denied
 `403` (only a human user holds an organization membership). The tenant boundary
@@ -1576,6 +1577,50 @@ display name or OIDC subject (threats T1/T5/T7). Because the audit log reference
 are recorded facts (not foreign keys) and carry no PII, the **append-only audit
 hash chain still verifies** after an erasure: that is what makes the right to
 erasure reconcilable with the immutable audit log.
+
+### Data-subject access and portability export (right of access / portability)
+
+An authorized caller can obtain a machine-readable export of a data subject's
+personal data — GDPR Art.15 "right of access" / Art.20 "right to data portability"
+(CORE-PRIV-004), the read-side counterpart of erasure:
+
+| Method | Route                                                                              | Authorized callers                                                           |
+| ------ | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET`  | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export` | the data subject themselves, or organization `Owner`/`Admin` on their behalf |
+
+Until this story the only self-service route was `GET /api/v1/me`, which returns the
+caller's _principal context_ (their profile id and the memberships they hold) — not
+the personal data Core actually stores about them. This route assembles that data.
+It is **distinct from the session/workspace Exports feature** (which exports content
+artifacts a workspace produced, not a subject's personal data). It resolves the
+target member to their global user profile and returns the documented
+personal-data set, gathered **tenant-scoped** for the resolved organization:
+
+- the subject's **identity profile** (id, OIDC issuer/subject, display name, email);
+- their **organization membership** and **workspace memberships** (role + when granted);
+- their **participant records** (workspace, display name, status);
+- the **invitations** addressed to their email (workspace, invited email, role,
+  status, expiry) — never the invite token or its hash (threats T6/T7);
+- it returns `200 OK` with the export; it mutates no business data.
+
+Unlike erasure — whose effect is **global** — the export is **tenant-scoped in both
+authorization and data**: every record is read scoped to the resolved organization,
+so an `Owner`/`Admin` exporting on the subject's behalf never learns of the subject's
+activity in a tenant they do not control, and the subject reaches their data in other
+tenants only through those tenants' own export routes (threat T5). Because the export
+**discloses** personal data, the PII is delivered **only to the entitled recipient**: the
+data subject **themselves** (self-service — the caller's resolved profile matches the
+target member's subject) or an `Owner`/`Admin` acting on their behalf. Every other
+tenant member — a `Host`/`CoHost`/`Participant`/`Observer`/`Auditor` who is not the
+subject — is denied `403`, and a foreign-tenant/unknown organization or member is
+hidden as `404` (threats T1/T5, fail-closed).
+
+Every successful export appends an append-only `PersonalDataExported` audit record
+(see "Audit log" below) capturing the tenant, the authenticated **actor** (whoever
+obtained the export) and the exported subject **by id** — never the disclosed email,
+display names or invited emails (threat T7). The PII lives only in the export
+response, so the **append-only audit hash chain still verifies** and the audit row
+outlives a later erasure of the same subject.
 
 ### Organization deletion (tenant offboarding)
 

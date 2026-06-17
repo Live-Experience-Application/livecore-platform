@@ -153,4 +153,28 @@ public interface IWorkspaceMemberRepository
     Task RemoveAsync(
         WorkspaceMember member,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every workspace membership the given subject holds WITHIN the given organization (tenant), oldest
+    /// first, for the data-subject access/portability export (CORE-PRIV-004, GDPR Art.15/20). It is the only
+    /// lookup on this contract keyed by the subject across a whole tenant (every other lookup additionally pins a
+    /// single workspace), and it is deliberately TENANT-SCOPED: the export under
+    /// <c>organizations/{slug}/members/{memberId}/personal-data-export</c> is authorized within ONE tenant, so it
+    /// returns only the subject's workspace memberships in THAT tenant. The predicate LEADS with
+    /// <c>organization_id</c> and matches the subject, so a membership the subject holds in another tenant is
+    /// never returned even when the surrogate ids would otherwise be addressable, and the subject's memberships in
+    /// other tenants are reached only through that tenant's own export route (threat T5/T1 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). The read is tracking-free and ordered by the time-ordered surrogate id
+    /// (UUIDv7), provider-independent (SQLite cannot ORDER BY a DateTimeOffset), matching the other repositories'
+    /// ordering convention.
+    /// </summary>
+    /// <param name="organizationId">The tenant the export is authorized in (required, non-empty).</param>
+    /// <param name="userProfileId">The data subject's user-profile id (required, non-empty).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The subject's workspace memberships in the tenant (empty when the subject has none there).</returns>
+    /// <exception cref="ArgumentException">The organization id or subject id is empty.</exception>
+    Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken);
 }

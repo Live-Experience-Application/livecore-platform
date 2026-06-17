@@ -222,4 +222,37 @@ internal sealed class WorkspaceMemberRepository : IWorkspaceMemberRepository
         _dbContext.WorkspaceMembers.Remove(member);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored membership (ids are generated non-empty), so the read fails fast
+        // instead of scanning the whole table.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // TENANT-SCOPED export read (CORE-PRIV-004): the predicate LEADS with the tenant column (the organization
+        // boundary checked before the workspace boundary) and matches the subject, so a membership the subject
+        // holds in another tenant is never returned even when the surrogate ids would otherwise be addressable
+        // (threat T5/T1). The read is tracking-free (it never mutates — the export only reads the subject's data
+        // back) and ordered oldest-first by the time-ordered surrogate id (UUIDv7), provider-independent because
+        // SQLite cannot ORDER BY a DateTimeOffset.
+        return await _dbContext.WorkspaceMembers
+            .AsNoTracking()
+            .Where(member => member.OrganizationId == organizationId
+                && member.UserProfileId == userProfileId)
+            .OrderBy(member => member.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

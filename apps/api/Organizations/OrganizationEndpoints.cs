@@ -54,6 +54,20 @@ namespace LiveCore.Api.Organizations;
 ///   by id (<see cref="AuditAction.UserProfileErased"/>). The sole Owner of an
 ///   organization cannot be erased (the orphan invariant, 409). Fail-closed and
 ///   hidden as 404 for a cross-tenant/unknown organization or member.</item>
+///   <item><c>GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export</c>
+///   — obtain a machine-readable access/portability export of a data subject's
+///   personal data (CORE-PRIV-004, GDPR Art.15 access / Art.20 portability), the
+///   access counterpart of the erasure above and DISTINCT from the session Exports
+///   feature. Resolves the member to their global user profile and runs the
+///   <see cref="PersonalDataExportService"/>: the export gathers the documented
+///   personal-data set scoped to the resolved tenant (the subject's identity
+///   profile plus their organization membership, workspace memberships, participant
+///   records and the invitations addressed to their email) and the access is
+///   audited by id (<see cref="AuditAction.PersonalDataExported"/>). The PII is
+///   delivered ONLY to the entitled recipient: the data subject THEMSELVES (self-service)
+///   or an Owner/Admin acting on their behalf; any other tenant member is denied
+///   403. Fail-closed and hidden as 404 for a cross-tenant/unknown organization or
+///   member.</item>
 /// </list>
 ///
 /// Authorization model (server-side, fail-closed; docs/06_AUTHORIZATION_MATRIX.md;
@@ -107,6 +121,7 @@ internal static class OrganizationEndpoints
             .RequireAuthorization();
 
         group.MapGet("/", ListOrganizationsAsync);
+        group.MapGet("/{organizationSlug}/members/{memberId}/personal-data-export", ExportMemberPersonalDataAsync);
         group.MapPost("/", CreateOrganizationAsync);
         group.MapDelete("/{organizationSlug}", DeleteOrganizationAsync);
         group.MapDelete("/{organizationSlug}/members/{memberId}", RemoveOrganizationMemberAsync);
@@ -512,6 +527,89 @@ internal static class OrganizationEndpoints
         };
     }
 
+    // GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export
+    private static async Task<IResult> ExportMemberPersonalDataAsync(
+        HttpContext httpContext,
+        string organizationSlug,
+        string memberId,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The organization is identified by its slug in the path (the tenant's natural key, matched against the
+        // token's organization claim). A missing/blank slug or a malformed member id can never address a stored
+        // row; hide as 404, never echoing why.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return HiddenOrganization();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenOrganization();
+        }
+
+        // Resolve the trusted tenant context (token claim AND persisted membership). A denied resolution — a
+        // foreign/unknown tenant, a malformed slug, a non-member or a service-account principal — is hidden as
+        // 404, so a tenant the caller cannot see is indistinguishable from a missing one (threat T5), exactly like
+        // the member-removal and erasure routes.
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return HiddenOrganization();
+        }
+
+        var context = resolution.Context;
+
+        // Identify the data subject by their membership in THIS tenant; a member id that belongs to another
+        // organization (or no membership at all) is hidden as 404, never 403, so a member outside the caller's
+        // resolved tenant can never be probed for (threats T1/T5). The membership resolves the subject's global
+        // user-profile id, which the export command then assembles the personal data for.
+        var target = await deps.OrganizationMembers
+            .FindByIdAsync(context.OrganizationId, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenOrganization();
+        }
+
+        // AUTHORIZATION (the story's "PII delivered only to the entitled subject" criterion;
+        // docs/06_AUTHORIZATION_MATRIX.md). The export discloses a subject's personal data, so it is delivered ONLY
+        // to those entitled to it: the data subject THEMSELVES (self-service access), or an Owner/Admin acting on
+        // their behalf (the tenant's data controller, which GDPR permits). The caller is already a known member of
+        // the tenant (the resolution proved it), so any OTHER tenant member — a Host/CoHost/Participant/Observer/
+        // Auditor who is not the subject — is denied 403, fail-closed. Exact, non-linear role check (no >/<); the
+        // self check matches the caller's resolved user profile against the target member's subject.
+        var callerIsSubject = context.UserProfileId == target.UserProfileId;
+        var callerIsTenantAdmin = context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin);
+        if (!(callerIsSubject || callerIsTenantAdmin))
+        {
+            return Forbidden();
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var export = await deps.PersonalDataExport
+            .ExportAsync(context.OrganizationId, context.UserProfileId, target.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Defensive: the membership references a real user profile by foreign key, so the subject should always
+        // exist; if it somehow does not, hide it as 404 rather than reveal anything (fail-closed).
+        return export is null
+            ? HiddenOrganization()
+            : Results.Ok(PersonalDataExportResponse.From(export));
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They
     /// exist only when a database connection string is configured; when absent,
@@ -527,6 +625,7 @@ internal static class OrganizationEndpoints
         var auditLog = services.GetService<IAuditLogRepository>();
         var dataSubjectErasure = services.GetService<DataSubjectErasureService>();
         var organizationDeletion = services.GetService<OrganizationDeletionService>();
+        var personalDataExport = services.GetService<PersonalDataExportService>();
 
         if (organizations is null
             || userProfiles is null
@@ -534,7 +633,8 @@ internal static class OrganizationEndpoints
             || organizationMembers is null
             || auditLog is null
             || dataSubjectErasure is null
-            || organizationDeletion is null)
+            || organizationDeletion is null
+            || personalDataExport is null)
         {
             dependencies = default;
             return false;
@@ -547,7 +647,8 @@ internal static class OrganizationEndpoints
             organizationMembers,
             auditLog,
             dataSubjectErasure,
-            organizationDeletion);
+            organizationDeletion,
+            personalDataExport);
         return true;
     }
 
@@ -636,5 +737,6 @@ internal static class OrganizationEndpoints
         IOrganizationMemberRepository OrganizationMembers,
         IAuditLogRepository AuditLog,
         DataSubjectErasureService DataSubjectErasure,
-        OrganizationDeletionService OrganizationDeletion);
+        OrganizationDeletionService OrganizationDeletion,
+        PersonalDataExportService PersonalDataExport);
 }

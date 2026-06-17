@@ -276,6 +276,40 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceInvitation>> ListByInvitedEmailInOrganizationAsync(
+        Guid organizationId,
+        string invitedEmail,
+        CancellationToken cancellationToken)
+    {
+        // An empty id or blank email can never address a stored invitation, so the read fails fast instead of
+        // scanning the whole table.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (string.IsNullOrWhiteSpace(invitedEmail))
+        {
+            throw new ArgumentException("Invited email must not be blank.", nameof(invitedEmail));
+        }
+
+        // TENANT-SCOPED export read (CORE-PRIV-004): the predicate LEADS with the tenant column and matches the
+        // invited email by EXACT (ordinal) equality — EF translates it to parameterized SQL against the trimmed,
+        // case-preserved stored value — so an invitation addressed to the subject in another tenant is never
+        // returned, and a near-match address is never returned (threat T5/T1). The read is tracking-free (the
+        // export only reads back) and ordered oldest-first by the time-ordered surrogate id (UUIDv7),
+        // provider-independent because SQLite cannot ORDER BY a DateTimeOffset. The token hash rides along on the
+        // aggregate but the endpoint projects to a DTO that never emits it (threats T6/T7).
+        return await _dbContext.WorkspaceInvitations
+            .AsNoTracking()
+            .Where(invitation => invitation.OrganizationId == organizationId
+                && invitation.InvitedEmail == invitedEmail)
+            .OrderBy(invitation => invitation.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<WorkspaceInvitation>> ListTerminalForRetentionAsync(
         DateTimeOffset createdBefore,
         DateTimeOffset asOf,

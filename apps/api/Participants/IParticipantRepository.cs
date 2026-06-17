@@ -184,4 +184,30 @@ public interface IParticipantRepository
         Guid userProfileId,
         DateTimeOffset updatedAt,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists every participant the given data subject is linked to WITHIN the given organization (tenant), oldest
+    /// first, for the data-subject access/portability export (CORE-PRIV-004, GDPR Art.15/20). Unlike
+    /// <see cref="AnonymizeBySubjectAsync"/> — which is cross-tenant by design because erasure must reach the
+    /// subject's data everywhere — this read is deliberately TENANT-SCOPED: the export under
+    /// <c>organizations/{slug}/members/{memberId}/personal-data-export</c> is authorized within ONE tenant, so it
+    /// returns only the subject's participant records in THAT tenant. An Owner/Admin exporting on the subject's
+    /// behalf therefore never learns of the subject's participation in another tenant, and the subject's own
+    /// records in other tenants are reached only through that tenant's own export route (threat T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). The predicate LEADS with <c>organization_id</c> and matches the user
+    /// link, so a participant the subject has in another tenant is never returned even when the surrogate ids
+    /// would otherwise be addressable; anonymous participants (no user link) match no subject. The list spans
+    /// every lifecycle status (an access export reflects the subject's data as held, including soft-removed
+    /// participation), ordered by the time-ordered surrogate id (UUIDv7) — provider-independent (SQLite cannot
+    /// ORDER BY a DateTimeOffset), matching the other repositories' ordering convention.
+    /// </summary>
+    /// <param name="organizationId">The tenant the export is authorized in (required, non-empty).</param>
+    /// <param name="userProfileId">The data subject's user-profile id (required, non-empty).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The subject's participant records in the tenant (empty when the subject has none there).</returns>
+    /// <exception cref="ArgumentException">The organization id or user profile id is empty.</exception>
+    Task<IReadOnlyList<Participant>> ListBySubjectInOrganizationAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken);
 }

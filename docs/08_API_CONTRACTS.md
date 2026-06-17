@@ -96,6 +96,7 @@ POST   /api/v1/organizations
 DELETE /api/v1/organizations/{organizationSlug}
 GET    /api/v1/audit-logs
 DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data
+GET    /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export
 GET    /api/v1/organizations/{organizationSlug}/templates
 POST   /api/v1/organizations/{organizationSlug}/templates
 GET    /api/v1/organizations/{organizationSlug}/templates/{templateId}

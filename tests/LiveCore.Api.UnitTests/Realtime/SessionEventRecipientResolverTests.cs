@@ -265,5 +265,11 @@ public sealed class SessionEventRecipientResolverTests
 
         public Task<int> AnonymizeBySubjectAsync(Guid userProfileId, DateTimeOffset updatedAt, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<Participant>> ListBySubjectInOrganizationAsync(
+            Guid organizationId,
+            Guid userProfileId,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 }

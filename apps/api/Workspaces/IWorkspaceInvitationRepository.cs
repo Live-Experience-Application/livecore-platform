@@ -164,6 +164,32 @@ public interface IWorkspaceInvitationRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists every invitation addressed to the given email WITHIN the given organization (tenant), oldest first,
+    /// for the data-subject access/portability export (CORE-PRIV-004, GDPR Art.15/20). Unlike
+    /// <see cref="AnonymizeByInvitedEmailAsync"/> — which is cross-tenant by design because erasure must scrub the
+    /// subject's email everywhere — this read is deliberately TENANT-SCOPED: the export under
+    /// <c>organizations/{slug}/members/{memberId}/personal-data-export</c> is authorized within ONE tenant, so it
+    /// returns only the invitations addressed to the subject in THAT tenant. An Owner/Admin exporting on the
+    /// subject's behalf therefore never learns of invitations the subject received in another tenant, and the
+    /// subject's invitations in other tenants are reached only through that tenant's own export route (threat T5
+    /// in docs/07_SECURITY_THREAT_MODEL.md). The predicate LEADS with <c>organization_id</c> and matches the
+    /// invited email by EXACT (ordinal) equality — the email is stored as trimmed, case-preserved data — so a
+    /// near-match or a foreign-tenant invitation is never returned. The read is tracking-free and ordered by the
+    /// time-ordered surrogate id (UUIDv7), provider-independent (SQLite cannot ORDER BY a DateTimeOffset). The
+    /// invitation aggregates carry the token hash, but the export endpoint projects to a DTO that never emits it
+    /// (threats T6/T7) — only the invited email itself, which IS the subject's own personal datum, is disclosed.
+    /// </summary>
+    /// <param name="organizationId">The tenant the export is authorized in (required, non-empty).</param>
+    /// <param name="invitedEmail">The data subject's email to match (required, non-blank).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The subject's invitations in the tenant (empty when none matched there).</returns>
+    /// <exception cref="ArgumentException">The organization id is empty or the invited email is blank.</exception>
+    Task<IReadOnlyList<WorkspaceInvitation>> ListByInvitedEmailInOrganizationAsync(
+        Guid organizationId,
+        string invitedEmail,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists up to <paramref name="maxCount"/> TERMINAL invitations created before <paramref name="createdBefore"/>
     /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). An
     /// invitation is TERMINAL (closed/expired/revoked) when it is <see cref="WorkspaceInvitationStatus.Accepted"/>,

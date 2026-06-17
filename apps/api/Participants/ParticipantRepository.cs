@@ -258,4 +258,38 @@ internal sealed class ParticipantRepository : IParticipantRepository
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return participants.Count;
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Participant>> ListBySubjectInOrganizationAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored participant (ids are generated non-empty), so the read fails fast
+        // instead of scanning the whole table.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // TENANT-SCOPED export read (CORE-PRIV-004): the predicate LEADS with the tenant column and matches the
+        // user link, so the subject's participant records in another tenant are never returned even when the
+        // surrogate ids would otherwise be addressable (threat T5/T1). The read is tracking-free (it never
+        // mutates — the export only reads the subject's data back) and ordered oldest-first by the time-ordered
+        // surrogate id (UUIDv7), provider-independent because SQLite cannot ORDER BY a DateTimeOffset. Every
+        // lifecycle status is included: an access/portability export reflects the subject's data as held, so a
+        // soft-removed participant is still part of the subject's record.
+        return await _dbContext.Participants
+            .AsNoTracking()
+            .Where(participant => participant.OrganizationId == organizationId
+                && participant.UserProfileId == userProfileId)
+            .OrderBy(participant => participant.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }
