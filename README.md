@@ -59,6 +59,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [TypeScript SDK package](#typescript-sdk-package)
     - [TypeScript design tokens package](#typescript-design-tokens-package)
     - [TypeScript UI core package](#typescript-ui-core-package)
+    - [Worked consumer example (CORE-PUB-003)](#worked-consumer-example-core-pub-003)
     - [Package versioning and changelog](#package-versioning-and-changelog)
     - [Boundary scan](#boundary-scan)
     - [Spec consistency check](#spec-consistency-check)
@@ -277,6 +278,7 @@ packages/contracts       @livecore/contracts  - TypeScript contract types (DTOs,
 packages/sdk-ts          @livecore/sdk-ts     - TypeScript SDK client (typed Core API client over @livecore/contracts)
 packages/ui-core         @livecore/ui-core    - generic, framework-agnostic UI primitive contracts (variant vocabularies, prop shapes, variant defaults)
 packages/design-tokens   @livecore/design-tokens - generic design tokens and theme contracts
+examples/minimal-consumer  @livecore-examples/minimal-consumer - minimal worked consumer (private, never published): a vertical app authenticating, constructing the SDK client (logging PACKAGE_NAME/VERSION) and calling the API; built in CI against the package public surfaces so a breaking change fails its build (CORE-PUB-003)
 tests/LiveCore.Api.UnitTests  xUnit unit tests for the API domain modules (IdentityAccess)
 tests/LiveCore.SmokeTests  xUnit smoke and health endpoint tests for the hosts
 tests/version-lockstep/version-lockstep.test.mjs  cross-package version lockstep test: the four packages share one version across package.json + exported VERSION + per-package + root CHANGELOG (CORE-CMP-003; run via `pnpm run test:versions`)
@@ -575,6 +577,62 @@ constants and the `resolveVariant` helper, with the prop contracts being
 compile-time types. Its `test` script builds the package, type-checks the
 compile-time type assertions (`tsconfig.test.json`) and runs package-build tests
 against the compiled output with the Node built-in test runner.
+
+### Worked consumer example (CORE-PUB-003)
+
+A vertical author starting from these packages had no reference integration to copy
+(`apps/` is the API and worker only). `examples/minimal-consumer`
+(`@livecore-examples/minimal-consumer`) is that reference: a minimal,
+product-neutral consumer that does exactly what a vertical does — install the
+published packages, authenticate, construct the typed client and call the API.
+
+A consumer in another repository installs the packages from the registry and imports
+the typed surface:
+
+```bash
+pnpm add @livecore/sdk-ts @livecore/contracts
+```
+
+```ts
+import { LiveCoreClient, PACKAGE_NAME, VERSION } from "@livecore/sdk-ts";
+import type { CurrentPrincipalResponse } from "@livecore/contracts";
+
+// Pin exactly which published Core release this app runs against (the lockstep
+// VERSION; see "Package versioning and changelog" below).
+console.log(`Running against ${PACKAGE_NAME}@${VERSION}.`);
+
+// The SDK is OIDC-first: it never mints a token. Supply one from your login flow
+// (the provider may be async to refresh it); authorization stays server-side.
+const client = new LiveCoreClient({
+    baseUrl: "http://localhost:5062", // Core API origin, WITHOUT the /api/v1 prefix
+    getAccessToken: () => process.env.LIVECORE_ACCESS_TOKEN ?? "",
+});
+
+// Call a read route through the typed surface; a denial is a typed LiveCoreApiError.
+const principal: CurrentPrincipalResponse =
+    await client.identity.getCurrentPrincipal();
+console.log(principal.user.displayName ?? principal.user.subject);
+```
+
+The full worked version — the fail-closed configuration load and the typed
+`LiveCoreApiError` handling — is in `examples/minimal-consumer/src/quickstart.ts`,
+and the runnable entry (`pnpm --filter @livecore-examples/minimal-consumer start`,
+with `LIVECORE_API_BASE_URL` and `LIVECORE_ACCESS_TOKEN` set against a local Core)
+is `src/main.ts`. The example's own
+[`README`](examples/minimal-consumer/README.md) has the run instructions.
+
+The example is **built in CI against the package public surfaces, not their internal
+source**, so a breaking change to the published shape fails its build (CORE-PUB-001).
+It takes `@livecore/sdk-ts` and `@livecore/contracts` as `workspace:*` dependencies
+and imports each only by its package entry point, so module resolution follows each
+package's `exports`/`types` to its built `dist/index.d.ts` — the same entry point a
+registry consumer resolves — and the packages expose no deep import path, so the
+example can never reach internal `src/`. The `typescript` job's
+`pnpm --recursive run build` builds it, and a package test
+(`tests/minimal-consumer.public-surface.test.mjs`) guards that it keeps importing
+only the public entry points and that the compiled output is loadable. The example
+is `private` and never published — it is not one of the four released `@livecore`
+packages.
 
 ### Package versioning and changelog
 

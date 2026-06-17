@@ -1,0 +1,22 @@
+{
+  "name": "@livecore-examples/minimal-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal worked example: a vertical app consuming the published-shape @livecore/sdk-ts and @livecore/contracts packages — authenticate, construct the client (logging PACKAGE_NAME/VERSION) and call the Core API. Built in CI against the package public surfaces (CORE-PUB-003).",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "tsc -p tsconfig.json && node --test tests/minimal-consumer.public-surface.test.mjs"
+  },
+  "dependencies": {
+    "@livecore/contracts": "workspace:*",
+    "@livecore/sdk-ts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

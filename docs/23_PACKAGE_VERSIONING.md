@@ -350,3 +350,32 @@ version with the republish refusal. It authenticates to the registry with the
 time — **no registry credential lives in the repository**. npm build provenance
 and the remaining publish-shape fields (`engines`, `repository.directory`) are a
 follow-up (CORE-PUB-004).
+
+### Worked consumer example (CORE-PUB-003)
+
+A published shape is only proven consumable if something consumes it. The repository
+ships a minimal worked consumer — `examples/minimal-consumer`
+(`@livecore-examples/minimal-consumer`) — as the reference integration a vertical
+author copies: it installs the published packages, authenticates, constructs the
+typed SDK client (logging the package `PACKAGE_NAME`/`VERSION` it runs against, the
+runtime introspection above) and calls a Core API read route. It is product-neutral
+(the boundary scan applies) and **private** — never one of the four released
+packages, so it does not enter the lockstep, the publish plan or the changelog.
+
+The example is the consumer-side guard on the published surface. It depends on
+`@livecore/sdk-ts` and `@livecore/contracts` as `workspace:*` links and imports each
+**only by its package entry point**, so TypeScript module resolution follows each
+package's `exports`/`types` to its built `dist/index.d.ts` — the exact entry point a
+registry consumer resolves — and the packages expose no deep import path, so the
+example can never reach internal `src/`. CI builds it in the `typescript` job
+(`pnpm --recursive run build`, after the packages it depends on), so a **breaking
+change to the published surface fails the example build** (CORE-PUB-001): a removed
+or renamed export, or a narrowed type, stops the example compiling. A package test
+(`examples/minimal-consumer/tests/minimal-consumer.public-surface.test.mjs`,
+mirrored into `pnpm --recursive run test`) additionally asserts the example keeps
+importing only the public entry points and that its compiled output is loadable. The
+example therefore makes the SemVer rules above observable from a consumer's seat: a
+surface change that should be a MAJOR/MINOR event cannot pass unnoticed while a
+worked consumer still compiles against it. The runnable usage and the documented
+quick start are in `README.md` ("Worked consumer example") and the example's own
+`README`.

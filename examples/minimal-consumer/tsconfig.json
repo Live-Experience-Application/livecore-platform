@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // The example is a runnable Node program, but it must type-check against the
+    // published @livecore package surfaces ALONE — with no ambient @types/node, so
+    // a vertical author sees exactly the Core dependency they take on. `DOM` supplies
+    // the standard `console`/`fetch` globals Node 22 also implements; the small
+    // `process` env view the runnable entry needs is declared locally in src/.
+    "lib": ["ES2022", "DOM"],
+    "types": []
+  },
+  "include": ["src"]
+}

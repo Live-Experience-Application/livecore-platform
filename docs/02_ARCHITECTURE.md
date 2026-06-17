@@ -79,7 +79,21 @@ packages/ui-core
 
 packages/design-tokens
   generic tokens and theme contracts
+
+examples/minimal-consumer
+  minimal worked reference consumer: a vertical app authenticating, constructing
+  the SDK client and calling the API against the published package surfaces
 ```
+
+The `examples/minimal-consumer` package (CORE-PUB-003) is the reference integration
+a vertical author copies — there is no reference web app, and `apps/` is the API and
+worker only. It is product-neutral and **private** (never one of the four published
+`@livecore` packages). It depends on `@livecore/sdk-ts` and `@livecore/contracts` as
+`workspace:*` links and imports each only by its package entry point, so it builds
+against the packages' published `dist` surfaces — not their internal `src/` — and CI
+(`pnpm --recursive run build`) fails the example build on a breaking change to that
+published shape. See `docs/23_PACKAGE_VERSIONING.md` ("Worked consumer example") and
+`README.md`.
 
 The `packages/contracts` types are **OpenAPI-derived**: the API emits an OpenAPI 3
 document (CORE-OAS-001; see "OpenAPI document" under

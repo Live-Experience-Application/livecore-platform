@@ -24,6 +24,19 @@ importers:
         specifier: ^8.61.0
         version: 8.61.0(eslint@10.4.1)(typescript@5.9.3)
 
+  examples/minimal-consumer:
+    dependencies:
+      '@livecore/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@livecore/sdk-ts':
+        specifier: workspace:*
+        version: link:../../packages/sdk-ts
+    devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/contracts:
     devDependencies:
       openapi-typescript:
