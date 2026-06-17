@@ -158,7 +158,7 @@ internal static class SessionEventReplayEndpoints
             afterSequenceValue = parsedCursor;
         }
 
-        var envelopes = await deps.Replay
+        var slice = await deps.Replay
             .ReplayAsync(
                 resolution.Context.OrganizationId,
                 sessionGuid,
@@ -167,7 +167,7 @@ internal static class SessionEventReplayEndpoints
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var response = SessionEventReplayResponse.From(sessionGuid, envelopes, timeProvider.GetUtcNow());
+        var response = SessionEventReplayResponse.From(sessionGuid, slice, timeProvider.GetUtcNow());
 
         return Results.Ok(response);
     }

@@ -33,35 +33,44 @@ namespace LiveCore.Api.Realtime;
 /// <param name="SessionId">The session whose stream was replayed (echoes the addressed session).</param>
 /// <param name="Events">
 /// The recipient-safe events the caller is entitled to, in append (chronological) order — only those
-/// after the acknowledged cursor when one was supplied. Always present; empty when the caller has
-/// acknowledged everything they may see.
+/// after the acknowledged cursor when one was supplied, and only the first BOUNDED page of them
+/// (CORE-PERF-002). Always present; empty when the caller has acknowledged everything they may see.
+/// </param>
+/// <param name="NextSequence">
+/// The cursor to pass back as <c>afterSequence</c> to fetch the NEXT page when the replay was capped
+/// (CORE-PERF-002), or <see langword="null"/> when the caller has caught up (no more events after this
+/// page). It is the highest RAW per-session sequence in the page — independent of which events the caller
+/// may see — so the client always pages FORWARD, even across a full page with no event it is entitled to:
+/// the cap never silently drops unacknowledged events, and the client deduplicates already-seen events
+/// (docs/11_REALTIME_SYNC.md). A sequence number is not sensitive content (threat T7).
 /// </param>
 /// <param name="GeneratedAt">Server timestamp (UTC) at which the replay was computed.</param>
 public sealed record SessionEventReplayResponse(
     Guid SessionId,
     IReadOnlyList<SessionEventReplayItem> Events,
+    long? NextSequence,
     DateTimeOffset GeneratedAt)
 {
     /// <summary>
-    /// Builds the replay response from the already-filtered, already-projected recipient envelopes
+    /// Builds the replay response from the already-filtered, already-projected recipient page
     /// (<see cref="SessionReplayService.ReplayAsync"/>) at the given server time. This is a pure shape
     /// mapping — every visibility decision and projection has already been made — so no event can be
     /// added or unmasked here.
     /// </summary>
     internal static SessionEventReplayResponse From(
         Guid sessionId,
-        IReadOnlyList<SessionEventEnvelope> envelopes,
+        SessionReplaySlice slice,
         DateTimeOffset generatedAt)
     {
-        ArgumentNullException.ThrowIfNull(envelopes);
+        ArgumentNullException.ThrowIfNull(slice);
 
-        var items = new List<SessionEventReplayItem>(envelopes.Count);
-        foreach (var envelope in envelopes)
+        var items = new List<SessionEventReplayItem>(slice.Events.Count);
+        foreach (var envelope in slice.Events)
         {
             items.Add(SessionEventReplayItem.From(envelope));
         }
 
-        return new SessionEventReplayResponse(sessionId, items, generatedAt);
+        return new SessionEventReplayResponse(sessionId, items, slice.NextSequence, generatedAt);
     }
 }
 

@@ -100,6 +100,38 @@ one (`docs/05_MODULE_CONTRACTS.md`: visibility is decided in one place). Reconne
 recipient resolver unchanged, so a participant — now also a member of the shared `:audience` group — replays
 exactly its live audience view.
 
+## Bounded, cursored reconnect replay (CORE-PERF-002)
+
+Reconnect replay used to load the **entire** session stream
+(`SessionEventRepository.ListBySessionAsync` — no sequence cursor, no row limit), slice it after the client
+cursor **in memory**, and then resolve recipient visibility **per event** (one rule lookup each). A reconnect
+to a long, well-attended session therefore did `O(events)` work and rule lookups inside a single request, so a
+reconnect storm could become a self-inflicted denial of service (threat T9 in
+`docs/07_SECURITY_THREAT_MODEL.md`).
+
+Replay is now **bounded** and **cursored** end to end:
+
+- **The cursor and a row cap are pushed into SQL.** `ISessionEventRepository.ListBySessionAfterAsync` reads
+  only the rows whose per-session `sequence` is **greater than the client cursor**, in sequence order, capped
+  at a fixed maximum page size (`SessionReplayService.MaxReplayEvents`) — a
+  `WHERE sequence > cursor ORDER BY sequence LIMIT cap` backed by the unique `session_events(session_id,
+  sequence)` index. The whole stream is never loaded then filtered in memory, so the read cost is bounded
+  regardless of stream length.
+- **Recipient visibility for the page is resolved in ONE batched lookup.** The recipient resolver's
+  `ResolveBatchAsync` collects the page's **distinct** visibility subjects and resolves them with a single
+  batched rule query (`VisibilityRuleRepository.ListByResourcesAsync` → `VisibilityPolicy
+  .ResolveAudienceVisibilityBatchAsync`), reusing the **same** CORE-PERF-001 in-memory audience gate — so the
+  per-replay rule-lookup count is **one**, independent of both the number of events and the audience size
+  (replay cost no longer grows with `events × participants`). The per-event routing/projection is the SAME
+  `BuildDeliveries` the live single-event path uses, so a replayed page is byte-for-byte what live delivery
+  would have produced — **replay correctness and filtering are unchanged** (threat T3).
+- **Paging forward never silently drops events.** When a page comes back FULL (exactly the cap), more rows may
+  remain, so the response carries `nextSequence` — the page's highest RAW per-session sequence — for the
+  client to pass back as `afterSequence` and fetch the next page. It is the raw sequence (independent of which
+  events the caller may see), so a client pages forward **even across a full page that contains no event it is
+  entitled to**; a non-full page sets `nextSequence` to null (caught up). A sequence number is not sensitive
+  content (a host already sees every sequence, and a participant already detects gaps by design — threat T7).
+
 ## Per-session event sequence (CORE-RTC-001)
 
 Every session event carries a **per-session, gap-free, strictly monotonic** `sequence` number, and both live
@@ -166,6 +198,9 @@ Reconnect requires:
   skips or duplicates — CORE-RTC-001)
 - server-side replay filter
 - duplicate event handling
+- **bounded paging** — a reconnect replays at most one capped page; when more remains the response's
+  `nextSequence` is the cursor for the next page, so a large backlog is drained over successive bounded
+  requests rather than one unbounded load (CORE-PERF-002)
 
 ## Scale-out
 

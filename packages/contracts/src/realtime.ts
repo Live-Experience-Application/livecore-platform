@@ -61,9 +61,19 @@ export interface SessionEventReplayResponse {
   /**
    * The recipient-safe events the caller is entitled to, in append (sequence)
    * order — only those after the acknowledged sequence cursor when one was
-   * supplied.
+   * supplied, and only the first bounded page of them (CORE-PERF-002).
    */
   events: SessionEventReplayItem[];
+  /**
+   * The cursor to pass back as `afterSequence` to fetch the NEXT page when the
+   * replay was capped (CORE-PERF-002), or `null` when the caller has caught up
+   * (no more events after this page). It is the highest raw per-session sequence
+   * in the page — independent of which events the caller may see — so the client
+   * always pages forward, even across a full page with no event it is entitled
+   * to, and deduplicates already-seen events (docs/11_REALTIME_SYNC.md). The cap
+   * never silently drops unacknowledged events.
+   */
+  nextSequence: number | null;
   /** Server timestamp (UTC) at which the replay was computed. */
   generatedAt: IsoDateTimeString;
 }

@@ -352,6 +352,19 @@ public sealed class RealtimeDeliveryEndpointTests
             return _inner.ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken);
         }
 
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            IReadOnlyCollection<Guid> resourceIds,
+            CancellationToken cancellationToken)
+        {
+            // The BATCHED rule lookup (CORE-PERF-002): count it too, so the reconnect-replay scale assertions
+            // see every rule query the resolution issues — batched or single.
+            _counter.Increment();
+            return _inner.ListByResourcesAsync(organizationId, workspaceId, sessionId, resourceIds, cancellationToken);
+        }
+
         public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
             => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
 

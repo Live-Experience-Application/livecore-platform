@@ -42,4 +42,28 @@ public interface ISessionEventRepository
         Guid organizationId,
         Guid sessionId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists a BOUNDED, CURSORED slice of the given session's stream (CORE-PERF-002): the events whose
+    /// per-session <see cref="SessionEvent.Sequence"/> is strictly greater than
+    /// <paramref name="afterSequence"/> (or from the start when it is <see langword="null"/>), in append
+    /// (sequence) order, capped at <paramref name="limit"/> rows. The cursor and the cap are pushed into
+    /// SQL — a <c>WHERE sequence &gt; cursor ORDER BY sequence LIMIT limit</c> backed by the unique
+    /// <c>session_events(session_id, sequence)</c> index — so a reconnect replay reads ONLY the rows after
+    /// the client cursor up to the cap rather than loading the whole stream and filtering in memory; replay
+    /// cost is bounded and does not grow with stream length (threat T9 abuse/DoS — a reconnect storm cannot
+    /// load an unbounded stream). The slice is tenant- AND session-scoped exactly like
+    /// <see cref="ListBySessionAsync"/> (the predicate leads with <c>organization_id</c> and matches
+    /// <c>session_id</c>; threat T5/T1). Because the sequence is gap-free and monotonic, a cursor of N
+    /// returns N+1.. with no skips or duplicates, and a full slice (exactly <paramref name="limit"/> rows)
+    /// signals more may remain after its last sequence — the caller pages forward by that sequence.
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or session id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The limit is below 1.</exception>
+    Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+        Guid organizationId,
+        Guid sessionId,
+        long? afterSequence,
+        int limit,
+        CancellationToken cancellationToken);
 }

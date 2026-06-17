@@ -6,11 +6,13 @@ using LiveCore.Api.Realtime;
 namespace LiveCore.Api.UnitTests.Realtime;
 
 /// <summary>
-/// Tests for <see cref="SessionReplayService"/> (CORE-RT-005, "reconnect replay with filtering"). They pin
-/// the two things the replay filter is responsible for, in isolation: (1) the CURSOR slice — only events
-/// after the last acknowledged id, in append order — and (2) the per-recipient INTERSECT — keep only the
-/// delivery addressed to one of the caller's own server-managed groups, with the projection that group
-/// received. The per-event gating/projection itself is the recipient resolver's job (covered by
+/// Tests for <see cref="SessionReplayService"/> (CORE-RT-005, "reconnect replay with filtering"; CORE-PERF-002,
+/// "bounded and cursored"). They pin the things the replay filter is responsible for, in isolation: (1) the
+/// CURSOR slice — only events after the last acknowledged id, in append order — now pushed into the repository
+/// read; (2) the per-recipient INTERSECT — keep only the delivery addressed to one of the caller's own
+/// server-managed groups, with the projection that group received; and (3) the BOUNDED page — the read is
+/// capped and a full page hands back a forward cursor so the cap never silently drops events (CORE-PERF-002).
+/// The per-event gating/projection itself is the recipient resolver's job (covered by
 /// <see cref="SessionEventRecipientResolverTests"/>), so here it is FAKED to return controlled deliveries,
 /// which is exactly what lets these tests prove the slice + intersect deterministically.
 ///
@@ -56,9 +58,11 @@ public sealed class SessionReplayServiceTests
         var replay = await service.ReplayAsync(
             _org, _session, [_hostsGroup], afterSequence: null, CancellationToken.None);
 
-        Assert.Equal(new[] { first.Id, selected.Id }, replay.Select(envelope => envelope.EventId));
+        Assert.Equal(new[] { first.Id, selected.Id }, replay.Events.Select(envelope => envelope.EventId));
         // Host projection carries the routing target for the selected event.
-        Assert.Equal(selected.TargetParticipantId, replay[1].TargetParticipantId);
+        Assert.Equal(selected.TargetParticipantId, replay.Events[1].TargetParticipantId);
+        // A short stream is a non-full page, so there is no next page.
+        Assert.Null(replay.NextSequence);
     }
 
     [Fact]
@@ -83,10 +87,10 @@ public sealed class SessionReplayServiceTests
         var replayA = await service.ReplayAsync(_org, _session, [groupA], afterSequence: null, CancellationToken.None);
         var replayB = await service.ReplayAsync(_org, _session, [groupB], afterSequence: null, CancellationToken.None);
 
-        Assert.Equal(new[] { selectedToA.Id, audience.Id }, replayA.Select(envelope => envelope.EventId));
-        Assert.Equal(new[] { audience.Id }, replayB.Select(envelope => envelope.EventId));
+        Assert.Equal(new[] { selectedToA.Id, audience.Id }, replayA.Events.Select(envelope => envelope.EventId));
+        Assert.Equal(new[] { audience.Id }, replayB.Events.Select(envelope => envelope.EventId));
         // The audience projection a participant replays never carries the routing target.
-        Assert.All(replayB, envelope => Assert.Null(envelope.TargetParticipantId));
+        Assert.All(replayB.Events, envelope => Assert.Null(envelope.TargetParticipantId));
     }
 
     [Fact]
@@ -105,24 +109,29 @@ public sealed class SessionReplayServiceTests
 
         var replay = await service.ReplayAsync(_org, _session, [_observersGroup], afterSequence: null, CancellationToken.None);
 
-        Assert.Empty(replay);
+        Assert.Empty(replay.Events);
     }
 
     [Fact]
     public async Task The_cursor_after_sequence_n_replays_only_n_plus_one_onwards()
     {
         // The required test: a cursor of sequence N returns N+1.. with no skips or duplicates (CORE-RTC-001).
+        // The cursor is applied by the repository read (CORE-PERF-002), faked here to slice post-cursor rows.
         var first = NewEvent(1);
         var second = NewEvent(2);
         var third = NewEvent(3);
         var resolver = new FakeRecipientResolver(HostAlways);
-        var service = new SessionReplayService(new FakeEventRepository(first, second, third), resolver);
+        var repository = new FakeEventRepository(first, second, third);
+        var service = new SessionReplayService(repository, resolver);
 
         var replay = await service.ReplayAsync(
             _org, _session, [_hostsGroup], afterSequence: first.Sequence, CancellationToken.None);
 
-        Assert.Equal(new[] { second.Id, third.Id }, replay.Select(envelope => envelope.EventId));
-        Assert.Equal(new long[] { 2, 3 }, replay.Select(envelope => envelope.Sequence));
+        Assert.Equal(new[] { second.Id, third.Id }, replay.Events.Select(envelope => envelope.EventId));
+        Assert.Equal(new long[] { 2, 3 }, replay.Events.Select(envelope => envelope.Sequence));
+        // The repository was asked only for the post-cursor rows up to the cap — never the whole stream.
+        Assert.Equal(first.Sequence, repository.LastAfterSequence);
+        Assert.Equal(SessionReplayService.MaxReplayEvents, repository.LastLimit);
     }
 
     [Fact]
@@ -135,13 +144,14 @@ public sealed class SessionReplayServiceTests
         var replay = await service.ReplayAsync(
             _org, _session, [_hostsGroup], afterSequence: second.Sequence, CancellationToken.None);
 
-        Assert.Empty(replay);
+        Assert.Empty(replay.Events);
+        Assert.Null(replay.NextSequence);
     }
 
     [Fact]
-    public async Task A_cursor_below_the_first_sequence_replays_the_whole_stream()
+    public async Task A_cursor_below_the_first_sequence_replays_from_the_start()
     {
-        // A zero/out-of-range cursor is fail-safe: replay the whole stream (still per-recipient filtered),
+        // A zero/out-of-range cursor is fail-safe: replay from the start (still per-recipient filtered),
         // and let the client deduplicate (docs/11 "duplicate event handling").
         var first = NewEvent(1);
         var second = NewEvent(2);
@@ -150,7 +160,36 @@ public sealed class SessionReplayServiceTests
         var replay = await service.ReplayAsync(
             _org, _session, [_hostsGroup], afterSequence: 0, CancellationToken.None);
 
-        Assert.Equal(new[] { first.Id, second.Id }, replay.Select(envelope => envelope.EventId));
+        Assert.Equal(new[] { first.Id, second.Id }, replay.Events.Select(envelope => envelope.EventId));
+    }
+
+    [Fact]
+    public async Task A_full_page_hands_back_the_next_cursor_so_the_client_pages_forward()
+    {
+        // CORE-PERF-002: when the bounded read returns a FULL page (exactly the cap), more rows may remain,
+        // so the service hands back the page's highest RAW sequence as the next cursor — even if a recipient
+        // can see none of the page, the cap never silently drops unacknowledged events.
+        var stream = new SessionEvent[SessionReplayService.MaxReplayEvents + 3];
+        for (var index = 0; index < stream.Length; index++)
+        {
+            stream[index] = NewEvent(index + 1);
+        }
+
+        var service = new SessionReplayService(new FakeEventRepository(stream), new FakeRecipientResolver(HostAlways));
+
+        var firstPage = await service.ReplayAsync(_org, _session, [_hostsGroup], afterSequence: null, CancellationToken.None);
+
+        // The page is capped at the maximum and the next cursor is its highest raw sequence.
+        Assert.Equal(SessionReplayService.MaxReplayEvents, firstPage.Events.Count);
+        Assert.Equal(SessionReplayService.MaxReplayEvents, firstPage.NextSequence);
+
+        // Paging forward by the returned cursor drains the rest, and the final (non-full) page has no cursor.
+        var secondPage = await service.ReplayAsync(
+            _org, _session, [_hostsGroup], afterSequence: firstPage.NextSequence, CancellationToken.None);
+
+        Assert.Equal(3, secondPage.Events.Count);
+        Assert.Null(secondPage.NextSequence);
+        Assert.Equal(new long[] { stream.Length - 2, stream.Length - 1, stream.Length }, secondPage.Events.Select(e => e.Sequence));
     }
 
     [Fact]
@@ -161,7 +200,7 @@ public sealed class SessionReplayServiceTests
 
         var replay = await service.ReplayAsync(_org, _session, [], afterSequence: null, CancellationToken.None);
 
-        Assert.Empty(replay);
+        Assert.Empty(replay.Events);
         Assert.False(repository.WasQueried);
     }
 
@@ -196,6 +235,14 @@ public sealed class SessionReplayServiceTests
             SessionEvent sessionEvent,
             CancellationToken cancellationToken)
             => Task.FromResult(_plan(sessionEvent));
+
+        // The batch path the replay service uses (CORE-PERF-002): apply the SAME plan per event, so a
+        // batched delivery list is identical to the per-event one — exactly the production contract.
+        public Task<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>> ResolveBatchAsync(
+            IReadOnlyList<SessionEvent> sessionEvents,
+            CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>>(
+                sessionEvents.Select(sessionEvent => _plan(sessionEvent)).ToList());
     }
 
     private sealed class FakeEventRepository : ISessionEventRepository
@@ -205,6 +252,10 @@ public sealed class SessionReplayServiceTests
         public FakeEventRepository(params SessionEvent[] stream) => _stream = stream;
 
         public bool WasQueried { get; private set; }
+
+        public long? LastAfterSequence { get; private set; }
+
+        public int LastLimit { get; private set; }
 
         public Task AppendAsync(SessionEvent sessionEvent, CancellationToken cancellationToken)
             => throw new NotSupportedException();
@@ -216,6 +267,27 @@ public sealed class SessionReplayServiceTests
         {
             WasQueried = true;
             return Task.FromResult(_stream);
+        }
+
+        // The bounded + cursored read the replay service calls (CORE-PERF-002): slice the post-cursor rows in
+        // sequence order and cap at the limit, mirroring the SQL the real repository pushes down.
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
+            CancellationToken cancellationToken)
+        {
+            WasQueried = true;
+            LastAfterSequence = afterSequence;
+            LastLimit = limit;
+
+            var slice = _stream
+                .Where(sessionEvent => afterSequence is not { } cursor || sessionEvent.Sequence > cursor)
+                .OrderBy(sessionEvent => sessionEvent.Sequence)
+                .Take(limit)
+                .ToList();
+            return Task.FromResult<IReadOnlyList<SessionEvent>>(slice);
         }
     }
 }

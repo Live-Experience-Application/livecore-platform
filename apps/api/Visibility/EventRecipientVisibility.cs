@@ -60,6 +60,67 @@ internal sealed class EventRecipientVisibility : IEventRecipientVisibility
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyDictionary<(string SubjectType, Guid SubjectId), AudienceVisibility>>
+        ResolveAudienceRecipientsBatchAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            IReadOnlyCollection<(string SubjectType, Guid SubjectId)> subjects,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(subjects);
+
+        var result = new Dictionary<(string SubjectType, Guid SubjectId), AudienceVisibility>();
+        if (subjects.Count == 0)
+        {
+            return result;
+        }
+
+        // Parse each DISTINCT subject's kind fail-closed (by NAME only, never numeric — the same parse the
+        // single resolution uses). A recognized subject maps to a resource ref; an unrecognized or empty one
+        // is mapped straight to None (fail-closed — a malformed subject never leaks an event).
+        var refBySubject = new Dictionary<(string SubjectType, Guid SubjectId), (VisibilityResourceType ResourceType, Guid ResourceId)>();
+        foreach (var subject in subjects.Distinct())
+        {
+            if (TryParseSubjectType(subject.SubjectType, out var resourceType) && subject.SubjectId != Guid.Empty)
+            {
+                refBySubject[subject] = (resourceType, subject.SubjectId);
+            }
+            else
+            {
+                result[subject] = AudienceVisibility.None;
+            }
+        }
+
+        if (refBySubject.Count == 0)
+        {
+            return result;
+        }
+
+        // Resolve every recognized subject through the canonical SESSION-SCOPED batched audience resolution
+        // (CORE-PERF-002 + CORE-PERF-001): ONE batched rule lookup yields each subject's audience-wide
+        // decision and participant-scoped visible set, so the realtime audience gate equals the REST one and
+        // a reveal in a concurrent session of the same workspace can never contribute here.
+        var resolved = await _policy
+            .ResolveAudienceVisibilityBatchAsync(
+                organizationId,
+                workspaceId,
+                sessionId,
+                refBySubject.Values.Distinct().ToArray(),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var (subject, resourceRef) in refBySubject)
+        {
+            result[subject] = resolved.TryGetValue(resourceRef, out var audience)
+                ? audience
+                : AudienceVisibility.None;
+        }
+
+        return result;
+    }
+
+    /// <inheritdoc />
     public async Task<bool> CanParticipantReceiveAsync(
         Guid organizationId,
         Guid workspaceId,

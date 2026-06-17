@@ -32,10 +32,22 @@ namespace LiveCore.Api.Realtime;
 /// docs/11_REALTIME_SYNC.md). Events are replayed strictly AFTER it in append (sequence) order — the stream
 /// is read by the gap-free monotonic sequence the repository orders by, NOT the millisecond-resolution
 /// UUIDv7 id — so a cursor of N returns exactly N+1.. with no skips or duplicates. A cursor below the first
-/// sequence replays the whole stream — every event is still re-filtered per recipient (so nothing leaks)
+/// sequence replays from the start — every event is still re-filtered per recipient (so nothing leaks)
 /// and the client deduplicates already-seen events (docs/11_REALTIME_SYNC.md requires client-side
 /// "duplicate event handling"), so a stale or out-of-range cursor is fail-safe and never silently drops
 /// unacknowledged events.
+///
+/// BOUNDED AND CURSORED (CORE-PERF-002). The cursor AND a row cap (<see cref="MaxReplayEvents"/>) are pushed
+/// into SQL (<see cref="ISessionEventRepository.ListBySessionAfterAsync"/>): the replay reads ONLY the
+/// post-cursor rows up to the cap — a <c>WHERE sequence &gt; cursor ORDER BY sequence LIMIT cap</c> backed by
+/// the unique <c>session_events(session_id, sequence)</c> index — rather than loading the whole stream and
+/// filtering in memory, so a reconnect storm cannot become a self-inflicted DoS (threat T9). The recipient
+/// visibility for the WHOLE page is then resolved with a SINGLE batched lookup
+/// (<see cref="ISessionEventRecipientResolver.ResolveBatchAsync"/>, reusing the CORE-PERF-001 in-memory
+/// audience gate) rather than one query per event, so replay cost is bounded and does not grow with events
+/// times participants. When a page comes back FULL the service hands back the page's highest RAW sequence as
+/// <see cref="SessionReplaySlice.NextSequence"/> so the client pages forward (even across a full page with no
+/// event it may see) — the cap never silently drops unacknowledged events.
 ///
 /// This is a plain decision service over already-resolved ids (mirroring <c>RevealService</c> and
 /// <c>VisibilityPolicy</c>): the tenant boundary, session existence and the caller's relationship are
@@ -45,6 +57,14 @@ namespace LiveCore.Api.Realtime;
 /// </summary>
 internal sealed class SessionReplayService
 {
+    /// <summary>
+    /// The maximum number of raw stream rows a single replay page reads (CORE-PERF-002). It is the SQL row
+    /// cap pushed into <see cref="ISessionEventRepository.ListBySessionAfterAsync"/>, so a reconnect can never
+    /// load an unbounded stream (threat T9). A client with a larger backlog pages forward by
+    /// <see cref="SessionReplaySlice.NextSequence"/>.
+    /// </summary>
+    internal const int MaxReplayEvents = 500;
+
     private readonly ISessionEventRepository _events;
     private readonly ISessionEventRecipientResolver _recipients;
 
@@ -78,10 +98,13 @@ internal sealed class SessionReplayService
     /// up to sequence N receives N+1.. with no skips or duplicates (CORE-RTC-001).
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The recipient-safe envelopes the caller is entitled to, in append (sequence) order.</returns>
+    /// <returns>
+    /// One BOUNDED page of the recipient-safe envelopes the caller is entitled to, in append (sequence)
+    /// order, plus the forward cursor to the next page when one exists (<see cref="SessionReplaySlice"/>).
+    /// </returns>
     /// <exception cref="ArgumentNullException">The group set is null.</exception>
     /// <exception cref="ArgumentException">The organization id or session id is empty.</exception>
-    public async Task<IReadOnlyList<SessionEventEnvelope>> ReplayAsync(
+    public async Task<SessionReplaySlice> ReplayAsync(
         Guid organizationId,
         Guid sessionId,
         IReadOnlyCollection<string> recipientGroups,
@@ -106,29 +129,29 @@ internal sealed class SessionReplayService
         // so the replay is legitimately empty (fail-closed) without touching the database.
         if (recipientGroups.Count == 0)
         {
-            return [];
+            return SessionReplaySlice.Empty;
         }
 
         var groups = new HashSet<string>(recipientGroups, StringComparer.Ordinal);
 
-        // The tenant- and session-scoped, append-ordered stream (the repository leads with the tenant
-        // column and orders by the time-ordered surrogate id; threat T5/T1).
-        var stream = await _events
-            .ListBySessionAsync(organizationId, sessionId, cancellationToken)
+        // BOUNDED + CURSORED read (CORE-PERF-002): the cursor and the cap are pushed into SQL, so this reads
+        // ONLY the post-cursor rows up to the cap (ordered by the gap-free monotonic sequence; threat T5/T1),
+        // never the whole stream loaded then filtered in memory (threat T9 abuse/DoS).
+        var page = await _events
+            .ListBySessionAfterAsync(organizationId, sessionId, afterSequence, MaxReplayEvents, cancellationToken)
             .ConfigureAwait(false);
 
-        var pending = SliceAfter(stream, afterSequence);
+        // Re-run the LIVE recipient computation for the WHOLE page in ONE batched lookup (CORE-PERF-002,
+        // reusing CORE-PERF-001) rather than one query per event. Reusing the resolver — not a parallel
+        // filter — guarantees the replayed projection is identical to the live one (threat T3; docs/09 step 5).
+        var deliveriesPerEvent = await _recipients
+            .ResolveBatchAsync(page, cancellationToken)
+            .ConfigureAwait(false);
 
-        var replay = new List<SessionEventEnvelope>();
-        foreach (var sessionEvent in pending)
+        var replay = new List<SessionEventEnvelope>(page.Count);
+        for (var index = 0; index < page.Count; index++)
         {
-            // Re-run the LIVE recipient computation (CORE-RT-004) and keep only the delivery addressed to
-            // one of the caller's own groups. Reusing the resolver — not a parallel filter — guarantees the
-            // replayed projection is identical to the live one (threat T3; docs/09 step 5).
-            var deliveries = await _recipients
-                .ResolveAsync(sessionEvent, cancellationToken)
-                .ConfigureAwait(false);
-            foreach (var delivery in deliveries)
+            foreach (var delivery in deliveriesPerEvent[index])
             {
                 if (groups.Contains(delivery.Group))
                 {
@@ -142,33 +165,11 @@ internal sealed class SessionReplayService
             }
         }
 
-        return replay;
-    }
+        // A FULL page means more rows MAY exist after it: hand back the page's highest RAW sequence as the
+        // next cursor so the client pages forward even across a full page with no event it may see (the cap
+        // never silently drops unacknowledged events). A non-full page means the caller has caught up.
+        var nextSequence = page.Count == MaxReplayEvents ? page[^1].Sequence : (long?)null;
 
-    /// <summary>
-    /// Returns the events of <paramref name="ordered"/> whose per-session <see cref="SessionEvent.Sequence"/>
-    /// is strictly greater than the acknowledged <paramref name="afterSequence"/>, in append (sequence)
-    /// order (CORE-RTC-001). With no cursor the whole stream is returned. Because the sequence is gap-free
-    /// and monotonic, a cursor of N returns exactly N+1.. with no skips or duplicates; a cursor at or beyond
-    /// the last sequence returns nothing (the caller has acknowledged everything), and a cursor below the
-    /// first returns the whole stream — both fail-safe (the client also deduplicates, docs/11).
-    /// </summary>
-    private static IReadOnlyList<SessionEvent> SliceAfter(IReadOnlyList<SessionEvent> ordered, long? afterSequence)
-    {
-        if (afterSequence is not { } cursor)
-        {
-            return ordered;
-        }
-
-        var tail = new List<SessionEvent>();
-        foreach (var sessionEvent in ordered)
-        {
-            if (sessionEvent.Sequence > cursor)
-            {
-                tail.Add(sessionEvent);
-            }
-        }
-
-        return tail;
+        return new SessionReplaySlice(replay, nextSequence);
     }
 }

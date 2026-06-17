@@ -172,6 +172,13 @@ public sealed class SessionEventPublisherTests
             AppendCountAtResolve = AppendCountSource?.Invoke() ?? 0;
             return Task.FromResult(_deliveries);
         }
+
+        // The live publisher resolves one event at a time; the batch path (reconnect replay) is not exercised
+        // here.
+        public Task<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>> ResolveBatchAsync(
+            IReadOnlyList<SessionEvent> sessionEvents,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class RecordingEventRepository : ISessionEventRepository
@@ -187,6 +194,14 @@ public sealed class SessionEventPublisherTests
         public Task<IReadOnlyList<SessionEvent>> ListBySessionAsync(
             Guid organizationId,
             Guid sessionId,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
             CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }

@@ -138,6 +138,58 @@ internal sealed class VisibilityRuleRepository : IVisibilityRuleRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        IReadOnlyCollection<Guid> resourceIds,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored session's rules, so the lookup fails fast instead of
+        // returning an arbitrary set of rows (mirrors ListByResourceAsync).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        ArgumentNullException.ThrowIfNull(resourceIds);
+
+        // No requested resources can never match a rule, so the batch returns nothing without touching the
+        // database (and avoids an empty IN ()).
+        var ids = resourceIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return [];
+        }
+
+        // The BATCH lookup (CORE-PERF-002): one query for the whole resource set — the predicate leads with
+        // the tenant column, then matches the workspace, the SESSION and the resource-id set
+        // (resource_id IN (..)) on the session-scoped critical index. So the rules for every distinct subject
+        // of a replayed slice are read ONCE, staying exactly tenant-, workspace- and session-scoped (a rule
+        // in another session of the same workspace is never returned — the cross-session leak; threat T5/T3).
+        // The id is a globally-unique surrogate, so the caller re-pairs each returned rule to its requested
+        // (type, id) subject by the rule's own resource type/id. Ordering is deterministic (time-ordered id).
+        return await _dbContext.VisibilityRules
+            .Where(rule => rule.OrganizationId == organizationId
+                && rule.WorkspaceId == workspaceId
+                && rule.SessionId == sessionId
+                && ids.Contains(rule.ResourceId))
+            .OrderBy(rule => rule.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(rule);

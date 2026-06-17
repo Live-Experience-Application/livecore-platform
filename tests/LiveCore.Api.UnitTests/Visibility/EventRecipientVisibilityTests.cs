@@ -209,4 +209,82 @@ public sealed class EventRecipientVisibilityTests : IDisposable
         Assert.True(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), selected, "Entity", resourceId, CancellationToken.None));
         Assert.False(await service.CanParticipantReceiveAsync(org, ws, await SessionIdAsync(org, ws), other, "Entity", resourceId, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task The_batch_resolution_matches_the_single_resolution_for_every_subject_kind()
+    {
+        // CORE-PERF-002: the batched audience resolution returns, for every requested subject, the SAME
+        // AudienceVisibility the single resolution would — over a mix of an audience-wide visible subject, a
+        // participant-scoped subject, a hidden subject, a subject with no rules and an unrecognized subject
+        // (fail-closed). This is what lets reconnect replay gate a whole slice from one lookup without
+        // diverging from live delivery.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var selected = await SeedParticipantAsync(org, ws);
+
+        var audienceVisibleResource = Guid.NewGuid();
+        var participantScopedResource = Guid.NewGuid();
+        var hiddenResource = Guid.NewGuid();
+        var noRuleResource = Guid.NewGuid();
+        await SeedAudienceRuleAsync(org, ws, audienceVisibleResource, VisibilityState.Visible);
+        await SeedParticipantRuleAsync(org, ws, participantScopedResource, selected, VisibilityState.Visible);
+        await SeedAudienceRuleAsync(org, ws, hiddenResource, VisibilityState.Hidden);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        (string SubjectType, Guid SubjectId)[] subjects =
+        [
+            ("Entity", audienceVisibleResource),
+            ("Entity", participantScopedResource),
+            ("Entity", hiddenResource),
+            ("Entity", noRuleResource),
+            ("Bogus", Guid.NewGuid()),
+        ];
+
+        var batch = await service.ResolveAudienceRecipientsBatchAsync(org, ws, sessionId, subjects, CancellationToken.None);
+
+        // Every requested subject has an entry, and each equals the single resolution.
+        foreach (var subject in subjects)
+        {
+            var single = await service.ResolveAudienceRecipientsAsync(
+                org, ws, sessionId, subject.SubjectType, subject.SubjectId, CancellationToken.None);
+            Assert.True(batch.TryGetValue(subject, out var batched));
+            Assert.Equal(single.AudienceVisible, batched.AudienceVisible);
+            Assert.Equal(single.SelectedVisibleParticipantIds, batched.SelectedVisibleParticipantIds);
+        }
+
+        // Spot-check the specific outcomes.
+        Assert.True(batch[("Entity", audienceVisibleResource)].AudienceVisible);
+        Assert.Equal(new[] { selected }, batch[("Entity", participantScopedResource)].SelectedVisibleParticipantIds);
+        Assert.False(batch[("Entity", hiddenResource)].AudienceVisible);
+        Assert.False(batch[("Entity", noRuleResource)].AudienceVisible);
+        Assert.Empty(batch[("Entity", noRuleResource)].SelectedVisibleParticipantIds);
+    }
+
+    [Fact]
+    public async Task The_batch_resolution_is_tenant_and_session_scoped()
+    {
+        // The batched lookup is tenant- AND session-scoped exactly like the single one: an audience-wide
+        // visible rule in tenant A's session never makes the same resource visible when resolved for tenant
+        // B's session (threat T5/T3).
+        var (orgA, wsA) = await SeedWorkspaceAsync();
+        var sessionA = await SessionIdAsync(orgA, wsA);
+        var resourceId = Guid.NewGuid();
+        await SeedAudienceRuleAsync(orgA, wsA, resourceId, VisibilityState.Visible);
+
+        await using var context = CreateContext();
+        var service = CreateService(context);
+
+        (string SubjectType, Guid SubjectId)[] subjects = [("Entity", resourceId)];
+
+        // Resolved for the correct tenant/session: visible.
+        var inA = await service.ResolveAudienceRecipientsBatchAsync(orgA, wsA, sessionA, subjects, CancellationToken.None);
+        Assert.True(inA[("Entity", resourceId)].AudienceVisible);
+
+        // Resolved through a foreign tenant id: the rule is never returned, so it is not visible (fail-closed).
+        var foreignOrg = Guid.NewGuid();
+        var inForeignTenant = await service.ResolveAudienceRecipientsBatchAsync(foreignOrg, wsA, sessionA, subjects, CancellationToken.None);
+        Assert.False(inForeignTenant[("Entity", resourceId)].AudienceVisible);
+    }
 }

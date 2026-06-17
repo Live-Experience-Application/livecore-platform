@@ -12,6 +12,13 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- `SessionEventReplayResponse.nextSequence` (CORE-PERF-002): the reconnect-replay
+  route now returns at most one bounded page of events, and `nextSequence` carries
+  the cursor to pass back as `afterSequence` to fetch the next page (or `null` when
+  the caller has caught up). It is the page's highest raw per-session sequence, so a
+  client always pages forward — even across a full page that contains no event it is
+  entitled to — and the cap never silently drops unacknowledged events (docs/11). An
+  additive, optional response field (a MINOR change).
 - The live realtime hub contract (CORE-RT-007): the stable mirror of the server's
   SignalR live path so a vertical can open the live session stream without
   hard-coding the server's C# constants. `RealtimeHubPaths` (`session` →

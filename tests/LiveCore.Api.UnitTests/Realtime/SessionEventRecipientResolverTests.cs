@@ -79,14 +79,43 @@ public sealed class SessionEventRecipientResolverTests
     public async Task A_selected_event_the_participant_may_not_see_reaches_hosts_only()
     {
         // Defence in depth: even on the selected path, the participant delivery is gated by the Visibility
-        // engine. If they may not see the subject, only hosts receive the (confirmation) event.
+        // engine. The per-participant decision is derived from the SAME audience resolution the audience path
+        // uses (CORE-PERF-002, so the slice can be batched): the participant may see it iff an audience-wide
+        // visible rule, or a rule scoped to exactly them, exists. Here neither holds, so only hosts receive
+        // the (confirmation) event.
         var selected = Guid.NewGuid();
-        var visibility = new FakeRecipientVisibility { HiddenParticipants = { selected } };
+        var visibility = new FakeRecipientVisibility { AudienceVisible = false };
         var resolver = new SessionEventRecipientResolver(visibility);
 
         var deliveries = await resolver.ResolveAsync(SelectedEvent(selected), CancellationToken.None);
 
         Assert.Equal(new[] { RealtimeGroups.SessionHosts(_session) }, deliveries.Select(d => d.Group));
+    }
+
+    [Fact]
+    public async Task A_selected_event_reaches_a_participant_entitled_only_by_a_participant_scoped_rule()
+    {
+        // The audience-at-large may NOT see the subject, but the selected participant has a participant-scoped
+        // visible rule (a selected-participant reveal on the same resource). They are entitled, so the event
+        // reaches their own group (plus hosts) — derived from the SAME audience resolution, the exact outcome
+        // the central per-participant decision (CanParticipantReceive) would give.
+        var selected = Guid.NewGuid();
+        var visibility = new FakeRecipientVisibility
+        {
+            AudienceVisible = false,
+            SelectedVisibleParticipantIds = { selected },
+        };
+        var resolver = new SessionEventRecipientResolver(visibility);
+
+        var deliveries = await resolver.ResolveAsync(SelectedEvent(selected), CancellationToken.None);
+
+        Assert.Equal(
+            new[]
+            {
+                RealtimeGroups.SessionHosts(_session),
+                RealtimeGroups.SessionParticipant(_session, selected),
+            },
+            deliveries.Select(delivery => delivery.Group));
     }
 
     [Fact]
@@ -269,6 +298,24 @@ public sealed class SessionEventRecipientResolverTests
         {
             ParticipantGateCalls++;
             return Task.FromResult(!HiddenParticipants.Contains(participantId));
+        }
+
+        // The batched audience resolution (CORE-PERF-002): each subject resolves to the same fixed audience
+        // decision the single resolution returns, counted as one resolution per call (the batch is one
+        // lookup over the slice's distinct subjects).
+        public Task<IReadOnlyDictionary<(string SubjectType, Guid SubjectId), AudienceVisibility>>
+            ResolveAudienceRecipientsBatchAsync(
+                Guid organizationId,
+                Guid workspaceId,
+                Guid sessionId,
+                IReadOnlyCollection<(string SubjectType, Guid SubjectId)> subjects,
+                CancellationToken cancellationToken)
+        {
+            AudienceResolveCalls++;
+            var audience = new AudienceVisibility(AudienceVisible, SelectedVisibleParticipantIds.ToArray());
+            IReadOnlyDictionary<(string SubjectType, Guid SubjectId), AudienceVisibility> result =
+                subjects.Distinct().ToDictionary(subject => subject, _ => audience);
+            return Task.FromResult(result);
         }
     }
 }

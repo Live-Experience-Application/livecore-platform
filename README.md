@@ -2985,11 +2985,27 @@ deliveries addressed to the caller's own groups, with the same host-vs-audience 
 live delivery uses — so a replayed item is the projection the recipient would have received
 live, and a hidden event is never replayed. The optional `?afterSequence=` is the caller's
 last acknowledged per-session **sequence** number; events with a greater sequence are replayed,
-so a cursor of N returns N+1.. with no skips or duplicates (a cursor below the first replays the
-whole stream, which the client deduplicates per `docs/11_REALTIME_SYNC.md`).
+so a cursor of N returns N+1.. with no skips or duplicates (a cursor below the first replays from
+the start, which the client deduplicates per `docs/11_REALTIME_SYNC.md`).
 Like the participant-visible feed, the stream is private: every denial — a foreign tenant,
 an unknown session, a caller with no legitimate relationship, or a `participantId` the
 caller does not own — is hidden as `404` (never `403`).
+
+**Bounded, cursored replay (CORE-PERF-002).** The replay used to load the **entire** stream and
+filter it in memory, then resolve recipient visibility **per event** — `O(events)` work and rule
+lookups in one request, so a reconnect storm to a long, well-attended session was a self-inflicted
+DoS (threat T9). The cursor and a **row cap** are now pushed into SQL
+(`ISessionEventRepository.ListBySessionAfterAsync` — `WHERE sequence > cursor ORDER BY sequence
+LIMIT cap`, on the unique `session_events(session_id, sequence)` index), so the read is bounded
+regardless of stream length, and recipient visibility for the whole page is resolved in **one
+batched lookup** (`ResolveBatchAsync` → `VisibilityRuleRepository.ListByResourcesAsync`, reusing
+the CORE-PERF-001 in-memory audience gate) rather than one query per event — so the per-replay
+query count does not grow with `events × participants`. The per-event routing/projection is the
+**same** code the live single-event path runs, so replay correctness and filtering are unchanged
+(threat T3). When a page comes back full the response's `nextSequence` (the page's highest **raw**
+sequence) is the cursor for the next page, so a large backlog drains over successive bounded
+requests and the cap never silently drops unacknowledged events; a non-full page returns
+`nextSequence: null` (caught up).
 
 **Per-session monotonic event sequence (CORE-RTC-001).** Every session event carries a
 `sequence` column — a **per-session, gap-free, strictly monotonic** number — and both live

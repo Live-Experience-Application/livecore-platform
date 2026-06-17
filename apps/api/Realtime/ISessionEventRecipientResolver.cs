@@ -23,4 +23,20 @@ internal interface ISessionEventRecipientResolver
     Task<IReadOnlyList<SessionEventDelivery>> ResolveAsync(
         SessionEvent sessionEvent,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolves the recipient deliveries for a BATCH of events (CORE-PERF-002), returning one delivery list
+    /// per input event in the SAME order. It is identical in outcome to calling <see cref="ResolveAsync"/>
+    /// per event — the SAME routing and the SAME central Visibility gate — but resolves the audience
+    /// visibility of the whole batch's distinct subjects with a SINGLE batched lookup
+    /// (<see cref="LiveCore.Api.Visibility.IEventRecipientVisibility.ResolveAudienceRecipientsBatchAsync"/>,
+    /// CORE-PERF-001 reuse) rather than one query per event, so reconnect replay cost does not grow with the
+    /// number of events.
+    /// The per-event delivery list is byte-for-byte what <see cref="ResolveAsync"/> would have produced, so
+    /// nothing leaks that live delivery would have withheld (threat T3).
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The event list is null.</exception>
+    Task<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>> ResolveBatchAsync(
+        IReadOnlyList<SessionEvent> sessionEvents,
+        CancellationToken cancellationToken);
 }

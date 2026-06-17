@@ -53,6 +53,14 @@ namespace LiveCore.Api.Realtime;
 /// visible set reaches exactly the individually-entitled participants (the same recipient set the old
 /// fan-out produced).
 ///
+/// BATCH RESOLUTION FOR RECONNECT REPLAY (CORE-PERF-002). <see cref="ResolveBatchAsync"/> resolves a whole
+/// slice of events at once: it collects the slice's DISTINCT subjects and resolves their audience
+/// visibility with ONE batched lookup (<see cref="IEventRecipientVisibility.ResolveAudienceRecipientsBatchAsync"/>)
+/// instead of one query per event, then builds each event's deliveries from the SAME routing
+/// (<c>BuildDeliveries</c>) the single <see cref="ResolveAsync"/> uses. So reconnect replay cost no longer
+/// grows with the number of events, and a batched delivery list is byte-for-byte what the per-event path
+/// would have produced — replay can never leak an event live delivery would have withheld (threat T3).
+///
 /// THE RECIPIENT SET IS BOUNDED BY THE EVENT'S SESSION (CORE-SVIS-001). EVERY group this resolver emits is
 /// keyed by <see cref="SessionEvent.SessionId"/> (<see cref="RealtimeGroups.SessionHosts"/> /
 /// <see cref="RealtimeGroups.SessionObservers"/> / <see cref="RealtimeGroups.SessionAudience"/> /
@@ -97,6 +105,135 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
     {
         ArgumentNullException.ThrowIfNull(sessionEvent);
 
+        // Resolve the audience visibility for THIS event (one session-scoped rule lookup when it needs one),
+        // then build the deliveries from it. The routing lives in ONE place (BuildDeliveries), shared with
+        // the batch path, so live delivery and reconnect replay can never diverge.
+        var audience = await ResolveAudienceForEventAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        return BuildDeliveries(sessionEvent, audience);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>> ResolveBatchAsync(
+        IReadOnlyList<SessionEvent> sessionEvents,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(sessionEvents);
+
+        if (sessionEvents.Count == 0)
+        {
+            return [];
+        }
+
+        // Resolve the audience visibility of every DISTINCT subject in the batch with a SINGLE batched lookup
+        // per (tenant, workspace, session) — a replay slice is one session, so this is ONE lookup — instead
+        // of one query per event (CORE-PERF-002). The map is then reused for every event that shares a
+        // subject, so the query count does not grow with the number of replayed events.
+        var resolved = await ResolveAudienceBatchAsync(sessionEvents, cancellationToken).ConfigureAwait(false);
+
+        var deliveries = new List<IReadOnlyList<SessionEventDelivery>>(sessionEvents.Count);
+        foreach (var sessionEvent in sessionEvents)
+        {
+            // Pull this event's pre-resolved audience visibility (None when it needs no audience decision —
+            // a host-only or no-subject event — or, fail-closed, when its subject was unrecognized) and build
+            // its deliveries from the SAME routing the single path uses.
+            var audience = AudienceVisibility.None;
+            if (NeedsAudienceDecision(sessionEvent)
+                && resolved.TryGetValue(SubjectKey(sessionEvent), out var resolvedAudience))
+            {
+                audience = resolvedAudience;
+            }
+
+            deliveries.Add(BuildDeliveries(sessionEvent, audience));
+        }
+
+        return deliveries;
+    }
+
+    /// <summary>
+    /// Resolves the audience visibility for a single event: <see cref="AudienceVisibility.None"/> when the
+    /// event needs no audience decision (a host-only event, or one with no visibility subject — neither
+    /// triggers a rule lookup), otherwise the central Visibility engine's SESSION-SCOPED single-subject
+    /// resolution (CORE-PERF-001).
+    /// </summary>
+    private async Task<AudienceVisibility> ResolveAudienceForEventAsync(
+        SessionEvent sessionEvent,
+        CancellationToken cancellationToken)
+    {
+        if (!NeedsAudienceDecision(sessionEvent))
+        {
+            return AudienceVisibility.None;
+        }
+
+        return await _visibility
+            .ResolveAudienceRecipientsAsync(
+                sessionEvent.OrganizationId,
+                sessionEvent.WorkspaceId,
+                sessionEvent.SessionId,
+                sessionEvent.VisibilitySubjectType!,
+                sessionEvent.VisibilitySubjectId!.Value,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves the audience visibility of every distinct subject across the batch with one batched lookup
+    /// per (tenant, workspace, session) group (CORE-PERF-002), keyed by the full subject tuple so each event
+    /// can read back its own subject's decision.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<SubjectLookupKey, AudienceVisibility>> ResolveAudienceBatchAsync(
+        IReadOnlyList<SessionEvent> sessionEvents,
+        CancellationToken cancellationToken)
+    {
+        // Distinct subject-bearing, non-host-only events, grouped by (tenant, workspace, session). All events
+        // of a replayed session share one scope, so this is a single group in practice; grouping keeps the
+        // batch correct (and session-scoped) even if ever fed a mixed list.
+        var subjectsByScope = new Dictionary<(Guid OrganizationId, Guid WorkspaceId, Guid SessionId), HashSet<(string SubjectType, Guid SubjectId)>>();
+        foreach (var sessionEvent in sessionEvents)
+        {
+            if (!NeedsAudienceDecision(sessionEvent))
+            {
+                continue;
+            }
+
+            var scope = (sessionEvent.OrganizationId, sessionEvent.WorkspaceId, sessionEvent.SessionId);
+            if (!subjectsByScope.TryGetValue(scope, out var subjects))
+            {
+                subjects = [];
+                subjectsByScope[scope] = subjects;
+            }
+
+            subjects.Add((sessionEvent.VisibilitySubjectType!, sessionEvent.VisibilitySubjectId!.Value));
+        }
+
+        var resolved = new Dictionary<SubjectLookupKey, AudienceVisibility>();
+        foreach (var (scope, subjects) in subjectsByScope)
+        {
+            var perSubject = await _visibility
+                .ResolveAudienceRecipientsBatchAsync(
+                    scope.OrganizationId, scope.WorkspaceId, scope.SessionId, subjects, cancellationToken)
+                .ConfigureAwait(false);
+
+            foreach (var (subject, audience) in perSubject)
+            {
+                resolved[new SubjectLookupKey(
+                    scope.OrganizationId, scope.WorkspaceId, scope.SessionId, subject.SubjectType, subject.SubjectId)] = audience;
+            }
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// Builds the recipient deliveries of an event from its already-resolved <paramref name="audience"/>
+    /// visibility — the SINGLE routing implementation shared by <see cref="ResolveAsync"/> (which resolves
+    /// the audience per event) and <see cref="ResolveBatchAsync"/> (which resolves it for the whole batch in
+    /// one lookup). Keeping the routing in one place is what guarantees live delivery and reconnect replay
+    /// produce the IDENTICAL recipient set (threat T3; docs/05_MODULE_CONTRACTS.md). The
+    /// <paramref name="audience"/> is consulted only for a subject-bearing, non-host-only event; for the
+    /// other classes the branches below decide without it.
+    /// </summary>
+    private static IReadOnlyList<SessionEventDelivery> BuildDeliveries(SessionEvent sessionEvent, AudienceVisibility audience)
+    {
         var deliveries = new List<SessionEventDelivery>();
 
         // Hosts always receive the event (host-content roles see everything), with the host projection
@@ -124,9 +261,14 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
         {
             // SELECTED / private: only the selected participant, and only if they may see the subject.
             // No observers, no shared audience group, no other participants. Per-participant lookups and
-            // groups are reserved for selected-participant events (CORE-PERF-001).
-            if (await CanParticipantReceiveAsync(sessionEvent, selectedParticipantId, cancellationToken)
-                .ConfigureAwait(false))
+            // groups are reserved for selected-participant events (CORE-PERF-001). The per-participant
+            // decision is derived from the SAME audience resolution — visible to them iff an audience-wide
+            // visible rule, or a rule scoped to exactly them, exists (the same outcome as the central
+            // CanParticipantReceive decision) — and an event with no visibility subject is unconditional.
+            var canReceive = !sessionEvent.HasVisibilitySubject
+                || audience.AudienceVisible
+                || audience.SelectedVisibleParticipantIds.Contains(selectedParticipantId);
+            if (canReceive)
             {
                 deliveries.Add(new SessionEventDelivery(
                     RealtimeGroups.SessionParticipant(sessionEvent.SessionId, selectedParticipantId),
@@ -147,19 +289,6 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
                 RealtimeGroups.SessionAudience(sessionEvent.SessionId), audienceEnvelope));
             return deliveries;
         }
-
-        // Subject-gated audience event: ONE session-scoped rule lookup yields both the audience-wide
-        // decision and the participant-scoped visible set (CORE-PERF-001), so the recipient set is computed
-        // without a per-participant query.
-        var audience = await _visibility
-            .ResolveAudienceRecipientsAsync(
-                sessionEvent.OrganizationId,
-                sessionEvent.WorkspaceId,
-                sessionEvent.SessionId,
-                sessionEvent.VisibilitySubjectType!,
-                sessionEvent.VisibilitySubjectId!.Value,
-                cancellationToken)
-            .ConfigureAwait(false);
 
         if (audience.AudienceVisible)
         {
@@ -189,22 +318,30 @@ internal sealed class SessionEventRecipientResolver : ISessionEventRecipientReso
     }
 
     /// <summary>
-    /// Whether the given participant may receive the event: an event with no visibility subject is
-    /// unconditional; otherwise the central Visibility engine decides (per-participant).
+    /// Whether an event needs an audience-visibility decision at all: only a subject-bearing event that is
+    /// not host-only is gated through the Visibility engine. A host-only or no-subject event is routed
+    /// without a rule lookup, so neither contributes a subject to the (single or batched) lookup.
     /// </summary>
-    private async Task<bool> CanParticipantReceiveAsync(
-        SessionEvent sessionEvent,
-        Guid participantId,
-        CancellationToken cancellationToken)
-        => !sessionEvent.HasVisibilitySubject
-            || await _visibility
-                .CanParticipantReceiveAsync(
-                    sessionEvent.OrganizationId,
-                    sessionEvent.WorkspaceId,
-                    sessionEvent.SessionId,
-                    participantId,
-                    sessionEvent.VisibilitySubjectType!,
-                    sessionEvent.VisibilitySubjectId!.Value,
-                    cancellationToken)
-                .ConfigureAwait(false);
+    private static bool NeedsAudienceDecision(SessionEvent sessionEvent)
+        => sessionEvent.HasVisibilitySubject && !SessionEventTypes.IsHostOnly(sessionEvent.EventType);
+
+    /// <summary>The batched-resolution lookup key for an event's subject (scope + subject identifiers).</summary>
+    private static SubjectLookupKey SubjectKey(SessionEvent sessionEvent)
+        => new(
+            sessionEvent.OrganizationId,
+            sessionEvent.WorkspaceId,
+            sessionEvent.SessionId,
+            sessionEvent.VisibilitySubjectType!,
+            sessionEvent.VisibilitySubjectId!.Value);
+
+    /// <summary>
+    /// Key for the batched audience-visibility map: the tenant/workspace/session scope plus the subject
+    /// (type-name, id). Scoping by the full tuple keeps the batch correct even across a mixed event list.
+    /// </summary>
+    private readonly record struct SubjectLookupKey(
+        Guid OrganizationId,
+        Guid WorkspaceId,
+        Guid SessionId,
+        string SubjectType,
+        Guid SubjectId);
 }

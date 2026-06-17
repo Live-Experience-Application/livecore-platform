@@ -175,6 +175,17 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
             .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, CancellationToken.None);
     }
 
+    private async Task<IReadOnlyList<VisibilityRule>> ListRulesByResourcesAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        IReadOnlyCollection<Guid> resourceIds)
+    {
+        await using var context = CreateContext();
+        return await new VisibilityRuleRepository(context)
+            .ListByResourcesAsync(organizationId, workspaceId, sessionId, resourceIds, CancellationToken.None);
+    }
+
     private async Task<(Guid OrganizationId, Guid WorkspaceId)> SeedWorkspaceAsync(
         string organizationSlug = _organizationSlugA,
         string workspaceSlug = _workspaceSlugA)
@@ -231,6 +242,86 @@ public sealed class VisibilityRuleRepositoryTests : IDisposable
             Assert.Equal(VisibilityState.Visible, reloaded.Visibility);
             Assert.True(reloaded.IsVisibleToAudience());
         }
+    }
+
+    // --- Batched resource lookup (CORE-PERF-002) -------------------------------
+
+    [Fact]
+    public async Task ListByResources_returns_the_rules_of_every_requested_resource_in_one_query()
+    {
+        // CORE-PERF-002: the batched lookup returns the rules for a SET of resources together — the rules of
+        // each requested resource, and none of an unrequested one.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        var resourceOne = Guid.NewGuid();
+        var resourceTwo = Guid.NewGuid();
+        var resourceUnrequested = Guid.NewGuid();
+        var participant = await SeedParticipantAsync(org, ws);
+
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceOne, VisibilityState.Visible, sessionId);
+        // resourceTwo carries both an audience-wide and a participant-scoped rule — both come back.
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceTwo, VisibilityState.Hidden, sessionId);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, resourceTwo, participant.Id, VisibilityState.Visible, sessionId);
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceUnrequested, VisibilityState.Visible, sessionId);
+
+        var rules = await ListRulesByResourcesAsync(org, ws, sessionId, [resourceOne, resourceTwo]);
+
+        Assert.Equal(3, rules.Count);
+        Assert.All(rules, rule => Assert.Contains(rule.ResourceId, new[] { resourceOne, resourceTwo }));
+        Assert.Single(rules, rule => rule.ResourceId == resourceOne);
+        Assert.Equal(2, rules.Count(rule => rule.ResourceId == resourceTwo));
+        Assert.DoesNotContain(rules, rule => rule.ResourceId == resourceUnrequested);
+    }
+
+    [Fact]
+    public async Task ListByResources_with_no_ids_returns_empty()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Entity, Guid.NewGuid(), VisibilityState.Visible, sessionId);
+
+        Assert.Empty(await ListRulesByResourcesAsync(org, ws, sessionId, []));
+    }
+
+    [Fact]
+    public async Task ListByResources_is_tenant_workspace_and_session_scoped()
+    {
+        // The batched read never borrows another tenant's, workspace's or session's rules (threat T5/T1; the
+        // cross-session leak T3).
+        var orgA = await SeedOrganizationAsync(_organizationSlugA);
+        var orgB = await SeedOrganizationAsync(_organizationSlugB);
+        var wsA = await SeedWorkspaceAsync(orgA.Id, _workspaceSlugA);
+        var wsOther = await SeedWorkspaceAsync(orgA.Id, _workspaceSlugB);
+        var sessionA = (await SeedSessionAsync(orgA.Id, wsA.Id)).Id;
+        var sessionConcurrent = (await SeedSessionAsync(orgA.Id, wsA.Id, "Concurrent")).Id;
+
+        var resourceId = Guid.NewGuid();
+        await SeedRuleAsync(orgA.Id, wsA.Id, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible, sessionA);
+
+        // Correct tenant/workspace/session: returned.
+        Assert.Single(await ListRulesByResourcesAsync(orgA.Id, wsA.Id, sessionA, [resourceId]));
+        // Foreign tenant: never returned.
+        Assert.Empty(await ListRulesByResourcesAsync(orgB.Id, wsA.Id, sessionA, [resourceId]));
+        // Foreign workspace: never returned.
+        Assert.Empty(await ListRulesByResourcesAsync(orgA.Id, wsOther.Id, sessionA, [resourceId]));
+        // A concurrent session of the SAME workspace: never returned (the cross-session leak).
+        Assert.Empty(await ListRulesByResourcesAsync(orgA.Id, wsA.Id, sessionConcurrent, [resourceId]));
+    }
+
+    [Fact]
+    public async Task ListByResources_rejects_empty_scope_ids()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionId = await SessionIdAsync(org, ws);
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByResourcesAsync(Guid.Empty, ws, sessionId, [Guid.NewGuid()], CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByResourcesAsync(org, Guid.Empty, sessionId, [Guid.NewGuid()], CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByResourcesAsync(org, ws, Guid.Empty, [Guid.NewGuid()], CancellationToken.None));
     }
 
     // --- Tenant + workspace isolation (negative authorization) -----------------

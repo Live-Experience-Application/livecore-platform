@@ -88,6 +88,31 @@ public interface IVisibilityRuleRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists every visibility rule governing ANY of the given resources WITHIN the given organization,
+    /// workspace AND SESSION, in deterministic (time-ordered surrogate id) order — the BATCH form of
+    /// <see cref="ListByResourceAsync"/> (CORE-PERF-002). It reads the rules for a whole set of resources in
+    /// ONE query (<c>WHERE organization_id = .. AND workspace_id = .. AND session_id = .. AND resource_id IN
+    /// (..)</c>, on the session-scoped critical index), so a reconnect replay can resolve the audience
+    /// visibility of every distinct subject in the replayed slice with a SINGLE lookup instead of one per
+    /// event — replay cost does not grow with the number of events (it reuses the CORE-PERF-001 in-memory
+    /// audience gate, just fed from one batched read). The filter is on the resource IDs (globally-unique
+    /// surrogates), so the caller pairs each returned rule back to its requested (type, id) subject by the
+    /// rule's own <see cref="VisibilityRule.ResourceType"/>/<see cref="VisibilityRule.ResourceId"/> (a rule
+    /// for a different type that happened to share an id is simply not matched to a requested subject). Like
+    /// the single-resource lookup it is tenant-, workspace- AND session-scoped (the predicate leads with
+    /// <c>organization_id</c>, then <c>workspace_id</c>, then <c>session_id</c>), so a foreign tenant's,
+    /// workspace's or session's rules are NEVER returned (threat T5/T1; the cross-session leak T3) and a
+    /// reveal in a concurrent session never contributes. An empty resource set returns an empty list.
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id, workspace id or session id is empty.</exception>
+    Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        IReadOnlyCollection<Guid> resourceIds,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new visibility rule. Returns <see cref="VisibilityRuleAddResult.Added"/> on success, or
     /// <see cref="VisibilityRuleAddResult.Duplicate"/> when a rule already exists for the same (session,
     /// resource, DIMENSION) and the filtered unique index (CORE-SVIS-002) rejected the insert — typically

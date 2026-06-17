@@ -100,4 +100,56 @@ internal sealed class SessionEventRepository : ISessionEventRepository
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+        Guid organizationId,
+        Guid sessionId,
+        long? afterSequence,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored session's events, so the lookup fails fast instead of
+        // returning an arbitrary set of rows (mirrors ListBySessionAsync).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        // The row cap must be a real, positive page size: a non-positive cap can never bound the read, so
+        // reject it rather than silently degrade to an empty or unbounded result (CORE-PERF-002).
+        if (limit < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "The replay row cap must be at least 1.");
+        }
+
+        // The cursor and the cap are pushed into SQL (CORE-PERF-002): the predicate leads with the tenant
+        // column, matches the session, then keeps only the rows AFTER the client cursor, orders by the
+        // per-session monotonic SEQUENCE (CORE-RTC-001) and caps at the limit — WHERE sequence > cursor
+        // ORDER BY sequence LIMIT limit, backed by the unique session_events(session_id, sequence) index. So
+        // a reconnect replay reads ONLY the post-cursor rows up to the cap rather than loading the whole
+        // stream then filtering in memory (threat T9 abuse/DoS), and stays tenant- and session-scoped
+        // (threat T5/T1).
+        var query = _dbContext.SessionEvents
+            .Where(sessionEvent => sessionEvent.OrganizationId == organizationId
+                && sessionEvent.SessionId == sessionId);
+
+        // A null cursor replays from the start; a set cursor keeps only the strictly-later rows. The
+        // comparison is done SQL-side, never by loading then filtering (CORE-PERF-002).
+        if (afterSequence is { } cursor)
+        {
+            query = query.Where(sessionEvent => sessionEvent.Sequence > cursor);
+        }
+
+        return await query
+            .OrderBy(sessionEvent => sessionEvent.Sequence)
+            .Take(limit)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

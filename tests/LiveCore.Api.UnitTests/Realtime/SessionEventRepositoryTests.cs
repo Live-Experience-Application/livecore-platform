@@ -74,6 +74,14 @@ public sealed class SessionEventRepositoryTests : IDisposable
         return await new SessionEventRepository(context).ListBySessionAsync(organizationId, sessionId, CancellationToken.None);
     }
 
+    private async Task<IReadOnlyList<SessionEvent>> ListAfterAsync(
+        Guid organizationId, Guid sessionId, long? afterSequence, int limit)
+    {
+        await using var context = CreateContext();
+        return await new SessionEventRepository(context)
+            .ListBySessionAfterAsync(organizationId, sessionId, afterSequence, limit, CancellationToken.None);
+    }
+
     private static SessionEvent Event(Guid org, Guid ws, Guid session, Guid? target = null)
         => SessionEvent.Create(org, ws, session, SessionEventTypes.ContentRevealed, Guid.NewGuid(), target, "{}", 1, _now);
 
@@ -211,5 +219,90 @@ public sealed class SessionEventRepositoryTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListBySessionAsync(Guid.Empty, session, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListBySessionAsync(org, Guid.Empty, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task List_after_returns_only_post_cursor_rows_in_sequence_order()
+    {
+        // CORE-PERF-002: the cursored read returns ONLY the rows after the cursor, in sequence order — the
+        // SQL-side WHERE sequence > cursor, not the whole stream loaded then filtered.
+        var (org, ws, session) = await SeedSessionAsync();
+        for (var index = 0; index < 5; index++)
+        {
+            await AppendAsync(Event(org, ws, session));
+        }
+
+        var afterTwo = await ListAfterAsync(org, session, afterSequence: 2, limit: 100);
+
+        Assert.Equal(new long[] { 3, 4, 5 }, afterTwo.Select(e => e.Sequence));
+    }
+
+    [Fact]
+    public async Task List_after_with_no_cursor_returns_from_the_start()
+    {
+        var (org, ws, session) = await SeedSessionAsync();
+        for (var index = 0; index < 3; index++)
+        {
+            await AppendAsync(Event(org, ws, session));
+        }
+
+        var fromStart = await ListAfterAsync(org, session, afterSequence: null, limit: 100);
+
+        Assert.Equal(new long[] { 1, 2, 3 }, fromStart.Select(e => e.Sequence));
+    }
+
+    [Fact]
+    public async Task List_after_caps_the_result_at_the_limit()
+    {
+        // CORE-PERF-002: the row cap is pushed into SQL — the read returns at most `limit` rows even when the
+        // stream is longer, so a reconnect can never load an unbounded stream (threat T9).
+        var (org, ws, session) = await SeedSessionAsync();
+        for (var index = 0; index < 10; index++)
+        {
+            await AppendAsync(Event(org, ws, session));
+        }
+
+        var capped = await ListAfterAsync(org, session, afterSequence: null, limit: 4);
+
+        // Exactly the cap, and they are the FIRST post-cursor rows in sequence order (1..4) — the page the
+        // client pages forward from (next cursor = 4).
+        Assert.Equal(new long[] { 1, 2, 3, 4 }, capped.Select(e => e.Sequence));
+    }
+
+    [Fact]
+    public async Task List_after_is_scoped_to_its_tenant_and_session()
+    {
+        var (orgA, wsA, sessionA) = await SeedSessionAsync("northwind-labs", "summer-show");
+        var (orgB, _, _) = await SeedSessionAsync("acme-co", "b-show");
+        var sessionB = Session.Create(orgA, wsA, "Other", _now);
+        await using (var context = CreateContext())
+        {
+            context.Sessions.Add(sessionB);
+            await context.SaveChangesAsync();
+        }
+
+        await AppendAsync(Event(orgA, wsA, sessionA));
+        await AppendAsync(Event(orgA, wsA, sessionB.Id));
+
+        // Another tenant's id never returns this session's events, and another session's id never returns
+        // them either (threat T5/T1).
+        Assert.Empty(await ListAfterAsync(orgB, sessionA, afterSequence: null, limit: 100));
+        Assert.Single(await ListAfterAsync(orgA, sessionA, afterSequence: null, limit: 100));
+        Assert.Single(await ListAfterAsync(orgA, sessionB.Id, afterSequence: null, limit: 100));
+    }
+
+    [Fact]
+    public async Task List_after_rejects_empty_ids_and_a_non_positive_limit()
+    {
+        var (org, _, session) = await SeedSessionAsync();
+        await using var context = CreateContext();
+        var repository = new SessionEventRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListBySessionAfterAsync(Guid.Empty, session, null, 100, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListBySessionAfterAsync(org, Guid.Empty, null, 100, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListBySessionAfterAsync(org, session, null, 0, CancellationToken.None));
     }
 }

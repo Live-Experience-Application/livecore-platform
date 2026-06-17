@@ -357,5 +357,13 @@ public sealed class CommandRetryResilienceTests
             Guid sessionId,
             CancellationToken cancellationToken)
             => _inner.ListBySessionAsync(organizationId, sessionId, cancellationToken);
+
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
+            CancellationToken cancellationToken)
+            => _inner.ListBySessionAfterAsync(organizationId, sessionId, afterSequence, limit, cancellationToken);
     }
 }

@@ -248,15 +248,125 @@ internal sealed class VisibilityPolicy
             .ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken)
             .ConfigureAwait(false);
 
+        return ComputeAudienceVisibility(rules);
+    }
+
+    /// <summary>
+    /// Resolves the audience visibility of MANY resources IN THE GIVEN SESSION from a SINGLE batched rule
+    /// lookup (CORE-PERF-002) — the batch form of <see cref="ResolveAudienceVisibilityAsync"/> used by
+    /// reconnect replay to gate a whole slice of events without one query per event. It reads the rules of
+    /// every requested resource ONCE
+    /// (<see cref="IVisibilityRuleRepository.ListByResourcesAsync"/>) and computes each resource's
+    /// <see cref="AudienceVisibility"/> in memory with the SAME aggregate predicates the single-resource
+    /// resolution uses (<see cref="ComputeAudienceVisibility"/>), so the batched decision can never diverge
+    /// from <see cref="ResolveAudienceVisibilityAsync"/> — visibility stays decided in exactly ONE place
+    /// (docs/05_MODULE_CONTRACTS.md). A requested resource with no rules yields
+    /// <see cref="AudienceVisibility.None"/>. The lookup is tenant-, workspace- AND SESSION-scoped
+    /// (CORE-SVIS-001), so a reveal in a concurrent session of the same workspace never contributes (the
+    /// cross-session leak; threat T5/T3).
+    /// </summary>
+    /// <returns>A map from each requested (type, id) resource to its audience visibility.</returns>
+    /// <exception cref="ArgumentException">The organization id, workspace id or session id is empty.</exception>
+    public Task<IReadOnlyDictionary<(VisibilityResourceType ResourceType, Guid ResourceId), AudienceVisibility>>
+        ResolveAudienceVisibilityBatchAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            IReadOnlyCollection<(VisibilityResourceType ResourceType, Guid ResourceId)> resources,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(resources);
+
+        // SESSION-SCOPED entry point (CORE-SVIS-001): the audience decision consults only the rules of THIS
+        // session. An empty session id can never address a real session, so fail fast (mirrors the other
+        // session-scoped entry points).
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        return ResolveAudienceVisibilityBatchCoreAsync(
+            organizationId, workspaceId, sessionId, resources, cancellationToken);
+    }
+
+    /// <summary>
+    /// The single implementation of the batched audience-visibility resolution (CORE-PERF-002): ONE
+    /// session-scoped batched rule lookup, then each resource's audience decision computed in memory over
+    /// its rules — so the per-replay query count is independent of the number of events.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<(VisibilityResourceType ResourceType, Guid ResourceId), AudienceVisibility>>
+        ResolveAudienceVisibilityBatchCoreAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid sessionId,
+            IReadOnlyCollection<(VisibilityResourceType ResourceType, Guid ResourceId)> resources,
+            CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // Distinct, real subjects only: an empty id can never govern a resource, so it is dropped (the
+        // single-resource path rejects an empty id; here it is simply not requested) — fail-closed (no
+        // entry, so the caller treats it as None).
+        var distinctResources = resources
+            .Where(resource => resource.ResourceId != Guid.Empty)
+            .Distinct()
+            .ToArray();
+
+        var result = new Dictionary<(VisibilityResourceType ResourceType, Guid ResourceId), AudienceVisibility>();
+        if (distinctResources.Length == 0)
+        {
+            return result;
+        }
+
+        // THE single batched lookup (CORE-PERF-002): read every requested resource's session-scoped rules
+        // ONCE, then gate each resource in memory — never one query per resource.
+        var resourceIds = distinctResources.Select(resource => resource.ResourceId).Distinct().ToArray();
+        var rules = await _rules
+            .ListByResourcesAsync(organizationId, workspaceId, sessionId, resourceIds, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Pair each rule back to its (type, id) resource (the batched read filtered on the id set only, so a
+        // rule of a different type sharing an id is grouped under its OWN (type, id) and never matched to a
+        // requested subject of another type).
+        var rulesByResource = rules.ToLookup(rule => (rule.ResourceType, rule.ResourceId));
+        foreach (var resource in distinctResources)
+        {
+            result[resource] = ComputeAudienceVisibility(rulesByResource[resource]);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Computes a resource's <see cref="AudienceVisibility"/> from its visibility rules (CORE-PERF-001) —
+    /// the SINGLE in-memory gate shared by the single-resource (<see cref="ResolveAudienceVisibilityAsync"/>)
+    /// and batched (<see cref="ResolveAudienceVisibilityBatchAsync"/>) resolutions, so the two can never
+    /// diverge. The whole audience may see it iff an AUDIENCE-WIDE visible rule exists (exactly the audience
+    /// branch of <see cref="CanViewResourceAsync"/>); the participants made visible ONLY by a rule scoped to
+    /// exactly them (a selected-participant reveal) are the distinct targets of the visible, non-audience-wide
+    /// rules. Both use the same aggregate predicates as the per-resource and per-participant decisions.
+    /// </summary>
+    private static AudienceVisibility ComputeAudienceVisibility(IEnumerable<VisibilityRule> rules)
+    {
+        var materialized = rules as IReadOnlyCollection<VisibilityRule> ?? rules.ToArray();
+
         // The whole audience may see it iff an AUDIENCE-WIDE visible rule exists — exactly the audience
         // branch of CanViewResource (no divergence; both use the aggregate predicates).
-        var audienceVisible = rules.Any(rule => rule.IsVisibleToAudience() && rule.IsAudienceWide);
+        var audienceVisible = materialized.Any(rule => rule.IsVisibleToAudience() && rule.IsAudienceWide);
 
         // Participants made visible ONLY by a rule scoped to exactly them (a selected-participant reveal): a
         // visible, non-audience-wide rule names one participant. Distinct, so a participant with several such
         // rules is addressed once. When the audience is visible these are already covered by the shared
         // group, but resolving them here keeps the single-lookup contract regardless.
-        var selectedVisibleParticipantIds = rules
+        var selectedVisibleParticipantIds = materialized
             .Where(rule => rule.IsVisibleToAudience() && !rule.IsAudienceWide)
             .Select(rule => rule.TargetParticipantId!.Value)
             .Distinct()

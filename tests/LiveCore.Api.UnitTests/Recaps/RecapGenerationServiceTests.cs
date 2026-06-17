@@ -412,6 +412,16 @@ public sealed class RecapGenerationServiceTests
                 .ToList();
             return Task.FromResult(events);
         }
+
+        // Recap generation reads the whole stream via ListBySessionAsync; the bounded/cursored replay read is
+        // not exercised here.
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     /// <summary>A fixed <see cref="TimeProvider"/> so each produced recap's timestamp is deterministic.</summary>

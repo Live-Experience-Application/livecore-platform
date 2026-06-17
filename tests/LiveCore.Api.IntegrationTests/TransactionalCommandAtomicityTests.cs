@@ -380,6 +380,14 @@ public sealed class TransactionalCommandAtomicityTests
             Guid sessionId,
             CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class ThrowingRealtimeBackplane : IRealtimeBackplane

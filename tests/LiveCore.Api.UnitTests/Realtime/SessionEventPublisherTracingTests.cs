@@ -75,6 +75,11 @@ public sealed class SessionEventPublisherTracingTests
             SessionEvent sessionEvent,
             CancellationToken cancellationToken)
             => Task.FromResult<IReadOnlyList<SessionEventDelivery>>([]);
+
+        public Task<IReadOnlyList<IReadOnlyList<SessionEventDelivery>>> ResolveBatchAsync(
+            IReadOnlyList<SessionEvent> sessionEvents,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class RecordingEventRepository : ISessionEventRepository
@@ -90,6 +95,14 @@ public sealed class SessionEventPublisherTracingTests
         public Task<IReadOnlyList<SessionEvent>> ListBySessionAsync(
             Guid organizationId,
             Guid sessionId,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<SessionEvent>> ListBySessionAfterAsync(
+            Guid organizationId,
+            Guid sessionId,
+            long? afterSequence,
+            int limit,
             CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }

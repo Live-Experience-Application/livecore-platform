@@ -56,6 +56,14 @@ internal sealed class RaceInjectingVisibilityRuleRepository : IVisibilityRuleRep
         CancellationToken cancellationToken)
         => _inner.ListByResourceAsync(organizationId, workspaceId, sessionId, resourceType, resourceId, cancellationToken);
 
+    public Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        IReadOnlyCollection<Guid> resourceIds,
+        CancellationToken cancellationToken)
+        => _inner.ListByResourcesAsync(organizationId, workspaceId, sessionId, resourceIds, cancellationToken);
+
     public Task UpdateAsync(VisibilityRule rule, CancellationToken cancellationToken)
         => _inner.UpdateAsync(rule, cancellationToken);
 
