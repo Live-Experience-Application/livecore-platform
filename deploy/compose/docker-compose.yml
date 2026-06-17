@@ -97,7 +97,12 @@ services:
       # after which the production readiness gate enforces them (CORE-OPS-005).
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_HTTP_PORTS: "8080"
-      ConnectionStrings__Database: ${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore}
+      # Production connection guidance (CORE-RES-004): the connection string sizes the
+      # Npgsql connection pool with "Maximum Pool Size", tuned so the API + worker
+      # replicas together stay within PostgreSQL's max_connections (default 100). The
+      # per-command CommandTimeout/statement_timeout ceilings are applied by Core with
+      # safe defaults (Persistence__CommandTimeout / Persistence__StatementTimeout).
+      ConnectionStrings__Database: "${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore;Maximum Pool Size=40}"
       # [prod-required] OIDC — unset here (fail-closed: authenticated routes 401).
       Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-}
       Authentication__Oidc__Audience: ${Authentication__Oidc__Audience:-}
@@ -133,7 +138,10 @@ services:
     image: livecore-worker:local
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
-      ConnectionStrings__Database: ${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore}
+      # Production connection guidance (CORE-RES-004): a smaller pool than the API —
+      # the worker runs a handful of background loops, not request fan-out — kept within
+      # PostgreSQL's max_connections alongside the API and migrate pools.
+      ConnectionStrings__Database: "${ConnectionStrings__Database:-Host=postgres;Port=5432;Database=livecore;Username=livecore;Password=livecore;Maximum Pool Size=20}"
       # The worker's metrics/health surface (CORE-DR-003) binds this URL inside
       # the container; the port is published below for the host-side liveness probe.
       Worker__Metrics__Url: ${Worker__Metrics__Url:-http://0.0.0.0:9464}

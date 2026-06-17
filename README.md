@@ -1035,15 +1035,15 @@ an operation that succeeds on a retry never reaches the caller as an error. A
 **non-transient** failure (a constraint violation, a query bug) is not retried and still
 fails immediately, so resilience never masks a real error.
 
-A single owner, `LiveCoreNpgsqlOptions.Configure`, turns retry on (`EnableRetryOnFailure`)
-in one place and is passed to **every** `UseNpgsql` call — the API host
-(`Program.cs`), each worker job context (asset cleanup, recap generation, export
-processing, store-notification reconciliation) and the design-time/migrations factory —
-so the API and every worker job share one resilience policy and migrations applied
-against a separate database tolerate a transient blip. It is applied wherever `UseNpgsql`
-is called, each of which is already **gated on a configured connection string**, so the
-host still runs without persistence (fail-closed) exactly as before, and it reads no
-configuration and holds no secret (threat T7).
+A single owner, `LiveCoreNpgsqlOptions`, turns retry on (`EnableRetryOnFailure`) in one place
+for **every** context — the API host (`Program.cs`) and each worker job context (asset cleanup,
+recap generation, export processing, store-notification reconciliation, data retention) through
+the `UseLiveCoreNpgsql` runtime helper, and the design-time/migrations factory through
+`Configure` directly — so the API and every worker job share one resilience policy and migrations
+applied against a separate database tolerate a transient blip. It is applied wherever the context
+is registered, each of which is already **gated on a configured connection string**, so the host
+still runs without persistence (fail-closed) exactly as before, and it holds no secret (threat T7).
+The same owner applies the per-command timeouts below.
 
 Enabling retry is **safe** because every multi-step write already runs inside the EF
 execution strategy's `ExecuteAsync` (the commit-then-publish unit of work above, plus the
@@ -1067,6 +1067,31 @@ untouched, so the default non-retrying path is unchanged. This was latent until 
 the test suites used a plain non-retrying provider, so the delegate was never re-run; a
 focused unit test and the `CommandRetryResilienceTests` HTTP tests now enable a retrying
 strategy and inject a transient failure mid-delegate to pin the behavior.
+
+### Database command timeouts and connection pool sizing (CORE-RES-004)
+
+A retrying strategy without a per-command **ceiling** is a liability: a single stuck query could run
+to the Npgsql default and then be reissued up to the six `EnableRetryOnFailure` attempts, so the
+worst-case wall-clock — and the pool/thread occupancy it costs — was effectively unbounded. Core now
+bounds **every runtime command** at two layers and sizes the **connection pool**, all configurable with
+safe defaults and **without changing** the retry behaviour:
+
+- a **client-side `CommandTimeout`** (`LiveCoreNpgsqlOptions`) so the driver cancels a command that
+  exceeds it and each retry attempt is itself bounded — default **30 s**, tuned with
+  `Persistence:CommandTimeout`;
+- a **server-side `statement_timeout`** (`StatementTimeoutConnectionInterceptor`, applied on every
+  connection open) so PostgreSQL aborts the query even if the client cancellation is lost — default
+  **30 s**, tuned with `Persistence:StatementTimeout` (`00:00:00` disables it). It is applied to the
+  runtime contexts only, **not** the design-time/migrations context, so a long controlled migration
+  is not bounded by the runtime ceiling;
+- a tuned **`Maximum Pool Size`** in the connection string — production connection guidance (not a code
+  default), sized so all API and worker replicas stay within the database `max_connections`.
+
+So a stuck query is bounded at the client and the server, retry can only ever amplify a **bounded**
+quantity, and the existing retry-resilience behaviour is preserved (a non-transient `statement_timeout`
+cancellation is not retried). Both runtime hosts share one registration helper,
+`LiveCoreNpgsqlOptions.UseLiveCoreNpgsql`. See `docs/13_SELF_HOSTING_REQUIREMENTS.md`. Pairs with
+CORE-PERF-003 (DbContext pooling).
 
 ### Concurrency conflicts in the worker job contexts
 

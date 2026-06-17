@@ -312,6 +312,49 @@ runtime application role, so the REVOKE on the application role does not interfe
 with a tenant-teardown cascade. Cryptographically **signing** or externally **anchoring** the chain (to defend
 against a fully privileged actor) is a documented follow-up beyond Core's scope.
 
+## Database connection tuning: command/statement timeouts and pool sizing (CORE-RES-004)
+
+A single pathological query must have a **ceiling**. Before this, the shared Npgsql configuration
+(`Persistence/LiveCoreNpgsqlOptions.cs`) turned on the retrying execution strategy (CORE-CONC-003) but set **no**
+command timeout, so a stuck query ran to the Npgsql default and — because the retrying strategy can re-issue an
+operation up to `EnableRetryOnFailure`'s **6** attempts — the worst-case wall-clock, and the pool/thread occupancy
+it costs, was effectively unbounded. The fix bounds **each command** at two layers and sizes the **connection pool**,
+all configurable with safe defaults, **without changing** the retry behaviour:
+
+- **Client-side `CommandTimeout`** — applied by Core to every runtime `LiveCoreDbContext` (the API host and every
+  worker job). The EF Core / Npgsql driver cancels a command that exceeds it, so a stuck query never blocks its
+  thread/connection indefinitely and **each retry attempt is itself bounded**. Default **30 seconds**; tune with
+  `Persistence:CommandTimeout` (`Persistence__CommandTimeout`, a `TimeSpan`). A non-positive value is rejected at
+  startup (a misconfiguration can never silently turn the bound into "no timeout").
+- **Server-side `statement_timeout`** — applied by Core on **every connection open** (a `SET statement_timeout`,
+  `Persistence/StatementTimeoutConnectionInterceptor.cs`) so PostgreSQL **aborts** the query on its own even if the
+  client cancellation is lost (a wedged connection). This is the defence-in-depth backstop the client timeout cannot
+  give. Default **30 seconds**; tune with `Persistence:StatementTimeout` (`Persistence__StatementTimeout`, a
+  `TimeSpan`); set it to `00:00:00` to disable the server-side ceiling (the client `CommandTimeout` still applies).
+  It is applied **only to the runtime contexts**, deliberately **not** to the design-time/migrations context, so a
+  long, controlled schema migration (a large index build) is not bounded by the runtime query ceiling.
+- **`Maximum Pool Size` (connection pool sizing)** — this is **production connection guidance** set in the
+  **connection string**, not a Core code default, because the right value depends on the database's
+  `max_connections` and how many API/worker replicas share it. Size it so **all** API and worker replicas together
+  stay within `max_connections` (PostgreSQL's default is `100`). Example:
+  `Host=…;Username=…;Password=…;Maximum Pool Size=40`. Connection pooling is on by default (`Pooling=true`); do not
+  disable it. The bundled compose manifest shows a tuned split (api `40`, worker `20`); a single-VPS deployment with
+  one API and one worker stays well under the default `max_connections`.
+
+Together these mean a stuck query is bounded at the client **and** the server, retry can only ever amplify a
+**bounded** quantity (at most `MaxRetryCount` × the per-command ceiling, not an unbounded run), and the pool cannot
+be exhausted beyond a sized limit. The retrying execution strategy (CORE-CONC-003) is **preserved unchanged** —
+a transient failure is still retried, and a non-transient one (including a `statement_timeout` cancellation) still
+fails immediately. The timeouts carry no secret (only timespans, threat T7); the only credential, the connection
+string, is supplied from configuration as before. This pairs with the DbContext pooling and authz-lookup caching
+of CORE-PERF-003.
+
+| Setting (config key)            | Env var                         | Default    | Consumer    | Purpose                                                                 |
+| ------------------------------- | ------------------------------- | ---------- | ----------- | ----------------------------------------------------------------------- |
+| `Persistence:CommandTimeout`    | `Persistence__CommandTimeout`   | `00:00:30` | API, worker | Client-side per-command ceiling (EF Core/Npgsql `CommandTimeout`).      |
+| `Persistence:StatementTimeout`  | `Persistence__StatementTimeout` | `00:00:30` | API, worker | Server-side `statement_timeout`; `00:00:00` disables the server ceiling.|
+| `Maximum Pool Size` (in `ConnectionStrings:Database`) | within `ConnectionStrings__Database` | Npgsql default (`100`) | API, worker | Connection-pool cap; tune to the database `max_connections` across replicas. |
+
 ## Edge posture: CORS, forwarded headers and HTTPS (CORE-OPS-003)
 
 The Core API is meant to sit **behind a reverse proxy / load balancer that
@@ -765,7 +808,9 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 
 | Setting (config key)                | Env var                            | Secret | Required                | Consumer    | Fail-closed default when unset                          |
 | ----------------------------------- | ---------------------------------- | :----: | ----------------------- | ----------- | ------------------------------------------------------- |
-| `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod  |
+| `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod (set a tuned `Maximum Pool Size`, CORE-RES-004) |
+| `Persistence:CommandTimeout`        | `Persistence__CommandTimeout`      |   no   | no (tunable)            | API, worker | `00:00:30` client-side per-command ceiling (CORE-RES-004) |
+| `Persistence:StatementTimeout`      | `Persistence__StatementTimeout`    |   no   | no (tunable)            | API, worker | `00:00:30` server-side `statement_timeout`; `00:00:00` disables it (CORE-RES-004) |
 | `Authentication:Oidc:Authority`     | `Authentication__Oidc__Authority`  |   no   | production              | API         | Auth disabled; authenticated routes `401`; not-ready    |
 | `Authentication:Oidc:Audience`      | `Authentication__Oidc__Audience`   |   no   | production              | API         | Refuses to start once Authority is set (CORE-OPS-004)   |
 | `Authentication:Oidc:RequireHttpsMetadata` | `Authentication__Oidc__RequireHttpsMetadata` | no | no (dev only)    | API         | `true` (HTTPS metadata required)                        |
