@@ -859,4 +859,53 @@ public sealed class AuditLogEntryTests
         Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
         Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
     }
+
+    // --- Organization deletion factory (CORE-PRIV-002) -------------------------
+
+    [Fact]
+    public void ForOrganizationDeletion_records_a_platform_level_fact_by_id_only()
+    {
+        // CORE-PRIV-002: the tenant offboarding is audited at the PLATFORM level (null organization) so the
+        // record survives the cascade that removes the tenant's own audit log; it captures actor + deleted org id
+        // only, with no workspace and no before/after state, and never the tenant's name.
+        var actor = Guid.NewGuid();
+        var deletedOrganization = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForOrganizationDeletion(actor, "Organization", deletedOrganization, _now);
+
+        Assert.Equal(AuditAction.OrganizationDeleted, entry.Action);
+        // Platform-level: a tenant-scoped entry would be cascade-removed with the very tenant being torn down.
+        Assert.Null(entry.OrganizationId);
+        Assert.Null(entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        // The deleted organization is carried as the RESOURCE (a recorded fact), not the tenant foreign key.
+        Assert.Equal("Organization", entry.ResourceType);
+        Assert.Equal(deletedOrganization, entry.ResourceId);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.Null(entry.PreviousState);
+        Assert.Null(entry.NewState);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForOrganizationDeletion_rejects_an_empty_actor_deleted_org_or_blank_resource_type()
+    {
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForOrganizationDeletion(
+            Guid.Empty, "Organization", Guid.NewGuid(), _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForOrganizationDeletion(
+            Guid.NewGuid(), "Organization", Guid.Empty, _now));
+        Assert.Throws<ArgumentException>(() => AuditLogEntry.ForOrganizationDeletion(
+            Guid.NewGuid(), " ", Guid.NewGuid(), _now));
+    }
+
+    [Fact]
+    public void ForOrganizationDeletion_normalizes_created_at_to_utc()
+    {
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        var entry = AuditLogEntry.ForOrganizationDeletion(Guid.NewGuid(), "Organization", Guid.NewGuid(), local);
+
+        Assert.Equal(TimeSpan.Zero, entry.CreatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, entry.CreatedAt.UtcDateTime);
+    }
 }

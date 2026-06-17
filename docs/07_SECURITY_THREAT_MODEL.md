@@ -178,6 +178,39 @@ The controller/processor split for self-hosters, the data-residency configuratio
 windows and the at-rest-encryption expectations are recorded in the privacy/data-protection documentation
 (CORE-PRIV-005).
 
+## Authorized tenant organization deletion (CORE-PRIV-002)
+
+A tenant has a right to offboarding / data deletion, but until this story Core had **no** path to delete a
+tenant: `csv/api_routes.csv` exposed only member and template deletion, the `OrganizationRepository` had no
+delete, and so the `ON DELETE CASCADE` foreign keys every tenant-scoped table already declares into
+`organizations(id)` (workspaces, sessions, participants, memberships, the audit log, and the rest —
+`docs/10_DATABASE_SCHEMA.md`) were **unreachable**. The whole tenant teardown was designed into the schema but
+nothing could trigger it.
+
+The deletion command (`DELETE /api/v1/organizations/{organizationSlug}`, Owner only) closes that gap:
+
+- it HARD-deletes the `organizations` root row, and the database's existing `ON DELETE CASCADE` foreign keys
+  then remove the whole tenant in the same operation — its workspaces, sessions, participants, memberships and
+  its OWN audit log (the audit log is intentionally part of the tenant teardown, so an offboarded tenant leaves
+  no tenant-scoped data behind);
+- it is the **most destructive** tenant action, so it is **Owner-only** — strictly narrower than member
+  management or erasure (Owner/Admin). The authorization is tenant-scoped and fail-closed (threats T1/T5): a
+  non-Owner tenant member — an Admin included — is denied `403`, and a foreign-tenant/unknown organization is
+  hidden as `404` (the tenant context resolver requires the token's organization claim AND a persisted Owner
+  membership);
+- it is **audited at the platform level**. The deleted tenant's own audit log is cascade-removed, so a
+  tenant-scoped record would be torn down with it; the offboarding is recorded as a PLATFORM-LEVEL
+  `OrganizationDeleted` audit fact (a null organization, **outside** the per-tenant hash chain — the same
+  posture as the entitlement/store facts) that SURVIVES the teardown. It records the actor (the Owner) and the
+  deleted organization by id only, never the tenant's name or any content (threat T7), and the deleted-org id is
+  a recorded fact (not a tenant foreign key), so it is not cascade-removed;
+- the audit append and the cascade delete commit in **one transaction**, so the teardown is applied whole or
+  not at all (a failure leaves the tenant intact and writes no audit row).
+
+The orphaned-residue limitation (an organization-subject entitlement/quota row is keyed by a polymorphic
+subject pair with no organization foreign key, so it is not reached by the tenant cascade) is recorded in
+`docs/10_DATABASE_SCHEMA.md`.
+
 ## Supply chain integrity (CORE-DEP-003)
 
 The published API, worker and migrations images are part of the trusted computing base a deployment runs. An

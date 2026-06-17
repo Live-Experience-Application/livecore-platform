@@ -1354,6 +1354,7 @@ The Organizations module exposes the tenant create/read API (CORE-API-001):
 | -------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | `GET`    | `/api/v1/organizations`                                                     | any authenticated user (only the organizations they belong to)   |
 | `POST`   | `/api/v1/organizations`                                                     | any authenticated user (becomes the new tenant's `Owner`)        |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}`                                  | organization `Owner` (delete the tenant — see below)             |
 | `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}`               | organization `Owner` or `Admin` (remove member — see below)      |
 | `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data` | organization `Owner` or `Admin` (erase data subject — see below) |
 
@@ -1574,6 +1575,41 @@ display name or OIDC subject (threats T1/T5/T7). Because the audit log reference
 are recorded facts (not foreign keys) and carry no PII, the **append-only audit
 hash chain still verifies** after an erasure: that is what makes the right to
 erasure reconcilable with the immutable audit log.
+
+### Organization deletion (tenant offboarding)
+
+An authorized owner can delete an organization, tearing the whole tenant down —
+tenant offboarding / data deletion (CORE-PRIV-002):
+
+| Method   | Route                                      | Authorized callers   |
+| -------- | ------------------------------------------ | -------------------- |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}` | organization `Owner` |
+
+Until this story Core had **no** path to delete a tenant, even though every
+tenant-scoped table already declared an `ON DELETE CASCADE` foreign key into
+`organizations(id)` — the cascade was designed in but **unreachable**. This route
+is the command that triggers it: deleting the `organizations` root row removes the
+whole tenant in one operation — its **workspaces, sessions, participants,
+memberships and its own audit log** (the audit log is intentionally part of the
+teardown, so an offboarded tenant leaves no tenant-scoped data behind). It returns
+`204 No Content`.
+
+Deletion is the **most destructive** tenant action, so it is **Owner-only**
+(`docs/06_AUTHORIZATION_MATRIX.md`) — strictly narrower than member management or
+erasure (which are `Owner`/`Admin`). It is tenant-scoped and fail-closed: an
+`Admin` or any other non-`Owner` tenant member is `403`, and a foreign-tenant or
+unknown organization is hidden as `404` (the tenant resolver requires the token's
+organization claim **and** a persisted `Owner` membership; threats T1/T5). Other
+tenants' data is untouched.
+
+Because the deleted tenant's own audit log is cascade-removed, the offboarding
+itself is recorded as a **platform-level** `OrganizationDeleted` audit record (a
+null organization, **outside** the per-tenant hash chain) so the security record
+**survives** the teardown. It captures the authenticated **actor** (the owner) and
+the deleted organization **by id** — never the tenant's name or any content
+(threat T7) — and the deleted-org id is a recorded fact (not a tenant foreign key),
+so it is not cascade-removed. The audit append and the cascade delete commit in
+**one transaction**.
 
 ### Workspace archive (lifecycle end-state)
 

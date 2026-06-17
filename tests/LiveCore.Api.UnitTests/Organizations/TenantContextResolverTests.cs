@@ -421,6 +421,9 @@ public sealed class TenantContextResolverTests
             OrganizationMember owner,
             CancellationToken cancellationToken)
             => throw new NotSupportedException("The tenant context resolver does not create organizations.");
+
+        public Task DeleteAsync(Organization organization, CancellationToken cancellationToken)
+            => throw new NotSupportedException("The tenant context resolver does not delete organizations.");
     }
 
     private sealed class FakeUserProfileRepository : IUserProfileRepository

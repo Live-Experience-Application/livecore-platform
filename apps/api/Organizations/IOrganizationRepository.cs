@@ -119,4 +119,21 @@ public interface IOrganizationRepository
         Organization organization,
         OrganizationMember owner,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// HARD-deletes the given organization (the tenant root) — the authorized
+    /// tenant offboarding behind <c>DELETE /api/v1/organizations/{organizationSlug}</c>
+    /// (CORE-PRIV-002, "Privacy and Data Lifecycle"). Removing the
+    /// <c>organizations</c> row triggers the database's existing
+    /// <c>ON DELETE CASCADE</c> foreign keys into <c>organizations(id)</c>, so the
+    /// whole tenant — its workspaces, sessions, participants, memberships and its
+    /// OWN audit log (the audit log is intentionally part of the tenant teardown) —
+    /// is removed in the same operation. This is an explicit exception to the
+    /// "avoid hard-delete for business data" principle: the story IS the deletion
+    /// of the tenant and all its data. The caller authorizes the deletion (an Owner
+    /// of the resolved tenant) and records the platform-level offboarding audit fact
+    /// before calling in; this contract only performs the delete.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The organization is null.</exception>
+    Task DeleteAsync(Organization organization, CancellationToken cancellationToken);
 }

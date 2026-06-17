@@ -203,4 +203,18 @@ internal sealed class OrganizationRepository : IOrganizationRepository
             throw;
         }
     }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(Organization organization, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(organization);
+
+        // Remove the tenant root and save: EF issues a single DELETE against organizations(id), and the
+        // database's ON DELETE CASCADE foreign keys into organizations(id) (workspaces, sessions, participants,
+        // organization/workspace memberships, the tenant's audit log, and so on — all declared Cascade) remove
+        // the whole tenant in the same operation. There is no application-level child enumeration: the schema's
+        // cascade is the teardown, exactly as the story (CORE-PRIV-002) intends.
+        _dbContext.Organizations.Remove(organization);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

@@ -368,6 +368,62 @@ public sealed class OrganizationRepositoryTests : IDisposable
             () => repository.AddWithOwnerAsync(organization, mismatchedOwner, CancellationToken.None));
     }
 
+    // ---- DeleteAsync (tenant teardown cascade, CORE-PRIV-002) ----------------
+
+    [Fact]
+    public async Task Delete_removes_the_organization_and_cascades_its_membership_while_other_tenants_are_untouched()
+    {
+        // CORE-PRIV-002: deleting the organization root triggers the ON DELETE CASCADE foreign key into
+        // organizations(id), so the tenant's organization_members go with it. A second tenant and its member are
+        // fully isolated and untouched (threat T5). Foreign-key enforcement is ON (see the constructor), so the
+        // cascade is genuinely exercised.
+        var ownerA = await SeedUserAsync("owner-a");
+        var ownerB = await SeedUserAsync("owner-b");
+        var orgA = await SeedOrganizationAsync(_slug, _name);
+        var orgB = await SeedOrganizationAsync(_foreignSlug, _foreignName);
+
+        await using (var context = CreateContext())
+        {
+            var members = new OrganizationMemberRepository(context);
+            await members.AddAsync(
+                OrganizationMember.Create(orgA.Id, ownerA.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+            await members.AddAsync(
+                OrganizationMember.Create(orgB.Id, ownerB.Id, MembershipRole.Owner, _createdAt),
+                CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var repository = new OrganizationRepository(context);
+            var organization = await repository.FindByIdAsync(orgA.Id, CancellationToken.None);
+            Assert.NotNull(organization);
+            await repository.DeleteAsync(organization, CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            // Tenant A is gone, and its membership was cascade-removed.
+            Assert.Null(await new OrganizationRepository(context).FindByIdAsync(orgA.Id, CancellationToken.None));
+            var members = new OrganizationMemberRepository(context);
+            Assert.False(await members.IsMemberAsync(orgA.Id, ownerA.Id, CancellationToken.None));
+
+            // Tenant B and its membership are untouched.
+            Assert.NotNull(await new OrganizationRepository(context).FindByIdAsync(orgB.Id, CancellationToken.None));
+            Assert.True(await members.IsMemberAsync(orgB.Id, ownerB.Id, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task Delete_rejects_a_null_organization()
+    {
+        await using var context = CreateContext();
+        var repository = new OrganizationRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => repository.DeleteAsync(null!, CancellationToken.None));
+    }
+
     // ---- ListByMemberAsync (the subject's own organizations, CORE-API-001) ----
 
     [Fact]

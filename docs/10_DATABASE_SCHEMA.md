@@ -176,6 +176,33 @@ Two PII columns are NOT reachable by any user foreign key — `participants.disp
 non-identifying placeholders) before deleting the profile, in one transaction. No schema change is required:
 the erasure is the application command the existing `SET NULL`/`CASCADE` foreign keys already assumed.
 
+## Authorized tenant organization deletion and the tenant cascade (CORE-PRIV-002)
+
+`organizations` is the tenant root: every tenant-scoped table carries an `organization_id` that is a foreign
+key into `organizations(id)`, and **every one of those foreign keys is `ON DELETE CASCADE`** (workspaces,
+workspace members and invitations, organization members, sessions, scenes, content blocks, entities, entity
+types, entity relationships, participants, visibility rules, assets, asset links, export jobs, export manifests,
+recaps, session events, templates, and the `audit_logs` / `audit_log_sequences` tables). So deleting one
+`organizations` row tears the **whole tenant** down in a single operation — the right to tenant offboarding /
+data deletion — without any application-level child enumeration. The `audit_logs` tenant foreign key cascades
+too: the tenant's own audit log is **intentionally** part of the teardown, so an offboarded tenant leaves no
+tenant-scoped data behind. Like the erasure above, this is an explicit exception to the "avoid hard-delete for
+business data" principle — the story IS the deletion of the tenant and all its data.
+
+No schema change is required: the deletion command (`DELETE /api/v1/organizations/{organizationSlug}`, Owner
+only) is the application command the existing `ON DELETE CASCADE` foreign keys already assumed but nothing
+previously exercised. Because the deleted tenant's own audit log is cascade-removed, the offboarding itself is
+recorded as a **platform-level** `audit_logs` row (`organization_id IS NULL`, **outside** the per-tenant hash
+chain — the same posture as the entitlement/store facts) so the security record SURVIVES the teardown; the
+deleted organization id is carried as the audit row's `resource_id` (a recorded fact, not a tenant foreign key,
+so it is not cascade-removed). The audit append and the cascade delete commit in **one transaction**.
+
+Global and subject-keyed tables carry no `organization_id` foreign key, so the cascade never reaches them
+(`users` is a global identity; `purchase_transactions`/`purchase_events`/`store_notification_events` are
+deployment-spanning; `subject_entitlements`/`quota_usage` are keyed by a polymorphic subject pair with no
+organization foreign key). An organization-subject entitlement/quota row therefore is not removed by the
+tenant cascade — it becomes unreachable residue rather than a dangling foreign key.
+
 ## Session-scoped visibility rules (CORE-SVIS-001)
 
 `visibility_rules` is **session-scoped**: it carries a required `session_id` column (a foreign key into

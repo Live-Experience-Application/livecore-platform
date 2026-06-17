@@ -299,6 +299,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (user-profile, participant, invitation, organization-member and audit-log).
     builder.Services.AddScoped<DataSubjectErasureService>();
 
+    // Authorized tenant organization deletion command (CORE-PRIV-002, tenant offboarding / data deletion): the
+    // Organizations module's destructive teardown command. An authorized Owner (DELETE
+    // /api/v1/organizations/{organizationSlug}, wired by MapOrganizationEndpoints) deletes a tenant — appending
+    // the platform-level OrganizationDeleted offboarding audit fact and removing the tenant root, whose schema
+    // ON DELETE CASCADE foreign keys then tear down its workspaces, sessions, participants, memberships and its
+    // own audit log — atomically through the CORE-CONC-002 TransactionalUnitOfWork. Registered here inside the
+    // persistence conditional alongside the repositories it composes (organization and audit-log).
+    builder.Services.AddScoped<OrganizationDeletionService>();
+
     // Workspace persistence (CORE-WS-001): the Workspaces module owns the
     // tenant-scoped workspaces table (docs/05_MODULE_CONTRACTS.md). Registered
     // here, inside the persistence conditional, exactly like the organization

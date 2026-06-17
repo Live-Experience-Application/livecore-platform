@@ -386,4 +386,24 @@ public enum AuditAction
     /// immutable audit log; threats T1/T5/T7) (<see cref="AuditLogEntry.ForUserProfileErasure"/>).
     /// </summary>
     UserProfileErased = 25,
+
+    /// <summary>
+    /// An authorized Owner deleted an organization, tearing the whole tenant down — the tenant organization
+    /// deletion command (CORE-PRIV-002, the "Privacy and Data Lifecycle" epic, tenant offboarding / data
+    /// deletion). The deletion removes the organization root and, through the schema's <c>ON DELETE CASCADE</c>
+    /// foreign keys into <c>organizations(id)</c>, the tenant's workspaces, sessions, participants, memberships
+    /// and its OWN audit log (the audit log is intentionally part of the tenant teardown). Recording the deletion
+    /// satisfies the story's "authorized, guarded and fail-closed" intent: it records that an authorized Owner
+    /// offboarded a tenant (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). A deletion is a removal, not a
+    /// transition to a new state, and an organization has no lifecycle state, so there is NO before/after state
+    /// pair; its actor is the Owner who performed the deletion and its resource is the deleted organization (its
+    /// generic kind name <c>Organization</c> and the surrogate id). Unlike the tenant-scoped actions above this is
+    /// a PLATFORM-LEVEL audit fact (a null organization, exactly like the entitlement/store facts): a tenant-scoped
+    /// entry would be cascade-removed with the very tenant being torn down, so the offboarding record is recorded
+    /// at the platform level — outside the per-tenant hash chain — so it SURVIVES the teardown. The audit row
+    /// carries ONLY identifiers — never the deleted tenant's name or any free-form content (threat T7) — and
+    /// outlives the now-deleted organization it references because the reference is a recorded fact, not a foreign
+    /// key (<see cref="AuditLogEntry.ForOrganizationDeletion"/>).
+    /// </summary>
+    OrganizationDeleted = 26,
 }

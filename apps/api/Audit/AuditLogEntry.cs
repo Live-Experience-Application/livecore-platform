@@ -707,6 +707,75 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records an organization deletion (<see cref="AuditAction.OrganizationDeleted"/>) — the audit fact written
+    /// when an authorized Owner deletes an organization, tearing the whole tenant down (CORE-PRIV-002, tenant
+    /// offboarding / data deletion). It is the tenant-teardown counterpart of the resource-deletion factories
+    /// (e.g. <see cref="ForEntityDeletion"/>) and, like them, a thin specialization of <see cref="Create"/> that
+    /// pins the action and applies the deletion producer's stricter contract: the authenticated actor (the Owner
+    /// who performed the deletion) and the deleted organization resource (its generic kind name and surrogate id)
+    /// are REQUIRED, where the generic factory leaves them optional. A deletion is a removal rather than a
+    /// transition, and an organization has no lifecycle state, so there is NO before/after state pair (both null).
+    ///
+    /// Unlike every tenant-scoped deletion fact, this is a PLATFORM-LEVEL fact: the organization is set to
+    /// <see langword="null"/> (exactly as the entitlement/store facts are) because a tenant-scoped entry would be
+    /// cascade-removed with the very tenant being torn down (the <c>audit_logs</c> tenant foreign key CASCADES on
+    /// the organization's deletion). Recording the offboarding at the platform level — outside the per-tenant
+    /// hash chain — is what lets the security record SURVIVE the teardown. The resource kind is passed as a
+    /// generic NAME string (e.g. <c>Organization</c>) so the Audit module does not depend on the Organizations
+    /// module's types. Every value is an identifier or a generic name — never the deleted tenant's name or any
+    /// free-form content (threat T7) — and the audit row outlives the now-deleted organization it references
+    /// because the reference is a recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="actorUserProfileId">The Owner who performed the deletion (required; the audited actor).</param>
+    /// <param name="organizationResourceType">The deleted organization's generic kind name (e.g. Organization).</param>
+    /// <param name="deletedOrganizationId">The deleted organization's surrogate id (a recorded fact, not a tenant foreign key).</param>
+    /// <param name="createdAt">When the deletion happened.</param>
+    /// <exception cref="ArgumentException">
+    /// The actor id or the deleted organization id is empty, or the organization resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForOrganizationDeletion(
+        Guid actorUserProfileId,
+        string organizationResourceType,
+        Guid deletedOrganizationId,
+        DateTimeOffset createdAt)
+    {
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationResourceType))
+        {
+            throw new ArgumentException(
+                "Organization resource type must not be empty.",
+                nameof(organizationResourceType));
+        }
+
+        if (deletedOrganizationId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "Deleted organization id must not be empty.",
+                nameof(deletedOrganizationId));
+        }
+
+        return Create(
+            // PLATFORM-LEVEL (null tenant): the deleted tenant's own audit log is cascade-removed by the
+            // deletion, so this offboarding record is recorded at the platform level (outside the per-tenant
+            // hash chain) so it SURVIVES the teardown. The deleted organization id is carried as the RESOURCE
+            // (a recorded fact), not as the tenant foreign key (which would cascade it away).
+            organizationId: null,
+            workspaceId: null,
+            AuditAction.OrganizationDeleted,
+            actorUserProfileId,
+            organizationResourceType,
+            deletedOrganizationId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a workspace invitation redemption (<see cref="AuditAction.MemberJoined"/>) — the audit fact
     /// written when an authenticated caller redeems a scoped invitation and gains the granted workspace
     /// membership (CORE-WS-006). It is the inverse of <see cref="ForMemberRemoval"/>: a thin specialization

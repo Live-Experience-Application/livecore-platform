@@ -24,6 +24,17 @@ namespace LiveCore.Api.Organizations;
 ///   <item><c>POST /api/v1/organizations</c> — create a new tenant and make the
 ///   caller its founding <c>Owner</c> ("Creates organization and Owner
 ///   membership"), atomically.</item>
+///   <item><c>DELETE /api/v1/organizations/{organizationSlug}</c>
+///   — delete an organization, tearing the whole tenant down (CORE-PRIV-002,
+///   tenant offboarding / data deletion), "Delete organization" (Owner ONLY —
+///   stricter than member management). Runs the
+///   <see cref="OrganizationDeletionService"/>: the tenant root is hard-deleted and
+///   the schema's <c>ON DELETE CASCADE</c> foreign keys remove its workspaces,
+///   sessions, participants, memberships and its OWN audit log (the audit log is
+///   intentionally part of the teardown); the offboarding is appended to the audit
+///   log as a PLATFORM-LEVEL fact (<see cref="AuditAction.OrganizationDeleted"/>)
+///   that survives the teardown. A non-Owner tenant member is denied 403.
+///   Fail-closed and hidden as 404 for a cross-tenant/unknown organization.</item>
 ///   <item><c>DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}</c>
 ///   — remove an organization member (CORE-LIFE-001), "Manage members" (Owner or
 ///   Admin). Hard-deletes the membership, revoking the subject's tenant access on
@@ -97,6 +108,7 @@ internal static class OrganizationEndpoints
 
         group.MapGet("/", ListOrganizationsAsync);
         group.MapPost("/", CreateOrganizationAsync);
+        group.MapDelete("/{organizationSlug}", DeleteOrganizationAsync);
         group.MapDelete("/{organizationSlug}/members/{memberId}", RemoveOrganizationMemberAsync);
         group.MapDelete("/{organizationSlug}/members/{memberId}/personal-data", EraseMemberPersonalDataAsync);
 
@@ -348,6 +360,71 @@ internal static class OrganizationEndpoints
         return Results.NoContent();
     }
 
+    // DELETE /api/v1/organizations/{organizationSlug}
+    private static async Task<IResult> DeleteOrganizationAsync(
+        HttpContext httpContext,
+        string organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The organization is identified by its slug in the path (the tenant's natural key, matched against the
+        // token's organization claim). A missing/blank slug can never address a stored tenant; hide as 404, never
+        // echoing why.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return HiddenOrganization();
+        }
+
+        // Resolve the trusted tenant context (token claim AND persisted membership). A denied resolution — a
+        // foreign/unknown tenant, a malformed slug, a non-member or a service-account principal — is hidden as
+        // 404, so a tenant the caller cannot see is indistinguishable from a missing one (threat T5), exactly like
+        // the member-removal route.
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return HiddenOrganization();
+        }
+
+        var context = resolution.Context;
+
+        // Deleting a tenant is the most destructive tenant action, so it is OWNER-ONLY
+        // (docs/06_AUTHORIZATION_MATRIX.md "Delete organization") — stricter than member management (Owner/Admin).
+        // The caller is a known member of the tenant (the resolution proved it), so an insufficient role — an
+        // Admin, or any other tenant role — is a 403. Exact, non-linear role check (no >/<).
+        if (!context.HasRole(MembershipRole.Owner))
+        {
+            return Forbidden();
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var result = await deps.OrganizationDeletion
+            .DeleteAsync(context.OrganizationId, context.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result switch
+        {
+            // The tenant is deleted (the cascade removed its workspaces, sessions, participants, memberships and
+            // its own audit log) and the platform-level offboarding fact survives; nothing is returned (204).
+            OrganizationDeletionResult.Deleted => Results.NoContent(),
+
+            // Defensive: the resolution proved the tenant exists, so this should not occur; if it was deleted
+            // concurrently, hide it as 404 rather than reveal anything (fail-closed).
+            _ => HiddenOrganization(),
+        };
+    }
+
     // DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data
     private static async Task<IResult> EraseMemberPersonalDataAsync(
         HttpContext httpContext,
@@ -449,20 +526,28 @@ internal static class OrganizationEndpoints
         var organizationMembers = services.GetService<IOrganizationMemberRepository>();
         var auditLog = services.GetService<IAuditLogRepository>();
         var dataSubjectErasure = services.GetService<DataSubjectErasureService>();
+        var organizationDeletion = services.GetService<OrganizationDeletionService>();
 
         if (organizations is null
             || userProfiles is null
             || resolver is null
             || organizationMembers is null
             || auditLog is null
-            || dataSubjectErasure is null)
+            || dataSubjectErasure is null
+            || organizationDeletion is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new OrganizationEndpointDependencies(
-            organizations, userProfiles, resolver, organizationMembers, auditLog, dataSubjectErasure);
+            organizations,
+            userProfiles,
+            resolver,
+            organizationMembers,
+            auditLog,
+            dataSubjectErasure,
+            organizationDeletion);
         return true;
     }
 
@@ -550,5 +635,6 @@ internal static class OrganizationEndpoints
         TenantContextResolver Resolver,
         IOrganizationMemberRepository OrganizationMembers,
         IAuditLogRepository AuditLog,
-        DataSubjectErasureService DataSubjectErasure);
+        DataSubjectErasureService DataSubjectErasure,
+        OrganizationDeletionService OrganizationDeletion);
 }

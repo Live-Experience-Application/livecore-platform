@@ -21,6 +21,7 @@ Roles are generic. Verticals may rename them in UI.
 | Export workspace | yes | yes | optional | no | no | no | optional |
 | Delete workspace | yes | optional | no | no | no | no | no |
 | Erase data subject personal data | yes | yes | no | no | no | no | no |
+| Delete organization | yes | no | no | no | no | no | no |
 
 ## Authorization principles
 
@@ -31,3 +32,4 @@ Roles are generic. Verticals may rename them in UI.
 - Participant visibility is computed server-side.
 - Audit roles may view metadata but should not automatically view sensitive content unless explicitly allowed.
 - Erasing a data subject's personal data (the right to erasure, `DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data`, CORE-PRIV-001) is a member-management privilege restricted to Owner/Admin, exactly like removing a member. It is authorized within a tenant (the caller must be an Owner/Admin of the resolved organization and the target a member of it), but because Core's user profile is a single global identity its effect is global: the subject's profile is deleted and their per-tenant personal-data copies are anonymized everywhere (GDPR Art.17). The sole Owner of an organization cannot be erased (an ownerless tenant would be permanently unreachable); a non-privileged member is denied `403` and a foreign-tenant/unknown member is hidden as `404` (fail-closed).
+- Deleting an organization (tenant offboarding / data deletion, `DELETE /api/v1/organizations/{organizationSlug}`, CORE-PRIV-002) is the most destructive tenant action, so it is **Owner-only** — strictly narrower than member management or erasure (which are Owner/Admin). It tears the whole tenant down through the schema's existing `ON DELETE CASCADE` foreign keys (the tenant's workspaces, sessions, participants, memberships and its own audit log are removed; the audit log is intentionally part of the teardown). It is authorized within a tenant (the caller must be an Owner of the resolved organization), fail-closed: an Admin or any other non-Owner member is denied `403`, and a foreign-tenant/unknown organization is hidden as `404`. Because the deleted tenant's own audit log is cascade-removed, the offboarding itself is recorded as a **platform-level** `OrganizationDeleted` audit fact (a null organization, outside the per-tenant hash chain) so the security record survives the teardown.
