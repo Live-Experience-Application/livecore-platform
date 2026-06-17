@@ -62,6 +62,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Package versioning and changelog](#package-versioning-and-changelog)
     - [Boundary scan](#boundary-scan)
     - [Spec consistency check](#spec-consistency-check)
+    - [OpenAPI document](#openapi-document-core-oas-001)
 - [Run the hosts locally](#run-the-hosts-locally)
     - [Deploy the whole stack with Docker Compose](#deploy-the-whole-stack-with-docker-compose)
 - [Operations and observability](#operations-and-observability)
@@ -573,8 +574,10 @@ from the implementation** — it now also validates `csv/api_routes.csv` against
 the routes the minimal-API registrations mount (both directions), the documented
 roles/auth, the entitlement event catalog (binding each `audit=true` event to a
 real `AuditAction` enum member, CORE-SPEC-002), the mobile store CSV against the
-in-process gateway route table, and `csv/database_tables.csv` plus its promised
-unique indexes against the EF Core model snapshot. CI runs it as the
+in-process gateway route table, `csv/database_tables.csv` plus its promised
+unique indexes against the EF Core model snapshot, and the committed OpenAPI
+document (`openapi/livecore-v1.json`) against the routes the minimal-API
+registrations mount (both directions, CORE-OAS-001). CI runs it as the
 `spec-consistency` job (which first runs `scripts/test-spec-consistency.ps1`,
 the seeded-drift tests for the check logic in
 `scripts/LiveCoreSpecConsistency.psm1`).
@@ -588,6 +591,44 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/spec-consistency.ps1
 ```
+
+### OpenAPI document (CORE-OAS-001)
+
+The API produces an **OpenAPI 3 document** describing every registered `/api/v1`
+route, its request/response schema and the RFC 7807 Problem Details error shape. The
+document is **generated from the running minimal-API route table** (via
+`Microsoft.AspNetCore.OpenApi`), not hand-maintained, so it cannot diverge from the
+routes the host actually mounts. It is **committed as a build artifact** at
+[`openapi/livecore-v1.json`](openapi/livecore-v1.json) and **served only outside
+Production** at `GET /openapi/v1.json` (a production deployment exposes no
+schema-discovery surface). With the API host running locally:
+
+```bash
+curl http://localhost:5062/openapi/v1.json
+```
+
+Two gates keep the committed document honest:
+
+- the `spec-consistency` job (check 12, above) fails when `openapi/livecore-v1.json`
+  does not describe exactly the registered `/api/v1` routes;
+- the `dotnet` test suite (`OpenApiDocumentTests`) asserts the served document is valid
+  OpenAPI 3, covers the host's registered routes and equals the committed artifact.
+
+After an intentional route or schema change, **regenerate** the committed document by
+running the smoke suite with `LIVECORE_OPENAPI_UPDATE=1`:
+
+```bash
+# Windows (PowerShell)
+$env:LIVECORE_OPENAPI_UPDATE = '1'; dotnet test tests/LiveCore.SmokeTests --filter OpenApiDocumentTests
+```
+
+```bash
+# Linux/macOS
+LIVECORE_OPENAPI_UPDATE=1 dotnet test tests/LiveCore.SmokeTests --filter OpenApiDocumentTests
+```
+
+The typed `@livecore/contracts` types are hand-written today and will be generated
+from this document with their own drift gate in CORE-OAS-002.
 
 ## Run the hosts locally
 

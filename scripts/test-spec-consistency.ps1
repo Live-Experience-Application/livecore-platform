@@ -13,9 +13,11 @@
     a changed (unknown) role, an undocumented endpoint, a documented-but-unmounted
     route, an entitlement-catalog event with no audit action, a mobile route whose
     auth_required disagrees with the route, a table/unique-index that the EF model
-    snapshot does not back, and a non-deferred session event no command emits
-    (CORE-EVT-004) - and then proves the REAL repository tree passes every check.
-    This is the seeded-drift / real-tree-passes requirement of CORE-SPEC-001.
+    snapshot does not back, a non-deferred session event no command emits
+    (CORE-EVT-004), and an OpenAPI document that omits a registered route or lists a
+    phantom one (CORE-OAS-001) - and then proves the REAL repository tree passes
+    every check. This is the seeded-drift / real-tree-passes requirement of
+    CORE-SPEC-001.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-spec-consistency.ps1
@@ -292,6 +294,58 @@ $realEmission = @(Test-LiveCoreSessionEventEmission -CatalogRow $realCatalogEven
 AssertTrue ($realEmission.Count -eq 0) `
     'the real SessionEventTypes set equals the real non-deferred event catalog (CORE-EVT-004)'
 
+# === Check 12: committed OpenAPI document vs the implemented /api/v1 endpoints (CORE-OAS-001) ===
+
+function Get-OpenApiRouteFixture {
+    param([string]$Method, [string]$Path)
+    return [pscustomobject]@{
+        Method = $Method.ToUpperInvariant()
+        Path   = $Path
+        Key    = (ConvertTo-LiveCoreRouteKey -Method $Method -Path $Path)
+    }
+}
+
+# A document whose routes exactly match the implemented endpoints produces no findings.
+$consistentOpenApi = @(
+    Get-OpenApiRouteFixture -Method 'GET' -Path '/api/v1/me'
+    Get-OpenApiRouteFixture -Method 'POST' -Path '/api/v1/sessions/{sessionId}/reveal'
+)
+$consistentImplForOas = @(
+    Get-ImplRouteFixture -Method 'GET' -Path '/api/v1/me' -Anonymous $false
+    Get-ImplRouteFixture -Method 'POST' -Path '/api/v1/sessions/{sessionId}/reveal' -Anonymous $false
+)
+$consistentOas = @(Test-LiveCoreOpenApiCoverage -OpenApi $consistentOpenApi -Implemented $consistentImplForOas)
+AssertTrue ($consistentOas.Count -eq 0) `
+    'an OpenAPI document whose routes match the implemented endpoints produces no findings (CORE-OAS-001)'
+
+# A registered endpoint missing from the committed document fails (the document is stale).
+$staleOpenApi = @(Get-OpenApiRouteFixture -Method 'GET' -Path '/api/v1/me')
+$staleImpl = @(
+    Get-ImplRouteFixture -Method 'GET' -Path '/api/v1/me' -Anonymous $false
+    Get-ImplRouteFixture -Method 'POST' -Path '/api/v1/workspaces' -Anonymous $false -Source 'WorkspaceEndpoints.cs'
+)
+$staleOas = @(Test-LiveCoreOpenApiCoverage -OpenApi $staleOpenApi -Implemented $staleImpl)
+AssertTrue (Test-AnyFinding -Finding $staleOas -Pattern 'OPENAPI:.*workspaces.*missing from openapi/livecore-v1.json') `
+    'a registered /api/v1 endpoint missing from the committed OpenAPI document fails the check (CORE-OAS-001)'
+
+# A document path that no endpoint mounts fails (a phantom route in the document).
+$phantomOpenApi = @(
+    Get-OpenApiRouteFixture -Method 'GET' -Path '/api/v1/me'
+    Get-OpenApiRouteFixture -Method 'GET' -Path '/api/v1/ghost'
+)
+$phantomImplForOas = @(Get-ImplRouteFixture -Method 'GET' -Path '/api/v1/me' -Anonymous $false)
+$phantomOas = @(Test-LiveCoreOpenApiCoverage -OpenApi $phantomOpenApi -Implemented $phantomImplForOas)
+AssertTrue (Test-AnyFinding -Finding $phantomOas -Pattern 'OPENAPI:.*ghost.*no minimal-API endpoint mounts') `
+    'an OpenAPI document path that no endpoint mounts fails the check (CORE-OAS-001)'
+
+# The real committed OpenAPI document equals the real implemented /api/v1 routes (both directions).
+$realOpenApiRoutes = @(Get-LiveCoreOpenApiRoute -RepoRoot $repoRoot)
+AssertTrue ($realOpenApiRoutes.Count -gt 0) 'the committed OpenAPI document declares /api/v1 routes (CORE-OAS-001)'
+$realImplementedRoutes = @(Get-LiveCoreImplementedRoute -RepoRoot $repoRoot)
+$realOasCoverage = @(Test-LiveCoreOpenApiCoverage -OpenApi $realOpenApiRoutes -Implemented $realImplementedRoutes)
+AssertTrue ($realOasCoverage.Count -eq 0) `
+    'the real committed OpenAPI document covers exactly the implemented /api/v1 routes (CORE-OAS-001)'
+
 # === The real repository tree passes every check ===
 
 $realEntitlementEvents = @(Get-LiveCoreEntitlementEvent -RepoRoot $repoRoot)
@@ -300,7 +354,7 @@ $realCatalog = @(Test-LiveCoreEntitlementEventCatalog -Row $realEntitlementEvent
 AssertTrue ($realCatalog.Count -eq 0) 'the real csv/entitlement_event_catalog.csv passes the catalog check and the AuditAction binding (CORE-SPEC-002)'
 
 $result = Invoke-LiveCoreSpecConsistency -RepoRoot $repoRoot
-AssertTrue ($result.CheckCount -eq 11) 'the orchestrator runs all eleven checks'
+AssertTrue ($result.CheckCount -eq 12) 'the orchestrator runs all twelve checks'
 if ($result.Findings.Count -gt 0) {
     foreach ($finding in $result.Findings) {
         $failures.Add("FAIL (real tree): $finding")
@@ -320,5 +374,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Spec consistency tests passed: seeded route/role/auth/event/mobile/schema/session-event drift is rejected and the real tree passes.' -ForegroundColor Green
+Write-Host 'Spec consistency tests passed: seeded route/role/auth/event/mobile/schema/session-event/openapi drift is rejected and the real tree passes.' -ForegroundColor Green
 exit 0

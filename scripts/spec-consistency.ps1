@@ -40,6 +40,12 @@
          non-deferred csv/event_catalog.csv events, in both directions, so the
          catalog can no longer list a session event that no command emits.
 
+    OpenAPI document route binding (CORE-OAS-001):
+     12. the committed OpenAPI document (openapi/livecore-v1.json) describes exactly
+         the /api/v1 routes the minimal-API registrations mount, in both directions
+         (the OpenAPI analogue of check 6), so a route added/removed without the
+         document regenerated fails.
+
     Exits 0 when every invariant holds, 1 when drift is found, and 2 on a
     configuration error (a spec file that cannot be found or parsed).
 

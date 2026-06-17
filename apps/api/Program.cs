@@ -149,6 +149,19 @@ builder.Services.AddLiveCoreRateLimiting(builder.Configuration);
 // migration; the rewrite never reads the token, the body or any tenant identifier (threats T1/T5/T7).
 builder.Services.AddLiveCoreMobileApiGateway();
 
+// OpenAPI document generation for the v1 API (CORE-OAS-001). OpenApiConfiguration registers the
+// Microsoft.AspNetCore.OpenApi generator that builds an OpenAPI 3 document FROM the running minimal-API route
+// table (the ApiExplorer metadata of the endpoints mapped below), scoped to the /api/v1 surface, so the
+// document can never diverge from the routes the host actually mounts (the committed openapi/livecore-v1.json
+// build artifact a CI gate checks for drift). It is registered UNCONDITIONALLY (it needs no database or
+// identity, exactly like the metrics/health surfaces), and the route table the document describes is identical
+// whether or not persistence is configured because every /api/v1 endpoint below is mapped unconditionally and
+// fails closed at runtime. The read-only explorer endpoint is mapped LATER and ONLY outside Production
+// (app.MapLiveCoreOpenApi), so a production deployment exposes no schema-discovery surface; the document
+// carries only route shapes, generic schema names and the RFC 7807 Problem Details error shape — never a
+// secret, tenant identifier or content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+builder.Services.AddLiveCoreOpenApi();
+
 // Realtime SignalR services and the scale-out backplane (CORE-RT-001 SignalR; CORE-RT-006 the
 // IRealtimeBackplane seam; CORE-OPS-007 the conditional Redis/Valkey backplane). SignalR is part of the
 // ASP.NET Core shared framework (docs/11_REALTIME_SYNC.md mandates it). The IRealtimeBackplane is the single
@@ -1265,6 +1278,16 @@ app.MapLiveCoreMetricsEndpoint();
 // modified source overrides the offered location with SourceOffer:RepositoryUrl so the offer points at the
 // source actually running there.
 app.MapLiveCoreSourceOfferEndpoint();
+
+// OpenAPI explorer endpoint (CORE-OAS-001): GET /openapi/v1.json, serving the OpenAPI 3 document generated from
+// the /api/v1 route table. Mapped ONLY outside Production (MapLiveCoreOpenApi checks the environment), so a
+// production deployment exposes no schema-discovery surface (the story note "keep any explorer non-production
+// only"); the committed openapi/livecore-v1.json build artifact remains the canonical document a CI gate checks
+// against the registered routes. It is a top-level infrastructure route (not part of the versioned /api/v1
+// product surface, so it is excluded from the document it serves and from csv/api_routes.csv, exactly like
+// /health/*, /metrics and /source) and needs no database, so it is mapped here unconditionally w.r.t.
+// persistence. The document leaks no token, tenant identifier, configuration value or content (threat T7).
+app.MapLiveCoreOpenApi();
 
 // Current-principal endpoint (CORE-API-002): GET /api/v1/me, the IdentityAccess
 // module's read of the authenticated caller's principal context (their user

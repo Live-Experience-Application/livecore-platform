@@ -8,6 +8,9 @@ LICENSE
 pnpm-lock.yaml
 # NuGet lock files are machine-generated dependency manifests (CORE-DEP-003).
 **/packages.lock.json
+# The OpenAPI document is generated from the running route table (CORE-OAS-001);
+# it is serialized by the API host, not formatted by Prettier.
+openapi/
 node_modules/
 dist/
 bin/

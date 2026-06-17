@@ -5,7 +5,7 @@
 #   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
 #   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
-#   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001)
+#   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
@@ -185,8 +185,11 @@ jobs:
     # CORE-DOC-001 + CORE-SPEC-001: fails when the route, table, event or epic
     # specifications in docs/ and csv/ drift from each other, from their single
     # source of truth (see docs/24_SPEC_CONSISTENCY.md) OR from the implementation
-    # (the minimal-API registrations + the EF model snapshot). Pure source check,
-    # no build needed.
+    # (the minimal-API registrations + the EF model snapshot). CORE-OAS-001 adds
+    # check 12, which fails when the committed OpenAPI document
+    # (openapi/livecore-v1.json) does not describe exactly the registered /api/v1
+    # routes; the document is also uploaded here as a build artifact. Pure source
+    # check, no build needed.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -196,6 +199,13 @@ jobs:
 
       - name: Run spec consistency check
         run: pwsh -NoProfile -File scripts/spec-consistency.ps1
+
+      - name: Upload the OpenAPI document (build artifact, CORE-OAS-001)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-v1
+          path: openapi/livecore-v1.json
+          if-no-files-found: error
 
   migration-down-lint:
     name: Migration Down() review (CORE-DR-004)

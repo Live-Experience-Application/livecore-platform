@@ -30,6 +30,22 @@
          validation against the external OIDC provider. Patch-aligned to the other
          Microsoft.* packages here (10.0.9). -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
+    <!-- OpenAPI document generation for the v1 API (CORE-OAS-001). docs/02_ARCHITECTURE.md describes the
+         TypeScript contracts as OpenAPI-derived, but the API shipped NO OpenAPI package and NO spec, so the
+         hand-written @livecore/contracts could silently drift from the server. This is the official Microsoft
+         ASP.NET Core package that builds an OpenAPI 3 document FROM the running minimal-API route table (the
+         ApiExplorer metadata of the endpoints already mapped in Program.cs) rather than a hand-maintained file,
+         so the document can never diverge from the routes the host actually mounts. It backs the
+         non-production-only /openapi/v1.json explorer endpoint and the committed openapi/livecore-v1.json
+         build artifact a CI gate checks for drift (spec-consistency check 12 + the OpenApiDocumentTests build
+         test). A justified new dependency: it is the framework-native, no-reflection-at-runtime OpenAPI
+         generator the docs already assume, and reimplementing OpenAPI emission by hand would duplicate a
+         correctness-sensitive subsystem. The document carries only route shapes, generic schema names and the
+         RFC 7807 Problem Details error shape — never a secret, tenant identifier or content (threat T7) — and
+         the explorer endpoint is mapped ONLY outside Production (keep any explorer non-production only).
+         Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). Foundation for CORE-OAS-002
+         (generating the TypeScript contracts from this document). -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
     <!-- Official ASP.NET Core SignalR backplane over a Redis/Valkey-compatible server (CORE-OPS-007). It
          makes the SignalR HubLifetimeManager that backs IHubContext<SessionHub> publish each group send over
          Redis pub/sub, so a group delivery reaches the connections held by EVERY API instance, not just the

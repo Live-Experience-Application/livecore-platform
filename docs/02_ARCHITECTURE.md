@@ -81,6 +81,12 @@ packages/design-tokens
   generic tokens and theme contracts
 ```
 
+The `packages/contracts` types are **hand-written today**: the API now emits an
+OpenAPI 3 document (CORE-OAS-001; see "OpenAPI document" under
+[API versioning](#api-versioning)), and **generating** the TypeScript contracts from
+that document with a drift gate — making "OpenAPI-derived" literally true — is the
+next story (CORE-OAS-002).
+
 ## Backend module boundaries
 
 ```text
@@ -144,6 +150,34 @@ Host command
 Use `/api/v1/...` from the beginning.
 
 Breaking changes require a contract version bump and release notes.
+
+### OpenAPI document (CORE-OAS-001)
+
+The API produces an **OpenAPI 3 document** that describes every registered `/api/v1`
+route, its request/response schema and the RFC 7807 Problem Details error shape
+(`code` extension; CORE-DX-001). The document is **generated from the running
+minimal-API route table** (`Microsoft.AspNetCore.OpenApi`, wired in
+`apps/api/Hosting/OpenApiConfiguration.cs`), not hand-maintained, so it can never
+diverge from the routes the host actually mounts.
+
+- **Served only outside Production** at `GET /openapi/v1.json`, so a production
+  deployment exposes no schema-discovery surface; it is a top-level infrastructure
+  route (like `/health/*`, `/metrics` and `/source`), excluded from the versioned
+  product surface and from the document it serves.
+- **Committed as a build artifact** at `openapi/livecore-v1.json`. A CI gate
+  (`scripts/spec-consistency.ps1`, check 12) fails when the committed document does
+  not describe exactly the registered routes, and the `dotnet` test suite asserts the
+  served document is valid OpenAPI 3 (`OpenApiDocumentTests`). To regenerate the
+  artifact after an intentional route/schema change, run the smoke suite with
+  `LIVECORE_OPENAPI_UPDATE=1` (see `README.md`).
+- **No content leak (threat T7).** The document carries only route shapes, generic
+  schema names and the Problem Details shape; the document transformer strips the
+  request-DTO XML doc prose so no internal commentary reaches the published contract.
+
+The document is the foundation for the typed TypeScript contracts (CORE-OAS-002),
+which will be generated from it with their own drift gate. See
+`docs/08_API_CONTRACTS.md` for the contract details and `docs/24_SPEC_CONSISTENCY.md`
+for the drift gate.
 
 ### Evolution, deprecation and sunset (CORE-DX-006)
 

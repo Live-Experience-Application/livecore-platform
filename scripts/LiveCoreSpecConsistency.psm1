@@ -43,6 +43,15 @@
           longer list a session event that no command emits (a DEFERRED-marked
           catalog row is excluded).
 
+    CORE-OAS-001 adds one more semantic invariant, binding the committed OpenAPI
+    document to the implementation (the OpenAPI-side analogue of check 6):
+
+      12. the committed OpenAPI document (openapi/livecore-v1.json) describes
+          EXACTLY the /api/v1 routes the minimal-API registrations mount, in BOTH
+          directions, so a route added or removed without the document regenerated
+          fails (the document is generated from the running route table, not
+          hand-maintained).
+
     The single source of truth per concern is docs/24_SPEC_CONSISTENCY.md.
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh).
 #>
@@ -326,6 +335,34 @@ function Get-LiveCoreSessionEventType {
         $types.Add($m.Groups['value'].Value)
     }
     return $types.ToArray()
+}
+
+function Get-LiveCoreOpenApiRoute {
+    # The /api/v1 routes the committed OpenAPI document (openapi/livecore-v1.json, CORE-OAS-001) describes,
+    # each normalized to the same route key the implemented/documented routes use. The document is generated
+    # from the running minimal-API route table, so this enumeration is the OpenAPI-side mirror that check 12
+    # binds to the implementation - the OpenAPI analogue of Get-LiveCoreDocumentedRoute.
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    $file = Get-LiveCoreSpecFile -RepoRoot $RepoRoot -RelativePath 'openapi/livecore-v1.json'
+    $document = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+    $verbs = @('get', 'put', 'post', 'delete', 'patch', 'options', 'head', 'trace')
+    $routes = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $document.paths) {
+        foreach ($pathProperty in $document.paths.PSObject.Properties) {
+            $path = $pathProperty.Name
+            foreach ($operation in $pathProperty.Value.PSObject.Properties) {
+                $method = ([string]$operation.Name).ToLowerInvariant()
+                if ($verbs -notcontains $method) { continue }
+                $routes.Add([pscustomobject]@{
+                        Method = $method.ToUpperInvariant()
+                        Path   = $path
+                        Key    = (ConvertTo-LiveCoreRouteKey -Method $method -Path $path)
+                    })
+            }
+        }
+    }
+    return $routes.ToArray()
 }
 
 function Get-LiveCoreCatalogEvent {
@@ -662,6 +699,36 @@ function Test-LiveCoreSessionEventEmission {
     return $findings.ToArray()
 }
 
+function Test-LiveCoreOpenApiCoverage {
+    # CORE-OAS-001: the committed OpenAPI document must cover EXACTLY the routes the minimal API registers, in
+    # BOTH directions (mirrors check 6, which binds csv/api_routes.csv to the implementation). A registered
+    # /api/v1 endpoint missing from the document fails (the committed document is stale - regenerate it), and a
+    # document path that no endpoint mounts fails. The document is generated from the running route table, so a
+    # green run means the checked-in contract cannot silently drift from the server.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$OpenApi,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Implemented
+    )
+    $findings = New-Object System.Collections.Generic.List[string]
+
+    $docKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($d in $OpenApi) { [void]$docKeys.Add($d.Key) }
+
+    $implKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($i in $Implemented) {
+        [void]$implKeys.Add($i.Key)
+        if (-not $docKeys.Contains($i.Key)) {
+            $findings.Add("OPENAPI: '$($i.Key)' is registered ($($i.Source)) but is missing from openapi/livecore-v1.json (regenerate the committed OpenAPI document) - CORE-OAS-001")
+        }
+    }
+    foreach ($d in $OpenApi) {
+        if (-not $implKeys.Contains($d.Key)) {
+            $findings.Add("OPENAPI: openapi/livecore-v1.json documents '$($d.Key)' which no minimal-API endpoint mounts - CORE-OAS-001")
+        }
+    }
+    return $findings.ToArray()
+}
+
 # --- Shared constants for the new checks ---
 
 function Get-LiveCoreKnownRoleDescriptor {
@@ -848,6 +915,11 @@ function Invoke-LiveCoreSpecConsistency {
     $emittedTypes = @(Get-LiveCoreSessionEventType -RepoRoot $RepoRoot)
     foreach ($f in (Test-LiveCoreSessionEventEmission -CatalogRow $catalogEvents -EmittedType $emittedTypes)) { $findings.Add($f) }
 
+    # --- Check 12: committed OpenAPI document vs the implemented /api/v1 endpoints (CORE-OAS-001) ---
+    $checkCount++
+    $openApiRoutes = @(Get-LiveCoreOpenApiRoute -RepoRoot $RepoRoot)
+    foreach ($f in (Test-LiveCoreOpenApiCoverage -OpenApi $openApiRoutes -Implemented $implemented)) { $findings.Add($f) }
+
     return @{
         Findings   = $findings.ToArray()
         CheckCount = $checkCount
@@ -865,6 +937,7 @@ Export-ModuleMember -Function @(
     'Get-LiveCoreSnapshotText',
     'Get-LiveCoreEntitlementEvent',
     'Get-LiveCoreSessionEventType',
+    'Get-LiveCoreOpenApiRoute',
     'Get-LiveCoreCatalogEvent',
     'Get-LiveCoreKnownRoleDescriptor',
     'Get-LiveCoreRequiredUniqueIndex',
@@ -876,5 +949,6 @@ Export-ModuleMember -Function @(
     'Test-LiveCoreUniqueIndex',
     'Test-LiveCoreTableSchema',
     'Test-LiveCoreSessionEventEmission',
+    'Test-LiveCoreOpenApiCoverage',
     'Invoke-LiveCoreSpecConsistency'
 )

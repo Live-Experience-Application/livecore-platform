@@ -25,7 +25,7 @@ drift, no dead/ill-formed store event and no schema/index drift slipped through.
 
 | Concern | Single source of truth | Mirrors / derived views |
 | --- | --- | --- |
-| API routes | `csv/api_routes.csv` (mounted `/api/v1` routes) | `docs/08_API_CONTRACTS.md` representative list; `csv/mobile_store_api_routes.csv` (mobile-facing `/v1` path shape of the store/entitlement routes) |
+| API routes | `csv/api_routes.csv` (mounted `/api/v1` routes) | `docs/08_API_CONTRACTS.md` representative list; `csv/mobile_store_api_routes.csv` (mobile-facing `/v1` path shape of the store/entitlement routes); `openapi/livecore-v1.json` (the OpenAPI 3 document generated from the route table, bound to the implementation by check 12 — CORE-OAS-001) |
 | Database tables | `csv/database_tables.csv` (matches the EF Core model) | `docs/10_DATABASE_SCHEMA.md` table list; `csv/entitlement_database_tables.csv` (entitlement/store ownership view) |
 | Session events | `csv/event_catalog.csv` | `docs/09_EVENT_CATALOG.md` table; `apps/api/Realtime/SessionEventTypes.cs` (the emitted set, bound to the non-deferred catalog by check 11 — CORE-EVT-004) |
 | Store/entitlement domain events | `csv/entitlement_event_catalog.csv` | — |
@@ -325,6 +325,42 @@ It **adds no route, table or migration** — only the two new event-type constan
 their emission and the host-only routing class — so the other spec-consistency
 checks are unchanged.
 
+## OpenAPI document as a derived, drift-gated route view (CORE-OAS-001)
+
+`docs/02_ARCHITECTURE.md` describes the TypeScript contracts as OpenAPI-derived,
+but the API shipped **no** OpenAPI package and **no** spec, so the hand-written
+`@livecore/contracts` could silently drift from the server. CORE-OAS-001 makes the
+OpenAPI document real and **binds it to the implementation**:
+
+- the API now produces an **OpenAPI 3 document** from the running minimal-API route
+  table (`Microsoft.AspNetCore.OpenApi`, wired in
+  `apps/api/Hosting/OpenApiConfiguration.cs`), scoped to the `/api/v1` surface and
+  carrying the RFC 7807 Problem Details error shape (CORE-DX-001). It is served at
+  `GET /openapi/v1.json` **only outside Production** (no schema-discovery surface in
+  production) and committed as the build artifact `openapi/livecore-v1.json`;
+- the document is a **derived view of the routes** (generated, not hand-maintained),
+  so it joins `docs/08` and `csv/mobile_store_api_routes.csv` as a mirror of the
+  `csv/api_routes.csv` source of truth in the table above. To regenerate it after an
+  intentional route/schema change, run the smoke suite with
+  `LIVECORE_OPENAPI_UPDATE=1` set (see `README.md`);
+- the spec-consistency **check 12** now binds the committed document to the
+  implementation: it describes **exactly** the `/api/v1` routes the minimal-API
+  registrations mount, in both directions (the OpenAPI analogue of check 6), so a
+  route added or removed without the document regenerated fails CI. The `dotnet`
+  test suite additionally asserts the served document is valid OpenAPI 3, covers the
+  host's registered routes and equals the committed artifact
+  (`OpenApiDocumentTests`);
+- the document carries only route shapes, generic schema names and the Problem
+  Details error shape — the document transformer **strips** the request-DTO XML doc
+  prose (threat-model references, story ids, `docs/` paths) so no internal commentary
+  reaches the published contract (threat T7).
+
+It **adds no route, table, event or migration** — the OpenAPI endpoint is a
+top-level infrastructure route (like `/health/*`, `/metrics` and `/source`), excluded
+from `csv/api_routes.csv` and from the document it serves — so the other
+spec-consistency checks are unchanged. It is the foundation for CORE-OAS-002
+(generating the TypeScript contracts from this document with its own drift gate).
+
 ## Genuinely deferred items
 
 These are documented for design intent but are **not** in the implemented
@@ -580,9 +616,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
 
 The script exits `0` when every invariant holds, `1` when it finds drift (with a
 per-finding report), and `2` on a configuration error (a spec file it cannot
-find or parse). It runs eleven checks — the five name-set invariants
+find or parse). It runs twelve checks — the five name-set invariants
 (CORE-DOC-001), five semantic invariants validated against the implementation
-(CORE-SPEC-001), and the session-event catalog binding (CORE-EVT-004):
+(CORE-SPEC-001), the session-event catalog binding (CORE-EVT-004), and the
+OpenAPI document route binding (CORE-OAS-001):
 
 1. every route in the `docs/08` representative block is a row in
    `csv/api_routes.csv`;
@@ -635,7 +672,14 @@ find or parse). It runs eleven checks — the five name-set invariants
     `DEFERRED` is excluded from the comparison (today the workspace-prepared
     `SceneCreated`/`ContentBlockCreated`). The catalog is now a contract, not
     aspirational.
+12. **OpenAPI document route binding (CORE-OAS-001).** The committed OpenAPI
+    document (`openapi/livecore-v1.json`) describes **exactly** the `/api/v1` routes
+    the minimal-API registrations mount, in both directions (the OpenAPI analogue of
+    check 6): a registered endpoint missing from the document (a stale, un-regenerated
+    document) or a document path that no endpoint mounts fails. The document is
+    generated from the running route table, so a green run means the checked-in
+    contract cannot silently drift from the server.
 
-Checks 6–11 are the reason a spec change that touches a route, role, store event,
-mobile path, table or session event must be reconciled with the code (or the code
-with the spec) before CI goes green.
+Checks 6–12 are the reason a spec change that touches a route, role, store event,
+mobile path, table, session event or the OpenAPI document must be reconciled with the
+code (or the code with the spec) before CI goes green.

@@ -143,6 +143,29 @@ DELETE /api/v1/assets/{assetId}/links/{linkId}
 DELETE /api/v1/assets/{assetId}
 ```
 
+## OpenAPI document (CORE-OAS-001)
+
+The API produces an **OpenAPI 3 document** describing every registered `/api/v1`
+route, its request/response schema and the Problem Details error shape above. The
+document is **generated from the running minimal-API route table** (not
+hand-maintained), so it cannot diverge from the routes the host actually mounts.
+
+| Aspect | Detail |
+|---|---|
+| Format | OpenAPI 3.0 (`Microsoft.AspNetCore.OpenApi`) |
+| Scope | the `/api/v1` surface only (infrastructure routes like `/health`, `/metrics`, `/source` and the SignalR hub are excluded) |
+| Error shape | the RFC 7807 Problem Details body, including the stable `code` extension, is a named `ProblemDetails` schema component |
+| Explorer endpoint | `GET /openapi/v1.json`, served **only outside Production** (no schema-discovery surface in production) |
+| Build artifact | committed at `openapi/livecore-v1.json` |
+| Drift gate | `scripts/spec-consistency.ps1` check 12 fails when the committed document does not describe exactly the registered routes; the `dotnet` suite asserts it is valid OpenAPI 3 (`OpenApiDocumentTests`) |
+| Regenerate | run the smoke suite with `LIVECORE_OPENAPI_UPDATE=1` after an intentional route/schema change |
+
+The document carries only route shapes, generic schema names and the Problem Details
+shape — never a secret, tenant identifier or content; the request-DTO XML doc prose is
+stripped, so no internal commentary reaches the published contract (threat T7). The
+typed `@livecore/contracts` types are hand-written today and will be **generated from
+this document** with a drift gate in CORE-OAS-002.
+
 ## DTO design rules
 
 - Host DTOs and Participant DTOs are different.
