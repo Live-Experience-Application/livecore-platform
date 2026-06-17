@@ -68,6 +68,17 @@ in-container `HEALTHCHECK`; probing is done over HTTP from outside the container
 (a reverse proxy, a kubelet, or the published host ports above), exactly as the
 image design intends.
 
+## License and attribution in the images
+
+The images Compose builds from the in-repo Dockerfiles are legally complete
+(CORE-LIC-003): each declares its license with the OCI
+`org.opencontainers.image.licenses="AGPL-3.0-or-later"` label (inspect it with
+`docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' <image>`)
+and carries the AGPL `LICENSE` and the generated third-party `THIRD-PARTY-NOTICES.md`
+attribution inventory under `/licenses`. The published release images
+(`ghcr.io/<owner>/livecore-*`) carry the same labels and files. See
+`docs/16_LICENSING.md`.
+
 ## Configuration
 
 Every setting is an environment variable from the documented contract

@@ -62,6 +62,19 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:ddcf70ad1ab963a4fcd41fbd722a6b6
 WORKDIR /app
 COPY --from=build /app/publish .
 
+# License and attribution (CORE-LIC-003), mirroring apps/api/Dockerfile: the OCI
+# org.opencontainers.image.* labels declare the license/source/revision, and the
+# AGPL LICENSE plus the generated third-party NOTICE inventory ship under
+# /licenses so the redistributed image preserves the required notices.
+ARG SOURCE_REVISION=""
+LABEL org.opencontainers.image.title="LiveCore Worker" \
+    org.opencontainers.image.description="LiveCore Core Platform background worker host." \
+    org.opencontainers.image.vendor="LiveCore" \
+    org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+    org.opencontainers.image.source="https://github.com/Live-Experience-Application/livecore-platform" \
+    org.opencontainers.image.revision="${SOURCE_REVISION}"
+COPY LICENSE THIRD-PARTY-NOTICES.md /licenses/
+
 # The worker's metrics/health listener binds the unprivileged container port 9464
 # by default (Worker:Metrics:Url, CORE-DR-003). Exposed here so the port contract of
 # the image is explicit; a deployment restricts the surface at the network edge.

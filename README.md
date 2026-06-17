@@ -4415,6 +4415,11 @@ Image baseline:
   the floating `10.0` tag, and the NuGet restore runs in **locked mode** against a
   committed `packages.lock.json`, so a rebuild always resolves the same base layers
   and the same dependency graph (CORE-DEP-003, see "Supply chain" below).
+- The images are **legally complete** (CORE-LIC-003): they declare their license
+  with the OCI `org.opencontainers.image.licenses="AGPL-3.0-or-later"` label (plus
+  `.source` and `.revision`) and carry the AGPL `LICENSE` and the generated
+  third-party `THIRD-PARTY-NOTICES.md` attribution inventory under `/licenses` (see
+  "Third-party attribution and license compliance" below).
 
 Local development orchestration (Compose with database, auth and storage
 services) lives in `livecore-deploy`, not in this repository (see
@@ -4490,6 +4495,38 @@ provenance/attestation (e.g. cosign) is a documented follow-up. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base images, SBOM and vulnerability
 scan").
 
+### Third-party attribution and license compliance (CORE-LIC-003)
+
+The Core is AGPL-3.0-or-later and **redistributes** third-party code in the
+container images and the published npm packages, so the distribution is made
+legally complete and license-checked:
+
+- **A generated third-party NOTICE inventory.** `THIRD-PARTY-NOTICES.md` is
+  generated from `csv/third_party_notices.csv` by
+  `scripts/generate-third-party-notices.ps1` (run it with `-Write` and commit; do
+  not edit the Markdown by hand). It **ships in both** artifacts — under `/licenses`
+  in the images and in every package tarball (`files[]` lists `LICENSE` and
+  `THIRD-PARTY-NOTICES.md`). The inventory is **drift-gated** and
+  **coverage-gated**: every direct, runtime-shipping NuGet dependency must have an
+  attribution row, so a new attribution-requiring dependency cannot ship without a
+  notice.
+- **OCI license labels.** Both images carry
+  `org.opencontainers.image.licenses="AGPL-3.0-or-later"` (plus `.source` and
+  `.revision`); the `docker` CI job asserts the label and that the
+  `LICENSE`/`THIRD-PARTY-NOTICES.md` are present in the image.
+- **A CI license-compliance gate.** `scripts/assert-license-compliance.ps1` scans
+  the dependency closure recorded in the image's CycloneDX SBOM (reusing the
+  CORE-DEP-003 SBOM) and is **fail-closed**: a deny-listed license blocks, and any
+  license not on the allow-list — including an absent or unknown license — blocks.
+  It starts report-only over the real SBOM (the coverage-gate posture) and is flipped
+  to blocking by dropping `-ReportOnly`; the gate logic is proven by
+  `scripts/test-license-compliance.ps1` (a seeded disallowed license fails) on every
+  push and pull request.
+
+The `license-compliance` CI job runs the NOTICE drift/coverage gate, the
+distribution-completeness checks and the license-gate logic test. See
+`docs/16_LICENSING.md` ("Third-party attribution and the license-compliance gate").
+
 ### Backup and restore (CORE-OPS-010)
 
 The Core holds systems of record whose loss is unrecoverable: the tenant-isolated,
@@ -4544,19 +4581,20 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                       | What it runs                                                                                                                   |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `dotnet`                  | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                          |
-| `typescript`              | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                         |
-| `boundary-scan`           | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                    |
-| `backup-restore-drill`    | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                    |
-| `backup-restore-postgres` | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002) |
-| `powershell-lint`         | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                 |
-| `docker`                  | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                               |
-| `publish-dry-run`         | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                |
-| `migrations`              | builds the migrations runner image and applies all migrations to an empty Postgres                                             |
-| `integration-postgres`    | model-vs-migration drift gate, then the integration suite against a real Postgres                                              |
-| `publish`                 | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                       |
+| Job                       | What it runs                                                                                                                                   |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dotnet`                  | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                          |
+| `typescript`              | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                         |
+| `boundary-scan`           | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                    |
+| `license-compliance`      | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003) |
+| `backup-restore-drill`    | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                    |
+| `backup-restore-postgres` | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                 |
+| `powershell-lint`         | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                 |
+| `docker`                  | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                               |
+| `publish-dry-run`         | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                |
+| `migrations`              | builds the migrations runner image and applies all migrations to an empty Postgres                                                             |
+| `integration-postgres`    | model-vs-migration drift gate, then the integration suite against a real Postgres                                                              |
+| `publish`                 | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                       |
 
 The `publish` job runs **only on a release tag** and **only after every other job
 passes**; pull requests and branch pushes never reach it, so a registry push never
@@ -4616,3 +4654,8 @@ treatment (CORE-LIC-001); the essentials:
   "LiveCore" name or marks. You may state factually that your product is built on the
   LiveCore Core, but may not use the name to brand your own product or imply
   endorsement.
+- **Third-party attribution.** The Core redistributes third-party code in its
+  images and packages; their copyright/permission notices are preserved in the
+  generated `THIRD-PARTY-NOTICES.md` that ships with both artifacts, and a CI
+  license-compliance gate fails on a disallowed or unknown dependency license
+  (CORE-LIC-003, "Third-party attribution and license compliance" above).

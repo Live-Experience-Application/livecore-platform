@@ -204,6 +204,13 @@ The consistency of the process is enforced by tests, not convention:
   that `VERSION` is valid SemVer, that it equals the package's own
   `package.json` version, that `CHANGELOG.md` has a top entry for that version,
   and that the changelog ships with the package (`files` includes `CHANGELOG.md`).
+  It also asserts (CORE-LIC-003) that every package ships the AGPL `LICENSE` and
+  the generated `THIRD-PARTY-NOTICES.md` — both listed in `files[]`, with the
+  `LICENSE` byte-identical to the repository-root AGPL text — so a consuming
+  vertical receives the license and the third-party attribution inventory in the
+  tarball. The `THIRD-PARTY-NOTICES.md` is generated and drift-gated; see
+  `docs/16_LICENSING.md` ("Third-party attribution and the license-compliance
+  gate").
 - A **cross-package version lockstep test** (CORE-CMP-003,
   `tests/version-lockstep/version-lockstep.test.mjs`, run by `pnpm run test:versions`
   and the CI `typescript` job) checks that the four packages agree on **one**

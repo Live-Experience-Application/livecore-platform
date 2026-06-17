@@ -1,0 +1,18 @@
+ecosystem,component,version,license,copyright,source_url,kind,notes
+nuget,AWSSDK.S3,3.7.305.22,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,direct,S3-compatible asset storage SigV4 pre-signing and object delete (CORE-OPS-006).
+nuget,AWSSDK.Core,3.7.x,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,transitive,Core runtime of the AWS SDK pulled in by AWSSDK.S3.
+nuget,Microsoft.AspNetCore.Authentication.JwtBearer,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,OIDC JWT bearer validation (docs/adr/0005).
+nuget,Microsoft.AspNetCore.OpenApi,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,OpenAPI document generation for the v1 API (CORE-OAS-001).
+nuget,Microsoft.AspNetCore.SignalR.StackExchangeRedis,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,SignalR Redis/Valkey backplane for realtime scale-out (CORE-OPS-007).
+nuget,Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/efcore,direct,Database health check used by the readiness probe.
+nuget,Npgsql.EntityFrameworkCore.PostgreSQL,10.0.2,PostgreSQL,The Npgsql Project,https://github.com/npgsql/efcore.pg,direct,PostgreSQL EF Core provider (docs/02_ARCHITECTURE.md).
+nuget,Npgsql,8.x,PostgreSQL,The Npgsql Project,https://github.com/npgsql/npgsql,transitive,PostgreSQL ADO.NET driver under the EF Core provider.
+nuget,OpenTelemetry.Extensions.Hosting,1.16.0,Apache-2.0,The OpenTelemetry Authors,https://github.com/open-telemetry/opentelemetry-dotnet,direct,OpenTelemetry SDK + host integration for metrics/tracing (CORE-OBS-001/003).
+nuget,OpenTelemetry.Exporter.Prometheus.AspNetCore,1.16.0-beta.1,Apache-2.0,The OpenTelemetry Authors,https://github.com/open-telemetry/opentelemetry-dotnet,direct,Prometheus pull-based /metrics exposition (CORE-OBS-001).
+nuget,OpenTelemetry.Exporter.OpenTelemetryProtocol,1.16.0,Apache-2.0,The OpenTelemetry Authors,https://github.com/open-telemetry/opentelemetry-dotnet,direct,OTLP span/metric export to a configured collector (CORE-OBS-003).
+nuget,StackExchange.Redis,2.x,MIT,Stack Exchange,https://github.com/StackExchange/StackExchange.Redis,transitive,Redis/Valkey client under the SignalR backplane.
+nuget,Google.Protobuf,3.x,BSD-3-Clause,Google Inc.,https://github.com/protocolbuffers/protobuf,transitive,Protocol Buffers runtime under the OTLP exporter.
+nuget,Grpc.Net.Client,2.x,Apache-2.0,The gRPC Authors,https://github.com/grpc/grpc-dotnet,transitive,gRPC transport under the OTLP exporter.
+nuget,Microsoft.NET / ASP.NET Core shared framework,net10.0,MIT,.NET Foundation and Contributors,https://github.com/dotnet/runtime,runtime,The .NET runtime and ASP.NET Core shared framework provided by the base image.
+oci,Debian GNU/Linux base image packages,(see image SBOM),various,Respective Debian package maintainers,https://www.debian.org,base,"OS packages in the mcr.microsoft.com/dotnet/aspnet base image; their exact set and licenses for a given build are recorded in the per-image CycloneDX SBOM (CORE-DEP-003) and checked by the license-compliance gate."
+npm,(none),-,AGPL-3.0-or-later,LiveCore,https://github.com/Live-Experience-Application/livecore-platform,first-party,"The published @livecore/* packages ship only first-party compiled TypeScript (dist/) and declare no third-party npm runtime dependencies, so there is no third-party npm code to attribute."

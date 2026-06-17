@@ -16,6 +16,16 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- Third-party attribution and a CI license-compliance gate (CORE-LIC-003). A
+  generated `THIRD-PARTY-NOTICES.md` inventory (from `csv/third_party_notices.csv`)
+  now ships in the container images (under `/licenses`) and in every package
+  tarball, and each package's `files[]` includes the AGPL `LICENSE` and the NOTICE,
+  so a consuming vertical receives both. The API/worker images carry OCI
+  `org.opencontainers.image.licenses`/`.source`/`.revision` labels, and a
+  fail-closed license-compliance gate scans the image SBOM's dependency closure and
+  fails on a disallowed or unknown license. The NOTICE is drift- and
+  coverage-gated (every shipping NuGet dependency must be attributed). No package
+  runtime surface changed.
 - A typed live realtime client and hub connection contract (CORE-RT-007).
   `@livecore/contracts` exports the live SignalR hub path, the `SessionEvent`
   client-method name and the connection-parameter shape as stable constants/types

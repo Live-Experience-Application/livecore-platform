@@ -6,6 +6,7 @@
 #   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
+#   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
@@ -235,6 +236,39 @@ jobs:
           path: openapi/livecore-v1.json
           if-no-files-found: error
 
+  license-compliance:
+    name: License compliance and third-party attribution (CORE-LIC-003)
+    runs-on: ubuntu-latest
+    # CORE-LIC-003: the distribution must be legally complete and license-checked.
+    # This job proves the pure logic on every push and pull request, with no Docker
+    # or registry:
+    #   1. the third-party NOTICE inventory is generated from
+    #      csv/third_party_notices.csv (THIRD-PARTY-NOTICES.md, drift-gated) and
+    #      every direct, runtime-shipping NuGet dependency is attributed
+    #      (generate-third-party-notices.ps1 in check mode);
+    #   2. the NOTICE and the AGPL LICENSE ship in every package, and the API/worker
+    #      Dockerfiles carry the OCI org.opencontainers.image.licenses (+ source,
+    #      revision) labels and copy the NOTICE/LICENSE into the image
+    #      (test-distribution-compliance.ps1);
+    #   3. the SBOM license gate fails on a seeded disallowed or unknown license
+    #      (test-license-compliance.ps1). The gate runs for real over the produced
+    #      CycloneDX SBOM in the publish-dry-run/publish jobs.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Test the license-compliance gate logic (a seeded disallowed license fails)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-license-compliance.ps1
+
+      - name: Test distribution completeness (NOTICE + LICENSE shipped, OCI labels)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-distribution-compliance.ps1
+
+      - name: Drift-gate the third-party NOTICE inventory and its coverage
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/generate-third-party-notices.ps1
+
   migration-down-lint:
     name: Migration Down() review (CORE-DR-004)
     runs-on: ubuntu-latest
@@ -347,10 +381,34 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build API image
-        run: docker build --file apps/api/Dockerfile --tag livecore-api:ci .
+        run: docker build --file apps/api/Dockerfile --build-arg SOURCE_REVISION=${{ github.sha }} --tag livecore-api:ci .
 
       - name: Build worker image
-        run: docker build --file apps/worker/Dockerfile --tag livecore-worker:ci .
+        run: docker build --file apps/worker/Dockerfile --build-arg SOURCE_REVISION=${{ github.sha }} --tag livecore-worker:ci .
+
+      - name: Assert the images carry the OCI license label and ship the NOTICE (CORE-LIC-003)
+        # The redistributed images must be legally complete: declare their license
+        # with the OCI org.opencontainers.image.licenses label and carry the AGPL
+        # LICENSE plus the generated third-party NOTICE inventory under /licenses.
+        run: |
+          set -euo pipefail
+          for image in livecore-api:ci livecore-worker:ci; do
+            license="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.licenses" }}' "$image")"
+            source="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image")"
+            revision="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+            echo "$image: licenses=$license source=$source revision=$revision"
+            if [ "$license" != "AGPL-3.0-or-later" ]; then
+              echo "Image $image is missing the OCI org.opencontainers.image.licenses=AGPL-3.0-or-later label."
+              exit 1
+            fi
+            if [ -z "$source" ]; then
+              echo "Image $image is missing the OCI org.opencontainers.image.source label."
+              exit 1
+            fi
+            # The AGPL LICENSE and the generated third-party NOTICE ship in the image.
+            docker run --rm --entrypoint sh "$image" -c 'test -s /licenses/LICENSE && test -s /licenses/THIRD-PARTY-NOTICES.md'
+          done
+          echo "Both images carry the OCI license label and ship the LICENSE + third-party NOTICE."
 
       - name: Smoke test API container (/health/live)
         run: |
@@ -563,6 +621,20 @@ jobs:
             trivy image --format json --output "$name.scan.json" "$reference"
             pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
               -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json" -ReportOnly
+          done
+
+      - name: Scan the dry-run SBOMs for disallowed/unknown licenses (report-only, CORE-LIC-003)
+        # CORE-LIC-003: the license-compliance gate reuses the CycloneDX SBOM produced
+        # above (no extra scan) and is fail-closed on a disallowed or unknown license.
+        # Report-only here so a not-yet-allow-listed transitive license documents
+        # itself on a pull request without blocking development; the publish job runs
+        # the same gate over the real SBOM.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          for name in api worker; do
+            pwsh -NoProfile -File scripts/assert-license-compliance.ps1 \
+              -SbomPath "$name.sbom.cdx.json" -ReportOnly
           done
 
       - name: Upload the dry-run SBOMs and scan reports
@@ -821,6 +893,7 @@ jobs:
       - typescript
       - boundary-scan
       - spec-consistency
+      - license-compliance
       - migration-down-lint
       - backup-restore-drill
       - backup-restore-postgres
@@ -888,8 +961,8 @@ jobs:
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
         run: |
           set -euo pipefail
-          docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
-          docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
+          docker build --file apps/api/Dockerfile --build-arg SOURCE_REVISION="${{ github.sha }}" --tag "$API_REFERENCE" .
+          docker build --file apps/worker/Dockerfile --build-arg SOURCE_REVISION="${{ github.sha }}" --tag "$WORKER_REFERENCE" .
 
       - name: Produce an SBOM and a CVE scan report, and fail the publish on a critical vulnerability
         # CORE-DEP-003: before anything is pushed, generate a CycloneDX SBOM and a
@@ -909,6 +982,23 @@ jobs:
             trivy image --format json --output "$name.scan.json" "$reference"
             pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
               -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json"
+          done
+
+      - name: Scan the SBOMs for disallowed/unknown licenses (CORE-LIC-003)
+        # CORE-LIC-003: reuse the CycloneDX SBOM produced above and run the
+        # fail-closed license gate over the published dependency closure. It starts
+        # report-only - the coverage-gate posture (docs/17): the seeded gate-logic
+        # test in the license-compliance job already proves it fails on a disallowed
+        # or unknown license, and this records any not-yet-allow-listed license from
+        # the first real published SBOM without blocking the initial releases. Drop
+        # -ReportOnly to make a disallowed or unknown license block the publish once
+        # the allow-list (scripts/LiveCoreLicenseCompliance.psm1) is validated against
+        # the published closure.
+        run: |
+          set -euo pipefail
+          for name in api worker; do
+            pwsh -NoProfile -File scripts/assert-license-compliance.ps1 \
+              -SbomPath "$name.sbom.cdx.json" -ReportOnly
           done
 
       - name: Refuse to overwrite an already-published immutable tag, then push

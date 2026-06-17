@@ -36,6 +36,12 @@ csv/
 *.md
 LICENSE
 
+# ...except the AGPL LICENSE and the generated third-party NOTICE inventory, which
+# the runtime images COPY into /licenses so the redistributed image is legally
+# complete (CORE-LIC-003). Re-include them after the broad *.md / LICENSE excludes.
+!LICENSE
+!THIRD-PARTY-NOTICES.md
+
 # Local environment files must never enter an image
 .env
 .env.*

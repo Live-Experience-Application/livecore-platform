@@ -55,6 +55,22 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:ddcf70ad1ab963a4fcd41fbd722a6b6
 WORKDIR /app
 COPY --from=build /app/publish .
 
+# License and attribution (CORE-LIC-003). The image declares its license with the
+# OCI org.opencontainers.image.* labels and carries the AGPL LICENSE plus the
+# generated third-party NOTICE inventory under /licenses, so the redistributed
+# image is legally complete (AGPL section 7 / Apache section 4 require preserving
+# notices on redistribution). SOURCE_REVISION is passed at build time
+# (--build-arg SOURCE_REVISION=$GITHUB_SHA) so the image is traceable to its source
+# commit; it is empty for an ad-hoc local build.
+ARG SOURCE_REVISION=""
+LABEL org.opencontainers.image.title="LiveCore API" \
+    org.opencontainers.image.description="LiveCore Core Platform API host." \
+    org.opencontainers.image.vendor="LiveCore" \
+    org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+    org.opencontainers.image.source="https://github.com/Live-Experience-Application/livecore-platform" \
+    org.opencontainers.image.revision="${SOURCE_REVISION}"
+COPY LICENSE THIRD-PARTY-NOTICES.md /licenses/
+
 # Kestrel listens on the unprivileged container port 8080. This is the
 # default of the official .NET runtime images; it is restated here so the
 # port contract of the image is explicit.

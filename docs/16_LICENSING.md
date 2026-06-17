@@ -213,3 +213,72 @@ Every new dependency must be checked for:
 - maintenance status
 - security posture
 - necessity
+
+## Third-party attribution and the license-compliance gate (CORE-LIC-003)
+
+The Core is AGPL-3.0-or-later and **redistributes** third-party code in two
+shipped artifacts — the container images and the published npm packages. AGPL
+section 7 and (for the Apache-2.0 dependencies such as `AWSSDK.S3` and the
+`OpenTelemetry.*` packages) Apache section 4 require **preserving the copyright and
+permission notices** of those dependencies on redistribution. Three controls make
+the distribution legally complete and license-checked:
+
+### A generated third-party NOTICE inventory
+
+`THIRD-PARTY-NOTICES.md` is a **generated** attribution inventory of the runtime
+NuGet (and npm) dependencies. Its single source of truth is
+`csv/third_party_notices.csv`; `scripts/generate-third-party-notices.ps1` renders
+the CSV into the committed `THIRD-PARTY-NOTICES.md` and keeps a copy in each
+published package. Do **not** edit the Markdown by hand — run the generator with
+`-Write` and commit. The inventory **ships in both** distribution artifacts:
+
+- the API and worker container images carry it (and the AGPL `LICENSE`) under
+  `/licenses` (`apps/api/Dockerfile`, `apps/worker/Dockerfile`), and
+- each package tarball lists `LICENSE` and `THIRD-PARTY-NOTICES.md` in its
+  `files[]` (`packages/*/package.json`), so a consuming vertical receives both.
+
+The authoritative, **per-build** component list for a published image is its
+CycloneDX SBOM (CORE-DEP-003); the NOTICE is the curated human-readable
+attribution that travels with the artifact.
+
+The inventory is **drift-gated** in CI (the `license-compliance` job runs the
+generator in check mode) and **coverage-gated**: every direct, runtime-shipping
+NuGet `PackageReference` in the API/worker projects must have an attribution row,
+so a newly added attribution-requiring dependency cannot ship without a notice. A
+build/design-only reference (`<PrivateAssets>all</PrivateAssets>`, e.g. the EF Core
+design package) never lands in the runtime output and is excluded.
+
+The per-package `LICENSE` and `THIRD-PARTY-NOTICES.md` reproduce verbatim
+license/notice text, so the boundary scan excludes them by file name (they would
+otherwise trip on words such as "party" that the verbatim AGPL text and the
+`THIRD-PARTY-NOTICES` name contain); the scanner also treats the standard compound
+"third-party" as legitimate in Core source (`scripts/boundary-scan.ps1`).
+
+### OCI image license labels
+
+Both runtime images declare their license to any registry or scanner with the OCI
+`org.opencontainers.image.licenses="AGPL-3.0-or-later"` label, alongside
+`org.opencontainers.image.source` (the upstream repository) and
+`org.opencontainers.image.revision` (the build commit, passed as
+`--build-arg SOURCE_REVISION`). The `docker` CI job asserts the license label is
+present and that the `LICENSE`/`THIRD-PARTY-NOTICES.md` ship in the image.
+
+### A CI license-compliance gate
+
+`scripts/assert-license-compliance.ps1` (logic in
+`scripts/LiveCoreLicenseCompliance.psm1`) scans the dependency closure recorded in
+the image's CycloneDX/SPDX **SBOM** — reusing the SBOM CORE-DEP-003 already
+produces — and is **fail-closed**: a license on the deny-list blocks, and any
+license **not** on the allow-list (including an absent or `NOASSERTION` license) is
+treated as **unknown** and blocks. The allow-list (permissive plus the
+AGPL-compatible licenses common in the .NET/Debian closure) and deny-list are
+configurable.
+
+Like the coverage gate (`docs/17`), the gate over the real SBOM **starts
+report-only** in the `publish-dry-run` and `publish` jobs so a first real SBOM
+documents any not-yet-allow-listed license without blocking the initial releases;
+drop `-ReportOnly` to make a disallowed or unknown license block the publish once
+the allow-list is validated against the published closure. The gate **decision** is
+pure logic, proven by `scripts/test-license-compliance.ps1` (a seeded disallowed
+license fails the gate) on every push and pull request, so the failure behavior is
+guaranteed regardless of the live posture.

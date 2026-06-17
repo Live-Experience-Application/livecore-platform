@@ -145,10 +145,27 @@ try {
     # A clean tracked file (control): never flagged.
     WriteFixtureFile -Root $fixtureRoot -RelativePath 'packages/contracts/index.ts' -Line 'export const VERSION = "0.1.0";'
 
+    # Scanned (non-excluded) source legitimately using the "third-party" compound -
+    # the dependency attribution wiring (CORE-LIC-003) - must NOT be flagged, because
+    # the third-party compound is allowed even though it contains a forbidden token.
+    WriteFixtureFile -Root $fixtureRoot -RelativePath 'apps/api/Attribution.cs' -Line @(
+        'namespace Fixture;'
+        '// Ships the THIRD-PARTY-NOTICES.md third-party attribution inventory.'
+        'public sealed class Attribution { }')
+
     # Documentation that legitimately names the terms: must NOT be flagged.
     $docLine = "This explains the boundary: $brandVisual and $brandVertical are forbidden in Core."
     foreach ($docPath in @('README.md', 'AGENTS.md', 'LICENSE', 'CHANGELOG.md', 'docs/00_sample.md', 'csv/notes.md')) {
         WriteFixtureFile -Root $fixtureRoot -RelativePath $docPath -Line $docLine
+    }
+
+    # License/attribution texts (CORE-LIC-003): the per-package LICENSE copies and the
+    # generated THIRD-PARTY-NOTICES.md (root and per-package) reproduce verbatim
+    # license/notice text and are excluded by file name at ANY path - so a brand term
+    # appearing in them, as it can in a preserved upstream notice, must NOT be flagged
+    # even though they are an extensionless file (LICENSE) and a nested .md.
+    foreach ($licensePath in @('packages/contracts/LICENSE', 'THIRD-PARTY-NOTICES.md', 'packages/sdk-ts/THIRD-PARTY-NOTICES.md')) {
+        WriteFixtureFile -Root $fixtureRoot -RelativePath $licensePath -Line $docLine
     }
 
     # Gitignored local tooling whose template legitimately names the verticals:
@@ -179,6 +196,12 @@ try {
     AssertTrue (-not $leak.Output.Contains('CHANGELOG.md')) 'CHANGELOG.md is NOT flagged (allowed documentation)'
     AssertTrue (-not $leak.Output.Contains('docs/00_sample.md')) 'the docs/ tree is NOT flagged (allowed documentation)'
     AssertTrue (-not $leak.Output.Contains('csv/notes.md')) 'the csv/ tree is NOT flagged (allowed documentation)'
+    AssertTrue (-not $leak.Output.Contains('packages/contracts/LICENSE')) `
+        'a per-package LICENSE copy is NOT flagged (license/attribution text by file name, CORE-LIC-003)'
+    AssertTrue (-not $leak.Output.Contains('THIRD-PARTY-NOTICES.md')) `
+        'the third-party NOTICE (root and per-package) is NOT flagged (license/attribution text, CORE-LIC-003)'
+    AssertTrue (-not $leak.Output.Contains('apps/api/Attribution.cs')) `
+        'the "third-party" compound in scanned source is NOT flagged (allowed compound, CORE-LIC-003)'
     AssertTrue (-not $leak.Output.Contains('packages/contracts/index.ts')) 'a clean tracked file is not flagged'
 
     # --- Scenario 2: neutralizing the source makes the same tree scan clean. ---

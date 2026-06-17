@@ -200,3 +200,39 @@ test("the CHANGELOG documents the current version and ships with the package", (
     "package.json files must include CHANGELOG.md so it ships to consumers",
   );
 });
+
+// --- The AGPL LICENSE and third-party NOTICE ship with the package (CORE-LIC-003). ---
+// The Core is AGPL-3.0-or-later and redistributes attribution-requiring
+// dependencies, so every package tarball must carry the AGPL LICENSE (with
+// CORE-PUB-001) and the generated third-party NOTICE inventory. Both are listed in
+// files[] and the shipped LICENSE is byte-identical to the repository-root AGPL text.
+test("the AGPL LICENSE and third-party NOTICE ship with the package (CORE-LIC-003)", () => {
+  for (const shipped of ["LICENSE", "THIRD-PARTY-NOTICES.md"]) {
+    assert.ok(
+      manifest.files.includes(shipped),
+      `package.json files must include ${shipped} so it ships in the tarball (CORE-LIC-003)`,
+    );
+  }
+  const license = readFileSync(new URL("LICENSE", PACKAGE_DIR), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
+  const rootLicense = readFileSync(
+    new URL("../../LICENSE", PACKAGE_DIR),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+  assert.ok(
+    license.includes("GNU AFFERO GENERAL PUBLIC LICENSE"),
+    "the shipped LICENSE must be the AGPL license text",
+  );
+  assert.equal(
+    license,
+    rootLicense,
+    "the package LICENSE must be byte-identical to the repository-root AGPL LICENSE",
+  );
+  const notice = readFileSync(
+    new URL("THIRD-PARTY-NOTICES.md", PACKAGE_DIR),
+    "utf8",
+  );
+  assert.match(notice, /# Third-Party Notices/);
+});

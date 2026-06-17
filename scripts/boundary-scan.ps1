@@ -104,6 +104,17 @@ $camelSplitRegex = New-Object System.Text.RegularExpressions.Regex('([a-z0-9])([
 # (e.g. 'APIClient' -> 'API Client', 'XMLHttpRequest' -> 'XML Http Request').
 $acronymSplitRegex = New-Object System.Text.RegularExpressions.Regex('([A-Z]+)([A-Z][a-z])')
 
+# Allowed compound phrases that incidentally contain a forbidden token but are
+# standard technical English, not the vertical term. "third-party" (as in
+# THIRD-PARTY-NOTICES, the dependency attribution inventory, CORE-LIC-003) contains
+# a forbidden gaming term only as part of that compound. These compounds are
+# stripped from each scanned line BEFORE term matching, so the legitimate compound
+# is never flagged while a bare occurrence of the token still is. Matches the
+# space/underscore/hyphen/concatenated variants the normalization below produces.
+$allowedCompoundRegex = New-Object System.Text.RegularExpressions.Regex(
+    '\bthird[ _-]?part(?:y|ies)\b',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
 # Enumerate TRACKED files only, via `git ls-files`. This is the whole point of
 # the boundary scan's coverage guarantee: gitignored local tooling (such as
 # scripts/story-loop.ps1, whose prompt template legitimately names the
@@ -154,6 +165,14 @@ $excludedFileNames = @('packages.lock.json', 'pnpm-lock.yaml')
 $excludedDocPathPattern = '^(?:docs|csv)/'
 $excludedDocRootFiles = @('README.md', 'AGENTS.md', 'LICENSE', 'CHANGELOG.md')
 
+# License and attribution texts, matched by file name at ANY path (the root and
+# the per-package copies under packages/*). These reproduce upstream license and
+# third-party-notice text verbatim, which legally must be preserved on
+# redistribution (CORE-LIC-003) and routinely contains tokens the term list would
+# otherwise flag (the AGPL text, and "THIRD-PARTY-NOTICES" itself). They are
+# generated/verbatim, never authored Core source.
+$excludedLicenseFileNames = @('LICENSE', 'THIRD-PARTY-NOTICES.md')
+
 # Text files considered Core source. Extensionless files (for example a plain
 # Dockerfile) are scanned too, and *.Dockerfile (the migrations runner image,
 # apps/api/Migrations.Dockerfile) is in scope.
@@ -175,6 +194,7 @@ foreach ($relativePath in $trackedFiles) {
 
     $fileName = [System.IO.Path]::GetFileName($relativePath)
     if ($excludedFileNames -contains $fileName) { continue }
+    if ($excludedLicenseFileNames -contains $fileName) { continue }
 
     $extension = [System.IO.Path]::GetExtension($fileName)
     if (-not ($extension -eq '' -or $sourceExtensions -contains $extension.ToLowerInvariant())) {
@@ -217,7 +237,10 @@ foreach ($relativePath in $trackedFiles) {
         # several variants surface the same occurrence.
         $reportedTerms = @{}
         foreach ($variant in $lineVariants) {
-            foreach ($match in $combinedRegex.Matches($variant)) {
+            # Strip allowed compounds (e.g. "third-party") so their incidental
+            # forbidden token is not matched, while a bare token still is.
+            $scannable = $allowedCompoundRegex.Replace($variant, ' ')
+            foreach ($match in $combinedRegex.Matches($scannable)) {
                 $termKey = $match.Value.ToLowerInvariant()
                 if ($reportedTerms.ContainsKey($termKey)) { continue }
                 $reportedTerms[$termKey] = $true
