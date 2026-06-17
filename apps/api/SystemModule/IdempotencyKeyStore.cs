@@ -63,4 +63,47 @@ internal sealed class IdempotencyKeyStore : IIdempotencyKeyStore
             return IdempotencyKeyAddResult.Duplicate;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<int> DeleteCreatedBeforeAsync(
+        DateTimeOffset createdBefore,
+        int maxCount,
+        CancellationToken cancellationToken)
+    {
+        if (maxCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, "The batch size must be positive.");
+        }
+
+        // SELECT the oldest candidates by their time-ordered surrogate id (UUIDv7 derived from the recorded
+        // time, chronological and provider-independent — the SQLite test provider cannot ORDER BY or compare a
+        // DateTimeOffset, exactly as the CORE-PRIV-003 retention reads note). Oldest first, bounded by the batch,
+        // so this sweep can never do unbounded work and repeated sweeps cover the backlog without starvation.
+        // Only the id and recorded time are read — never the scope or key value (threat T7) — and the age
+        // threshold is applied AFTER materialization so a still-recent row that slips into the batch is excluded.
+        var expiredIds = (await _dbContext.IdempotencyKeys
+                .AsNoTracking()
+                .OrderBy(idempotencyKey => idempotencyKey.Id)
+                .Take(maxCount)
+                .Select(idempotencyKey => new { idempotencyKey.Id, idempotencyKey.CreatedAt })
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .Where(candidate => candidate.CreatedAt < createdBefore)
+            .Select(candidate => candidate.Id)
+            .ToList();
+
+        if (expiredIds.Count == 0)
+        {
+            return 0;
+        }
+
+        // Bulk DELETE the selected rows by id in one statement (no change tracker, no audit — the purge is by
+        // age alone and reported by count, never by key value; CORE-PRIV-006). Idempotent and concurrency-safe:
+        // a row another sweep already removed simply matches nothing here, so the count reflects what THIS sweep
+        // removed and overlapping sweeps never double-delete or error.
+        return await _dbContext.IdempotencyKeys
+            .Where(idempotencyKey => expiredIds.Contains(idempotencyKey.Id))
+            .ExecuteDeleteAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

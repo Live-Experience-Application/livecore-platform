@@ -22,26 +22,31 @@ public readonly record struct DataRetentionFamilyResult(int Examined, int Purged
 }
 
 /// <summary>
-/// The outcome of one full run of the background data-retention sweep (CORE-PRIV-003): the per-family
-/// <see cref="DataRetentionFamilyResult"/> for each of the four families. Counts only, so a sweep summary is
-/// safe to log (threat T7).
+/// The outcome of one full run of the background data-retention sweep (CORE-PRIV-003/CORE-PRIV-006): the
+/// per-family <see cref="DataRetentionFamilyResult"/> for each of the five families. Counts only, so a sweep
+/// summary is safe to log (threat T7).
 /// </summary>
 /// <param name="Sessions">The completed/expired session family's result.</param>
 /// <param name="Recaps">The generated recap family's result.</param>
 /// <param name="Exports">The completed export artifact family's result.</param>
 /// <param name="Invitations">The closed/expired/revoked invitation family's result.</param>
+/// <param name="IdempotencyKeys">The idempotency-key family's result (CORE-PRIV-006); a count-only bulk purge by age.</param>
 public readonly record struct DataRetentionSweepResult(
     DataRetentionFamilyResult Sessions,
     DataRetentionFamilyResult Recaps,
     DataRetentionFamilyResult Exports,
-    DataRetentionFamilyResult Invitations)
+    DataRetentionFamilyResult Invitations,
+    DataRetentionFamilyResult IdempotencyKeys)
 {
     /// <summary>The total number of candidate records examined across all families this run.</summary>
-    public int TotalExamined => Sessions.Examined + Recaps.Examined + Exports.Examined + Invitations.Examined;
+    public int TotalExamined =>
+        Sessions.Examined + Recaps.Examined + Exports.Examined + Invitations.Examined + IdempotencyKeys.Examined;
 
     /// <summary>The total number of records purged across all families this run.</summary>
-    public int TotalPurged => Sessions.Purged + Recaps.Purged + Exports.Purged + Invitations.Purged;
+    public int TotalPurged =>
+        Sessions.Purged + Recaps.Purged + Exports.Purged + Invitations.Purged + IdempotencyKeys.Purged;
 
     /// <summary>The total number of records that could not be purged across all families this run.</summary>
-    public int TotalFailed => Sessions.Failed + Recaps.Failed + Exports.Failed + Invitations.Failed;
+    public int TotalFailed =>
+        Sessions.Failed + Recaps.Failed + Exports.Failed + Invitations.Failed + IdempotencyKeys.Failed;
 }

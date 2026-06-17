@@ -8,6 +8,7 @@ using LiveCore.Api.Realtime;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Retention;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -16,11 +17,11 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace LiveCore.Api.UnitTests.Retention;
 
 /// <summary>
-/// Integration-style tests for the <see cref="DataRetentionSweepService"/> (CORE-PRIV-003, the "Privacy and
-/// Data Lifecycle" epic, GDPR Art.5(1)(e) "storage limitation"). They run against an in-memory SQLite database
-/// with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>), so the real model mapping, the SQL translation,
-/// the FK cascades, the audit hash chain and the transactional unit of work are all exercised on every run
-/// without a database server — exactly like the asset/scene/entity deletion service tests.
+/// Integration-style tests for the <see cref="DataRetentionSweepService"/> (CORE-PRIV-003/CORE-PRIV-006, the
+/// "Privacy and Data Lifecycle" epic, GDPR Art.5(1)(e) "storage limitation"). They run against an in-memory
+/// SQLite database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>), so the real model mapping, the
+/// SQL translation, the FK cascades, the audit hash chain and the transactional unit of work are all exercised on
+/// every run without a database server — exactly like the asset/scene/entity deletion service tests.
 ///
 /// Coverage (the story's required tests):
 /// <list type="bullet">
@@ -31,8 +32,11 @@ namespace LiveCore.Api.UnitTests.Retention;
 ///   <item>DISABLING a window stops purging that family entirely.</item>
 ///   <item>The sweep is IDEMPOTENT (a second sweep is a no-op and never double-audits) and CONCURRENCY-SAFE (a
 ///   second overlapping sweep never double-deletes or errors).</item>
-///   <item>Every purge is AUDITED BY ID (a tenant-scoped RecordRetentionPurged fact, system actor, PII-free), and
+///   <item>Every tenant-scoped purge is AUDITED BY ID (a RecordRetentionPurged fact, system actor, PII-free), and
 ///   the export is KEPT when storage is unconfigured (fail-closed, no orphaned object).</item>
+///   <item>The idempotency-key family (CORE-PRIV-006) is a COUNT-ONLY bulk purge by age: a past-window key is
+///   removed and a within-window one retained, disabling stops it, overlapping sweeps never double-delete, and
+///   no per-record audit fact is written (deletion is never by key value).</item>
 /// </list>
 ///
 /// THE TEMPLATE BOUNDARY (docs/04): all names/kinds are GENERIC and NEUTRAL — no vertical vocabulary appears
@@ -233,6 +237,60 @@ public sealed class DataRetentionSweepServiceTests : IDisposable
         Assert.True(await verify.WorkspaceInvitations.AnyAsync(i => i.Id == within));
     }
 
+    // ----------------------------------------------------------------------------------------- Idempotency keys
+
+    [Fact]
+    public async Task Past_window_idempotency_key_is_purged_and_within_window_key_is_retained()
+    {
+        var expired = await SeedIdempotencyKeyAsync(_pastWindow);
+        var recent = await SeedIdempotencyKeyAsync(_withinWindow);
+
+        var result = await RunSweepAsync(Options(idempotencyKeys: true));
+
+        Assert.Equal(1, result.IdempotencyKeys.Purged);
+        await using var verify = CreateContext();
+        // The past-window key is gone; the within-window key is retained (deletion is by age alone).
+        Assert.False(await verify.IdempotencyKeys.AnyAsync(k => k.Id == expired));
+        Assert.True(await verify.IdempotencyKeys.AnyAsync(k => k.Id == recent));
+        // COUNT ONLY: the idempotency-key purge writes no per-record audit fact (never by key value).
+        Assert.Equal(0, await verify.AuditLogs.CountAsync(a => a.Action == AuditAction.RecordRetentionPurged));
+    }
+
+    [Fact]
+    public async Task Disabling_the_idempotency_key_window_stops_purging()
+    {
+        var expired = await SeedIdempotencyKeyAsync(_pastWindow);
+
+        // Idempotency keys disabled: a past-window key is NOT purged and nothing is examined.
+        var result = await RunSweepAsync(Options(idempotencyKeys: false));
+
+        Assert.Equal(0, result.IdempotencyKeys.Examined);
+        Assert.Equal(0, result.IdempotencyKeys.Purged);
+        await using var verify = CreateContext();
+        Assert.True(await verify.IdempotencyKeys.AnyAsync(k => k.Id == expired));
+    }
+
+    [Fact]
+    public async Task Overlapping_idempotency_key_sweep_does_not_double_delete_or_error()
+    {
+        var expired = await SeedIdempotencyKeyAsync(_pastWindow);
+
+        // A second worker arriving just after the first: the bulk delete by age is idempotent, so the second
+        // sweep matches nothing already gone — no double-delete, no error.
+        await using var contextA = CreateContext();
+        await using var contextB = CreateContext();
+        var resultA = await CreateService(contextA, Options(idempotencyKeys: true), new RecordingRetentionStorage())
+            .SweepAsync(CancellationToken.None);
+        var resultB = await CreateService(contextB, Options(idempotencyKeys: true), new RecordingRetentionStorage())
+            .SweepAsync(CancellationToken.None);
+
+        Assert.Equal(1, resultA.IdempotencyKeys.Purged);
+        Assert.Equal(0, resultB.IdempotencyKeys.Purged);
+        Assert.Equal(0, resultB.IdempotencyKeys.Failed);
+        await using var verify = CreateContext();
+        Assert.False(await verify.IdempotencyKeys.AnyAsync(k => k.Id == expired));
+    }
+
     // -------------------------------------------------------------------------------------------------- Audit
 
     [Fact]
@@ -317,6 +375,7 @@ public sealed class DataRetentionSweepServiceTests : IDisposable
             new RecapRepository(context),
             new ExportJobRepository(context),
             new WorkspaceInvitationRepository(context),
+            new IdempotencyKeyStore(context),
             new AuditLogRepository(context),
             storage,
             options,
@@ -329,14 +388,16 @@ public sealed class DataRetentionSweepServiceTests : IDisposable
         bool sessions = false,
         bool recaps = false,
         bool exports = false,
-        bool invitations = false)
+        bool invitations = false,
+        bool idempotencyKeys = false)
         => new(
             DataRetentionOptions.DefaultSweepInterval,
             DataRetentionOptions.DefaultBatchSize,
             new RetentionWindowOptions(sessions, _window),
             new RetentionWindowOptions(recaps, _window),
             new RetentionWindowOptions(exports, _window),
-            new RetentionWindowOptions(invitations, _window));
+            new RetentionWindowOptions(invitations, _window),
+            new RetentionWindowOptions(idempotencyKeys, _window));
 
     // ------------------------------------------------------------------------------------------------ seeding
 
@@ -451,6 +512,17 @@ public sealed class DataRetentionSweepServiceTests : IDisposable
         context.WorkspaceInvitations.Add(invitation);
         await context.SaveChangesAsync();
         return invitation.Id;
+    }
+
+    private async Task<Guid> SeedIdempotencyKeyAsync(DateTimeOffset createdAt)
+    {
+        await using var context = CreateContext();
+        // Generic, neutral scope/key (AGENTS.md) — unique per row so the unique (scope, key) index is satisfied.
+        var key = IdempotencyKey.Create(
+            $"reveal:{Guid.CreateVersion7():N}", $"key-{Guid.CreateVersion7():N}", createdAt);
+        context.IdempotencyKeys.Add(key);
+        await context.SaveChangesAsync();
+        return key.Id;
     }
 
     public enum SessionTerminalState

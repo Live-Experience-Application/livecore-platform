@@ -17,8 +17,9 @@ changes no Core source — it records the data map and two explicit decisions �
 all eleven spec-consistency checks (`docs/24_SPEC_CONSISTENCY.md`) and the boundary
 scan stay green. It pairs with the data-lifecycle mechanisms that were built:
 data-subject erasure (CORE-PRIV-001, GDPR Art.17), authorized tenant deletion
-(CORE-PRIV-002), the data-retention sweep (CORE-PRIV-003, Art.5(1)(e)) and the
-data-subject access/portability export (CORE-PRIV-004, Art.15/20). The
+(CORE-PRIV-002), the data-retention sweep (CORE-PRIV-003, Art.5(1)(e), extended to
+bound the idempotency-key store by CORE-PRIV-006) and the data-subject
+access/portability export (CORE-PRIV-004, Art.15/20). The
 decision-register sections below mirror the dated, named-owner decision style of
 `docs/24_SPEC_CONSISTENCY.md`.
 
@@ -140,21 +141,31 @@ age. The defaults:
 | **Recaps** | 365 days | **off** | The generated recap body (host content). |
 | **Exports** (`Completed`) | 90 days | **off** | The `export_jobs` row, its manifest and any object-storage blob (object first, then row; fail-closed if storage is unconfigured). |
 | **Invitations** (terminal: accepted/revoked/expired) | 30 days | **on** | The plaintext `invited_email`. |
+| **IdempotencyKeys** (CORE-PRIV-006) | 30 days | **on** | Aged `idempotency_keys` rows, by **count only** — see below. |
 
 The deletions an operator would be surprised to lose (sessions, recaps, exports)
 are **disabled by default** — enable them per family once the windows fit your
-retention obligations — while the clear privacy-hygiene invitation-email purge is
-**enabled by default**. Configure each with `Retention:<Family>:Enabled` and
-`Retention:<Family>:RetentionWindow` (plus a global `Retention:SweepInterval` /
-`Retention:BatchSize`); see `.env.example` and `docs/13`. Every purge is **audited
-by id** (`RecordRetentionPurged`), with no actor and no content, so the audit hash
-chain still verifies (CORE-SEC-003).
+retention obligations — while the clear privacy-hygiene purges are **enabled by
+default**: the invitation-email purge and the idempotency-key purge. Configure each
+with `Retention:<Family>:Enabled` and `Retention:<Family>:RetentionWindow` (plus a
+global `Retention:SweepInterval` / `Retention:BatchSize`); see `.env.example` and
+`docs/13`. Every **tenant-scoped** purge is **audited by id** (`RecordRetentionPurged`),
+with no actor and no content, so the audit hash chain still verifies (CORE-SEC-003).
+
+The **idempotency-key purge** (CORE-PRIV-006) bounds the otherwise insert-only
+`idempotency_keys` table — a row is written on every idempotent create/reveal/purchase
+replay and was never reclaimed, so it grew without limit. The table is generic
+retry-safety infrastructure: it is **not tenant-scoped** and its rows hold no host
+content (only a server-composed `scope` partition and a client `key` correlation
+token), so this purge deletes **by age alone** (a 30-day window, well beyond any
+plausible client retry horizon) and is logged **by count, never by key value**. It
+takes no per-record audit (there is no tenant subject to audit), and the bounded bulk
+delete is idempotent and concurrency-safe.
 
 **Not swept (append-only systems of record):** `audit_logs`, the purchase ledger
 (`purchase_transactions` / `purchase_events` / `store_notification_events`) and
 `session_events` other than via the session cascade above — these are backup
-systems of record (`docs/13`, "Backup and restore"). The `idempotency_keys` store
-is **not yet** retention-swept; bounding it is the follow-up CORE-PRIV-006.
+systems of record (`docs/13`, "Backup and restore").
 
 ## At-rest encryption expectations
 

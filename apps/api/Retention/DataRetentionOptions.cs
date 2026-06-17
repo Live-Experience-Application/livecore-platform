@@ -3,15 +3,17 @@ using System.Globalization;
 namespace LiveCore.Api.Retention;
 
 /// <summary>
-/// Configuration for the background data-retention sweep (CORE-PRIV-003, the "Privacy and Data Lifecycle" epic,
-/// GDPR Art.5(1)(e) "storage limitation"). The sweep expires and purges terminal/old personal-data-bearing
-/// records across four families, each gated by its own <see cref="RetentionWindowOptions"/>:
+/// Configuration for the background data-retention sweep (CORE-PRIV-003/CORE-PRIV-006, the "Privacy and Data
+/// Lifecycle" epic, GDPR Art.5(1)(e) "storage limitation"). The sweep expires and purges terminal/old
+/// personal-data-bearing records (and the unbounded idempotency-key store) across five families, each gated by
+/// its own <see cref="RetentionWindowOptions"/>:
 /// <list type="bullet">
 ///   <item><see cref="Sessions"/> — completed/expired sessions (and, by the schema cascade, their append-only
 ///   session events, recaps and session-scoped visibility rules);</item>
 ///   <item><see cref="Recaps"/> — generated recaps (the recap body is host content);</item>
 ///   <item><see cref="Exports"/> — completed export artifacts (the export row and any object-storage blob);</item>
-///   <item><see cref="Invitations"/> — closed/expired/revoked invitations (their plaintext invited email).</item>
+///   <item><see cref="Invitations"/> — closed/expired/revoked invitations (their plaintext invited email);</item>
+///   <item><see cref="IdempotencyKeys"/> — idempotency-key rows older than the retry horizon (CORE-PRIV-006).</item>
 /// </list>
 ///
 /// The knobs are deployment policy, not per-request input, so — exactly like <see cref="LiveCore.Api.Assets.AssetCleanupOptions"/>
@@ -25,7 +27,9 @@ namespace LiveCore.Api.Retention;
 /// DISABLED, so they never purge until the deployment opts in (with a generous default window present and inert
 /// until enabled). The invitation-email purge — terminal rows whose only payload is a now-dead plaintext email,
 /// with the invitation's lifecycle audit facts preserved separately — is clear privacy hygiene, so it defaults
-/// to ENABLED with a conservative window.
+/// to ENABLED with a conservative window. The idempotency-key purge (CORE-PRIV-006) — generic retry-safety rows
+/// with no host content, deleted by age alone once they are well past any plausible client retry horizon — is
+/// likewise clear hygiene that bounds an otherwise unbounded table, so it too defaults to ENABLED.
 /// </para>
 ///
 /// <para>
@@ -57,6 +61,13 @@ public sealed class DataRetentionOptions
     public static readonly TimeSpan DefaultInvitationRetention = TimeSpan.FromDays(30);
 
     /// <summary>
+    /// Default retention window for idempotency-key rows (30 days). ENABLED by default. The window is well beyond
+    /// any plausible client retry horizon (retries happen within seconds-to-hours), so a key is only ever purged
+    /// long after it could still recognize a retry (CORE-PRIV-006).
+    /// </summary>
+    public static readonly TimeSpan DefaultIdempotencyKeyRetention = TimeSpan.FromDays(30);
+
+    /// <summary>
     /// Creates retention options, validating that every value is sane. A non-positive sweep interval or a
     /// non-positive batch size is rejected (a degenerate sweep), and each family's window is validated by
     /// <see cref="RetentionWindowOptions"/>.
@@ -67,6 +78,7 @@ public sealed class DataRetentionOptions
     /// <param name="recaps">The generated recap retention policy.</param>
     /// <param name="exports">The completed export artifact retention policy.</param>
     /// <param name="invitations">The closed/expired/revoked invitation retention policy.</param>
+    /// <param name="idempotencyKeys">The idempotency-key retention policy (CORE-PRIV-006).</param>
     /// <exception cref="ArgumentNullException">A family policy is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The sweep interval or batch size is not positive.</exception>
     public DataRetentionOptions(
@@ -75,12 +87,14 @@ public sealed class DataRetentionOptions
         RetentionWindowOptions sessions,
         RetentionWindowOptions recaps,
         RetentionWindowOptions exports,
-        RetentionWindowOptions invitations)
+        RetentionWindowOptions invitations,
+        RetentionWindowOptions idempotencyKeys)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(recaps);
         ArgumentNullException.ThrowIfNull(exports);
         ArgumentNullException.ThrowIfNull(invitations);
+        ArgumentNullException.ThrowIfNull(idempotencyKeys);
 
         if (sweepInterval <= TimeSpan.Zero)
         {
@@ -99,6 +113,7 @@ public sealed class DataRetentionOptions
         Recaps = recaps;
         Exports = exports;
         Invitations = invitations;
+        IdempotencyKeys = idempotencyKeys;
     }
 
     /// <summary>How often the worker runs a retention sweep.</summary>
@@ -119,18 +134,25 @@ public sealed class DataRetentionOptions
     /// <summary>Retention policy for closed/expired/revoked invitations (their plaintext invited email).</summary>
     public RetentionWindowOptions Invitations { get; }
 
+    /// <summary>
+    /// Retention policy for idempotency-key rows (CORE-PRIV-006). Deletion is by AGE ALONE — a key past its
+    /// window is removed regardless of value — and the purge is logged by count only, never by key value.
+    /// </summary>
+    public RetentionWindowOptions IdempotencyKeys { get; }
+
     /// <summary>Whether ANY family is enabled — when false a sweep is a complete no-op and registers no useful work.</summary>
-    public bool AnyEnabled => Sessions.Enabled || Recaps.Enabled || Exports.Enabled || Invitations.Enabled;
+    public bool AnyEnabled =>
+        Sessions.Enabled || Recaps.Enabled || Exports.Enabled || Invitations.Enabled || IdempotencyKeys.Enabled;
 
     /// <summary>
     /// Reads the retention options from configuration under <see cref="ConfigurationSection"/>. The sweep cadence
     /// and batch size come from <c>Retention:SweepInterval</c> / <c>Retention:BatchSize</c>; each family's policy
     /// from <c>Retention:&lt;Family&gt;:Enabled</c> (a boolean) and <c>Retention:&lt;Family&gt;:RetentionWindow</c>
-    /// (a <see cref="TimeSpan"/>), where <c>&lt;Family&gt;</c> is <c>Sessions</c>, <c>Recaps</c>, <c>Exports</c> or
-    /// <c>Invitations</c>. Absent or blank values fall back to the safe defaults (sessions/recaps/exports disabled,
-    /// invitations enabled). A value that is PRESENT but cannot be parsed, or is out of range, is rejected at
-    /// startup rather than silently falling back — a misconfigured timing or flag is a startup error, never a
-    /// degenerate or surprising sweep.
+    /// (a <see cref="TimeSpan"/>), where <c>&lt;Family&gt;</c> is <c>Sessions</c>, <c>Recaps</c>, <c>Exports</c>,
+    /// <c>Invitations</c> or <c>IdempotencyKeys</c>. Absent or blank values fall back to the safe defaults
+    /// (sessions/recaps/exports disabled, invitations and idempotency keys enabled). A value that is PRESENT but
+    /// cannot be parsed, or is out of range, is rejected at startup rather than silently falling back — a
+    /// misconfigured timing or flag is a startup error, never a degenerate or surprising sweep.
     /// </summary>
     /// <exception cref="ArgumentNullException">The configuration is null.</exception>
     /// <exception cref="InvalidOperationException">A present value cannot be parsed.</exception>
@@ -147,7 +169,8 @@ public sealed class DataRetentionOptions
             ReadFamily(section.GetSection("Sessions"), "Sessions", enabledDefault: false, DefaultSessionRetention),
             ReadFamily(section.GetSection("Recaps"), "Recaps", enabledDefault: false, DefaultRecapRetention),
             ReadFamily(section.GetSection("Exports"), "Exports", enabledDefault: false, DefaultExportRetention),
-            ReadFamily(section.GetSection("Invitations"), "Invitations", enabledDefault: true, DefaultInvitationRetention));
+            ReadFamily(section.GetSection("Invitations"), "Invitations", enabledDefault: true, DefaultInvitationRetention),
+            ReadFamily(section.GetSection("IdempotencyKeys"), "IdempotencyKeys", enabledDefault: true, DefaultIdempotencyKeyRetention));
     }
 
     private static RetentionWindowOptions ReadFamily(

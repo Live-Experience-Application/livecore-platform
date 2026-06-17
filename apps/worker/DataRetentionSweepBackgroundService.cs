@@ -4,12 +4,14 @@ using LiveCore.Api.Retention;
 namespace LiveCore.Worker;
 
 /// <summary>
-/// Schedules the data-retention sweep (CORE-PRIV-003): on a fixed, configurable interval it runs one sweep of
-/// <see cref="DataRetentionSweepService"/>, which expires and PURGES terminal/old personal-data-bearing records
-/// across four independently-gated families — completed/expired sessions (and their cascade-removed session
-/// events, recaps and visibility rules), generated recaps, completed export artifacts (the row and any
-/// object-storage blob) and closed/expired/revoked invitations (their plaintext email) — auditing each purge by
-/// id (GDPR Art.5(1)(e) "storage limitation"). The worker owns the platform's async jobs
+/// Schedules the data-retention sweep (CORE-PRIV-003/CORE-PRIV-006): on a fixed, configurable interval it runs
+/// one sweep of <see cref="DataRetentionSweepService"/>, which expires and PURGES terminal/old
+/// personal-data-bearing records (and the unbounded idempotency-key store) across five independently-gated
+/// families — completed/expired sessions (and their cascade-removed session events, recaps and visibility rules),
+/// generated recaps, completed export artifacts (the row and any object-storage blob), closed/expired/revoked
+/// invitations (their plaintext email) and idempotency-key rows past the retry horizon (a count-only bulk purge
+/// by age) — auditing each tenant-scoped purge by id (GDPR Art.5(1)(e) "storage limitation"). The worker owns the
+/// platform's async jobs
 /// (docs/02_ARCHITECTURE.md: the worker owns "background jobs, exports, cleanup, async processing"); the purge
 /// LOGIC lives in the Retention module, so this host service only handles timing, scoping and resilience —
 /// exactly the split, and the structure, of <see cref="AssetCleanupBackgroundService"/> and
@@ -67,13 +69,15 @@ internal sealed class DataRetentionSweepBackgroundService : BackgroundService
     {
         _logger.LogInformation(
             "Data-retention sweep started; sweeping every {Interval} (batch size {BatchSize}). "
-                + "Enabled windows — sessions: {Sessions}, recaps: {Recaps}, exports: {Exports}, invitations: {Invitations}.",
+                + "Enabled windows — sessions: {Sessions}, recaps: {Recaps}, exports: {Exports}, "
+                + "invitations: {Invitations}, idempotency keys: {IdempotencyKeys}.",
             _options.SweepInterval,
             _options.BatchSize,
             _options.Sessions.Enabled,
             _options.Recaps.Enabled,
             _options.Exports.Enabled,
-            _options.Invitations.Enabled);
+            _options.Invitations.Enabled,
+            _options.IdempotencyKeys.Enabled);
 
         // Emit an initial heartbeat so the liveness signal exists from the moment the loop starts, before the
         // first sweep runs (CORE-OPS-005).
@@ -108,14 +112,16 @@ internal sealed class DataRetentionSweepBackgroundService : BackgroundService
             {
                 _logger.LogInformation(
                     "Data-retention sweep complete: examined {Examined}, purged {Purged}, failed {Failed} "
-                        + "(sessions {SessionsPurged}, recaps {RecapsPurged}, exports {ExportsPurged}, invitations {InvitationsPurged}).",
+                        + "(sessions {SessionsPurged}, recaps {RecapsPurged}, exports {ExportsPurged}, "
+                        + "invitations {InvitationsPurged}, idempotency keys {IdempotencyKeysPurged}).",
                     result.TotalExamined,
                     result.TotalPurged,
                     result.TotalFailed,
                     result.Sessions.Purged,
                     result.Recaps.Purged,
                     result.Exports.Purged,
-                    result.Invitations.Purged);
+                    result.Invitations.Purged,
+                    result.IdempotencyKeys.Purged);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

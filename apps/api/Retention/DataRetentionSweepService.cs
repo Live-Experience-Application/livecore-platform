@@ -4,20 +4,22 @@ using LiveCore.Api.Exports;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace LiveCore.Api.Retention;
 
 /// <summary>
-/// The data-retention sweep's application service (CORE-PRIV-003, the "Privacy and Data Lifecycle" epic, GDPR
-/// Art.5(1)(e) "storage limitation"). On each run it expires and PURGES terminal/old personal-data-bearing
-/// records across four configurable families — completed/expired sessions (and, by the schema cascade, their
-/// append-only session events, recaps and session-scoped visibility rules), generated recaps, completed export
-/// artifacts (the row and any object-storage blob) and closed/expired/revoked invitations (their plaintext
-/// invited email). The scheduling host — the background worker — invokes this service on an interval
-/// (docs/02_ARCHITECTURE.md: the worker owns "cleanup" and async jobs), exactly as it invokes the asset cleanup
-/// and recap generation services; the service itself is host-agnostic and fully unit-testable.
+/// The data-retention sweep's application service (CORE-PRIV-003/CORE-PRIV-006, the "Privacy and Data Lifecycle"
+/// epic, GDPR Art.5(1)(e) "storage limitation"). On each run it expires and PURGES terminal/old
+/// personal-data-bearing records (and the unbounded idempotency-key store) across five configurable families —
+/// completed/expired sessions (and, by the schema cascade, their append-only session events, recaps and
+/// session-scoped visibility rules), generated recaps, completed export artifacts (the row and any object-storage
+/// blob), closed/expired/revoked invitations (their plaintext invited email) and idempotency-key rows past the
+/// retry horizon (CORE-PRIV-006). The scheduling host — the background worker — invokes this service on an
+/// interval (docs/02_ARCHITECTURE.md: the worker owns "cleanup" and async jobs), exactly as it invokes the asset
+/// cleanup and recap generation services; the service itself is host-agnostic and fully unit-testable.
 ///
 /// <para>
 /// REUSE, NOT A PARALLEL ENGINE (the story note). Each family's candidates come from its OWNING module's
@@ -40,12 +42,24 @@ namespace LiveCore.Api.Retention;
 /// </para>
 ///
 /// <para>
-/// AUDITED BY ID (the acceptance criterion). Every purge appends a tenant-scoped
+/// AUDITED BY ID (the acceptance criterion). Every tenant-scoped purge appends a tenant-scoped
 /// <see cref="AuditAction.RecordRetentionPurged"/> fact recording the tenant, workspace and the purged record by
 /// its generic kind name and surrogate id — never the record's content, the recap body, the export blob or the
 /// invited email (threat T7). Because the audit reference is a recorded fact, not a foreign key, the audit row
 /// SURVIVES the purge, so the tamper-evident audit chain still verifies after a sweep (the same posture that
 /// makes erasure/deletion reconcilable with the immutable audit log).
+/// </para>
+///
+/// <para>
+/// THE IDEMPOTENCY-KEY FAMILY IS COUNT-ONLY (CORE-PRIV-006). The <c>idempotency_keys</c> table is generic
+/// retry-safety infrastructure and is NOT tenant-scoped (no organization/workspace), and its rows carry no host
+/// content — only a server-composed scope partition and a client correlation token. Removing one therefore has no
+/// per-tenant audit subject and nothing privacy-relevant to record beyond the fact that aged rows were reclaimed,
+/// so this family does NOT take the per-record audited <see cref="PurgeOneAsync"/> path. Instead it BULK-deletes
+/// rows by AGE ALONE through <see cref="IIdempotencyKeyStore.DeleteCreatedBeforeAsync"/> and logs the outcome by
+/// COUNT, never by key value (the acceptance criterion; threat T7). The bulk delete is naturally idempotent and
+/// concurrency-safe — a row another sweep already removed simply matches nothing — so overlapping sweeps neither
+/// double-delete nor error.
 /// </para>
 ///
 /// <para>
@@ -79,13 +93,14 @@ public sealed class DataRetentionSweepService
     private readonly IRecapRepository _recaps;
     private readonly IExportJobRepository _exports;
     private readonly IWorkspaceInvitationRepository _invitations;
+    private readonly IIdempotencyKeyStore _idempotencyKeys;
     private readonly IAuditLogRepository _audit;
     private readonly IAssetStorage _storage;
     private readonly DataRetentionOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<DataRetentionSweepService> _logger;
 
-    /// <summary>Creates the sweep service over the four module repositories, the audit log, the storage adapter, the unit of work and the policy.</summary>
+    /// <summary>Creates the sweep service over the module repositories (including the idempotency-key store), the audit log, the storage adapter, the unit of work and the policy.</summary>
     public DataRetentionSweepService(
         LiveCoreDbContext dbContext,
         TransactionalUnitOfWork unitOfWork,
@@ -93,6 +108,7 @@ public sealed class DataRetentionSweepService
         IRecapRepository recaps,
         IExportJobRepository exports,
         IWorkspaceInvitationRepository invitations,
+        IIdempotencyKeyStore idempotencyKeys,
         IAuditLogRepository audit,
         IAssetStorage storage,
         DataRetentionOptions options,
@@ -105,6 +121,7 @@ public sealed class DataRetentionSweepService
         ArgumentNullException.ThrowIfNull(recaps);
         ArgumentNullException.ThrowIfNull(exports);
         ArgumentNullException.ThrowIfNull(invitations);
+        ArgumentNullException.ThrowIfNull(idempotencyKeys);
         ArgumentNullException.ThrowIfNull(audit);
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(options);
@@ -117,6 +134,7 @@ public sealed class DataRetentionSweepService
         _recaps = recaps;
         _exports = exports;
         _invitations = invitations;
+        _idempotencyKeys = idempotencyKeys;
         _audit = audit;
         _storage = storage;
         _options = options;
@@ -141,8 +159,9 @@ public sealed class DataRetentionSweepService
         var recaps = await SweepRecapsAsync(now, cancellationToken).ConfigureAwait(false);
         var exports = await SweepExportsAsync(now, cancellationToken).ConfigureAwait(false);
         var invitations = await SweepInvitationsAsync(now, cancellationToken).ConfigureAwait(false);
+        var idempotencyKeys = await SweepIdempotencyKeysAsync(now, cancellationToken).ConfigureAwait(false);
 
-        return new DataRetentionSweepResult(sessions, recaps, exports, invitations);
+        return new DataRetentionSweepResult(sessions, recaps, exports, invitations, idempotencyKeys);
     }
 
     private async Task<DataRetentionFamilyResult> SweepSessionsAsync(DateTimeOffset now, CancellationToken cancellationToken)
@@ -301,6 +320,51 @@ public sealed class DataRetentionSweepService
         }
 
         return new DataRetentionFamilyResult(examined, purged, failed);
+    }
+
+    /// <summary>
+    /// Purges idempotency-key rows past their window (CORE-PRIV-006). Unlike the four tenant-scoped families, this
+    /// is a COUNT-ONLY bulk delete by AGE ALONE — the table is generic retry-safety infrastructure with no host
+    /// content and no tenant subject, so there is nothing to audit per row and nothing privacy-relevant to log
+    /// beyond the count of rows reclaimed (the acceptance criterion; threat T7). The bulk delete is idempotent and
+    /// concurrency-safe (a row another sweep already removed matches nothing), so overlapping sweeps never
+    /// double-delete. A transient persistence failure is caught and the bounded batch is left for the next sweep,
+    /// so one bad batch never aborts the run — the same resilience posture as the per-record families.
+    /// </summary>
+    private async Task<DataRetentionFamilyResult> SweepIdempotencyKeysAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (!_options.IdempotencyKeys.Enabled)
+        {
+            return DataRetentionFamilyResult.None;
+        }
+
+        var createdBefore = now - _options.IdempotencyKeys.RetentionWindow;
+
+        try
+        {
+            var deleted = await _idempotencyKeys
+                .DeleteCreatedBeforeAsync(createdBefore, _options.BatchSize, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (deleted > 0)
+            {
+                // COUNT ONLY, never a key value (the acceptance criterion; threat T7). Deletion is by age alone.
+                _logger.LogInformation(
+                    "Purged {Count} idempotency key(s) older than the {Window} retention window.",
+                    deleted,
+                    _options.IdempotencyKeys.RetentionWindow);
+            }
+
+            return new DataRetentionFamilyResult(deleted, deleted, 0);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // A transient persistence error: the bounded batch is left for the next sweep to retry rather than
+            // aborting the whole run. Count-only log (no key value; threat T7).
+            _logger.LogWarning(
+                exception, "Could not purge expired idempotency keys; they stay for the next sweep to retry.");
+            return new DataRetentionFamilyResult(0, 0, 1);
+        }
     }
 
     /// <summary>

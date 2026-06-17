@@ -2,6 +2,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Retention;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -49,6 +50,8 @@ public class DataRetentionServiceCollectionExtensionsTests
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(TransactionalUnitOfWork));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(ISessionRepository));
         Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IAuditLogRepository));
+        // The idempotency-key store whose bulk purge bounds the idempotency_keys table (CORE-PRIV-006).
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IIdempotencyKeyStore));
     }
 
     [Fact]

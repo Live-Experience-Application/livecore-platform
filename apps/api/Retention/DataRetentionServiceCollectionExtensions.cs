@@ -4,6 +4,7 @@ using LiveCore.Api.Exports;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -19,8 +20,9 @@ namespace LiveCore.Api.Retention;
 /// repositories and the audit log repository stay internal.
 ///
 /// Everything the sweep needs is registered here: the EF Core <see cref="LiveCoreDbContext"/> (PostgreSQL via
-/// Npgsql, exactly as the API host and the other worker wirings register it), the four module repositories whose
-/// records the sweep purges, the audit log repository, the <see cref="TransactionalUnitOfWork"/> that makes each
+/// Npgsql, exactly as the API host and the other worker wirings register it), the module repositories whose
+/// records the sweep purges (including the System module's idempotency-key store, CORE-PRIV-006), the audit log
+/// repository, the <see cref="TransactionalUnitOfWork"/> that makes each
 /// audit-append-plus-delete atomic, the <see cref="IAssetStorage"/> adapter (for the export blob delete), the
 /// <see cref="DataRetentionOptions"/> policy and a <see cref="TimeProvider"/>, plus the
 /// <see cref="DataRetentionSweepService"/> itself. As with the other jobs, persistence is GATED on a configured
@@ -82,6 +84,9 @@ public static class DataRetentionServiceCollectionExtensions
         services.TryAddScoped<IRecapRepository, RecapRepository>();
         services.TryAddScoped<IExportJobRepository, ExportJobRepository>();
         services.TryAddScoped<IWorkspaceInvitationRepository, WorkspaceInvitationRepository>();
+        // The System module's idempotency-key store, whose CORE-PRIV-006 bulk purge bounds the otherwise
+        // insert-only idempotency_keys table.
+        services.TryAddScoped<IIdempotencyKeyStore, IdempotencyKeyStore>();
         services.TryAddScoped<IAuditLogRepository, AuditLogRepository>();
         services.TryAddScoped<TransactionalUnitOfWork>();
         services.TryAddScoped<DataRetentionSweepService>();

@@ -3281,18 +3281,25 @@ expired once no longer needed. On a configurable cadence the sweep **expires and
   object-storage blob, deleted **object-first-then-row** through the existing `IAssetStorage`
   delete path so a purged export never orphans an object (and kept, fail-closed, when storage
   is unconfigured);
-- **closed/expired/revoked invitations** — removing the plaintext invited email.
+- **closed/expired/revoked invitations** — removing the plaintext invited email;
+- **idempotency keys** (CORE-PRIV-006) — bounding the otherwise insert-only `idempotency_keys`
+  table (a row per idempotent create/reveal/purchase replay, previously never reclaimed). This
+  family is **not tenant-scoped** and carries no host content, so it deletes **by age alone**
+  past any plausible client retry horizon and is logged **by count, never by key value** — a
+  bounded bulk delete with no per-record audit.
 
 Each window is measured from the record's age and is **independently enabled**. The deletions
 an operator would be surprised to lose — sessions, recaps, completed exports — are **disabled
-by default**; the clear privacy-hygiene invitation-email purge is **enabled by default**
-(`Retention:*`; see [`docs/13`](docs/13_SELF_HOSTING_REQUIREMENTS.md)). Every purge is
-**audited by id** — a tenant-scoped `RecordRetentionPurged` fact naming the tenant, workspace
-and purged record by id, with no actor and no content — and the audit reference is a recorded
-fact (not a foreign key), so it survives the purge and the tamper-evident audit chain still
-verifies. Each purge commits its audit append and delete in **one transaction** and re-loads
-the record tenant-scoped inside it, so the sweep is **idempotent and concurrency-safe**:
-overlapping sweeps (or worker replicas) never double-delete, double-audit or error. A new
+by default**; the clear privacy-hygiene purges — the invitation-email purge and the
+idempotency-key purge — are **enabled by default** (`Retention:*`; see
+[`docs/13`](docs/13_SELF_HOSTING_REQUIREMENTS.md)). Every **tenant-scoped** purge is **audited
+by id** — a `RecordRetentionPurged` fact naming the tenant, workspace and purged record by id,
+with no actor and no content — and the audit reference is a recorded fact (not a foreign key),
+so it survives the purge and the tamper-evident audit chain still verifies. Each such purge
+commits its audit append and delete in **one transaction** and re-loads the record
+tenant-scoped inside it, so the sweep is **idempotent and concurrency-safe**: overlapping
+sweeps (or worker replicas) never double-delete, double-audit or error (the idempotency-key
+bulk delete is naturally idempotent — a row another sweep already removed matches nothing). A
 nullable `export_jobs.artifact_bucket` / `artifact_object_key` pair records where a completed
 export's blob lives (Core's manifest-only pipeline leaves it null), so the sweep can purge the
 object with the row.

@@ -238,14 +238,24 @@ free of starvation. The families and what a purge removes:
 - **Closed/expired/revoked invitations** (`workspace_invitations` that are `Accepted`, `Revoked`, or `Pending`
   but past `expires_at`). The purge removes the plaintext `invited_email`; the invitation's lifecycle audit
   facts are separate `audit_logs` rows that survive.
+- **Idempotency keys** (`idempotency_keys`, CORE-PRIV-006). The table is **insert-only** retry-safety
+  infrastructure (`SystemModule/IdempotencyKeyStore.cs`) — a row is written on every idempotent
+  create/reveal/purchase replay and was never reclaimed, so it grew **unbounded** over a deployment's lifetime.
+  This family deletes rows by **age alone** once they are well past any plausible client retry horizon (a
+  30-day default window, **enabled** by default). It is the one **non-tenant-scoped** family: `idempotency_keys`
+  has no `organization_id` and the rows carry no host content (only a server-composed `scope` partition and a
+  client `key` correlation token), so the purge is **not** audited per row and is logged **by count, never by
+  key value**. It is a bounded bulk delete (oldest `id` first, batch-limited), so it is naturally idempotent and
+  concurrency-safe — a row another sweep already removed simply matches nothing. No schema change is needed: the
+  existing `idempotency_keys(id)` primary key orders the sweep and the `created_at` column gives the age.
 
-Every purge is **audited by id**: a tenant-scoped `audit_logs` `RecordRetentionPurged` fact records the tenant,
-workspace and the purged record's generic kind name + surrogate id, with **no actor** (a system job) and no
-content (threat T7). Because the audit reference is a recorded fact, not a foreign key, the audit row survives
-the purge and the per-tenant tamper-evident hash chain still verifies. Each purge (audit append + delete) commits
-in **one transaction** and re-loads its record tenant-scoped inside that transaction, so overlapping sweeps (or
-worker replicas) are idempotent and concurrency-safe — a record already purged is skipped, and a lost delete
-race rolls the audit append back with it.
+Every **tenant-scoped** purge (the first four families) is **audited by id**: a tenant-scoped `audit_logs`
+`RecordRetentionPurged` fact records the tenant, workspace and the purged record's generic kind name + surrogate
+id, with **no actor** (a system job) and no content (threat T7). Because the audit reference is a recorded fact,
+not a foreign key, the audit row survives the purge and the per-tenant tamper-evident hash chain still verifies.
+Each such purge (audit append + delete) commits in **one transaction** and re-loads its record tenant-scoped
+inside that transaction, so overlapping sweeps (or worker replicas) are idempotent and concurrency-safe — a
+record already purged is skipped, and a lost delete race rolls the audit append back with it.
 
 ## Session-scoped visibility rules (CORE-SVIS-001)
 

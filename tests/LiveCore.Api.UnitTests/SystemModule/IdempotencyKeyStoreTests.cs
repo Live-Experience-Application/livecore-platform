@@ -13,8 +13,10 @@ namespace LiveCore.Api.UnitTests.SystemModule;
 ///
 /// Coverage: the aggregate's scope/key invariants; the store round-trip; that a second record of the
 /// same (scope, key) is rejected as a <see cref="IdempotencyKeyAddResult.Duplicate"/> (the idempotency
-/// signal) while the same key under a DIFFERENT scope is independent; and the find/blank-guard
-/// behavior. All fixtures are generic (AGENTS.md).
+/// signal) while the same key under a DIFFERENT scope is independent; the find/blank-guard behavior; and
+/// the CORE-PRIV-006 retention purge (<see cref="IdempotencyKeyStore.DeleteCreatedBeforeAsync"/>) that
+/// removes rows by age alone, bounded by the batch and idempotent when nothing is expired. All fixtures
+/// are generic (AGENTS.md).
 /// </summary>
 public sealed class IdempotencyKeyStoreTests : IDisposable
 {
@@ -218,5 +220,89 @@ public sealed class IdempotencyKeyStoreTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentException>(() => store.FindAsync("", "key", CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => store.FindAsync("scope", "  ", CancellationToken.None));
+    }
+
+    // --- Retention purge (CORE-PRIV-006) ---------------------------------------
+
+    [Fact]
+    public async Task Delete_created_before_removes_only_older_rows_and_returns_the_count()
+    {
+        var window = new DateTimeOffset(2026, 6, 17, 0, 0, 0, TimeSpan.Zero);
+        await SeedKeyAsync("reveal:org-a", "old-1", window - TimeSpan.FromDays(40));
+        await SeedKeyAsync("reveal:org-a", "old-2", window - TimeSpan.FromDays(31));
+        await SeedKeyAsync("reveal:org-a", "fresh", window - TimeSpan.FromHours(1));
+
+        await using (var context = CreateContext())
+        {
+            // Bound by age alone: the two rows recorded before the window are removed; the recent one survives.
+            var deleted = await new IdempotencyKeyStore(context)
+                .DeleteCreatedBeforeAsync(window - TimeSpan.FromDays(30), maxCount: 100, CancellationToken.None);
+            Assert.Equal(2, deleted);
+        }
+
+        await using (var context = CreateContext())
+        {
+            Assert.Null(await new IdempotencyKeyStore(context).FindAsync("reveal:org-a", "old-1", CancellationToken.None));
+            Assert.Null(await new IdempotencyKeyStore(context).FindAsync("reveal:org-a", "old-2", CancellationToken.None));
+            Assert.NotNull(await new IdempotencyKeyStore(context).FindAsync("reveal:org-a", "fresh", CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task Delete_created_before_is_bounded_by_the_batch_size()
+    {
+        var window = new DateTimeOffset(2026, 6, 17, 0, 0, 0, TimeSpan.Zero);
+        for (var i = 0; i < 3; i++)
+        {
+            await SeedKeyAsync("reveal:org-a", $"old-{i}", window - TimeSpan.FromDays(40));
+        }
+
+        await using (var context = CreateContext())
+        {
+            // A single sweep can never do unbounded work: only maxCount rows are removed this run.
+            var deleted = await new IdempotencyKeyStore(context)
+                .DeleteCreatedBeforeAsync(window - TimeSpan.FromDays(30), maxCount: 2, CancellationToken.None);
+            Assert.Equal(2, deleted);
+        }
+
+        await using (var context = CreateContext())
+        {
+            // The remaining past-window row is covered by the next sweep (no starvation).
+            var deleted = await new IdempotencyKeyStore(context)
+                .DeleteCreatedBeforeAsync(window - TimeSpan.FromDays(30), maxCount: 2, CancellationToken.None);
+            Assert.Equal(1, deleted);
+        }
+    }
+
+    [Fact]
+    public async Task Delete_created_before_is_idempotent_when_nothing_is_expired()
+    {
+        var window = new DateTimeOffset(2026, 6, 17, 0, 0, 0, TimeSpan.Zero);
+        await SeedKeyAsync("reveal:org-a", "fresh", window - TimeSpan.FromHours(1));
+
+        await using var context = CreateContext();
+        var deleted = await new IdempotencyKeyStore(context)
+            .DeleteCreatedBeforeAsync(window - TimeSpan.FromDays(30), maxCount: 100, CancellationToken.None);
+
+        // No rows past the window: a no-op that removes nothing and does not error.
+        Assert.Equal(0, deleted);
+        Assert.NotNull(await new IdempotencyKeyStore(context).FindAsync("reveal:org-a", "fresh", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Delete_created_before_rejects_a_non_positive_batch_size()
+    {
+        await using var context = CreateContext();
+        var store = new IdempotencyKeyStore(context);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => store.DeleteCreatedBeforeAsync(_createdAt, maxCount: 0, CancellationToken.None));
+    }
+
+    private async Task SeedKeyAsync(string scope, string key, DateTimeOffset createdAt)
+    {
+        await using var context = CreateContext();
+        await new IdempotencyKeyStore(context).AddAsync(
+            IdempotencyKey.Create(scope, key, createdAt), CancellationToken.None);
     }
 }
