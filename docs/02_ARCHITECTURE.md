@@ -174,6 +174,32 @@ single authorization decision:
   (`AuthorizationCache:Enabled` / `AuthorizationCache:Ttl`, docs/13_SELF_HOSTING_REQUIREMENTS.md) and can be
   disabled to force every lookup straight to the database — a change to throughput only, never to a decision.
 
+### Response-path bandwidth: JSON response compression (CORE-PERF-006)
+
+The list, feed and reconnect-replay endpoints return JSON ARRAYS that can be large for a busy session, and a
+mobile client on a constrained link pays that bandwidth/latency on every read. Under the same "Performance and
+Scalability" epic the API therefore wires ASP.NET Core's built-in **response-compression** middleware
+(`UseResponseCompression`; part of the shared framework, NO new dependency), changing only transfer encoding and
+never response content:
+
+- **Negotiated, JSON-only, Brotli-preferred.** A client that advertises `Accept-Encoding: br`/`gzip` receives the
+  same body compressed (Brotli preferred, gzip fallback); a client that sends no `Accept-Encoding` — or only an
+  encoding the server cannot satisfy — gets the identical UNCOMPRESSED body, so the response is byte-for-byte
+  unchanged. Only `application/json` and the `application/problem+json` error shape are compressed
+  (`ResponseCompressionConfiguration.CompressibleJsonMimeTypes`); the Prometheus `/metrics` text, signed-asset
+  redirects and any already-compressed/binary payload pass through untouched, and a response that already carries
+  a `Content-Encoding` is never re-compressed.
+- **The realtime hub transport is excluded.** The middleware is added only for non-hub paths (the
+  `HubBearerToken.PathPrefix` = `/hubs` area is branched out in `apps/api/Program.cs`), so the SignalR
+  negotiate/transport — which manages its own framing — is never double-compressed.
+- **Configurable, on by default.** The feature is on out of the box and tunable (`ResponseCompression:Enabled`,
+  `ResponseCompression:EnableForHttps`; docs/13_SELF_HOSTING_REQUIREMENTS.md). Compression over HTTPS is on by
+  default — the API returns bearer-token-authorized JSON DATA, not HTML mixing a stable secret with reflected
+  input, so the BREACH precondition does not apply — and an operator can revert to the framework's HTTPS-off
+  posture or disable the feature entirely. Like CORS, the rate limiter and the security headers, it is a coarse
+  edge optimization layered ON TOP OF the OIDC/tenant authorization every endpoint enforces; it never widens
+  authorization and carries no tenant/principal/resource detail (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+
 ## Realtime flow
 
 ```text

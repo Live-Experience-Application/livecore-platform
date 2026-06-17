@@ -85,6 +85,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Atomic quota check-and-consume (no TOCTOU race)](#atomic-quota-check-and-consume-no-toctou-race)
     - [Reverse-proxy edge: CORS, forwarded headers and HTTPS posture](#reverse-proxy-edge-cors-forwarded-headers-and-https-posture)
     - [Request rate limiting](#request-rate-limiting)
+    - [HTTP response compression for JSON](#http-response-compression-for-json)
     - [Graceful shutdown and SignalR sticky sessions](#graceful-shutdown-and-signalr-sticky-sessions)
 - [HTTP API and domain](#http-api-and-domain)
     - [Tenant model and HTTP API](#tenant-model-and-http-api)
@@ -1437,6 +1438,37 @@ abuse ceiling layered **on top of** the OIDC/tenant authorization every endpoint
 enforces server-side; it never widens authorization
 (`docs/07_SECURITY_THREAT_MODEL.md`), exactly like the CORS allow-list. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration keys.
+
+### HTTP response compression for JSON
+
+The API compresses its JSON responses with ASP.NET Core's built-in response-compression
+middleware (`UseResponseCompression`, CORE-PERF-006, the "Performance and Scalability" epic),
+**on by default**. Before this the pipeline applied no compression, so the list, feed and
+reconnect-replay endpoints — which return JSON **arrays** that can be large for a busy session
+— were always sent in full, inflating bandwidth and latency for large sessions and for mobile
+clients on a constrained link. The middleware is part of the shared framework, so **no new
+dependency** is added, and it changes only the transfer encoding, never the response body:
+
+- **Negotiated, JSON-only, Brotli-preferred.** A client that advertises `Accept-Encoding:
+br`/`gzip` receives the same body compressed (Brotli preferred, gzip fallback); a client
+  that sends no `Accept-Encoding` — or only an encoding the server cannot satisfy — gets the
+  identical **uncompressed** body, so the response is byte-for-byte unchanged. Only
+  `application/json` and the `application/problem+json` error shape are compressed; the
+  Prometheus `/metrics` text, signed-asset redirects and any already-compressed/binary payload
+  pass through untouched, and a response that already carries a `Content-Encoding` is never
+  re-compressed.
+- **The realtime hub transport is excluded.** The middleware is added only for non-hub paths
+  (the `/hubs` SignalR area is branched out of the pipeline), so the negotiate/transport —
+  which manages its own framing — is never double-compressed.
+- **Configurable, on by default.** The feature is on out of the box and tunable
+  (`ResponseCompression:Enabled`, `ResponseCompression:EnableForHttps`). Compression over HTTPS
+  is on by default — the API returns bearer-token-authorized JSON **data**, not HTML mixing a
+  stable secret with reflected input, so the BREACH precondition does not apply — and an
+  operator can revert to the framework HTTPS-off posture or disable the feature entirely. Like
+  CORS, the rate limiter and the security headers, it is a coarse edge optimization layered
+  **on top of** the OIDC/tenant authorization every endpoint already enforces; it never widens
+  authorization and carries no tenant/principal/resource detail (threat T7). See
+  `docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration keys.
 
 ### Graceful shutdown and SignalR sticky sessions
 

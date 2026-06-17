@@ -589,6 +589,35 @@ defense layered on the OIDC/tenant authorization every endpoint already enforces
 they never widen authorization. This complements the transport headers above
 (CORE-SEC-005).
 
+### HTTP response compression (`ResponseCompression:*`) (CORE-PERF-006)
+
+The API compresses its JSON responses with ASP.NET Core's built-in response-compression
+middleware (`UseResponseCompression`), **on by default**, so a client that advertises
+`Accept-Encoding: br`/`gzip` receives the same list/feed/replay payload compressed —
+cutting bandwidth and latency for large sessions and mobile clients. It changes only the
+transfer encoding, never the response body:
+
+- **JSON only, Brotli preferred.** Only `application/json` and `application/problem+json`
+  are compressed; the Prometheus `/metrics` text, signed-asset redirects and any
+  already-compressed/binary payload pass through untouched. Brotli is preferred with gzip
+  as the broad-compatibility fallback. A client that sends no `Accept-Encoding` (or only an
+  encoding the server cannot satisfy) gets the identical uncompressed body.
+- **The SignalR hub transport is excluded.** The middleware is added only for non-hub paths
+  (the `/hubs` area), so SignalR's own transport framing is never double-compressed.
+
+Configuration:
+
+- `ResponseCompression__Enabled=false` turns the whole feature off (default `true`): the
+  middleware is not added and every response is sent uncompressed.
+- `ResponseCompression__EnableForHttps=false` reverts to the framework's HTTPS-off posture
+  (default `true`, i.e. JSON is compressed over HTTPS too). HTTPS compression is on by
+  default because the API returns bearer-token-authorized JSON **data**, not HTML mixing a
+  stable secret with reflected request input, so the BREACH precondition does not apply.
+
+Compression carries no tenant/principal/resource detail (threat T7) and — like CORS, the
+rate limiter and the security headers — it is a coarse edge optimization layered on the
+OIDC/tenant authorization every endpoint already enforces; it never widens authorization.
+
 ### Constrained host header (`AllowedHosts`)
 
 `AllowedHosts` is constrained (no longer `*`): the repository default permits only
@@ -981,6 +1010,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `HttpsSecurity:HttpsRedirection:Enabled` / `Hsts:Enabled` | `HttpsSecurity__HttpsRedirection__Enabled`, `HttpsSecurity__Hsts__Enabled` | no | only without a TLS-terminating proxy | API | Both OFF: the proxy owns the redirect/HSTS (CORE-SEC-005) |
 | `SecurityHeaders:Enabled` / `<Header>:Enabled` / `<Header>:Value` | `SecurityHeaders__Enabled`, `SecurityHeaders__ContentTypeOptions__Enabled`, `SecurityHeaders__ContentSecurityPolicy__Value`, … | no | no (tunable) | API | Baseline headers ON: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, deny-all CSP on every response (CORE-SEC-009) |
 | `RateLimiting:Enabled` / `Global:*` / `Anonymous:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, `RateLimiting__Anonymous__PermitLimit`, `RateLimiting__Webhooks__FloorPermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 300/60s per anonymous IP, 60/60s per webhook IP; non-disableable webhook floor 600/60s (CORE-SEC-001, CORE-SEC-007) |
+| `ResponseCompression:Enabled` / `EnableForHttps` | `ResponseCompression__Enabled`, `ResponseCompression__EnableForHttps` | no | no (tunable) | API | JSON response compression ON (Brotli/gzip), incl. over HTTPS; JSON-only, hub transport excluded; content unchanged (CORE-PERF-006) |
 | `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |

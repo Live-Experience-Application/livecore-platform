@@ -142,6 +142,20 @@ builder.Services.AddLiveCoreHttpsSecurity(builder.Configuration);
 // the OIDC/tenant authorization every endpoint already enforces.
 builder.Services.AddLiveCoreSecurityHeaders(builder.Configuration);
 
+// HTTP response compression for JSON (CORE-PERF-006, the "Performance and Scalability" epic). Before this story
+// the pipeline wired NEITHER AddResponseCompression NOR UseResponseCompression, so the list/feed/replay
+// endpoints — which return JSON ARRAYS that can be large for a busy session — were always sent uncompressed,
+// inflating bandwidth and latency for large sessions and mobile clients. This registers ASP.NET Core's
+// response-compression services (Brotli preferred, gzip fallback; part of the shared framework, NO new
+// dependency) configured to compress ONLY application/json and application/problem+json, plus the resolved
+// ResponseCompressionSettings the pipeline reads to decide whether to add UseResponseCompression below. The
+// middleware is added (below) only for NON-hub paths, so the /hubs SignalR negotiate/transport is never
+// double-compressed. It changes only transfer encoding, never response content: a client that sends no
+// Accept-Encoding (or one the server cannot satisfy) gets the identical uncompressed body. The feature is ON by
+// default and configurable (ResponseCompression:*; docs/13_SELF_HOSTING_REQUIREMENTS.md), and — like CORS, the
+// rate limiter and the security headers — it never widens the OIDC/tenant authorization every endpoint enforces.
+builder.Services.AddLiveCoreResponseCompression(builder.Configuration);
+
 // Graceful shutdown drain window (CORE-DEP-002, the "Deployment and Supply Chain" epic). On a rolling restart
 // the orchestrator sends this instance a termination signal; the host then stops accepting new connections and
 // DRAINS its in-flight work before exiting. This applies ONE explicit, tuned, configurable
@@ -1286,6 +1300,8 @@ app.UseMiddleware<SecurityHeadersMiddleware>();
 // cannot double-redirect or fight the edge. The header/redirect carry no tenant/principal/resource detail
 // (threat T7; docs/13_SELF_HOSTING_REQUIREMENTS.md).
 var httpsSecurity = app.Services.GetRequiredService<HttpsSecurityConfiguration.HttpsSecuritySettings>();
+var responseCompression =
+    app.Services.GetRequiredService<ResponseCompressionConfiguration.ResponseCompressionSettings>();
 if (httpsSecurity.HstsEnabled)
 {
     app.UseHsts();
@@ -1294,6 +1310,24 @@ if (httpsSecurity.HstsEnabled)
 if (httpsSecurity.HttpsRedirectionEnabled)
 {
     app.UseHttpsRedirection();
+}
+
+// HTTP response compression for JSON (CORE-PERF-006). Wired here — early, before the middleware that writes the
+// response body, as the framework requires — but ONLY for non-hub paths: the branch predicate excludes the
+// SignalR hub area (HubBearerToken.PathPrefix, "/hubs", segment-matched so a look-alike like "/hubsignup" is
+// unaffected), so the hub negotiate/transport is never double-compressed (SignalR owns its transport framing).
+// On the REST surface a client that advertises Accept-Encoding: br/gzip receives the SAME JSON list/feed/replay
+// payload compressed (Brotli preferred); a client that sends no Accept-Encoding, or only an encoding the server
+// cannot satisfy, gets the identical uncompressed body, so response CONTENT is unchanged. Only application/json
+// and application/problem+json are compressed (ResponseCompressionConfiguration.CompressibleJsonMimeTypes), so
+// the Prometheus /metrics text, signed-asset redirects and any already-compressed/binary payload pass through
+// untouched. The whole feature is skipped when disabled (ResponseCompression:Enabled=false), exactly as
+// UseHsts/UseHttpsRedirection above are added only when their toggle is on.
+if (responseCompression.Enabled)
+{
+    app.UseWhen(
+        static context => !context.Request.Path.StartsWithSegments(HubBearerToken.PathPrefix),
+        static branch => branch.UseResponseCompression());
 }
 
 // Request metrics (CORE-OBS-001) run first among the application middleware so they time the WHOLE request
