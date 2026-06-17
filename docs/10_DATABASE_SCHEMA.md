@@ -95,6 +95,7 @@ assets(workspace_id, id)
 asset_links(workspace_id, asset_id)
 asset_links(workspace_id, asset_id, target_type, target_id) unique
 audit_logs(organization_id, created_at)
+audit_logs(organization_id, id)
 audit_logs(organization_id, sequence) unique
 audit_log_sequences(organization_id)
 export_jobs(workspace_id, id)
@@ -113,6 +114,23 @@ billing_account_links(purchase_transaction_id) unique
 billing_account_links(subject_type, subject_id)
 idempotency_keys(scope, key)
 ```
+
+### Paged audit-log read index `audit_logs(organization_id, id)` (CORE-PERF-007)
+
+The view-audit-log page read (`AuditLogRepository.ListPageByOrganizationAsync`, reached live by
+`GET /api/v1/audit-logs`) and the full id-ordered read (`ListByOrganizationAsync`) are
+`WHERE organization_id = X ORDER BY id` (the time-ordered UUIDv7 surrogate) with `OFFSET`/`LIMIT`. The
+`(organization_id, created_at)` critical index and the unique `(organization_id, sequence)` index both lead
+with the tenant but order by a **different** column, so neither satisfies the id ordering — without a
+matching composite PostgreSQL matches the tenant prefix and then **sorts it on every page**, a cost that
+grows without bound as the append-only log grows. The non-unique `audit_logs(organization_id, id)` covering
+index closes that gap: the tenant equality fixes `organization_id` and the index already yields rows in `id`
+order, so a page is index-backed with **no full sort, independent of offset depth**. It is the
+organization-scoped analogue of the `(workspace_id, id)` index every workspace-scoped id-ordered list carries
+(`assets`, `export_jobs`, `recaps`). It is purely an ordering aid (the id is already unique on its own), and
+the `(organization_id, created_at)` index still backs future time-range audit queries (CORE-AUD-005) while
+the unique `(organization_id, sequence)` index still backs the append-order hash-chain walk (CORE-SEC-003 /
+CORE-PERF-005).
 
 ## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006, CORE-WS-006)
 

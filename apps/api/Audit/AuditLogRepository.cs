@@ -172,13 +172,15 @@ internal sealed class AuditLogRepository : IAuditLogRepository
             throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
         }
 
-        // The predicate matches organization_id (the leading column of the documented critical index
-        // audit_logs(organization_id, created_at)), so the list is exactly tenant-scoped: another
-        // tenant's records are never returned even when their ids would otherwise be addressable
-        // (threat T5). The order is by the time-ordered surrogate id (UUIDv7), which is chronological
-        // and — unlike ordering by the DateTimeOffset created_at — is supported by every provider
-        // (SQLite cannot ORDER BY a DateTimeOffset); this matches the ordering convention of the other
-        // repositories. The created_at column still backs future time-range audit queries (CORE-AUD-005).
+        // The predicate matches organization_id, so the list is exactly tenant-scoped: another tenant's
+        // records are never returned even when their ids would otherwise be addressable (threat T5). The
+        // order is by the time-ordered surrogate id (UUIDv7), which is chronological and — unlike ordering
+        // by the DateTimeOffset created_at — is supported by every provider (SQLite cannot ORDER BY a
+        // DateTimeOffset); this matches the ordering convention of the other repositories. The
+        // WHERE organization_id = X ORDER BY id shape is backed by the covering index
+        // audit_logs(organization_id, id) (CORE-PERF-007), so the read is index-backed with no full sort;
+        // the (organization_id, created_at) critical index still backs future time-range audit queries
+        // (CORE-AUD-005).
         //
         // NON-TRACKED read (CORE-SEC-004): the audit log is TAMPER-PROOF in code, not only tamper-evident.
         // AsNoTracking returns detached entities, so an in-process caller can never load an audit row, mutate
@@ -218,13 +220,16 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         }
 
         // Same tenant-scoped, chronologically ordered read as ListByOrganizationAsync — the predicate matches
-        // organization_id (the leading column of the critical index audit_logs(organization_id, created_at)),
-        // so a foreign tenant's records are never returned (threat T5) — but bounded by Skip/Take so an
-        // unbounded log is never materialized. Ordering by the time-ordered surrogate id (UUIDv7) is
-        // provider-independent (SQLite cannot ORDER BY a DateTimeOffset) and stable for an append-only log:
-        // a new entry appends at the end (a higher id) and never shifts an already-read page. Skip/Take
-        // translate to the provider's LIMIT/OFFSET. NON-TRACKED (CORE-SEC-004) like the other reads, so a read
-        // entry can never be mutated and silently persisted back.
+        // organization_id, so a foreign tenant's records are never returned (threat T5) — but bounded by
+        // Skip/Take so an unbounded log is never materialized. Ordering by the time-ordered surrogate id
+        // (UUIDv7) is provider-independent (SQLite cannot ORDER BY a DateTimeOffset) and stable for an
+        // append-only log: a new entry appends at the end (a higher id) and never shifts an already-read page.
+        // Skip/Take translate to the provider's LIMIT/OFFSET. The WHERE organization_id = X ORDER BY id shape
+        // is backed by the covering index audit_logs(organization_id, id) (CORE-PERF-007): the tenant equality
+        // fixes organization_id and the index already yields rows in id order, so a page is index-backed with
+        // NO full sort no matter how deep the offset — without it Postgres would sort the matched tenant prefix
+        // on every page. NON-TRACKED (CORE-SEC-004) like the other reads, so a read entry can never be mutated
+        // and silently persisted back.
         return await _dbContext.AuditLogs
             .AsNoTracking()
             .Where(entry => entry.OrganizationId == organizationId)

@@ -13,9 +13,17 @@ namespace LiveCore.Api.Audit;
 /// audit"). The log is tenant-scoped, so it carries an <c>organization_id</c> column
 /// (docs/10_DATABASE_SCHEMA.md principle: "tenant-scoped tables include <c>organization_id</c>").
 ///
-/// The single documented critical index is <c>audit_logs(organization_id, created_at)</c>
+/// The documented critical index is <c>audit_logs(organization_id, created_at)</c>
 /// (docs/10_DATABASE_SCHEMA.md): the audit log is read per tenant in time order, so the composite index
 /// leads with the tenant column and then the timestamp. It is NON-unique — a tenant has many entries.
+///
+/// The tenant-scoped id-ordered reads (<c>ListByOrganizationAsync</c> and the paged
+/// <c>ListPageByOrganizationAsync</c> reached by <c>GET /api/v1/audit-logs</c>) order by the time-ordered
+/// surrogate id, NOT by <c>created_at</c>, so the critical index cannot satisfy their ordering. The
+/// <c>audit_logs(organization_id, id)</c> covering index (CORE-PERF-007) backs that read: the tenant
+/// equality fixes <c>organization_id</c> and the index already yields rows in <c>id</c> order, so a page
+/// is index-backed with no full sort, independent of offset depth. It is the organization-scoped analogue
+/// of the <c>(workspace_id, id)</c> index every workspace-scoped id-ordered list carries.
 ///
 /// FOREIGN KEYS — ONLY THE TENANT. <c>organization_id</c> is a foreign key into <c>organizations(id)</c>
 /// so tenant isolation is enforced at the row level (threat T5 in docs/07_SECURITY_THREAT_MODEL.md); it
@@ -111,6 +119,20 @@ internal sealed class AuditLogConfiguration : IEntityTypeConfiguration<AuditLogE
         // tenant column and then the timestamp (docs/10_DATABASE_SCHEMA.md). NON-unique.
         builder.HasIndex(entry => new { entry.OrganizationId, entry.CreatedAt })
             .HasDatabaseName("ix_audit_logs_organization_id_created_at");
+
+        // PAGED TENANT READ index audit_logs(organization_id, id) (CORE-PERF-007; docs/10_DATABASE_SCHEMA.md).
+        // The view-audit-log page read (ListPageByOrganizationAsync, reached by GET /api/v1/audit-logs) and the
+        // full id-ordered read (ListByOrganizationAsync) are WHERE organization_id = X ORDER BY id (the
+        // time-ordered UUIDv7 surrogate) with OFFSET/LIMIT. The (organization_id, created_at) critical index
+        // leads with the tenant but orders by created_at, so it cannot satisfy the id ordering — Postgres would
+        // sort the whole matched tenant prefix on every page, ever more expensive as the unbounded log grows.
+        // This composite leads with the tenant then the id, so the equality fixes organization_id and the index
+        // already yields rows in id order: the page is index-backed with no full sort, independent of offset
+        // depth. NON-unique: the id is already unique on its own, so this is a covering ordering aid, not a
+        // constraint. It is the organization-scoped analogue of the (workspace_id, id) index every
+        // workspace-scoped id-ordered list carries (assets, export_jobs, recaps; docs/10_DATABASE_SCHEMA.md).
+        builder.HasIndex(entry => new { entry.OrganizationId, entry.Id })
+            .HasDatabaseName("ix_audit_logs_organization_id_id");
 
         // Integrity backstop for the hash chain (CORE-SEC-003): the per-tenant append sequence is UNIQUE, so no
         // two entries of a tenant can ever share a sequence and the chain stays a single linear spine
