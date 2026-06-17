@@ -274,16 +274,48 @@ remote user the application interacts with:
 {
   "license": "AGPL-3.0-or-later",
   "version": "<running build version>",
-  "sourceUrl": "https://github.com/Live-Experience-Application/livecore-platform"
+  "sourceUrl": "https://github.com/Live-Experience-Application/livecore-platform/tree/v<running build version>"
 }
 ```
 
 The build version is read from the running assembly, so the offer always identifies
-the exact source revision deployed. A deployment that runs **modified** source must
-offer **its own** Corresponding Source, so the offered location is
-configuration-overridable with `SourceOffer:RepositoryUrl` (env
-`SourceOffer__RepositoryUrl`); unset, it falls back to the canonical upstream
-repository.
+the exact source revision deployed.
+
+### The offer is pinned to the running revision (CORE-LIC-005)
+
+Section 13 obliges the offer to resolve to the Corresponding Source of the **exact
+version running**, so `sourceUrl` is **pinned to the running revision** rather than
+the repository root: it is the repository pinned to the build version's release tag,
+`<repository>/tree/v<version>` (e.g.
+`https://github.com/Live-Experience-Application/livecore-platform/tree/v1.2.3`). The
+version is the single build version the release pipeline stamps (reused via
+`ResolveBuildVersion`), and the pipeline tags each release `v<version>`, so the
+pinned URL resolves to that tag's tree — a remote user can fetch the source that is
+actually running, not whatever the default branch later becomes.
+
+### A modified deployment cannot silently keep offering upstream (CORE-LIC-005)
+
+A deployment that runs **modified** source must offer **its own** Corresponding
+Source, so the offered repository is configuration-overridable with
+`SourceOffer:RepositoryUrl` (env `SourceOffer__RepositoryUrl`); unset, it falls back
+to the canonical upstream repository (still revision-pinned). To stop a modified
+deployment **silently** keeping the upstream offer, the configuration is **validated,
+fail-closed**, by the documented rule:
+
+- A deployment that **declares modified source** by setting `SourceOffer:Modified`
+  (env `SourceOffer__Modified`) to `true` **must also set** `SourceOffer:RepositoryUrl`
+  to its own Corresponding Source. If it leaves the repository unset, the host
+  **refuses to start** — rather than silently offering the canonical upstream source
+  as if it were the modified source running there.
+- A configured `SourceOffer:RepositoryUrl` must be an **absolute http(s) URL**; a
+  malformed value would offer a location no remote user can fetch, so the host
+  **refuses to start**.
+
+This mirrors the OIDC audience startup guard (CORE-OPS-004): a configuration foot-gun
+that would otherwise serve a wrong value is refused at startup. An **unmodified**
+deployment leaves both keys unset and always starts, offering the revision-pinned
+canonical upstream source. The rule is exercised end-to-end against the real host by
+`SourceOfferStartupGuardTests`.
 
 Like `/health/*` and `/metrics`, `/source` is a top-level infrastructure route, not
 part of the versioned `/api/v1` product surface (so it is not a row in

@@ -815,11 +815,21 @@ unauthenticated endpoint that discharges that obligation (CORE-CMP-001):
 It returns JSON — `{ "license", "version", "sourceUrl" }` — and requires no
 authentication, because the offer is owed to every remote user the application
 interacts with. The build version is read from the running assembly, so the offer
-always identifies the exact source revision deployed. A deployment that runs
-**modified** source must offer **its own** Corresponding Source, so the offered
-location is configuration-overridable with `SourceOffer:RepositoryUrl`
-(`SourceOffer__RepositoryUrl`); unset, it falls back to the canonical upstream
-repository.
+always identifies the exact source revision deployed, and `sourceUrl` is **pinned to
+that revision** — the repository pinned to the build version's release tag,
+`<repository>/tree/v<version>` — so it resolves to the Corresponding Source of the
+**exact version running**, never the bare repository root (CORE-LIC-005).
+
+A deployment that runs **modified** source must offer **its own** Corresponding
+Source, so the offered repository is configuration-overridable with
+`SourceOffer:RepositoryUrl` (`SourceOffer__RepositoryUrl`); unset, it falls back to
+the canonical upstream repository (still revision-pinned). So a modified deployment
+cannot **silently** keep offering upstream, the configuration is validated
+fail-closed: a deployment that declares modified source with `SourceOffer:Modified`
+(`SourceOffer__Modified=true`) but leaves `SourceOffer:RepositoryUrl` unset — or sets
+a malformed (non-absolute-http) repository — makes the host **refuse to start**,
+mirroring the OIDC audience startup guard (CORE-OPS-004). An unmodified deployment
+leaves both unset and always starts.
 
 Like `/health/*` and `/metrics`, `/source` is a top-level infrastructure route, not
 part of the versioned `/api/v1` product surface, and it exposes only the license, a

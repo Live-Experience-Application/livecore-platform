@@ -45,6 +45,17 @@ builder.Logging.AddJsonConsole(options =>
 // (docs/07_SECURITY_THREAT_MODEL.md).
 builder.WebHost.ConfigureKestrel(options => options.AddServerHeader = false);
 
+// AGPL section 13 source-offer configuration guard (CORE-LIC-005). Build the offer once at startup so a
+// deployment whose source-offer configuration would yield a wrong or non-fetchable Corresponding Source is
+// REFUSED HERE rather than first surfacing on a /source request: a deployment that declares modified source
+// (SourceOffer:Modified=true) but left SourceOffer:RepositoryUrl unset would silently offer the canonical
+// UPSTREAM source instead of the modified source actually running, and a malformed RepositoryUrl would offer a
+// location no remote user can fetch. This mirrors the OIDC audience startup guard (CORE-OPS-004): a foot-gun
+// that would otherwise serve a wrong value is refused at startup, fail-closed. An unmodified deployment leaves
+// both unset and resolves to the revision-pinned canonical upstream offer, so it always starts. The resolved
+// value is discarded; only its validation side effect matters here. See docs/16_LICENSING.md.
+_ = SourceOffer.ForRunningBuild(builder.Configuration);
+
 builder.Services.AddHealthChecks();
 
 // Operational metrics (CORE-OBS-001). LiveCoreMetrics owns the eight signals docs/15_OBSERVABILITY.md
