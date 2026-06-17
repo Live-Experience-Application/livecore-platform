@@ -260,7 +260,7 @@ internal static class HideEndpoints
                         // audience-wide hide reaches the observers and every active participant — so everyone
                         // who could be showing the resource is told to remove it. The payload carries resource
                         // IDENTIFIERS only, never resolved content (threats T2/T3/T7).
-                        var payload = JsonSerializer.Serialize(new HideEventPayload(
+                        var payload = JsonSerializer.Serialize(new SessionEventPayloads.ResourceReferenceEventPayload(
                             resourceTypeName,
                             result.ResourceId));
                         var contentHidden = SessionEvent.Create(
@@ -321,12 +321,6 @@ internal static class HideEndpoints
     /// the commit (commit-then-publish, CORE-CONC-002). The list is empty when the hide changed nothing.
     /// </summary>
     private readonly record struct HideCommitResult(HideResult Result, IReadOnlyList<SessionEvent> Events);
-
-    /// <summary>
-    /// The server-composed payload of a <c>ContentHidden</c> event: the generic kind and id of the hidden
-    /// resource. Identifiers only — never the resolved content (threat T7). Mirrors the reveal payload.
-    /// </summary>
-    private sealed record HideEventPayload(string ResourceType, Guid ResourceId);
 
     /// <summary>
     /// Reads the required <c>Idempotency-Key</c> header. Returns <see langword="false"/> when it is

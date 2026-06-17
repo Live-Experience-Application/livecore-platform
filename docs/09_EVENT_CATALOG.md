@@ -55,6 +55,35 @@ emitted or explicitly deferred.
 | ContentHidden | Host/CoHost | selected recipients | yes | un-reveal; inverse of ContentRevealed |
 | RecapGenerated | Host/System | Host/CoHost/Admin | yes | participant recap requires separate reveal; emitted host-only by the recap worker (CORE-EVT-004) |
 
+## Payload contracts and the typed client (CORE-RT-008)
+
+Each event's `payload` is **identifier-only** — resource ids and generic state
+names, never resolved content (threat T7). The payload shapes are defined once on
+the server in `apps/api/Realtime/SessionEventPayloads.cs` (the command sites
+compose every event from those records), and its `ByEventType` map binds every
+`SessionEventTypes` constant to its payload record. The wire field names are
+PascalCase: the payload is composed with the default `System.Text.Json` options,
+unlike the camelCase route DTOs.
+
+| Event(s) | Payload fields |
+|---|---|
+| SessionCreated / SessionStarted / SessionEnded | `SessionId`, `Status` |
+| ParticipantJoined / ParticipantLeft | `ParticipantId` |
+| SceneActivated | `SceneId` |
+| VisibilityRuleChanged | `ResourceType`, `ResourceId`, `Visibility` |
+| ContentRevealed / ContentHidden | `ResourceType`, `ResourceId` |
+| RecapGenerated | `RecapId`, `SessionId` |
+
+The `@livecore/contracts` package mirrors this for consumers:
+`KnownSessionEventTypes` is the ten emitted names and each has a typed payload in
+`SessionEventPayloadMap` (plus the `ParsedSessionEvent` discriminated union), so a
+vertical switching on a known `eventType` narrows the parsed payload to the exact
+shape instead of blind-parsing the opaque string. A CI drift gate (`check:events`,
+the TypeScript-side mirror of spec-consistency check 11) fails if that published
+vocabulary or any payload field set diverges from `csv/event_catalog.csv`,
+`apps/api/Realtime/SessionEventTypes.cs` and `apps/api/Realtime/SessionEventPayloads.cs`
+(docs/23_PACKAGE_VERSIONING.md).
+
 ## Scene and visibility lifecycle events (CORE-EVT-003)
 
 `SceneActivated` and the realtime `VisibilityRuleChanged` are emitted by the reveal/hide

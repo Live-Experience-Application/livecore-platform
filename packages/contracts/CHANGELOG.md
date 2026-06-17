@@ -12,6 +12,25 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The complete, drift-gated session-event contract (CORE-RT-008):
+  `KnownSessionEventTypes` now lists all ten emitted Core events
+  (`SessionCreated`, `SessionStarted`, `SessionEnded`, `ParticipantJoined`,
+  `ParticipantLeft`, `SceneActivated`, `VisibilityRuleChanged`, `ContentRevealed`,
+  `ContentHidden`, `RecapGenerated`) rather than just `ContentRevealed`, and each
+  gains a typed, identifier-only payload contract — `SessionLifecycleEventPayload`,
+  `ParticipantPresenceEventPayload`, `ResourceReferenceEventPayload`,
+  `VisibilityRuleChangedEventPayload`, `SceneActivatedEventPayload` and
+  `RecapGeneratedEventPayload` — keyed by event type in `SessionEventPayloadMap` and
+  exposed as the `ParsedSessionEvent` discriminated union, so a consumer narrows a
+  parsed payload by `eventType` instead of blind-parsing the opaque `payload`
+  string. The runtime `KnownSessionEventPayloadFields` mirrors each payload's field
+  names. The payload field names are PascalCase because the server composes the
+  event payload with the default System.Text.Json options (the route DTOs remain
+  camelCase). A CI drift gate in the `typescript` job (`check:events`, mirrored by
+  the package test) fails if the published event vocabulary or payload fields
+  diverge from `csv/event_catalog.csv`, `apps/api/Realtime/SessionEventTypes.cs` and
+  `apps/api/Realtime/SessionEventPayloads.cs` — the TypeScript-side mirror of
+  spec-consistency check 11 (docs/09, docs/23).
 - Contract types for the previously-unmodeled routes so the completed typed SDK can
   route every implemented `/api/v1` route in terms of curated contracts (CORE-SDK-006):
   identity (`CurrentPrincipalResponse`, `CurrentUserResponse`,

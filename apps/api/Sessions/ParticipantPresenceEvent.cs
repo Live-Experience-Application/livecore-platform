@@ -16,9 +16,9 @@ namespace LiveCore.Api.Sessions;
 /// to the whole session audience — the hosts (always, so the event is host-visible,
 /// docs/06_AUTHORIZATION_MATRIX.md), the observers and every active participant (the configurable audience of
 /// docs/09_EVENT_CATALOG.md). Routing the presence by its participant SUBJECT (the
-/// <see cref="ParticipantPresenceEventPayload.ParticipantId"/> in the payload) rather than by a
-/// selected-participant target keeps the announcement an audience event while the recipient-safe envelope
-/// still hides the internal addressing fields.
+/// <see cref="SessionEventPayloads.ParticipantPresenceEventPayload.ParticipantId"/> in the payload) rather
+/// than by a selected-participant target keeps the announcement an audience event while the recipient-safe
+/// envelope still hides the internal addressing fields.
 ///
 /// PAYLOAD IS IDENTIFIER-ONLY (threat T7 in docs/07_SECURITY_THREAT_MODEL.md): it carries the participant's
 /// surrogate id and nothing else — never the participant's display name or any other PII. The participant id
@@ -49,7 +49,7 @@ internal static class ParticipantPresenceEvent
         Guid? createdBy,
         DateTimeOffset createdAt)
     {
-        var payload = JsonSerializer.Serialize(new ParticipantPresenceEventPayload(participantId));
+        var payload = JsonSerializer.Serialize(new SessionEventPayloads.ParticipantPresenceEventPayload(participantId));
 
         // The event is audience-wide (targetParticipantId null, not a single selected participant) and carries
         // no visibility subject (both subject parameters default to null), so it is an unconditional audience
@@ -66,10 +66,4 @@ internal static class ParticipantPresenceEvent
             _schemaVersion,
             createdAt);
     }
-
-    /// <summary>
-    /// The server-composed payload of a participant presence event: the surrogate id of the participant who
-    /// joined or left. Identifiers only — never a display name or any other PII (threat T7).
-    /// </summary>
-    private sealed record ParticipantPresenceEventPayload(Guid ParticipantId);
 }

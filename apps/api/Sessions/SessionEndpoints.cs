@@ -945,7 +945,7 @@ internal static class SessionEndpoints
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new SessionLifecycleEventPayload(
+        var payload = JsonSerializer.Serialize(new SessionEventPayloads.SessionLifecycleEventPayload(
             session.Id,
             session.Status.ToString()));
 
@@ -984,7 +984,7 @@ internal static class SessionEndpoints
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new SessionLifecycleEventPayload(
+        var payload = JsonSerializer.Serialize(new SessionEventPayloads.SessionLifecycleEventPayload(
             session.Id,
             session.Status.ToString()));
 
@@ -1002,13 +1002,6 @@ internal static class SessionEndpoints
         await deps.EventPublisher.AppendAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
         return sessionEvent;
     }
-
-    /// <summary>
-    /// The server-composed payload of a <c>SessionStarted</c>/<c>SessionEnded</c> event: the session id and
-    /// its new lifecycle status name. Identifiers and a generic state name only — never any content
-    /// (threat T7).
-    /// </summary>
-    private sealed record SessionLifecycleEventPayload(Guid SessionId, string Status);
 
     /// <summary>Which lifecycle transition a handler invocation applies.</summary>
     private enum SessionLifecycleCommand

@@ -159,6 +159,15 @@ jobs:
         # run test`; this is the explicit, named gate (docs/23_PACKAGE_VERSIONING.md).
         run: pnpm --filter @livecore/contracts run check:openapi
 
+      - name: Drift-gate the TypeScript session-event contract (CORE-RT-008)
+        # Fail if @livecore/contracts' session-event vocabulary (KnownSessionEventTypes)
+        # or payload field sets (KnownSessionEventPayloadFields) diverge from the server:
+        # the non-deferred csv/event_catalog.csv events, the SessionEventTypes.cs constants
+        # and the SessionEventPayloads.cs payload records. The TypeScript-side mirror of
+        # spec-consistency check 11 (the package test asserts the same thing for
+        # `pnpm --recursive run test`; this is the explicit, named gate).
+        run: pnpm --filter @livecore/contracts run check:events
+
       - name: Run package tests
         run: pnpm --recursive run test
 

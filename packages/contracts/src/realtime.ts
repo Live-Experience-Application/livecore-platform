@@ -32,7 +32,13 @@ export interface SessionEventReplayItem {
   eventType: string;
   /** The session the event belongs to. */
   sessionId: Uuid;
-  /** The server-composed payload — resource identifiers only, never content. */
+  /**
+   * The server-composed payload — resource identifiers only, never content
+   * (threat T7) — as a raw JSON string. For a known {@link KnownSessionEventType}
+   * a consumer parses it into the typed {@link SessionEventPayloadMap} shape and
+   * discriminates by {@link eventType} via {@link ParsedSessionEvent}; an unknown
+   * future event keeps its payload as an opaque string.
+   */
   payload: string;
   /** The payload schema version (docs/09_EVENT_CATALOG.md). */
   schemaVersion: number;

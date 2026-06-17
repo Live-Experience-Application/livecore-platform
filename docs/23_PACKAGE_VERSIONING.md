@@ -74,6 +74,30 @@ addition; a removed, renamed or narrowed field, or a widened required input, is 
 changelog entry, never a silent edit: the drift gate forces the regeneration into the
 same commit, and this document's rules decide the version bump.
 
+### Drift-gated session-event contract (CORE-RT-008)
+
+The OpenAPI document covers the HTTP route DTOs, not the realtime hub's event-type
+names or payloads, so the published session-event surface gets its own drift gate.
+`@livecore/contracts` exports `KnownSessionEventTypes` (the names a consumer can
+switch on) and, for each, a typed identifier-only payload in `SessionEventPayloadMap`
+(with the `ParsedSessionEvent` discriminated union and the runtime
+`KnownSessionEventPayloadFields` map). A CI gate in the `typescript` job
+(`check:events`, mirrored by the package test) fails if that vocabulary or any
+payload field set diverges from the server's own sources — the non-deferred
+`csv/event_catalog.csv` events, the `apps/api/Realtime/SessionEventTypes.cs`
+constants and the `apps/api/Realtime/SessionEventPayloads.cs` payload records. This
+is the TypeScript-side mirror of spec-consistency check 11 (which binds the C#
+constants to the catalog), so a new, removed or renamed event or payload field
+forces the published contract to be updated in the same commit.
+
+Like the OpenAPI gate, this does not change the versioning rules — it enforces
+them. Classify a forced contract update with the same MAJOR-vs-MINOR rule: a new
+event or a new optional payload field is a **MINOR** addition; a removed or renamed
+event or payload field is a **breaking** change called out under `### Changed` /
+`### Removed`. The session-event `eventType` and `payload` wire fields stay
+forward-compatible (a plain `string` and a raw JSON string), so a vertical never
+rejects a future event a newer server emits.
+
 ## Lockstep releases
 
 The four packages are released **together** and always share a single version.

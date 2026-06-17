@@ -281,7 +281,7 @@ internal static class RevealEndpoints
                         // only, never resolved content (threat T7/T2). The revealed resource is recorded as
                         // the event's VISIBILITY SUBJECT (CORE-RT-004) so the recipient resolver can project
                         // per-recipient through the Visibility engine.
-                        var payload = JsonSerializer.Serialize(new RevealEventPayload(
+                        var payload = JsonSerializer.Serialize(new SessionEventPayloads.ResourceReferenceEventPayload(
                             resourceTypeName,
                             result.ResourceId));
                         var contentRevealed = SessionEvent.Create(
@@ -326,7 +326,7 @@ internal static class RevealEndpoints
                         // authorized session audience — no leakage of a scene a participant cannot see.
                         if (result.ResourceType == VisibilityResourceType.Scene)
                         {
-                            var sceneActivatedPayload = JsonSerializer.Serialize(new SceneActivatedEventPayload(result.ResourceId));
+                            var sceneActivatedPayload = JsonSerializer.Serialize(new SessionEventPayloads.SceneActivatedEventPayload(result.ResourceId));
                             var sceneActivated = SessionEvent.Create(
                                 context.OrganizationId,
                                 session.WorkspaceId,
@@ -390,7 +390,7 @@ internal static class RevealEndpoints
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new VisibilityRuleChangedEventPayload(
+        var payload = JsonSerializer.Serialize(new SessionEventPayloads.VisibilityRuleChangedEventPayload(
             resourceTypeName,
             resourceId,
             newState.ToString()));
@@ -418,25 +418,6 @@ internal static class RevealEndpoints
     /// the commit (commit-then-publish, CORE-CONC-002). The list is empty when the reveal changed nothing.
     /// </summary>
     private readonly record struct RevealCommitResult(RevealResult Result, IReadOnlyList<SessionEvent> Events);
-
-    /// <summary>
-    /// The server-composed payload of a <c>ContentRevealed</c> event: the generic kind and id of the
-    /// revealed resource. Identifiers only — never the resolved content (threat T7).
-    /// </summary>
-    private sealed record RevealEventPayload(string ResourceType, Guid ResourceId);
-
-    /// <summary>
-    /// The server-composed payload of a <c>VisibilityRuleChanged</c> event: the changed resource's generic
-    /// kind and id plus the new visibility STATE name (e.g. <c>Visible</c>/<c>Hidden</c>). Identifiers and
-    /// a state name only — never resolved content (threat T7).
-    /// </summary>
-    private sealed record VisibilityRuleChangedEventPayload(string ResourceType, Guid ResourceId, string Visibility);
-
-    /// <summary>
-    /// The server-composed payload of a <c>SceneActivated</c> event: the id of the activated scene.
-    /// Identifier only — never resolved content (threat T7).
-    /// </summary>
-    private sealed record SceneActivatedEventPayload(Guid SceneId);
 
     /// <summary>
     /// Reads the required <c>Idempotency-Key</c> header. Returns <see langword="false"/> when it is

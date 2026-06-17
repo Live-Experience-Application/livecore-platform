@@ -235,7 +235,7 @@ public sealed class RecapGenerationService
     {
         try
         {
-            var payload = JsonSerializer.Serialize(new RecapGeneratedEventPayload(recap.Id, recap.SessionId));
+            var payload = JsonSerializer.Serialize(new SessionEventPayloads.RecapGeneratedEventPayload(recap.Id, recap.SessionId));
 
             var sessionEvent = SessionEvent.Create(
                 recap.OrganizationId,
@@ -267,10 +267,4 @@ public sealed class RecapGenerationService
                 recap.SessionId);
         }
     }
-
-    /// <summary>
-    /// The server-composed payload of a <see cref="SessionEventTypes.RecapGenerated"/> event: the recap id
-    /// and the session it summarizes. Identifiers only — never the recap body (threat T7).
-    /// </summary>
-    private sealed record RecapGeneratedEventPayload(Guid RecapId, Guid SessionId);
 }

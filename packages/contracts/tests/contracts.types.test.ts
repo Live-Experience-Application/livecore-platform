@@ -26,13 +26,16 @@ import type {
   GoogleTokenVerificationRequest,
   HideRequest,
   InviteWorkspaceMemberRequest,
+  KnownSessionEventType,
   MembershipRole,
   PageResponse,
+  ParsedSessionEvent,
   ProblemCode,
   ProblemDetails,
   PurchaseProvider,
   ReorderSceneRequest,
   RevealRequest,
+  SessionEventPayloadMap,
   SessionResponse,
   SessionStatus,
   StoreNotificationAck,
@@ -40,7 +43,7 @@ import type {
   VisibilityResourceType,
   WorkspaceResponse,
 } from "../src/index.js";
-import { VERSION } from "../src/index.js";
+import { KnownSessionEventPayloadFields, VERSION } from "../src/index.js";
 // The OpenAPI-derived component schemas, generated from openapi/livecore-v1.json by
 // `pnpm --filter @livecore/contracts run generate` (CORE-OAS-002). The curated DTOs
 // above are validated against these below.
@@ -333,3 +336,82 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "UpdateWorkspaceRequest"
   >
 >;
+
+// --- The session-event vocabulary and its typed payloads (CORE-RT-008). ---------
+// The known-event vocabulary is the ten emitted Core events; a contract/drift test
+// (tests/contracts.events.test.mjs) binds this set and the payload field sets to
+// csv/event_catalog.csv, SessionEventTypes.cs and SessionEventPayloads.cs, so this
+// pins the published surface so it cannot change unnoticed.
+
+export type KnownSessionEventTypeIsExact = Assert<
+  Equal<
+    KnownSessionEventType,
+    | "SessionCreated"
+    | "SessionStarted"
+    | "SessionEnded"
+    | "ParticipantJoined"
+    | "ParticipantLeft"
+    | "SceneActivated"
+    | "VisibilityRuleChanged"
+    | "ContentRevealed"
+    | "ContentHidden"
+    | "RecapGenerated"
+  >
+>;
+
+// Every known event has exactly one payload contract — the payload map keys equal
+// the vocabulary, so an event added/removed without a payload (or vice versa) fails.
+export type PayloadMapCoversTheVocabulary = Assert<
+  Equal<keyof SessionEventPayloadMap, KnownSessionEventType>
+>;
+
+// The runtime KnownSessionEventPayloadFields tuple for each event lists EXACTLY the
+// field names of that event's payload type, so the runtime map the drift gate
+// compares to the server cannot drift from the typed payload contracts. A single
+// mismatch (a dropped, added or renamed field name) makes the per-event Equal
+// `false`, so the aggregated union is no longer the literal `true`.
+type PayloadFieldsRuntime = typeof KnownSessionEventPayloadFields;
+type RuntimeFieldsMatchPayloadType<K extends KnownSessionEventType> = Equal<
+  PayloadFieldsRuntime[K][number],
+  keyof SessionEventPayloadMap[K]
+>;
+type EveryEventFieldsMatch = {
+  [K in KnownSessionEventType]: RuntimeFieldsMatchPayloadType<K>;
+}[KnownSessionEventType];
+export type PayloadFieldsBindToPayloadTypes = Assert<
+  Equal<EveryEventFieldsMatch, true>
+>;
+
+// A consumer can discriminate a parsed payload by event type: switching on
+// `eventType` narrows `payload` to the exact per-event shape, and the `never`
+// default makes the switch fail to compile if a known event is left unhandled. This
+// is the type test that the discriminated union is usable end to end.
+export function discriminateParsedSessionEvent(
+  event: ParsedSessionEvent,
+): string {
+  switch (event.eventType) {
+    case "SessionCreated":
+    case "SessionStarted":
+    case "SessionEnded":
+      return event.payload.Status;
+    case "ParticipantJoined":
+    case "ParticipantLeft":
+      return event.payload.ParticipantId;
+    case "SceneActivated":
+      return event.payload.SceneId;
+    case "VisibilityRuleChanged":
+      return event.payload.Visibility;
+    case "ContentRevealed":
+    case "ContentHidden":
+      return event.payload.ResourceType;
+    case "RecapGenerated":
+      return event.payload.RecapId;
+    default:
+      return assertNeverSessionEvent(event);
+  }
+}
+
+/** Compile-time exhaustiveness guard: a known event left unhandled is a type error. */
+function assertNeverSessionEvent(event: never): never {
+  throw new Error(`unhandled session event: ${JSON.stringify(event)}`);
+}

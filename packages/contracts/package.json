@@ -15,7 +15,8 @@
     "build": "tsc -p tsconfig.json",
     "generate": "node scripts/generate-openapi.mjs --write",
     "check:openapi": "node scripts/generate-openapi.mjs --check",
-    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test tests/contracts.build.test.mjs"
+    "check:events": "node scripts/event-contract-drift.mjs",
+    "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test tests/contracts.build.test.mjs tests/contracts.events.test.mjs"
   },
   "devDependencies": {
     "openapi-typescript": "^7.13.0",
