@@ -145,6 +145,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Store notifications](#store-notifications)
 - [Container images](#container-images)
     - [Publishing release images (CORE-OPS-009)](#publishing-release-images-core-ops-009)
+    - [Publishing release packages (CORE-PUB-002)](#publishing-release-packages-core-pub-002)
     - [Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)](#supply-chain-pinned-base-images-sbom-and-cve-scan-core-dep-003)
     - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
@@ -255,6 +256,9 @@ scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + v
 scripts/LiveCoreReleaseVersion.psm1 release-tag-vs-package-version gate logic: reads the four packages' shared version (fail-closed if they disagree) and compares it to the release tag's version (CORE-CMP-003)
 scripts/assert-release-version.ps1  CLI the publish job runs to fail the publish when the release tag's version does not equal the packages' shared version (drift cannot ship, CORE-CMP-003)
 scripts/test-release-version.ps1    tests for the release-version gate (a matching tag passes; a mismatching tag, a non-release ref, or packages out of lockstep fail closed, CORE-CMP-003)
+scripts/LiveCorePackagePublish.psm1 release-gated npm publish logic: builds the fail-closed publish plan (reusing the release-version gate) and the immutability decision (is a version already published) (CORE-PUB-002)
+scripts/publish-packages.ps1   CLI the publish pipeline runs: dry-run packs all four packages on every push/PR; on a release tag it publishes them at the shared version and refuses to republish an existing version (CORE-PUB-002)
+scripts/test-package-publish.ps1    tests for the package-publish gate (a matching tag yields the four-package plan in dependency order; a mismatching tag, a non-release ref, packages out of lockstep, and a republish all fail closed, CORE-PUB-002)
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
 scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
@@ -377,10 +381,12 @@ and `THIRD-PARTY-NOTICES.md` — so `pnpm pack` produces a complete, importable
 tarball and nothing internal/test/source-only leaks in. A package-build test per
 package packs the tarball and asserts exactly that. Inside this monorepo the
 `@livecore/sdk-ts → @livecore/contracts` dependency stays a `workspace:*` link
-(pnpm rewrites it to the resolved version only at publish time). Choosing the
-registry and the publish-shape is recorded in
-[`docs/23_PACKAGE_VERSIONING.md`](docs/23_PACKAGE_VERSIONING.md) ("Publishing"); the
-release-gated CI publish job that pushes them is a follow-up (CORE-PUB-002).
+(pnpm rewrites it to the resolved version only at publish time). The CI pipeline
+publishes all four to npm on a release tag, gated by the shared-version invariant
+and refusing a republish (see
+[Publishing release packages](#publishing-release-packages-core-pub-002) below).
+Choosing the registry and the publish-shape is recorded in
+[`docs/23_PACKAGE_VERSIONING.md`](docs/23_PACKAGE_VERSIONING.md) ("Publishing").
 
 Install dependencies:
 
@@ -4488,6 +4494,37 @@ for that job). `scripts/test-image-tags.ps1` tests these properties and the
 `publish-dry-run` job exercises the same derivation and build on every push and
 pull request without pushing.
 
+### Publishing release packages (CORE-PUB-002)
+
+The four `@livecore` packages are published to the public npm registry by the same
+release-tag push that publishes the images, gated by the same shared-version
+invariant — so a package version ships only from a green, immutable, lockstepped
+release:
+
+- On a release tag the `publish-packages` job (after **every** quality gate
+  passes) asserts the release tag's version equals the four packages' shared
+  version (`scripts/assert-release-version.ps1`, the reused CORE-CMP-003 gate; a
+  drifted or out-of-lockstep version fails closed before anything is built), then
+  publishes all four in dependency order at that version
+  (`scripts/publish-packages.ps1`). Registry and public access come from each
+  package's `publishConfig` (the public npm registry under the `@livecore` scope).
+- **Immutability.** Before publishing each package the job queries the registry and
+  **refuses to republish** a version already published, mirroring the image job's
+  immutable-tag guard, so a shipped version is never overwritten.
+- **A per-PR dry-run.** The `publish-packages-dry-run` job runs the gate-logic test
+  (`scripts/test-package-publish.ps1`) and `pnpm publish --dry-run` for all four
+  packages on every push and pull request — building and packing each tarball
+  (rewriting the `workspace:*` dependency to the resolved version) without
+  contacting the registry — so the pipeline is proven without publishing.
+- **No credential in the repo.** The publish authenticates with the `NPM_TOKEN`
+  repository secret, written to a runner-local `~/.npmrc` only at publish time; the
+  job keeps the read-only repository token otherwise. Set `NPM_TOKEN` to an npm
+  automation token with publish rights to the `@livecore` scope.
+
+npm build provenance and the remaining publish-shape fields are a follow-up
+(CORE-PUB-004). See `docs/23_PACKAGE_VERSIONING.md` ("The release-gated publish
+pipeline").
+
 ### Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)
 
 The immutable release **tag** fixes what a deployment pulls; three further controls
@@ -4608,25 +4645,28 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                       | What it runs                                                                                                                                   |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dotnet`                  | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                          |
-| `typescript`              | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                         |
-| `boundary-scan`           | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                    |
-| `license-compliance`      | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003) |
-| `contributor-policy`      | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                       |
-| `backup-restore-drill`    | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                    |
-| `backup-restore-postgres` | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                 |
-| `powershell-lint`         | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                 |
-| `docker`                  | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                               |
-| `publish-dry-run`         | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                |
-| `migrations`              | builds the migrations runner image and applies all migrations to an empty Postgres                                                             |
-| `integration-postgres`    | model-vs-migration drift gate, then the integration suite against a real Postgres                                                              |
-| `publish`                 | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                       |
+| Job                        | What it runs                                                                                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                |
+| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                               |
+| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                          |
+| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)       |
+| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                             |
+| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                          |
+| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                       |
+| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                       |
+| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                     |
+| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                      |
+| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002) |
+| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                   |
+| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                    |
+| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                             |
+| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)             |
 
-The `publish` job runs **only on a release tag** and **only after every other job
-passes**; pull requests and branch pushes never reach it, so a registry push never
-happens off a release (CORE-OPS-009). Line endings are normalized to LF in the repository via `.gitattributes`, so
+The `publish` and `publish-packages` jobs run **only on a release tag** and **only
+after every other job passes**; pull requests and branch pushes never reach them, so
+neither a registry image push nor an npm publish happens off a release (CORE-OPS-009,
+CORE-PUB-002). Line endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
 

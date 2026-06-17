@@ -308,7 +308,45 @@ points, the types, the `CHANGELOG.md` and the `LICENSE`, and excludes tests and
 non-shipping sources; it also asserts the manifest declares the publishable surface
 above. The lockstep VERSION discipline (below) is unchanged.
 
-Wiring the release-gated CI publish job (building and pushing all four packages to
-the registry on a release tag, with a per-PR dry run) is a follow-up, CORE-PUB-002;
-this document defines the versioning, changelog and publish-shape discipline that
-the pipeline builds on.
+### The release-gated publish pipeline (CORE-PUB-002)
+
+The four packages are published to the npm registry by the CI pipeline, gated by
+the same shared-version invariant the release-image publish uses, so a package
+version is published only from a green, immutable, lockstepped release and a
+republish is refused:
+
+- `scripts/LiveCorePackagePublish.psm1` builds the **publish plan** for a release
+  tag: it reuses the release-version gate above (`LiveCoreReleaseVersion.psm1`,
+  CORE-CMP-003) to assert the release tag's version equals the four packages'
+  shared version, and returns the packages to publish in **dependency order**
+  (`@livecore/contracts` before its dependent `@livecore/sdk-ts`). A tag that
+  disagrees with the shared version, packages out of lockstep, or a non-release
+  ref all fail closed, so a mismatched or un-lockstepped version can never produce
+  a plan. It also exposes the **immutability** decision (is this version already on
+  the registry?), taking the registry's known versions through an injected query so
+  the decision is testable without a registry.
+- `scripts/publish-packages.ps1` is the CLI the pipeline runs. With `-DryRun` it
+  runs `pnpm publish --dry-run` for all four packages — building and packing each
+  tarball (rewriting the `workspace:*` dependency to the resolved version) without
+  contacting the registry — so the pipeline is proven on **every push and pull
+  request**. Without `-DryRun` it queries the registry and **refuses to republish**
+  a version already published (immutability, mirroring the image publish job's
+  immutable-tag guard) before publishing each package; registry and public access
+  come from each package's `publishConfig`.
+- `scripts/test-package-publish.ps1` tests the gate logic with no registry I/O — a
+  matching release tag yields the four-package plan in dependency order; a
+  mismatching tag, a non-release ref and the packages out of lockstep all fail
+  closed; and an already-published version is refused while a new or
+  never-published version is publishable. It runs on every push and pull request
+  via the CI `publish-packages-dry-run` job.
+
+The CI `publish-packages-dry-run` job runs the gate-logic test and the `-DryRun`
+publish (packing all four) on every push and pull request. The CI
+`publish-packages` job runs **only on a release tag**, **only after every quality
+gate passes**, asserts the release tag matches the shared version
+(`scripts/assert-release-version.ps1`), then publishes all four packages at that
+version with the republish refusal. It authenticates to the registry with the
+`NPM_TOKEN` repository secret, written to a runner-local `~/.npmrc` at publish
+time — **no registry credential lives in the repository**. npm build provenance
+and the remaining publish-shape fields (`engines`, `repository.directory`) are a
+follow-up (CORE-PUB-004).

@@ -15,14 +15,17 @@
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   publish-dry-run      - verify image tags + image-scan gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003, CORE-CMP-003)
+#   publish-packages-dry-run - package-publish gate-logic test + dry-run npm publish (pnpm publish --dry-run) packing all four @livecore packages on every push/PR, no registry push (CORE-PUB-002)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
 #   unit-smoke-postgres  - run the unit + smoke suites against real Postgres so provider-specific behavior is exercised (CORE-TST-004)
 #   publish              - assert release tag == package version (CORE-CMP-003), SBOM + CVE scan (fail on critical), then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
+#   publish-packages     - on a release tag only: publish the four @livecore packages to npm at the shared lockstep version, gated by the release-version + lockstep gate (assert-release-version.ps1) and refusing a republish of an existing version (immutability) (CORE-PUB-002)
 #
-# Every push and pull request runs the quality gates only. The publish job runs
-# only on a release tag push ('v<MAJOR>.<MINOR>.<PATCH>') and only after every
-# gate passes, so a registry push never happens on a pull request or a branch.
+# Every push and pull request runs the quality gates only. The publish and
+# publish-packages jobs run only on a release tag push ('v<MAJOR>.<MINOR>.<PATCH>')
+# and only after every gate passes, so neither a registry image push nor an npm
+# publish ever happens on a pull request or a branch.
 name: CI
 
 on:
@@ -699,6 +702,56 @@ jobs:
             worker.scan.json
           if-no-files-found: error
 
+  publish-packages-dry-run:
+    name: Package publish dry-run (packs all four, never pushes)
+    runs-on: ubuntu-latest
+    # CORE-PUB-002: proves the npm publish path for the four @livecore packages on
+    # every push and pull request without publishing. It first runs the
+    # publish-gate logic test - a release tag that disagrees with the packages'
+    # shared version, packages out of lockstep, or a republish of an existing
+    # version all fail closed - and then dry-runs the publish, building and packing
+    # all four packages (pnpm publish --dry-run, which rewrites the workspace:*
+    # dependency to the resolved version) without contacting the registry. The real
+    # publish-packages job runs the same gate against the actual release tag.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (pinned pnpm)
+        run: corepack enable pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test the package-publish gate logic (mismatch, lockstep break and republish fail closed)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-package-publish.ps1
+
+      - name: Build packages
+        run: pnpm --recursive run build
+
+      - name: Dry-run publish all four packages (built and packed, never pushed)
+        shell: pwsh
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: |
+          # On a release tag dry-run against that exact tag; otherwise dry-run
+          # against the current shared package version so the pipeline is proven on
+          # every push and pull request. The gate still asserts tag == shared
+          # version (and lockstep) before any package is packed.
+          $ref = $env:GIT_REF
+          if (-not $ref.StartsWith('refs/tags/v')) {
+            Import-Module ./scripts/LiveCoreReleaseVersion.psm1 -Force
+            $version = Get-LiveCorePackageVersion -RepositoryRoot (Get-Location).Path
+            $ref = "refs/tags/v$version"
+          }
+          pwsh -NoProfile -File scripts/publish-packages.ps1 -Ref $ref -DryRun
+
   powershell-lint:
     name: PowerShell script analysis
     runs-on: ubuntu-latest
@@ -1095,4 +1148,111 @@ jobs:
             echo "A CycloneDX SBOM and a CVE scan report were produced for each"
             echo "image and the critical-vulnerability gate passed before push"
             echo "(see the \`supply-chain-attestations\` build artifact)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-packages:
+    name: Publish the four @livecore packages to npm
+    runs-on: ubuntu-latest
+    # CORE-PUB-002: publish the four @livecore packages to the public npm registry
+    # only on a release tag push (never on a pull request or a branch push), and
+    # only after every quality gate above has passed, so a package version is
+    # published only from a green, immutable, lockstepped release. The release
+    # version gate refuses a tag that disagrees with the four packages' shared
+    # version or packages out of lockstep, and the publish step refuses to
+    # republish a version already on the registry (immutability).
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - dotnet
+      - coverage
+      - typescript
+      - boundary-scan
+      - spec-consistency
+      - license-compliance
+      - contributor-policy
+      - migration-down-lint
+      - backup-restore-drill
+      - backup-restore-postgres
+      - powershell-lint
+      - docker
+      - compose-smoke
+      - publish-dry-run
+      - publish-packages-dry-run
+      - migrations
+      - integration-postgres
+      - unit-smoke-postgres
+    permissions:
+      # Least privilege: this job keeps the read-only repository token. It
+      # authenticates to the npm registry with the NPM_TOKEN secret written to a
+      # runner-local ~/.npmrc below - no registry credential is stored in the repo.
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (pinned pnpm)
+        run: corepack enable pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert the release tag matches the packages' shared version (drift cannot ship)
+        # CORE-PUB-002 / CORE-CMP-003: reuse the existing release-version gate so a
+        # tag that disagrees with the four packages' shared version, packages out
+        # of lockstep, or a non-release ref fail the publish before anything is
+        # built or pushed.
+        shell: pwsh
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: ./scripts/assert-release-version.ps1 -Ref $env:GIT_REF
+
+      - name: Build packages
+        run: pnpm --recursive run build
+
+      - name: Configure npm authentication from the release secret (no credential in the repo)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "The NPM_TOKEN secret is not set; refusing to publish the packages." >&2
+            exit 1
+          fi
+          # Write the auth token to a runner-local user .npmrc that pnpm reads. The
+          # token comes from the encrypted CI secret and never lives in the repo.
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
+
+      - name: Publish all four packages at the shared version (immutability enforced)
+        # CORE-PUB-002: build the fail-closed publish plan from the release tag and
+        # publish each package at the shared lockstep version, refusing to
+        # republish a version already on the registry (immutability). Registry and
+        # public access come from each package's publishConfig
+        # (docs/23_PACKAGE_VERSIONING.md).
+        shell: pwsh
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: ./scripts/publish-packages.ps1 -Ref $env:GIT_REF
+
+      - name: Summarize the published packages
+        env:
+          GIT_REF: ${{ github.ref }}
+        run: |
+          version="${GIT_REF#refs/tags/v}"
+          {
+            echo "### Published npm packages"
+            echo ""
+            echo "All four @livecore packages were published to the public npm"
+            echo "registry at version \`$version\`:"
+            echo ""
+            echo "- \`@livecore/contracts@$version\`"
+            echo "- \`@livecore/design-tokens@$version\`"
+            echo "- \`@livecore/ui-core@$version\`"
+            echo "- \`@livecore/sdk-ts@$version\`"
+            echo ""
+            echo "The release-version gate (tag == shared lockstep version) passed"
+            echo "and a republish of an existing version was refused (immutability)."
           } >> "$GITHUB_STEP_SUMMARY"
