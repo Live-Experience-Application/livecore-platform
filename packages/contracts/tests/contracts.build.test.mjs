@@ -84,6 +84,13 @@ test("the browser-consumer response headers are exported (CORE-DX-005)", () => {
   assert.equal(ResponseHeaders.RateLimitReset, "RateLimit-Reset");
 });
 
+test("the deprecation/sunset response headers are exported (CORE-DX-006)", () => {
+  // A deprecated route signals its retirement with these CORS-exposed headers (RFC 8594 Sunset plus the
+  // Deprecation header); a consumer reads them to get advance notice before a contract changes.
+  assert.equal(ResponseHeaders.Deprecation, "Deprecation");
+  assert.equal(ResponseHeaders.Sunset, "Sunset");
+});
+
 test("the Problem Details error-code catalog is the stable published set", () => {
   // The published catalog must mirror the server-side ProblemCodes catalog exactly
   // (apps/api/ProblemCodes.cs); the cross-language drift check is the .NET contract

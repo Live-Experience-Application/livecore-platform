@@ -145,6 +145,28 @@ Use `/api/v1/...` from the beginning.
 
 Breaking changes require a contract version bump and release notes.
 
+### Evolution, deprecation and sunset (CORE-DX-006)
+
+The version is just the `/api/v1` path literal, so without a rule the only way to
+change anything is a whole-version cutover with no advance signal. The policy that
+closes that gap:
+
+- **Additive-only between versions.** A non-breaking change is **additive**: a new
+  OPTIONAL field, a new endpoint, or a new enum/event member. It ships under the
+  same `/api/v1` version. A change that REMOVES, RENAMES or NARROWS an existing
+  field/route/value (or widens a required input) is breaking and requires a new
+  version — never an in-place edit of `v1`. This is the same rule the published
+  TypeScript contracts follow for a MINOR vs MAJOR change
+  (`docs/23_PACKAGE_VERSIONING.md`).
+- **Advance signal before retirement.** A retiring route or field is flagged
+  deprecated and the API then emits the RFC 8594 `Sunset` header (the date it is
+  expected to stop responding) together with the `Deprecation` header, so a vertical
+  gets the retirement date **before** the contract changes rather than discovering it
+  when a call breaks. The header mechanism and the exact format are documented in
+  `docs/08_API_CONTRACTS.md`; the headers are exposed to browser consumers via CORS
+  (CORE-DX-005). The convention and mechanism exist even though no route is deprecated
+  yet.
+
 ## Error format
 
 Use RFC 7807-style Problem Details for API errors.

@@ -86,6 +86,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Graceful shutdown and SignalR sticky sessions](#graceful-shutdown-and-signalr-sticky-sessions)
 - [HTTP API and domain](#http-api-and-domain)
     - [Tenant model and HTTP API](#tenant-model-and-http-api)
+    - [API evolution: deprecation and sunset](#api-evolution-deprecation-and-sunset)
     - [Current principal](#current-principal)
     - [Organization create and read](#organization-create-and-read)
     - [Workspace member invites (scoped tokens)](#workspace-member-invites-scoped-tokens)
@@ -1284,6 +1285,33 @@ validation off). Outside `Production` a blank `Audience` stays tolerated for loc
 development (the same latitude `Authentication__Oidc__RequireHttpsMetadata=false`
 allows), and the unconfigured-`Authority` case keeps its fail-closed `401`
 behavior.
+
+### API evolution: deprecation and sunset
+
+API versioning is the `/api/v1` path literal alone, so without a rule any contract
+change would force a whole-version cutover with no advance signal (CORE-DX-006). Two
+conventions close that gap:
+
+- **Additive-only evolution.** Within a version the Core API changes **additive-only**: a
+  non-breaking change adds an OPTIONAL field, a new endpoint or a new enum/event member,
+  and ships under the same `/api/v1`. A change that **removes, renames or narrows** an
+  existing field/route/value — or widens a required input — is breaking and requires a new
+  version, never an in-place edit of `v1`. This is the same MINOR-vs-MAJOR rule the
+  published TypeScript contracts follow (`docs/23_PACKAGE_VERSIONING.md`), so a consumer
+  compiled against `v1` keeps working as the surface grows.
+- **Deprecation and sunset headers (RFC 8594).** A retiring route or field is flagged
+  deprecated, and the response then carries the `Sunset` header (the IMF-fixdate the route
+  is expected to stop responding) plus the `Deprecation` header (the token `true`, or the
+  date deprecation took effect when known), so a vertical learns the retirement date
+  **before** the contract changes. Both headers describe only the route's own schedule — no
+  tenant/principal/resource content (threat T7) — and the CORS policy **exposes** them (with
+  the other browser-consumer headers, CORE-DX-005) so a cross-origin SDK can read them;
+  `@livecore/contracts` `ResponseHeaders` names `Deprecation` and `Sunset`.
+
+The signal is strictly opt-in (only a flagged route emits the headers; a current route
+emits neither), and **no route is deprecated yet** — the policy and the mechanism are
+established ahead of the first deprecation. The header format and the additive-only rule
+are in `docs/08_API_CONTRACTS.md` and `docs/02_ARCHITECTURE.md`.
 
 ### Current principal
 

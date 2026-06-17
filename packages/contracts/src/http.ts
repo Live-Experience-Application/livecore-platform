@@ -43,9 +43,10 @@ export type RequestHeader =
  *
  * A browser/PWA SDK on a different origin can only READ a response header the CORS
  * policy explicitly exposes; the Core API exposes exactly this set
- * (`Access-Control-Expose-Headers`, CORE-DX-005), so every header named here is
- * readable cross-origin. None carries tenant/principal content — they are a version
- * validator, rate-limit signals, a created-resource path and a correlation id.
+ * (`Access-Control-Expose-Headers`, CORE-DX-005 / CORE-DX-006), so every header named
+ * here is readable cross-origin. None carries tenant/principal content — they are a
+ * version validator, rate-limit signals, a created-resource path, a correlation id and
+ * a deprecated route's own retirement schedule.
  */
 export const ResponseHeaders = {
   /**
@@ -82,6 +83,20 @@ export const ResponseHeaders = {
   RateLimitRemaining: "RateLimit-Remaining",
   /** Seconds until the caller's current window resets and the quota refills. */
   RateLimitReset: "RateLimit-Reset",
+  /**
+   * Present on a response from a DEPRECATED route (CORE-DX-006): the route is on its
+   * way out. The value is the boolean token `true`, or — when a specific date is
+   * known — the IMF-fixdate the deprecation took effect. Pairs with
+   * {@link ResponseHeaders.Sunset}. A current (non-deprecated) route sends neither.
+   */
+  Deprecation: "Deprecation",
+  /**
+   * The RFC 8594 retirement date of a deprecated route as an IMF-fixdate (CORE-DX-006):
+   * the instant the route is expected to stop responding, so a consumer gets advance
+   * signal before the contract changes. Sent together with
+   * {@link ResponseHeaders.Deprecation}.
+   */
+  Sunset: "Sunset",
 } as const;
 
 /** A standard Core API response header name. */

@@ -12,6 +12,15 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Deprecation/sunset response header names (CORE-DX-006): `ResponseHeaders` gains
+  `Deprecation` and `Sunset`. A deprecated Core API route signals its retirement
+  with the RFC 8594 `Sunset` header (the date it stops responding) plus the
+  `Deprecation` header, both exposed by the CORS policy so a cross-origin consumer
+  can read advance notice before a contract changes; neither carries
+  tenant/principal content (threat T7). The Core API evolves additive-only between
+  deprecations (a non-breaking change adds an optional field, endpoint or enum/event
+  member; it never removes, renames or narrows an existing one), so a current route
+  sends neither header.
 - Browser-consumer response header names (CORE-DX-005): `ResponseHeaders` gains
   `Location`, `RetryAfter` (`Retry-After`), `RequestId` (`X-Request-Id`) and the
   rate-limit family `RateLimitLimit`/`RateLimitRemaining`/`RateLimitReset`

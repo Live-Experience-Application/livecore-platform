@@ -48,9 +48,11 @@ public static class CorsConfiguration
     /// is invisible to the SDK unless CORS explicitly exposes it (the <c>Access-Control-Expose-Headers</c>
     /// response header). Without this list a browser SDK silently cannot read the weak optimistic-concurrency
     /// <c>ETag</c> (CORE-DX-002), the <c>Retry-After</c> and <c>RateLimit-*</c> rate-limit signals
-    /// (CORE-SEC-001 / CORE-DX-005), the <c>Location</c> of a freshly created resource, or the request-id
-    /// correlation header (CORE-OBS-005). None of these leak tenant/principal content (threat T7): they are an
-    /// opaque version validator, a numeric ceiling/remaining/reset, a created-resource path and a correlation id.
+    /// (CORE-SEC-001 / CORE-DX-005), the <c>Location</c> of a freshly created resource, the request-id
+    /// correlation header (CORE-OBS-005), or the <c>Deprecation</c>/<c>Sunset</c> retirement signal on a
+    /// deprecated route (CORE-DX-006). None of these leak tenant/principal content (threat T7): they are an
+    /// opaque version validator, a numeric ceiling/remaining/reset, a created-resource path, a correlation id and
+    /// a route's own retirement schedule.
     /// </summary>
     public static readonly IReadOnlyList<string> ExposedResponseHeaders =
     [
@@ -61,6 +63,8 @@ public static class CorsConfiguration
         RateLimitingConfiguration.RateLimitLimitHeaderName,
         RateLimitingConfiguration.RateLimitRemainingHeaderName,
         RateLimitingConfiguration.RateLimitResetHeaderName,
+        ApiDeprecation.DeprecationHeaderName,
+        ApiDeprecation.SunsetHeaderName,
     ];
 
     /// <summary>

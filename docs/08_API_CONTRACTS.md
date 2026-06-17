@@ -291,3 +291,39 @@ The typed SDK surfaces these instead of discarding them: `@livecore/contracts`
 `ResponseHeaders` names each header, and a non-success response raises a
 `LiveCoreApiError` carrying `retryAfter` (seconds) and `rateLimit` (`{ limit, remaining,
 reset }`), so a consumer can honor the server's back-off rather than guess.
+
+## API evolution: additive-only changes, deprecation and sunset (CORE-DX-006)
+
+API versioning is the `/api/v1` path literal alone, so without an explicit rule any
+contract change forces a whole-version cutover with no advance signal — a vertical only
+finds out a route or field changed when its calls break. Two conventions close that gap.
+
+**Additive-only evolution.** Within a version, the Core API changes **additive-only**: a
+non-breaking change ADDS an OPTIONAL field, a new endpoint, or a new enum/event member,
+and ships under the same `/api/v1` version. A change that **removes, renames or narrows**
+an existing field/route/value, or **widens a required input**, is breaking and requires a
+new version — never an in-place edit of `v1`. This is the same MINOR-vs-MAJOR rule the
+published TypeScript contracts follow (`docs/23_PACKAGE_VERSIONING.md`): a consumer
+compiled against `v1` keeps compiling and behaving as a version evolves additively.
+
+**Deprecation and sunset headers (RFC 8594).** When a route or field is on its way out it
+is flagged deprecated, and the response then carries:
+
+| Response header | Value | Meaning |
+|---|---|---|
+| `Sunset` | IMF-fixdate (RFC 8594 / RFC 7231), e.g. `Wed, 31 Dec 2031 23:59:59 GMT` | the instant the route is expected to stop responding |
+| `Deprecation` | the boolean token `true`, or — when known — the IMF-fixdate deprecation took effect | the route is deprecated (in effect since the given date) |
+
+So a consumer gets the retirement date **before** the contract changes and can migrate
+ahead of the sunset. The two headers are advisory metadata about the route itself — they
+carry no tenant, principal or resource content, so they leak nothing (threat T7 in
+`docs/07_SECURITY_THREAT_MODEL.md`). They are **exposed via CORS**
+(`Access-Control-Expose-Headers`, CORE-DX-005) so a cross-origin browser/PWA SDK can read
+them, and `@livecore/contracts` `ResponseHeaders` names `Deprecation` and `Sunset` for a
+typed consumer.
+
+The signal is **strictly opt-in**: only a route explicitly flagged deprecated emits the
+headers; a current route emits neither, so the headers never pollute a live contract. **No
+route is deprecated yet** — this story establishes the policy and the mechanism that honors
+it (the server flags an endpoint and the pipeline emits the headers) ahead of the first
+deprecation.

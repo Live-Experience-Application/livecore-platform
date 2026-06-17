@@ -1152,6 +1152,17 @@ app.UseMiddleware<ConcurrencyConflictMiddleware>();
 // the call.
 app.UseCors(CorsConfiguration.PolicyName);
 
+// API deprecation/sunset signaling (CORE-DX-006). For a request whose matched endpoint is flagged with
+// WithDeprecation(...) this emits the RFC 8594 Sunset header (the route's retirement date) plus the Deprecation
+// header, so a consumer gets advance signal before a contract changes. It runs after routing has selected the
+// endpoint (routing is added at the top of the minimal-hosting pipeline) and writes nothing for a current
+// (non-deprecated) route, so the signal is strictly opt-in. The headers describe only the route's own retirement
+// schedule — no tenant/principal/resource content (threat T7) — and the CORS policy exposes them
+// (CorsConfiguration.ExposedResponseHeaders) so a browser SDK can read them. No route is deprecated yet; this
+// establishes the convention and the mechanism that honors the documented additive-only evolution policy
+// (docs/02_ARCHITECTURE.md, docs/08_API_CONTRACTS.md, docs/23_PACKAGE_VERSIONING.md).
+app.UseLiveCoreDeprecationHeaders();
+
 // Authentication runs before authorization, which runs before the endpoints, per
 // the documented request flow (docs/02_ARCHITECTURE.md). The health endpoints
 // are mapped after this and stay anonymous because they are not in the

@@ -36,6 +36,21 @@ a breaking change is released as a **minor** bump and is always called out in th
 changelog under a `### Changed` or `### Removed` heading. Consumers should pin a
 caret range (for example `^0.1.0`) and read the changelog before upgrading.
 
+### Additive-only evolution and the runtime API contract (CORE-DX-006)
+
+The MINOR-vs-MAJOR rule above is the package-surface side of one repository-wide
+policy: the Core evolves **additive-only** between breaking versions. A new optional
+field, a new export/endpoint or a new enum/event member is additive (a MINOR change to
+the packages; a same-`/api/v1` change to the runtime API). Removing, renaming or
+narrowing an existing field/value, or widening a required input, is breaking — a MAJOR
+change to the packages and a new runtime API version, never an in-place edit of `v1`.
+The runtime side adds an **advance signal**: a retiring route or field emits the RFC 8594
+`Sunset` and `Deprecation` headers so a vertical learns the retirement date before the
+contract changes. The runtime mechanism, the header format and the CORS exposure are
+documented in `docs/02_ARCHITECTURE.md` ("Evolution, deprecation and sunset") and
+`docs/08_API_CONTRACTS.md` ("API evolution"). A `### Deprecated` changelog heading (Keep
+a Changelog, below) is the package-surface counterpart of the `Deprecation` header.
+
 ## Lockstep releases
 
 The four packages are released **together** and always share a single version.

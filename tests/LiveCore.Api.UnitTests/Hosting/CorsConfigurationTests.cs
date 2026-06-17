@@ -69,9 +69,9 @@ public class CorsConfigurationTests
     [Fact]
     public void ExposedResponseHeaders_is_the_documented_browser_consumer_set()
     {
-        // CORE-DX-005: the exact headers a cross-origin browser SDK must be able to read. Pinned so the set
-        // (and the agreement with @livecore/contracts ResponseHeaders and docs/08) cannot drift unnoticed. The
-        // end-to-end Access-Control-Expose-Headers behavior is covered by the integration suite.
+        // CORE-DX-005 / CORE-DX-006: the exact headers a cross-origin browser SDK must be able to read. Pinned so
+        // the set (and the agreement with @livecore/contracts ResponseHeaders and docs/08) cannot drift
+        // unnoticed. The end-to-end Access-Control-Expose-Headers behavior is covered by the integration suite.
         Assert.Equal(
             [
                 "ETag",
@@ -81,6 +81,8 @@ public class CorsConfigurationTests
                 "RateLimit-Limit",
                 "RateLimit-Remaining",
                 "RateLimit-Reset",
+                "Deprecation",
+                "Sunset",
             ],
             CorsConfiguration.ExposedResponseHeaders);
     }
