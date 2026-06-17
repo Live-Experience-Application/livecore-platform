@@ -51,6 +51,29 @@ documented in `docs/02_ARCHITECTURE.md` ("Evolution, deprecation and sunset") an
 `docs/08_API_CONTRACTS.md` ("API evolution"). A `### Deprecated` changelog heading (Keep
 a Changelog, below) is the package-surface counterpart of the `Deprecation` header.
 
+### Generated OpenAPI-derived contracts (CORE-OAS-002)
+
+`@livecore/contracts` is **OpenAPI-derived**: its `src/openapi.ts` is generated from
+the committed OpenAPI 3 document `openapi/livecore-v1.json` (itself generated from the
+running route table and drift-gated against it, CORE-OAS-001) by
+`pnpm --filter @livecore/contracts run generate` (`openapi-typescript`), and re-exported
+under the `OpenApi` namespace. A CI drift gate in the `typescript` job
+(`check:openapi`, mirrored by the package build test) regenerates the types and fails
+on any diff, so the server's contract and the published types can never silently
+diverge. The curated, human-facing request/response DTOs in the package are validated
+against the generated schemas by the type-tests (the generator marks every required
+reference-type field `nullable`, an ASP.NET minimal-API quirk, so the curated DTOs stay
+the primary documented surface).
+
+Generation does **not** change the versioning rules — it enforces them. When an
+intentional server change regenerates the types, classify the diff with the same
+MAJOR-vs-MINOR rule above: a new optional field, schema or endpoint is a **MINOR**
+addition; a removed, renamed or narrowed field, or a widened required input, is a
+**breaking** change released as a SemVer event and called out under a `### Changed` or
+`### Removed` changelog heading. A regenerated contract change is therefore a normal
+changelog entry, never a silent edit: the drift gate forces the regeneration into the
+same commit, and this document's rules decide the version bump.
+
 ## Lockstep releases
 
 The four packages are released **together** and always share a single version.

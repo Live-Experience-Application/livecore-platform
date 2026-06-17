@@ -12,6 +12,18 @@ detail; this root file is the workspace-level summary. The .NET API and worker
 hosts are not published packages and are not versioned here. See
 `docs/23_PACKAGE_VERSIONING.md` for the full versioning and changelog process.
 
+## [Unreleased]
+
+### Added
+
+- `@livecore/contracts` is now OpenAPI-derived (CORE-OAS-002): its `src/openapi.ts`
+  types are generated from the committed OpenAPI 3 document
+  (`openapi/livecore-v1.json`, CORE-OAS-001) with `openapi-typescript` and exposed
+  under the `OpenApi` namespace. A CI drift gate in the `typescript` job regenerates
+  the types and fails on any diff, and the curated request DTOs are validated against
+  the generated schemas, so the server's contract and the published types cannot
+  silently diverge. See the package changelog for detail.
+
 ## [0.1.0] - 2026-06-13
 
 First stable, documented release of the typed Core packages a vertical app

@@ -12,6 +12,22 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- OpenAPI-derived contract types (CORE-OAS-002): the package now generates
+  `src/openapi.ts` from the committed OpenAPI 3 document
+  (`openapi/livecore-v1.json`, itself generated from the running route table and
+  drift-gated against it, CORE-OAS-001) with `openapi-typescript`, and re-exports
+  them under the `OpenApi` namespace (for example
+  `OpenApi.components["schemas"]["CreateWorkspaceRequest"]`) — so the published
+  contracts are literally OpenAPI-derived and cover every request body the server
+  declares, including the six not previously modeled with a curated alias. A CI
+  drift gate in the `typescript` job (`check:openapi`, mirrored by the package
+  build test) regenerates the types and fails on any diff, and the curated
+  request DTOs are validated against the generated schemas by the type-tests, so
+  the server's contract and the published types cannot silently diverge. The
+  curated DTOs remain the primary documented surface (the generator marks every
+  required reference-type field `nullable`, an ASP.NET minimal-API quirk).
+  `openapi-typescript` is a build-time `devDependency`; the generated output is
+  committed, so the package still adds no runtime dependency.
 - Deprecation/sunset response header names (CORE-DX-006): `ResponseHeaders` gains
   `Deprecation` and `Sunset`. A deprecated Core API route signals its retirement
   with the RFC 8594 `Sunset` header (the date it stops responding) plus the

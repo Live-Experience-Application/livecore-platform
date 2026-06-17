@@ -9,9 +9,18 @@
  */
 import type {
   AdEligibilityResponse,
+  AppleTransactionVerificationRequest,
   AssetStatus,
   ContentBlockType,
+  CreateAssetLinkRequest,
+  CreateContentBlockRequest,
+  CreateEntityRequest,
+  CreateEntityTypeRequest,
+  CreateSceneRequest,
+  CreateUploadIntentRequest,
   CreateWorkspaceRequest,
+  GoogleTokenVerificationRequest,
+  InviteWorkspaceMemberRequest,
   MembershipRole,
   PageResponse,
   ProblemCode,
@@ -21,10 +30,15 @@ import type {
   SessionResponse,
   SessionStatus,
   StoreNotificationAck,
+  UpdateWorkspaceRequest,
   VisibilityResourceType,
   WorkspaceResponse,
 } from "../src/index.js";
 import { VERSION } from "../src/index.js";
+// The OpenAPI-derived component schemas, generated from openapi/livecore-v1.json by
+// `pnpm --filter @livecore/contracts run generate` (CORE-OAS-002). The curated DTOs
+// above are validated against these below.
+import type { components } from "../src/openapi.js";
 
 /** `true` only when `X` and `Y` are the exact same type. */
 type Equal<X, Y> =
@@ -177,3 +191,116 @@ export const problemDetailsExample: ProblemDetails = {
   status: 404,
   code: "not_found",
 };
+
+// --- The curated DTOs are validated against the OpenAPI-derived schemas. --------
+// (CORE-OAS-002.) `packages/contracts/src/openapi.ts` is generated from the committed
+// OpenAPI 3 document `openapi/livecore-v1.json`, which is itself generated from — and
+// drift-gated against — the server's minimal-API route table (CORE-OAS-001). A
+// byte-for-byte gate (`check:openapi`, run in the CI `typescript` job and the package
+// build test) fails if `openapi.ts` is out of date with that document, so the
+// generated surface tracks the server exactly.
+//
+// These assertions are the curated-surface half of the coupling: every hand-written
+// request DTO must carry EXACTLY the property names of the matching generated schema,
+// so an added/removed/renamed server request field fails this type test until the
+// curated DTO (and the changelog) is updated. We compare the property-NAME sets
+// rather than the full value types deliberately: the ASP.NET minimal-API OpenAPI
+// generator marks every required reference-type property `nullable` (a generated
+// `name` is `string | null`) and marks server-required some fields the curated DTO
+// documents as optional, so a structural `Equal` would fail on that quirk rather than
+// on real drift. The property-name set is the drift-meaningful, quirk-stable
+// invariant; the byte-diff gate covers value-type/nullability/format changes.
+
+type Schemas = components["schemas"];
+
+/** `true` only when curated DTO `C` carries exactly the property names of schema `S`. */
+type SameKeys<C, S> = Equal<keyof C, keyof S>;
+
+export type CreateWorkspaceRequestMatchesSchema = Assert<
+  SameKeys<CreateWorkspaceRequest, Schemas["CreateWorkspaceRequest"]>
+>;
+export type UpdateWorkspaceRequestMatchesSchema = Assert<
+  SameKeys<UpdateWorkspaceRequest, Schemas["UpdateWorkspaceRequest"]>
+>;
+export type InviteWorkspaceMemberRequestMatchesSchema = Assert<
+  SameKeys<
+    InviteWorkspaceMemberRequest,
+    Schemas["InviteWorkspaceMemberRequest"]
+  >
+>;
+export type CreateSceneRequestMatchesSchema = Assert<
+  SameKeys<CreateSceneRequest, Schemas["CreateSceneRequest"]>
+>;
+export type CreateContentBlockRequestMatchesSchema = Assert<
+  SameKeys<CreateContentBlockRequest, Schemas["CreateContentBlockRequest"]>
+>;
+export type CreateEntityRequestMatchesSchema = Assert<
+  SameKeys<CreateEntityRequest, Schemas["CreateEntityRequest"]>
+>;
+export type CreateEntityTypeRequestMatchesSchema = Assert<
+  SameKeys<CreateEntityTypeRequest, Schemas["CreateEntityTypeRequest"]>
+>;
+export type RevealRequestMatchesSchema = Assert<
+  SameKeys<RevealRequest, Schemas["RevealRequest"]>
+>;
+export type CreateUploadIntentRequestMatchesSchema = Assert<
+  SameKeys<CreateUploadIntentRequest, Schemas["CreateUploadIntentRequest"]>
+>;
+export type CreateAssetLinkRequestMatchesSchema = Assert<
+  SameKeys<CreateAssetLinkRequest, Schemas["CreateAssetLinkRequest"]>
+>;
+export type AppleTransactionVerificationRequestMatchesSchema = Assert<
+  SameKeys<
+    AppleTransactionVerificationRequest,
+    Schemas["AppleTransactionVerificationRequest"]
+  >
+>;
+export type GoogleTokenVerificationRequestMatchesSchema = Assert<
+  SameKeys<
+    GoogleTokenVerificationRequest,
+    Schemas["GoogleTokenVerificationRequest"]
+  >
+>;
+
+// The generated ProblemDetails schema carries exactly the fields the curated
+// `ProblemDetails` models. The curated type adds an index signature for the RFC 7807
+// "readers must tolerate unknown members" rule, which widens its own `keyof`, so we
+// pin the generated schema's field names directly instead of comparing key sets.
+export type ProblemDetailsSchemaFieldsAreModeled = Assert<
+  Equal<
+    keyof Schemas["ProblemDetails"],
+    "type" | "title" | "status" | "detail" | "instance" | "code"
+  >
+>;
+
+// The generated surface covers EVERY request body the server's OpenAPI document
+// declares — including the six the package does not (yet) model with a curated alias
+// (AcceptWorkspaceInvitationRequest, CreateOrganizationRequest, CreateSessionRequest,
+// CreateTemplateRequest, HideRequest, ReorderSceneRequest), which a consumer can still
+// reach as `OpenApi.components["schemas"][...]`. Adding or removing a server request
+// schema changes this set and fails the assertion (and the byte-diff gate), so the
+// generated contract surface cannot silently drift from the server.
+export type GeneratedSchemaSetIsExact = Assert<
+  Equal<
+    keyof Schemas,
+    | "AcceptWorkspaceInvitationRequest"
+    | "AppleTransactionVerificationRequest"
+    | "CreateAssetLinkRequest"
+    | "CreateContentBlockRequest"
+    | "CreateEntityRequest"
+    | "CreateEntityTypeRequest"
+    | "CreateOrganizationRequest"
+    | "CreateSceneRequest"
+    | "CreateSessionRequest"
+    | "CreateTemplateRequest"
+    | "CreateUploadIntentRequest"
+    | "CreateWorkspaceRequest"
+    | "GoogleTokenVerificationRequest"
+    | "HideRequest"
+    | "InviteWorkspaceMemberRequest"
+    | "ProblemDetails"
+    | "ReorderSceneRequest"
+    | "RevealRequest"
+    | "UpdateWorkspaceRequest"
+  >
+>;

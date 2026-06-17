@@ -27,6 +27,21 @@ export const PACKAGE_NAME = "@livecore/contracts";
  */
 export const VERSION = "0.1.0";
 
+/**
+ * The OpenAPI-derived types (CORE-OAS-002), generated from the committed OpenAPI 3
+ * document `openapi/livecore-v1.json` (CORE-OAS-001) by
+ * `pnpm --filter @livecore/contracts run generate`, exposed under the `OpenApi`
+ * namespace (for example `OpenApi.components["schemas"]["CreateWorkspaceRequest"]`).
+ * They make the package's contracts literally OpenAPI-derived: a CI drift gate
+ * fails if these types diverge from the document, and the curated DTOs below are
+ * validated against them by the contract type-tests, so the server and the
+ * published types cannot silently diverge. The curated DTOs remain the primary,
+ * documented surface — the generator marks every required reference-type field
+ * `nullable` (an ASP.NET minimal-API quirk), so the curated shapes are the
+ * human-facing tightening a consumer codes against.
+ */
+export type * as OpenApi from "./openapi.js";
+
 export * from "./scalars.js";
 export * from "./http.js";
 export * from "./pagination.js";

@@ -150,6 +150,15 @@ jobs:
       - name: Build packages
         run: pnpm --recursive run build
 
+      - name: Drift-gate the OpenAPI-derived contracts (CORE-OAS-002)
+        # Regenerate @livecore/contracts' OpenAPI-derived types from the committed
+        # OpenAPI document (openapi/livecore-v1.json, itself drift-gated against the
+        # registered routes by spec-consistency check 12) and fail on any diff, so
+        # the server's contract and the published TypeScript types cannot silently
+        # diverge. The package build test asserts the same thing for `pnpm --recursive
+        # run test`; this is the explicit, named gate (docs/23_PACKAGE_VERSIONING.md).
+        run: pnpm --filter @livecore/contracts run check:openapi
+
       - name: Run package tests
         run: pnpm --recursive run test
 

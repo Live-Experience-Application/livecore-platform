@@ -11,6 +11,11 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
+  generateOpenApiTypes,
+  GENERATED_TYPES_URL,
+} from "../scripts/generate-openapi.mjs";
+
+import {
   API_BASE_PATH,
   AssetStatuses,
   ContentBlockTypes,
@@ -29,6 +34,28 @@ import {
 
 test("the built package exposes its stable name", () => {
   assert.equal(PACKAGE_NAME, "@livecore/contracts");
+});
+
+// --- The OpenAPI-derived types do not drift from the document (CORE-OAS-002). ----
+// The drift gate, as a portable test: regenerate the contract types from the
+// committed OpenAPI document in memory and assert they equal the committed
+// src/openapi.ts byte-for-byte (line-ending insensitive — the repository stores LF
+// but a Windows checkout may be CRLF). This is the same check as the package
+// `check:openapi` script and the CI `typescript`-job drift step; running it here
+// means `pnpm --recursive run test` fails if the server's OpenAPI document and the
+// published contracts have diverged.
+test("the committed OpenAPI-derived types match the document (CORE-OAS-002)", async () => {
+  const committed = readFileSync(GENERATED_TYPES_URL, "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
+  const regenerated = await generateOpenApiTypes();
+  assert.equal(
+    committed,
+    regenerated,
+    "packages/contracts/src/openapi.ts is out of date with openapi/livecore-v1.json; " +
+      "run `pnpm --filter @livecore/contracts run generate` and commit the result (CORE-OAS-002).",
+  );
 });
 
 test("the built package exposes the versioned API base path", () => {

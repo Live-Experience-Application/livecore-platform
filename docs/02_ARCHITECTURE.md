@@ -81,11 +81,18 @@ packages/design-tokens
   generic tokens and theme contracts
 ```
 
-The `packages/contracts` types are **hand-written today**: the API now emits an
-OpenAPI 3 document (CORE-OAS-001; see "OpenAPI document" under
-[API versioning](#api-versioning)), and **generating** the TypeScript contracts from
-that document with a drift gate — making "OpenAPI-derived" literally true — is the
-next story (CORE-OAS-002).
+The `packages/contracts` types are **OpenAPI-derived**: the API emits an OpenAPI 3
+document (CORE-OAS-001; see "OpenAPI document" under
+[API versioning](#api-versioning)), and `@livecore/contracts` generates its
+`src/openapi.ts` types from that committed document with `openapi-typescript`
+(CORE-OAS-002), exposed under the `OpenApi` namespace. A CI drift gate in the
+`typescript` job regenerates those types and fails on any diff, and the curated,
+human-facing request/response DTOs are validated against the generated schemas by
+the package type-tests, so the server's contract and the published types cannot
+silently diverge. The curated DTOs remain the primary documented surface because
+the generator marks every required reference-type field `nullable` (an ASP.NET
+minimal-API quirk); a generated change is still a SemVer event in the changelog
+(`docs/23_PACKAGE_VERSIONING.md`).
 
 ## Backend module boundaries
 
@@ -174,10 +181,12 @@ diverge from the routes the host actually mounts.
   schema names and the Problem Details shape; the document transformer strips the
   request-DTO XML doc prose so no internal commentary reaches the published contract.
 
-The document is the foundation for the typed TypeScript contracts (CORE-OAS-002),
-which will be generated from it with their own drift gate. See
-`docs/08_API_CONTRACTS.md` for the contract details and `docs/24_SPEC_CONSISTENCY.md`
-for the drift gate.
+The document is the foundation for the typed TypeScript contracts: `@livecore/contracts`
+generates its `src/openapi.ts` types from it with `openapi-typescript` and a CI drift
+gate (CORE-OAS-002), so the published types are literally OpenAPI-derived and cannot
+diverge from the server. See `docs/08_API_CONTRACTS.md` for the contract details,
+`docs/23_PACKAGE_VERSIONING.md` for how a generated change maps to a SemVer event, and
+`docs/24_SPEC_CONSISTENCY.md` for the OpenAPI document's own route drift gate.
 
 ### Evolution, deprecation and sunset (CORE-DX-006)
 

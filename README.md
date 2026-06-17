@@ -417,10 +417,28 @@ fields, enums as stable string names); the package carries no vertical domain
 language. The typed SDK client that calls these contracts is a separate package
 (`@livecore/sdk-ts`, CORE-SDK-002).
 
-The package is types-first and adds no runtime dependencies. Its `test` script
+The contracts are **OpenAPI-derived** (CORE-OAS-002): `src/openapi.ts` is generated
+from the committed OpenAPI 3 document (`openapi/livecore-v1.json`, itself generated
+from the running route table and drift-gated against it, CORE-OAS-001) by
+`pnpm --filter @livecore/contracts run generate` (`openapi-typescript`), and exposed
+under the `OpenApi` namespace (for example
+`OpenApi.components["schemas"]["CreateWorkspaceRequest"]`). A CI drift gate in the
+`typescript` job (`pnpm --filter @livecore/contracts run check:openapi`, mirrored by
+the package build test) regenerates those types and fails on any diff, so the
+server's contract and the published types cannot silently diverge. The curated,
+human-facing DTOs above are validated against the generated schemas by the package
+type-tests; they stay the primary documented surface because the generator marks
+every required reference-type field `nullable` (an ASP.NET minimal-API quirk). A
+regenerated change is classified and changelogged with the same SemVer rules as any
+other surface change (`docs/23_PACKAGE_VERSIONING.md`). The generated file is owned
+by the generator, so it is excluded from Prettier and ESLint but still type-checked
+by `tsc`.
+
+The package is types-first and adds no runtime dependencies (`openapi-typescript` is
+a build-time `devDependency`; the generated output is committed). Its `test` script
 builds the package, type-checks the compile-time type assertions
-(`tsconfig.test.json`) and runs package-build tests against the compiled output
-with the Node built-in test runner.
+(`tsconfig.test.json`) and runs package-build tests against the compiled output —
+including the OpenAPI drift gate — with the Node built-in test runner.
 
 ### TypeScript SDK package
 
@@ -627,8 +645,9 @@ $env:LIVECORE_OPENAPI_UPDATE = '1'; dotnet test tests/LiveCore.SmokeTests --filt
 LIVECORE_OPENAPI_UPDATE=1 dotnet test tests/LiveCore.SmokeTests --filter OpenApiDocumentTests
 ```
 
-The typed `@livecore/contracts` types are hand-written today and will be generated
-from this document with their own drift gate in CORE-OAS-002.
+The typed `@livecore/contracts` types are **generated from this document** with their
+own drift gate (CORE-OAS-002): see
+[TypeScript contract package](#typescript-contract-package).
 
 ## Run the hosts locally
 
