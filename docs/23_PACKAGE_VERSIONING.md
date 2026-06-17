@@ -111,10 +111,43 @@ new resource-client method) classified by the same rule above; the hub path and 
 client-method name are pinned by the package build/type tests so a server-side rename
 surfaces as a contract change rather than a silent break.
 
-Because the hub is not a route, the future SDK↔`csv/api_routes.csv` coverage parity gate
-(CORE-SDK-007) must **except** the live client method: `connect` has no route row, so a
+Because the hub is not a route, the SDK↔`csv/api_routes.csv` coverage parity gate
+(CORE-SDK-007, below) **excepts** the live client method: `connect` has no route row, so a
 parity check that demanded one per method would fail on it. The drift discipline for the
 hub is the pinned constants here, not a route-coverage gate.
+
+### Drift-gated SDK↔route coverage parity (CORE-SDK-007)
+
+The typed SDK is the consumability surface a vertical builds on, but nothing bound it to
+the API: the published coverage regressed to roughly 45% silently because the SDK could
+fall behind a new route without any gate noticing. `@livecore/sdk-ts` exposes one typed
+client method per implemented `/api/v1` route (CORE-SDK-006); a CI gate in the `typescript`
+job (`check:sdk-parity`, mirrored by the package test) now **enforces** that parity so it
+cannot regress again. The gate asserts, in BOTH directions over the route set, that the SDK
+exposes exactly one client method per **non-callback** `csv/api_routes.csv` route:
+
+- a route documented in `csv/api_routes.csv` with no client method fails (the SDK fell
+  behind a new route), and
+- a client method whose route is not a documented non-callback route fails (a phantom or
+  renamed route, or a forbidden provider callback).
+
+**Provider-facing webhook callbacks are explicitly excepted.** The routes whose roles cell
+is `none (provider callback)` — today the Apple/Google store-notification receivers — are
+called by the store servers, not by a vertical app, so the SDK must NOT expose a method for
+them; a method that did would fail the gate. The **live realtime client** (`connect`) is
+excepted for free: it opens the `/hubs/session` hub rather than issuing an `/api/v1`
+request, so it has no route call-site and contributes no route key (see the live hub
+contract above).
+
+This is the TypeScript-side mirror of spec-consistency check 6 (which binds
+`csv/api_routes.csv` to the implemented minimal-API routes,
+`scripts/LiveCoreSpecConsistency.psm1`): there the C# route registrations are bound to the
+CSV; here the published SDK surface is bound to it, reading `csv/api_routes.csv` as the
+single source of truth and the resource client SOURCES for the methods (so the gate needs
+no build). Like the gates above, it does not change the versioning rules — it enforces
+them: a new route plus its SDK method is a **MINOR** addition (a new resource-client
+method), classified by the same rule above, and the gate forces the SDK method into the
+same commit as the route.
 
 ## Lockstep releases
 

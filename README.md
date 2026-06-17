@@ -471,6 +471,20 @@ the package, type-checks the compile-time type assertions (`tsconfig.test.json`)
 and runs package-build tests against an injected transport with the Node built-in
 test runner.
 
+That full coverage is **machine-enforced** so it cannot silently regress
+(CORE-SDK-007). A CI drift gate in the `typescript` job
+(`pnpm --filter @livecore/sdk-ts run check:sdk-parity`, mirrored by the package
+test) asserts, in both directions, that the SDK exposes exactly one client method
+per **non-callback** `csv/api_routes.csv` route: a route added without an SDK
+method, or an SDK method whose route is not documented (a phantom, a renamed
+route, or a forbidden provider callback), fails CI. The provider-facing
+store-notification webhooks (`none (provider callback)`) are excepted — they are
+called by the store servers, not a vertical — and so is the live realtime
+`connect`, which opens the hub rather than an `/api/v1` route. The gate reads
+`csv/api_routes.csv` as the source of truth and the resource client sources for
+the methods (so it needs no build); it is the TypeScript-side mirror of
+spec-consistency check 6 (`docs/23_PACKAGE_VERSIONING.md`).
+
 The `realtime` group adds a **typed live client** for the SignalR session hub
 (CORE-RT-007). `client.realtime.connect(params, onEvent)` opens `/hubs/session` with
 the connection identifiers (`organizationSlug`, `sessionId` and, for a participant,

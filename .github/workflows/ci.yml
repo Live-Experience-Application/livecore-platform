@@ -168,6 +168,16 @@ jobs:
         # `pnpm --recursive run test`; this is the explicit, named gate).
         run: pnpm --filter @livecore/contracts run check:events
 
+      - name: Drift-gate the SDK to api_routes coverage parity (CORE-SDK-007)
+        # Fail if @livecore/sdk-ts does not expose exactly one typed client method per
+        # non-callback csv/api_routes.csv route: a route added without an SDK method, or
+        # an SDK method without a route, fails here, so the SDK can never silently fall
+        # behind the API again (the provider-facing store-notification callbacks are
+        # excepted). The TypeScript-side mirror of spec-consistency check 6 (the package
+        # test asserts the same thing for `pnpm --recursive run test`; this is the
+        # explicit, named gate - docs/23_PACKAGE_VERSIONING.md).
+        run: pnpm --filter @livecore/sdk-ts run check:sdk-parity
+
       - name: Run package tests
         run: pnpm --recursive run test
 
