@@ -368,4 +368,22 @@ public enum AuditAction
     /// <see cref="AuditLogEntry.ForStoreNotificationProcessed"/>.
     /// </summary>
     StoreNotificationProcessed = 19,
+
+    /// <summary>
+    /// A data subject's personal data was erased on an authorized request — the data-subject erasure command
+    /// (CORE-PRIV-001, the "Privacy and Data Lifecycle" epic, GDPR Art.17 "right to erasure"). An authorized
+    /// Owner/Admin erased a data subject (a member of the tenant): the subject's user profile (its OIDC subject,
+    /// email and display name) is removed, their participant display data and any invited-email rows are
+    /// anonymized, and the export/asset records they created survive anonymized via the schema's
+    /// <c>ON DELETE SET NULL</c> foreign keys. Recording the erasure satisfies the story's "audited by id only"
+    /// criterion: it records that an authorized admin exercised the right to erasure (threats T1/T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). An erasure is a removal, not a transition to a new state, so there is
+    /// no before/after state pair; it is organization-level (no workspace), its actor is the admin who performed
+    /// the erasure and its resource is the erased subject (its generic kind name <c>UserProfile</c> and the
+    /// surrogate id). The audit row carries ONLY identifiers — never the erased subject's email, display name or
+    /// OIDC subject — and outlives the now-deleted user profile it references because the reference is a recorded
+    /// fact, not a foreign key (the PII-free audit chain is precisely what makes erasure reconcilable with the
+    /// immutable audit log; threats T1/T5/T7) (<see cref="AuditLogEntry.ForUserProfileErasure"/>).
+    /// </summary>
+    UserProfileErased = 25,
 }

@@ -49,6 +49,23 @@ internal sealed class UserProfileRepository : IUserProfileRepository
     }
 
     /// <inheritdoc />
+    public async Task<UserProfile?> FindByIdAsync(Guid id, CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored profile (ids are generated non-empty), so the lookup fails
+        // fast instead of returning an arbitrary row.
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Profile id must not be empty.", nameof(id));
+        }
+
+        // The users table is global scope (no tenant column), so the surrogate id alone is the row's key; the
+        // erasure caller has already authorized the subject through a tenant-scoped membership lookup.
+        return await _dbContext.UserProfiles
+            .FirstOrDefaultAsync(profile => profile.Id == id, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<UserProfileAddResult> AddAsync(UserProfile profile, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(profile);
@@ -94,6 +111,25 @@ internal sealed class UserProfileRepository : IUserProfileRepository
             _dbContext.UserProfiles.Update(profile);
         }
 
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task EraseAsync(UserProfile profile, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+
+        // A profile loaded outside the erasure transaction is detached after a retry clears the change tracker
+        // (CORE-CONC-005); attach it so the delete re-runs cleanly from its key. Removing the row lets the
+        // database honor the foreign keys against users(id): the SET-NULL links (participants/assets/exports)
+        // survive anonymized and the CASCADE links (org/workspace memberships) are revoked; the append-only
+        // audit_logs are recorded facts, not foreign keys, so the hash chain is untouched.
+        if (_dbContext.Entry(profile).State == EntityState.Detached)
+        {
+            _dbContext.UserProfiles.Attach(profile);
+        }
+
+        _dbContext.UserProfiles.Remove(profile);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 }

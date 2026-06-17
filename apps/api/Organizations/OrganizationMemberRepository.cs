@@ -162,4 +162,43 @@ internal sealed class OrganizationMemberRepository : IOrganizationMemberReposito
         _dbContext.OrganizationMembers.Remove(member);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<bool> IsSoleOwnerOfAnyOrganizationAsync(
+        Guid userProfileId,
+        CancellationToken cancellationToken)
+    {
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // The organizations the subject is an Owner of. The role is persisted as its stable name
+        // (HasConversion<string>), so this equality is an EXACT match (the matrix is non-linear), never an
+        // ordering comparison. This is keyed by the subject's own id and never reads another tenant's data
+        // (threat T5).
+        var ownedOrganizationIds = await _dbContext.OrganizationMembers
+            .Where(member => member.UserProfileId == userProfileId && member.Role == MembershipRole.Owner)
+            .Select(member => member.OrganizationId)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        // For each, the subject is the SOLE Owner when that organization has exactly one Owner. Erasing the
+        // subject CASCADE-removes their membership, so a tenant with no other Owner would be left permanently
+        // unreachable: that is the conflict the erasure command refuses on.
+        foreach (var organizationId in ownedOrganizationIds)
+        {
+            var ownerCount = await _dbContext.OrganizationMembers
+                .CountAsync(
+                    member => member.OrganizationId == organizationId && member.Role == MembershipRole.Owner,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (ownerCount <= 1)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

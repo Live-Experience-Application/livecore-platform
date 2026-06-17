@@ -144,6 +144,40 @@ Controls:
 - the chain is unsigned (no secret), so cryptographic signing/external anchoring against a fully privileged
   actor is a documented follow-up
 
+## Data-subject erasure (CORE-PRIV-001)
+
+A data subject has a right to erasure (GDPR Art.17), but until this story Core had **no** erasure path: the
+user-profile repository exposed only find/add/update, and the subject's personal data was spread across the
+schema — the `users` profile (OIDC subject, email, display name), `participants.display_name` and
+`workspace_invitations.invited_email` (both plaintext). The schema already **assumed** user deletion
+(`assets.created_by`, `export_jobs.requested_by` and `participants.user_id` are nullable `ON DELETE SET NULL`;
+`organization_members.user_id` and `workspace_members.user_id` are `ON DELETE CASCADE`), yet nothing ever
+deleted a `users` row.
+
+The erasure command (`DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data`,
+Owner/Admin) closes that gap:
+
+- it HARD-deletes the subject's `users` profile row (the row IS the PII), and ANONYMIZES the personal data the
+  profile's deletion cannot itself reach — `participants.display_name` (scrubbed to a fixed placeholder, the
+  user link cleared) and `workspace_invitations.invited_email` (scrubbed to a non-routable placeholder);
+- deleting the profile lets the database honor the foreign keys above: the subject's exports/assets **survive
+  anonymized** (`SET NULL` creator) and their memberships are revoked (`CASCADE`);
+- the operation is tenant-scoped in its **authorization** (an Owner/Admin of the resolved tenant acting on a
+  member of it, fail-closed: `403` for a non-privileged member, hidden `404` for a foreign-tenant/unknown
+  member — threats T1/T5), but its **effect** is global because the user profile is one deployment-wide identity:
+  the subject's personal data is erased everywhere it was stored;
+- it is **audited by id only** (`UserProfileErased`, actor + erased subject id, never the erased PII), and the
+  audit log's references are recorded facts, not foreign keys, so the **PII-free append-only hash chain still
+  verifies** after an erasure — this is exactly what makes the right to erasure reconcilable with the immutable
+  audit log (the audit-log integrity control above);
+- it **fails closed** on the orphan invariant: the sole Owner of an organization cannot be erased (erasing them
+  would cascade-remove their membership and leave the tenant permanently unreachable), returning `409` and
+  changing nothing.
+
+The controller/processor split for self-hosters, the data-residency configuration, the default retention
+windows and the at-rest-encryption expectations are recorded in the privacy/data-protection documentation
+(CORE-PRIV-005).
+
 ## Supply chain integrity (CORE-DEP-003)
 
 The published API, worker and migrations images are part of the trusted computing base a deployment runs. An

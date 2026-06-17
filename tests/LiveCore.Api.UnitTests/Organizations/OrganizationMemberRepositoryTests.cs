@@ -331,4 +331,45 @@ public sealed class OrganizationMemberRepositoryTests : IDisposable
         Assert.Equal(MembershipRole.Owner, first.Role);
         Assert.Equal(MembershipRole.Auditor, second.Role);
     }
+
+    [Fact]
+    public async Task IsSoleOwnerOfAnyOrganizationAsync_is_true_only_when_a_tenant_has_no_other_owner()
+    {
+        // CORE-PRIV-001 orphan guard: a subject who is the sole Owner of a tenant cannot be erased.
+        var organization = await SeedOrganizationAsync(_slugA);
+        var soleOwner = await SeedUserAsync(_issuer, _subject);
+        await SeedMembershipAsync(organization.Id, soleOwner.Id, MembershipRole.Owner);
+
+        await using var context = CreateContext();
+        var repository = new OrganizationMemberRepository(context);
+
+        Assert.True(await repository.IsSoleOwnerOfAnyOrganizationAsync(soleOwner.Id, CancellationToken.None));
+
+        // Once a second Owner joins, the first is no longer the sole Owner.
+        var coOwner = await SeedUserAsync(_issuer, _otherSubject);
+        await SeedMembershipAsync(organization.Id, coOwner.Id, MembershipRole.Owner);
+        Assert.False(await repository.IsSoleOwnerOfAnyOrganizationAsync(soleOwner.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task IsSoleOwnerOfAnyOrganizationAsync_is_false_for_a_non_owner_member()
+    {
+        var organization = await SeedOrganizationAsync(_slugA);
+        var owner = await SeedUserAsync(_issuer, _subject);
+        await SeedMembershipAsync(organization.Id, owner.Id, MembershipRole.Owner);
+        var participant = await SeedUserAsync(_issuer, _otherSubject);
+        await SeedMembershipAsync(organization.Id, participant.Id, MembershipRole.Participant);
+
+        await using var context = CreateContext();
+        var repository = new OrganizationMemberRepository(context);
+
+        // A Participant owns nothing, so erasing them orphans no tenant.
+        Assert.False(await repository.IsSoleOwnerOfAnyOrganizationAsync(participant.Id, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task IsSoleOwnerOfAnyOrganizationAsync_rejects_an_empty_subject_id()
+        => await Assert.ThrowsAsync<ArgumentException>(() =>
+            new OrganizationMemberRepository(CreateContext())
+                .IsSoleOwnerOfAnyOrganizationAsync(Guid.Empty, CancellationToken.None));
 }

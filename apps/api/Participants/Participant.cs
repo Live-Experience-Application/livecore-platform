@@ -71,6 +71,15 @@ public sealed class Participant
     /// </summary>
     public const int MaxDisplayNameLength = 256;
 
+    /// <summary>
+    /// Generic, PII-free display name a participant's display identity is replaced with when the linked data
+    /// subject is erased (<see cref="Anonymize"/>, CORE-PRIV-001). It is a fixed, non-identifying placeholder so
+    /// no trace of the erased subject's display name survives, while the participant record itself is preserved
+    /// (history of who took part is retained, anonymized). It is a valid display name
+    /// (<see cref="IsValidDisplayName"/>).
+    /// </summary>
+    public const string AnonymizedDisplayName = "Erased participant";
+
     private Participant(
         Guid id,
         Guid organizationId,
@@ -175,9 +184,12 @@ public sealed class Participant
     /// <c>user_id</c> foreign key to the <c>users</c> table).
     /// <see langword="null"/> for an anonymous/guest participant that has no user
     /// account (docs/03_DOMAIN_LANGUAGE.md: a participant "may be linked to a
-    /// user"). Immutable; a participant never moves to another subject.
+    /// user"). A participant never moves to another subject; the only mutation is
+    /// the data-subject erasure (<see cref="Anonymize"/>, CORE-PRIV-001), which
+    /// CLEARS the link to <see langword="null"/> so the surviving record becomes an
+    /// anonymous participant — never a relink to a different subject.
     /// </summary>
-    public Guid? UserProfileId { get; }
+    public Guid? UserProfileId { get; private set; }
 
     /// <summary>
     /// Human-readable display identity of the participant
@@ -308,6 +320,23 @@ public sealed class Participant
         }
 
         Status = ParticipantStatus.Removed;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// Anonymizes this participant for a data-subject erasure (CORE-PRIV-001, GDPR Art.17): replaces the
+    /// human-facing <see cref="DisplayName"/> with the fixed PII-free <see cref="AnonymizedDisplayName"/> and
+    /// CLEARS the <see cref="UserProfileId"/> user link. The record itself SURVIVES (history of who took part is
+    /// retained, anonymized) — this is anonymization, not deletion — so the lifecycle <see cref="Status"/> and
+    /// the immutable organization, workspace and id are untouched; only the personal data the erasure must
+    /// remove (the display name, which the schema's <c>ON DELETE SET NULL</c> link cannot reach, and the link to
+    /// the erased subject) is scrubbed. The operation is idempotent: re-anonymizing an already-anonymized
+    /// participant simply re-applies the same placeholder and null link.
+    /// </summary>
+    public void Anonymize(DateTimeOffset updatedAt)
+    {
+        DisplayName = AnonymizedDisplayName;
+        UserProfileId = null;
         UpdatedAt = updatedAt.ToUniversalTime();
     }
 

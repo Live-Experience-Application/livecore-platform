@@ -6,3 +6,4 @@ View host-only content,yes,yes,yes,yes,no,no,audit-only
 Execute reveal,yes,yes,yes,yes,no,no,no
 View own visible feed,no,no,preview,preview,yes,no,no
 View audit log,yes,yes,optional,no,no,no,yes
+Erase data subject personal data,yes,yes,no,no,no,no,no

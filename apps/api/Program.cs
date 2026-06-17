@@ -288,6 +288,17 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IOrganizationRepository, OrganizationRepository>();
     builder.Services.AddScoped<IOrganizationMemberRepository, OrganizationMemberRepository>();
 
+    // Data-subject erasure command (CORE-PRIV-001, GDPR Art.17 "right to erasure"): the IdentityAccess module's
+    // cross-cutting privacy command. An authorized Owner/Admin (DELETE
+    // /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data, wired by MapOrganizationEndpoints)
+    // erases a data subject — deleting their user profile, anonymizing their participant display data and
+    // invited-email rows, and auditing the erasure by id — atomically through the CORE-CONC-002
+    // TransactionalUnitOfWork. The schema's ON DELETE SET NULL / CASCADE foreign keys then anonymize the
+    // subject's exports/assets and revoke their memberships, while the PII-free append-only audit chain survives
+    // intact. Registered here inside the persistence conditional alongside the repositories it composes
+    // (user-profile, participant, invitation, organization-member and audit-log).
+    builder.Services.AddScoped<DataSubjectErasureService>();
+
     // Workspace persistence (CORE-WS-001): the Workspaces module owns the
     // tenant-scoped workspaces table (docs/05_MODULE_CONTRACTS.md). Registered
     // here, inside the persistence conditional, exactly like the organization

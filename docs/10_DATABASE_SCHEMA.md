@@ -154,6 +154,28 @@ Append-only tables (`session_events`, `audit_logs`, `purchase_events`,
 PostgreSQL-only (the test suite's SQLite provider has no `xmin` system column), so it
 is applied only when the provider is Npgsql.
 
+## Data-subject erasure and the user foreign keys (CORE-PRIV-001)
+
+The `users` table is **global** scope (it references identities, not tenant data, so it carries no
+`organization_id`). It holds the data subject's PII: the OIDC `issuer`/`subject_id`, `email` and
+`display_name`. The right to erasure (GDPR Art.17) **hard-deletes** the `users` row — an explicit exception to
+the "avoid hard-delete for business data" principle, because the row itself is the personal data — and the
+schema's foreign keys into `users(id)` are designed so the deletion cascades correctly without stranding or
+losing dependent records:
+
+- `assets.created_by`, `export_jobs.requested_by` and `participants.user_id` are nullable **`ON DELETE SET
+  NULL`**: the dependent record SURVIVES with an anonymized (null) creator/requester/user link;
+- `organization_members.user_id` and `workspace_members.user_id` are **`ON DELETE CASCADE`**: the subject's
+  access grants are revoked everywhere;
+- `audit_logs` reference the actor/resource as **recorded facts, not foreign keys**, so the PII-free
+  append-only audit trail and its per-tenant hash chain survive a user deletion intact (the erasure is
+  reconcilable with the immutable audit log — `docs/07_SECURITY_THREAT_MODEL.md`).
+
+Two PII columns are NOT reachable by any user foreign key — `participants.display_name` and
+`workspace_invitations.invited_email` — so the erasure command anonymizes them explicitly (to fixed,
+non-identifying placeholders) before deleting the profile, in one transaction. No schema change is required:
+the erasure is the application command the existing `SET NULL`/`CASCADE` foreign keys already assumed.
+
 ## Session-scoped visibility rules (CORE-SVIS-001)
 
 `visibility_rules` is **session-scoped**: it carries a required `session_id` column (a foreign key into

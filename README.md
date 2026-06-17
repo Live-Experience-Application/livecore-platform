@@ -1350,11 +1350,12 @@ authorization rationale (threat T7).
 
 The Organizations module exposes the tenant create/read API (CORE-API-001):
 
-| Method   | Route                                                         | Authorized callers                                             |
-| -------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
-| `GET`    | `/api/v1/organizations`                                       | any authenticated user (only the organizations they belong to) |
-| `POST`   | `/api/v1/organizations`                                       | any authenticated user (becomes the new tenant's `Owner`)      |
-| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}` | organization `Owner` or `Admin` (remove member — see below)    |
+| Method   | Route                                                                       | Authorized callers                                               |
+| -------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `GET`    | `/api/v1/organizations`                                                     | any authenticated user (only the organizations they belong to)   |
+| `POST`   | `/api/v1/organizations`                                                     | any authenticated user (becomes the new tenant's `Owner`)        |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}`               | organization `Owner` or `Admin` (remove member — see below)      |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data` | organization `Owner` or `Admin` (erase data subject — see below) |
 
 The create and list routes are user-tenant operations, so a service-account principal is denied
 `403` (only a human user holds an organization membership). The tenant boundary
@@ -1529,6 +1530,50 @@ the authenticated **actor** (the admin who removed the member), the removed
 membership and the revoked role — never any token or content (threats T1/T6/T7).
 The audit record is a recorded fact, so it survives the now-deleted membership it
 references.
+
+### Data-subject erasure (right to erasure)
+
+An authorized admin can erase a data subject's personal data — GDPR Art.17, the
+"right to erasure" (CORE-PRIV-001):
+
+| Method   | Route                                                                       | Authorized callers              |
+| -------- | --------------------------------------------------------------------------- | ------------------------------- |
+| `DELETE` | `/api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data` | organization `Owner` or `Admin` |
+
+Until this story Core had **no** erasure path, even though the schema already
+**assumed** user deletion (the `users` foreign keys are `ON DELETE SET NULL` for
+`assets.created_by`/`export_jobs.requested_by`/`participants.user_id` and
+`ON DELETE CASCADE` for the membership tables) — but nothing ever deleted a `users`
+row. This route is the command those foreign keys assumed. It resolves the target
+member to their **global** user profile and erases the data subject:
+
+- the `users` profile row — the subject's OIDC subject, email and display name — is
+  **hard-deleted** (the row _is_ the PII);
+- their `participants.display_name` is scrubbed to a fixed placeholder and the user
+  link cleared, and their `workspace_invitations.invited_email` rows are scrubbed —
+  the two PII columns no user foreign key reaches, anonymized explicitly;
+- deleting the profile lets the database honor the foreign keys: the subject's
+  **exports and assets survive anonymized** (`SET NULL` creator) and their
+  memberships are **revoked** (`CASCADE`);
+- it returns `204 No Content`. All effects commit in **one transaction**.
+
+Authorization mirrors member management — **organization `Owner` or `Admin`**
+(`docs/06_AUTHORIZATION_MATRIX.md`), matched exactly. It is **tenant-scoped in its
+authorization** (the caller must be an Owner/Admin of the resolved tenant and the
+target a member of it) but **global in its effect**, because the user profile is a
+single deployment-wide identity: the subject's personal data is erased everywhere
+it was stored. Every step is fail-closed: a non-privileged tenant member is `403`,
+and a foreign-tenant/unknown member is hidden as `404` (threats T1/T5). The **sole
+`Owner`** of an organization cannot be erased (it would leave the tenant
+permanently unreachable) — `409 Conflict`, changing nothing.
+
+Every successful erasure appends an append-only `UserProfileErased` audit record
+(see "Audit log" below) capturing the tenant, the authenticated **actor** (the
+admin who performed it) and the erased subject **by id** — never the erased email,
+display name or OIDC subject (threats T1/T5/T7). Because the audit log references
+are recorded facts (not foreign keys) and carry no PII, the **append-only audit
+hash chain still verifies** after an erasure: that is what makes the right to
+erasure reconcilable with the immutable audit log.
 
 ### Workspace archive (lifecycle end-state)
 

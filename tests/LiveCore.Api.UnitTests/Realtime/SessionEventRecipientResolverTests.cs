@@ -262,5 +262,8 @@ public sealed class SessionEventRecipientResolverTests
 
         public Task UpdateAsync(Participant participant, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<int> AnonymizeBySubjectAsync(Guid userProfileId, DateTimeOffset updatedAt, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 }

@@ -32,6 +32,17 @@ namespace LiveCore.Api.Organizations;
 ///   removal is appended to the append-only audit log
 ///   (<see cref="AuditAction.MemberRemoved"/>). Fail-closed and hidden as 404 for a
 ///   cross-tenant/unknown organization or member.</item>
+///   <item><c>DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data</c>
+///   — erase a data subject's personal data (CORE-PRIV-001, GDPR Art.17 "right to
+///   erasure"), Owner or Admin. Resolves the member to their global user profile and
+///   runs the <see cref="DataSubjectErasureService"/>: the subject's profile (OIDC
+///   subject, email, display name) is deleted, their participant display data and
+///   invited-email rows are anonymized, and their exports/assets survive anonymized
+///   (and memberships are revoked) via the schema's <c>ON DELETE SET NULL</c>/
+///   <c>CASCADE</c> foreign keys; the erasure is appended to the PII-free audit log
+///   by id (<see cref="AuditAction.UserProfileErased"/>). The sole Owner of an
+///   organization cannot be erased (the orphan invariant, 409). Fail-closed and
+///   hidden as 404 for a cross-tenant/unknown organization or member.</item>
 /// </list>
 ///
 /// Authorization model (server-side, fail-closed; docs/06_AUTHORIZATION_MATRIX.md;
@@ -87,6 +98,7 @@ internal static class OrganizationEndpoints
         group.MapGet("/", ListOrganizationsAsync);
         group.MapPost("/", CreateOrganizationAsync);
         group.MapDelete("/{organizationSlug}/members/{memberId}", RemoveOrganizationMemberAsync);
+        group.MapDelete("/{organizationSlug}/members/{memberId}/personal-data", EraseMemberPersonalDataAsync);
 
         return endpoints;
     }
@@ -336,6 +348,93 @@ internal static class OrganizationEndpoints
         return Results.NoContent();
     }
 
+    // DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data
+    private static async Task<IResult> EraseMemberPersonalDataAsync(
+        HttpContext httpContext,
+        string organizationSlug,
+        string memberId,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The organization is identified by its slug in the path (the tenant's natural key, matched against the
+        // token's organization claim). A missing/blank slug or a malformed member id can never address a stored
+        // row; hide as 404, never echoing why.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return HiddenOrganization();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenOrganization();
+        }
+
+        // Resolve the trusted tenant context (token claim AND persisted membership). A denied resolution — a
+        // foreign/unknown tenant, a malformed slug, a non-member or a service-account principal — is hidden as
+        // 404, so a tenant the caller cannot see is indistinguishable from a missing one (threat T5), exactly
+        // like the member-removal route.
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            return HiddenOrganization();
+        }
+
+        var context = resolution.Context;
+
+        // The right to erasure is a member-management privilege: Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md),
+        // exactly as the member-removal route. The caller is a known member of the tenant (the resolution proved
+        // it), so an insufficient role is a 403. Exact, non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Identify the data subject by their membership in THIS tenant; a member id that belongs to another
+        // organization (or no membership at all) is hidden as 404, never 403, so a member outside the caller's
+        // resolved tenant can never be probed for (threats T1/T5). The membership resolves the subject's global
+        // user-profile id, which the erasure command then acts on.
+        var target = await deps.OrganizationMembers
+            .FindByIdAsync(context.OrganizationId, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenOrganization();
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var result = await deps.DataSubjectErasure
+            .EraseAsync(context.OrganizationId, context.UserProfileId, target.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result switch
+        {
+            // The subject's personal data is erased (profile deleted, participant/invitation PII anonymized,
+            // exports/assets anonymized and memberships revoked via the schema foreign keys) and audited by id;
+            // nothing is returned (204 No Content).
+            DataSubjectErasureResult.Erased => Results.NoContent(),
+
+            // The caller is authorized; the orphan invariant, not the caller, is the reason, so this is a 409
+            // Conflict (docs/08_API_CONTRACTS.md).
+            DataSubjectErasureResult.SubjectIsSoleOrganizationOwner => SoleOwnerErasureConflict(),
+
+            // Defensive: the membership references a real user profile by foreign key, so the subject should
+            // always exist; if it somehow does not, hide it as 404 rather than reveal anything (fail-closed).
+            _ => HiddenOrganization(),
+        };
+    }
+
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They
     /// exist only when a database connection string is configured; when absent,
@@ -349,19 +448,21 @@ internal static class OrganizationEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var organizationMembers = services.GetService<IOrganizationMemberRepository>();
         var auditLog = services.GetService<IAuditLogRepository>();
+        var dataSubjectErasure = services.GetService<DataSubjectErasureService>();
 
         if (organizations is null
             || userProfiles is null
             || resolver is null
             || organizationMembers is null
-            || auditLog is null)
+            || auditLog is null
+            || dataSubjectErasure is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new OrganizationEndpointDependencies(
-            organizations, userProfiles, resolver, organizationMembers, auditLog);
+            organizations, userProfiles, resolver, organizationMembers, auditLog, dataSubjectErasure);
         return true;
     }
 
@@ -423,6 +524,17 @@ internal static class OrganizationEndpoints
             title: "Conflict",
             detail: "The last Owner of the organization cannot be removed.");
 
+    // A data subject who is the sole Owner of an organization cannot be erased: erasing them cascade-removes
+    // their memberships, leaving that tenant permanently unreachable. The caller is authorized; the orphan
+    // invariant, not the caller, is the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md). The detail
+    // names only the generic invariant and leaks no tenant data (threat T7).
+    private static IResult SoleOwnerErasureConflict()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
+            title: "Conflict",
+            detail: "The sole Owner of an organization cannot be erased; transfer ownership first.");
+
     // Tenant existence is hidden: a foreign tenant (a slug the token does not
     // claim) is reported as 404, never echoing the reason (docs/08; threat T5).
     private static IResult HiddenOrganization()
@@ -437,5 +549,6 @@ internal static class OrganizationEndpoints
         UserProfileReferenceService UserProfiles,
         TenantContextResolver Resolver,
         IOrganizationMemberRepository OrganizationMembers,
-        IAuditLogRepository AuditLog);
+        IAuditLogRepository AuditLog,
+        DataSubjectErasureService DataSubjectErasure);
 }

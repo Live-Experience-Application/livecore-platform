@@ -220,4 +220,42 @@ internal sealed class ParticipantRepository : IParticipantRepository
         _dbContext.Participants.Update(participant);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<int> AnonymizeBySubjectAsync(
+        Guid userProfileId,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored participant (ids are generated non-empty), so the erasure
+        // fails fast instead of matching an arbitrary set of rows.
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        // CROSS-TENANT BY DESIGN (GDPR Art.17): the predicate matches the user link ALONE, not a tenant or
+        // workspace, so it anonymizes the subject's participant display data everywhere it was stored. This is
+        // safe under threat T5 — it is keyed by the subject's own surrogate id, returns only a count and is
+        // reachable only from the authorized erasure command. Load-then-mutate + SaveChanges (the codebase's
+        // add/remove convention) so the anonymized rows participate in the ambient erasure transaction.
+        var participants = await _dbContext.Participants
+            .Where(participant => participant.UserProfileId == userProfileId)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (participants.Count == 0)
+        {
+            return 0;
+        }
+
+        foreach (var participant in participants)
+        {
+            participant.Anonymize(updatedAt);
+        }
+
+        _dbContext.Participants.UpdateRange(participants);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return participants.Count;
+    }
 }

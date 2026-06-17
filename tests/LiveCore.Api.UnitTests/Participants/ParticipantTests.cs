@@ -320,4 +320,54 @@ public class ParticipantTests
 
         Assert.Contains("anonymous", text, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Anonymize_scrubs_the_display_name_and_clears_the_user_link()
+    {
+        // CORE-PRIV-001 (GDPR Art.17): erasing the linked data subject anonymizes the participant — the
+        // display name (PII the SET NULL user foreign key cannot reach) is scrubbed to the fixed placeholder and
+        // the user link is cleared, while the record itself survives.
+        var participant = Participant.Create(
+            _organizationId, _workspaceId, _userProfileId, "Secret Display Name", _createdAt);
+
+        participant.Anonymize(_updatedAt);
+
+        Assert.Equal(Participant.AnonymizedDisplayName, participant.DisplayName);
+        Assert.Null(participant.UserProfileId);
+        Assert.False(participant.IsLinkedToUser);
+        // The record survives (anonymization, not deletion): the boundaries and lifecycle are untouched.
+        Assert.Equal(_organizationId, participant.OrganizationId);
+        Assert.Equal(_workspaceId, participant.WorkspaceId);
+        Assert.Equal(ParticipantStatus.Active, participant.Status);
+        Assert.Equal(_updatedAt, participant.UpdatedAt);
+        // The placeholder is itself a valid display name and carries no trace of the erased PII.
+        Assert.True(Participant.IsValidDisplayName(participant.DisplayName));
+        Assert.DoesNotContain("Secret Display Name", participant.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Anonymize_is_idempotent()
+    {
+        var participant = Participant.Create(
+            _organizationId, _workspaceId, _userProfileId, "Secret Display Name", _createdAt);
+
+        participant.Anonymize(_updatedAt);
+        participant.Anonymize(_updatedAt);
+
+        Assert.Equal(Participant.AnonymizedDisplayName, participant.DisplayName);
+        Assert.Null(participant.UserProfileId);
+    }
+
+    [Fact]
+    public void Anonymize_normalizes_updated_at_to_utc()
+    {
+        var participant = Participant.Create(
+            _organizationId, _workspaceId, _userProfileId, "Secret Display Name", _createdAt);
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        participant.Anonymize(local);
+
+        Assert.Equal(TimeSpan.Zero, participant.UpdatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, participant.UpdatedAt.UtcDateTime);
+    }
 }

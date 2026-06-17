@@ -20,6 +20,7 @@ Roles are generic. Verticals may rename them in UI.
 | View audit log | yes | yes | optional | no | no | no | yes |
 | Export workspace | yes | yes | optional | no | no | no | optional |
 | Delete workspace | yes | optional | no | no | no | no | no |
+| Erase data subject personal data | yes | yes | no | no | no | no | no |
 
 ## Authorization principles
 
@@ -29,3 +30,4 @@ Roles are generic. Verticals may rename them in UI.
 - Workspace boundary must be checked before resource-level visibility.
 - Participant visibility is computed server-side.
 - Audit roles may view metadata but should not automatically view sensitive content unless explicitly allowed.
+- Erasing a data subject's personal data (the right to erasure, `DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data`, CORE-PRIV-001) is a member-management privilege restricted to Owner/Admin, exactly like removing a member. It is authorized within a tenant (the caller must be an Owner/Admin of the resolved organization and the target a member of it), but because Core's user profile is a single global identity its effect is global: the subject's profile is deleted and their per-tenant personal-data copies are anonymized everywhere (GDPR Art.17). The sole Owner of an organization cannot be erased (an ownerless tenant would be permanently unreachable); a non-privileged member is denied `403` and a foreign-tenant/unknown member is hidden as `404` (fail-closed).

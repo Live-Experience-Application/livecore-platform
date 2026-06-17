@@ -263,4 +263,41 @@ public class WorkspaceInvitationTests
         Assert.Contains("role=Admin", text, StringComparison.Ordinal);
         Assert.Contains("status=Pending", text, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void AnonymizeInvitedEmail_scrubs_the_email_and_preserves_everything_else()
+    {
+        // CORE-PRIV-001 (GDPR Art.17): erasing the invitee anonymizes the invited email (PII no foreign key
+        // references) to the fixed non-routable placeholder while the invitation row is preserved.
+        var invitation = WorkspaceInvitation.Create(
+            _organizationId, _workspaceId, _email, MembershipRole.Admin, _createdAt, out _);
+        var updatedAt = _createdAt.AddHours(1);
+
+        invitation.AnonymizeInvitedEmail(updatedAt);
+
+        Assert.Equal(WorkspaceInvitation.AnonymizedInvitedEmail, invitation.InvitedEmail);
+        Assert.NotEqual(_email, invitation.InvitedEmail);
+        // The placeholder is a valid invited email and carries no trace of the erased address.
+        Assert.True(WorkspaceInvitation.IsValidInvitedEmail(invitation.InvitedEmail));
+        // The invitation survives (anonymization, not deletion): scope, role, token hash and lifecycle hold.
+        Assert.Equal(_organizationId, invitation.OrganizationId);
+        Assert.Equal(_workspaceId, invitation.WorkspaceId);
+        Assert.Equal(MembershipRole.Admin, invitation.Role);
+        Assert.Equal(WorkspaceInvitationStatus.Pending, invitation.Status);
+        Assert.Equal(updatedAt, invitation.UpdatedAt);
+        Assert.DoesNotContain(_email, invitation.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnonymizeInvitedEmail_normalizes_updated_at_to_utc()
+    {
+        var invitation = WorkspaceInvitation.Create(
+            _organizationId, _workspaceId, _email, MembershipRole.Admin, _createdAt, out _);
+        var local = new DateTimeOffset(2026, 6, 12, 11, 0, 0, TimeSpan.FromHours(2));
+
+        invitation.AnonymizeInvitedEmail(local);
+
+        Assert.Equal(TimeSpan.Zero, invitation.UpdatedAt.Offset);
+        Assert.Equal(local.UtcDateTime, invitation.UpdatedAt.UtcDateTime);
+    }
 }

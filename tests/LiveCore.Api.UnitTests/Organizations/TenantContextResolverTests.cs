@@ -446,6 +446,9 @@ public sealed class TenantContextResolverTests
                 Profiles.FirstOrDefault(profile => profile.BelongsToOidcIdentity(issuer, subjectId)));
         }
 
+        public Task<UserProfile?> FindByIdAsync(Guid id, CancellationToken cancellationToken)
+            => Task.FromResult(Profiles.FirstOrDefault(profile => profile.Id == id));
+
         public Task<UserProfileAddResult> AddAsync(UserProfile profile, CancellationToken cancellationToken)
         {
             ArgumentNullException.ThrowIfNull(profile);
@@ -455,6 +458,12 @@ public sealed class TenantContextResolverTests
 
         public Task UpdateAsync(UserProfile profile, CancellationToken cancellationToken)
             => Task.CompletedTask;
+
+        public Task EraseAsync(UserProfile profile, CancellationToken cancellationToken)
+        {
+            Profiles.Remove(profile);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeOrganizationMemberRepository : IOrganizationMemberRepository
@@ -549,6 +558,24 @@ public sealed class TenantContextResolverTests
             ArgumentNullException.ThrowIfNull(member);
             Members.RemoveAll(existing => existing.Id == member.Id);
             return Task.CompletedTask;
+        }
+
+        public Task<bool> IsSoleOwnerOfAnyOrganizationAsync(
+            Guid userProfileId,
+            CancellationToken cancellationToken)
+        {
+            if (userProfileId == Guid.Empty)
+            {
+                throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+            }
+
+            var soleOwner = Members
+                .Where(member => member.UserProfileId == userProfileId && member.HasRole(MembershipRole.Owner))
+                .Select(member => member.OrganizationId)
+                .Any(organizationId =>
+                    Members.Count(member => member.OrganizationId == organizationId && member.HasRole(MembershipRole.Owner)) <= 1);
+
+            return Task.FromResult(soleOwner);
         }
     }
 }

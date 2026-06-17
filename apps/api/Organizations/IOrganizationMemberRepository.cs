@@ -110,4 +110,24 @@ public interface IOrganizationMemberRepository
     Task RemoveAsync(
         OrganizationMember member,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether the given subject is the SOLE Owner of any organization — i.e. there exists an organization in
+    /// which the subject holds the <see cref="MembershipRole.Owner"/> role and no other member does
+    /// (CORE-PRIV-001). It generalizes the per-tenant last-Owner invariant (<see cref="CountByRoleAsync"/>)
+    /// across every tenant the subject owns, because the data-subject erasure HARD-deletes the subject's user
+    /// profile, which CASCADE-removes their organization memberships in EVERY tenant at once: erasing a sole
+    /// Owner would leave that tenant permanently unreachable (the tenant resolver requires a membership), so the
+    /// erasure refuses (a 409 conflict) until ownership is transferred. Unlike the other methods on this
+    /// contract this one is deliberately NOT tenant-scoped — the erasure spans tenants — but it is safe under
+    /// threat T5: it is keyed by the subject's own surrogate id and returns only a boolean, never another
+    /// tenant's data.
+    /// </summary>
+    /// <param name="userProfileId">The data subject's user-profile id (required, non-empty).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns><see langword="true"/> when the subject is the only Owner of at least one organization.</returns>
+    /// <exception cref="ArgumentException">The user profile id is empty.</exception>
+    Task<bool> IsSoleOwnerOfAnyOrganizationAsync(
+        Guid userProfileId,
+        CancellationToken cancellationToken);
 }

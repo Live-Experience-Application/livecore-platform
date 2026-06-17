@@ -234,4 +234,44 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
         _dbContext.WorkspaceInvitations.Update(invitation);
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<int> AnonymizeByInvitedEmailAsync(
+        string invitedEmail,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken)
+    {
+        // A blank email can never address a stored invitation, so the erasure fails fast instead of matching
+        // an arbitrary set of rows.
+        if (string.IsNullOrWhiteSpace(invitedEmail))
+        {
+            throw new ArgumentException("Invited email must not be blank.", nameof(invitedEmail));
+        }
+
+        // CROSS-TENANT BY DESIGN (GDPR Art.17): the predicate matches the invited email ALONE, not a tenant or
+        // workspace, so it scrubs the subject's email everywhere it was recorded. The match is exact (ordinal)
+        // equality, which EF translates to parameterized SQL — the invited email is stored as trimmed,
+        // case-preserved data. This is safe under threat T5 — it is keyed by the subject's own email, returns
+        // only a count and is reachable only from the authorized erasure command. Load-then-mutate +
+        // SaveChanges (the codebase's convention) so the anonymized rows participate in the ambient erasure
+        // transaction.
+        var invitations = await _dbContext.WorkspaceInvitations
+            .Where(invitation => invitation.InvitedEmail == invitedEmail)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (invitations.Count == 0)
+        {
+            return 0;
+        }
+
+        foreach (var invitation in invitations)
+        {
+            invitation.AnonymizeInvitedEmail(updatedAt);
+        }
+
+        _dbContext.WorkspaceInvitations.UpdateRange(invitations);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return invitations.Count;
+    }
 }

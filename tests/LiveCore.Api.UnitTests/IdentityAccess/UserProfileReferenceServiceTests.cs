@@ -220,6 +220,15 @@ public class UserProfileReferenceServiceTests
             CancellationToken cancellationToken)
             => Task.FromResult(Profiles.FirstOrDefault(profile => profile.BelongsToOidcIdentity(issuer, subjectId)));
 
+        public Task<UserProfile?> FindByIdAsync(Guid id, CancellationToken cancellationToken)
+            => Task.FromResult(Profiles.FirstOrDefault(profile => profile.Id == id));
+
+        public Task EraseAsync(UserProfile profile, CancellationToken cancellationToken)
+        {
+            Profiles.Remove(profile);
+            return Task.CompletedTask;
+        }
+
         public Task<UserProfileAddResult> AddAsync(UserProfile profile, CancellationToken cancellationToken)
         {
             if (SimulateDuplicateOnAdd)

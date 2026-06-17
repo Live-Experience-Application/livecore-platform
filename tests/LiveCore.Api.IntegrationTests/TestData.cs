@@ -26,13 +26,20 @@ internal static class TestData
 {
     public static readonly DateTimeOffset SeedTime = new(2026, 6, 11, 8, 0, 0, TimeSpan.Zero);
 
-    /// <summary>Creates and persists a user profile for a given OIDC identity.</summary>
+    /// <summary>
+    /// Creates and persists a user profile for a given OIDC identity. Pass
+    /// <paramref name="displayName"/>/<paramref name="email"/> to seed the optional provider-mirrored personal
+    /// data (both default to null, the no-metadata case) — used by the data-subject erasure tests to arrange a
+    /// subject whose email/display name must be erased everywhere they were stored (CORE-PRIV-001).
+    /// </summary>
     public static async Task<UserProfile> AddUserAsync(
         this LiveCoreDbContext context,
         string issuer,
-        string subject)
+        string subject,
+        string? displayName = null,
+        string? email = null)
     {
-        var principal = new OidcPrincipal(PrincipalType.User, issuer, subject);
+        var principal = new OidcPrincipal(PrincipalType.User, issuer, subject, displayName, email);
         var profile = UserProfile.CreateFromPrincipal(principal, SeedTime);
         context.UserProfiles.Add(profile);
         await context.SaveChangesAsync();

@@ -158,4 +158,30 @@ public interface IParticipantRepository
     /// through a tenant-scoped lookup.
     /// </summary>
     Task UpdateAsync(Participant participant, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Anonymizes EVERY participant linked to the given data subject — scrubbing the display name to the fixed
+    /// PII-free placeholder and clearing the user link (<see cref="Participant.Anonymize"/>) — and returns how
+    /// many were anonymized (CORE-PRIV-001, GDPR Art.17). It is the data-subject erasure counterpart of the
+    /// resource-deletion "remove by X" methods, and the only Participants lookup keyed by the user link.
+    ///
+    /// CROSS-TENANT BY DESIGN. Unlike every other method on this contract, this one is deliberately NOT
+    /// tenant- or workspace-scoped: a data subject's personal data must be erased EVERYWHERE it was stored
+    /// (GDPR Art.17), and a participant's display name is a per-tenant copy of the subject's identity, so the
+    /// erasure spans every tenant and workspace the subject took part in. This is safe under threat T5 because
+    /// it is a write keyed by the SUBJECT'S OWN surrogate id (never a guessed foreign id), it READS nothing
+    /// back to any caller (it returns only a count), and it is reachable only from the authorized erasure
+    /// command — so it can never be used to read another tenant's data. The participant's
+    /// <c>display_name</c> is PII the schema's <c>ON DELETE SET NULL</c> user foreign key cannot reach, which is
+    /// exactly why the erasure must scrub it explicitly here rather than rely on the link being nulled.
+    /// </summary>
+    /// <param name="userProfileId">The erased data subject's user-profile id (required, non-empty).</param>
+    /// <param name="updatedAt">The erasure timestamp stamped on each anonymized participant.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The number of participants anonymized (zero when the subject had none).</returns>
+    /// <exception cref="ArgumentException">The user profile id is empty.</exception>
+    Task<int> AnonymizeBySubjectAsync(
+        Guid userProfileId,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken);
 }

@@ -77,6 +77,14 @@ public sealed class WorkspaceInvitation
     /// </summary>
     public static readonly TimeSpan DefaultValidity = TimeSpan.FromDays(7);
 
+    /// <summary>
+    /// Generic, PII-free placeholder the invited email is replaced with when the invitee is erased as a data
+    /// subject (<see cref="AnonymizeInvitedEmail"/>, CORE-PRIV-001). It is a fixed, non-routable address under
+    /// the reserved <c>.invalid</c> TLD (RFC 2606), so no trace of the erased subject's email survives while the
+    /// invitation row is preserved. It is a valid invited email (<see cref="IsValidInvitedEmail"/>).
+    /// </summary>
+    public const string AnonymizedInvitedEmail = "erased@erased.invalid";
+
     private WorkspaceInvitation(
         Guid id,
         Guid organizationId,
@@ -186,9 +194,12 @@ public sealed class WorkspaceInvitation
     /// <summary>
     /// Email of the invitee. Validated for shape, but DATA only: never a
     /// credential and never an authorization input (docs/adr/0005). Excluded
-    /// from <see cref="ToString"/> as personal data (threat T7).
+    /// from <see cref="ToString"/> as personal data (threat T7). The only
+    /// mutation is the data-subject erasure (<see cref="AnonymizeInvitedEmail"/>,
+    /// CORE-PRIV-001), which scrubs it to the PII-free
+    /// <see cref="AnonymizedInvitedEmail"/> placeholder.
     /// </summary>
-    public string InvitedEmail { get; }
+    public string InvitedEmail { get; private set; }
 
     /// <summary>
     /// Generic role the invitee will hold once the invite is redeemed,
@@ -380,6 +391,21 @@ public sealed class WorkspaceInvitation
 
         Status = WorkspaceInvitationStatus.Revoked;
         UpdatedAt = revokedAt.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// Anonymizes the invited email for a data-subject erasure (CORE-PRIV-001, GDPR Art.17): replaces the
+    /// invitee identifier with the fixed, non-routable PII-free <see cref="AnonymizedInvitedEmail"/> placeholder
+    /// so no trace of the erased subject's email survives. The invitation row itself is PRESERVED — this is
+    /// anonymization, not deletion — so the tenant, workspace, role, token hash, lifecycle
+    /// <see cref="Status"/> and expiry are all untouched; only the personal data the erasure must remove (the
+    /// plaintext email, which no foreign key references) is scrubbed. The operation is idempotent: re-anonymizing
+    /// re-applies the same placeholder.
+    /// </summary>
+    public void AnonymizeInvitedEmail(DateTimeOffset updatedAt)
+    {
+        InvitedEmail = AnonymizedInvitedEmail;
+        UpdatedAt = updatedAt.ToUniversalTime();
     }
 
     /// <summary>

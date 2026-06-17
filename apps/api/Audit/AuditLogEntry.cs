@@ -645,6 +645,68 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a data-subject erasure (<see cref="AuditAction.UserProfileErased"/>) — the audit fact written when
+    /// an authorized Owner/Admin erases a data subject's personal data (CORE-PRIV-001, GDPR Art.17 "right to
+    /// erasure"). It is the privacy counterpart of <see cref="ForMemberRemoval"/> and, like it, a thin
+    /// specialization of <see cref="Create"/> that pins the action and applies the erasure producer's stricter
+    /// contract: the tenant the erasure was authorized in, the authenticated actor (the admin who performed it)
+    /// and the erased subject resource (its generic kind name and surrogate id) are all REQUIRED, where the
+    /// generic factory leaves them optional. An erasure is a removal rather than a transition, and a user profile
+    /// has no lifecycle state, so there is NO before/after state pair (both null) — exactly as
+    /// <see cref="ForEntityDeletion"/> records a deletion. It is ORGANIZATION-level (no workspace), because the
+    /// erasure is authorized within a tenant even though the data subject's user profile is a global identity, so
+    /// the fact records the tenant and NO workspace, mirroring how <see cref="ForMemberRemoval"/> records an
+    /// organization-level member removal. The resource kind is passed as a generic NAME string (e.g.
+    /// <c>UserProfile</c>) so the Audit module does not depend on the IdentityAccess module's types. Every value
+    /// is an identifier or a generic name — NEVER the erased subject's email, display name or OIDC subject or any
+    /// free-form content (threats T1/T5/T7) — and the audit row outlives the now-deleted user profile it
+    /// references because the reference is a recorded fact, not a foreign key (the PII-free audit chain is what
+    /// makes erasure reconcilable with the immutable audit log).
+    /// </summary>
+    /// <param name="organizationId">The tenant the erasure was authorized in (required).</param>
+    /// <param name="actorUserProfileId">The admin who performed the erasure (required; the audited actor).</param>
+    /// <param name="subjectResourceType">The erased subject's generic kind name (e.g. UserProfile).</param>
+    /// <param name="erasedUserProfileId">The erased subject's user-profile surrogate id.</param>
+    /// <param name="createdAt">When the erasure happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty or the subject resource type is blank.
+    /// </exception>
+    public static AuditLogEntry ForUserProfileErasure(
+        Guid organizationId,
+        Guid actorUserProfileId,
+        string subjectResourceType,
+        Guid erasedUserProfileId,
+        DateTimeOffset createdAt)
+    {
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(subjectResourceType))
+        {
+            throw new ArgumentException("Subject resource type must not be empty.", nameof(subjectResourceType));
+        }
+
+        if (erasedUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Erased user profile id must not be empty.", nameof(erasedUserProfileId));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId: null,
+            AuditAction.UserProfileErased,
+            actorUserProfileId,
+            subjectResourceType,
+            erasedUserProfileId,
+            targetParticipantId: null,
+            previousState: null,
+            newState: null,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a workspace invitation redemption (<see cref="AuditAction.MemberJoined"/>) — the audit fact
     /// written when an authenticated caller redeems a scoped invitation and gains the granted workspace
     /// membership (CORE-WS-006). It is the inverse of <see cref="ForMemberRemoval"/>: a thin specialization

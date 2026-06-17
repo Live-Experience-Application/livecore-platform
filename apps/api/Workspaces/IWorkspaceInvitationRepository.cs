@@ -137,4 +137,29 @@ public interface IWorkspaceInvitationRepository
     /// </summary>
     /// <exception cref="ArgumentNullException">The invitation is null.</exception>
     Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Anonymizes EVERY invitation whose invited email matches the given address — scrubbing the email to the
+    /// fixed PII-free placeholder (<see cref="WorkspaceInvitation.AnonymizeInvitedEmail"/>) — and returns how
+    /// many were anonymized (CORE-PRIV-001, GDPR Art.17). It is the data-subject erasure counterpart of the
+    /// other "by X" methods, addressing invitations by the only PII column they carry (the invited email), which
+    /// no foreign key references — so the erasure must scrub it explicitly here.
+    ///
+    /// CROSS-TENANT BY DESIGN. Unlike the read/lookup methods on this contract, this one is deliberately NOT
+    /// tenant- or workspace-scoped: a data subject's email must be erased EVERYWHERE it was stored (GDPR
+    /// Art.17), and an invitation can precede the subject ever having a profile/membership, so it is matched by
+    /// the email value alone. This is safe under threat T5 because it is a write keyed by the subject's own
+    /// email (never a guessed foreign id), it READS nothing back to any caller (it returns only a count) and it
+    /// is reachable only from the authorized erasure command. The match is EXACT (ordinal): the invited email is
+    /// stored as trimmed, case-preserved data, so the erasure scrubs exactly the rows that recorded this address.
+    /// </summary>
+    /// <param name="invitedEmail">The erased data subject's email to scrub (required, non-blank).</param>
+    /// <param name="updatedAt">The erasure timestamp stamped on each anonymized invitation.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The number of invitations anonymized (zero when none matched).</returns>
+    /// <exception cref="ArgumentException">The invited email is blank.</exception>
+    Task<int> AnonymizeByInvitedEmailAsync(
+        string invitedEmail,
+        DateTimeOffset updatedAt,
+        CancellationToken cancellationToken);
 }
