@@ -39,6 +39,12 @@ internal sealed class IdempotencyKeyConfiguration : IEntityTypeConfiguration<Ide
             .HasMaxLength(IdempotencyKey.MaxKeyLength)
             .IsRequired();
 
+        // Optional reference to the resource the guarded request produced (CORE-DX-004): nullable, because a
+        // state-idempotent command (reveal/hide) records the key with no result. A create or
+        // purchase-verification key carries the created resource's id so a retry returns the original result.
+        builder.Property(idempotencyKey => idempotencyKey.ResultId)
+            .HasColumnName("result_id");
+
         builder.Property(idempotencyKey => idempotencyKey.CreatedAt)
             .HasColumnName("created_at")
             .IsRequired();

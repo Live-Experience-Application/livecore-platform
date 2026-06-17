@@ -93,6 +93,32 @@ public sealed class IdempotencyKeyStoreTests : IDisposable
         Assert.Equal("key", exception.ParamName);
     }
 
+    [Fact]
+    public void Create_without_a_result_id_leaves_it_null()
+    {
+        // The state-idempotent reveal/hide commands record a key with no result (CORE-DX-004).
+        var key = IdempotencyKey.Create("reveal:org-a", "key-1", _createdAt);
+        Assert.Null(key.ResultId);
+    }
+
+    [Fact]
+    public void Create_binds_a_supplied_result_id()
+    {
+        // A create or purchase-verification key binds the produced resource id (CORE-DX-004).
+        var resultId = Guid.CreateVersion7();
+        var key = IdempotencyKey.Create("session-create:org-a", "key-1", _createdAt, resultId);
+        Assert.Equal(resultId, key.ResultId);
+    }
+
+    [Fact]
+    public void Create_rejects_an_empty_result_id()
+    {
+        // An empty Guid never addresses a resource: passing one (rather than null) is a programming error.
+        var exception = Assert.Throws<ArgumentException>(
+            () => IdempotencyKey.Create("session-create:org-a", "key-1", _createdAt, Guid.Empty));
+        Assert.Equal("resultId", exception.ParamName);
+    }
+
     // --- Store -----------------------------------------------------------------
 
     [Fact]
@@ -113,6 +139,28 @@ public sealed class IdempotencyKeyStoreTests : IDisposable
             Assert.NotNull(found);
             Assert.Equal("reveal:org-a", found.Scope);
             Assert.Equal("key-1", found.Key);
+        }
+    }
+
+    [Fact]
+    public async Task Add_then_find_round_trips_the_result_id()
+    {
+        // CORE-DX-004: a create/purchase-verification key persists the produced resource id so a retry can
+        // re-load and return the original result.
+        var resultId = Guid.CreateVersion7();
+        await using (var context = CreateContext())
+        {
+            var store = new IdempotencyKeyStore(context);
+            await store.AddAsync(
+                IdempotencyKey.Create("session-create:org-a", "key-1", _createdAt, resultId), CancellationToken.None);
+        }
+
+        await using (var context = CreateContext())
+        {
+            var store = new IdempotencyKeyStore(context);
+            var found = await store.FindAsync("session-create:org-a", "key-1", CancellationToken.None);
+            Assert.NotNull(found);
+            Assert.Equal(resultId, found.ResultId);
         }
     }
 

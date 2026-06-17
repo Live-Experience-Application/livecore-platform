@@ -31,4 +31,15 @@ public interface IPurchaseTransactionRepository
         PurchaseProvider provider,
         string providerTransactionId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finds the purchase transaction with exactly the given surrogate id, or <see langword="null"/> when none
+    /// exists. Used by the Idempotency-Key replay path (CORE-DX-004): a verification route records the recorded
+    /// transaction's id against the client key, so a retry under the same key re-loads the original transaction
+    /// by that id and returns the original result WITHOUT re-running the external verifier. A purchase is named
+    /// globally (no tenant), so the lookup is by id alone; per-subject isolation is enforced by the buyer-scoped
+    /// idempotency scope, not by this read.
+    /// </summary>
+    /// <exception cref="System.ArgumentException">The id is empty.</exception>
+    Task<PurchaseTransaction?> FindByIdAsync(Guid id, CancellationToken cancellationToken);
 }

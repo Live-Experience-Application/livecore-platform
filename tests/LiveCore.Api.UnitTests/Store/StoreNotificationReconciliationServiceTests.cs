@@ -490,6 +490,9 @@ public sealed class StoreNotificationReconciliationServiceTests : IDisposable
             CancellationToken cancellationToken)
             => _inner.FindByProviderTransactionAsync(provider, providerTransactionId, cancellationToken);
 
+        public Task<PurchaseTransaction?> FindByIdAsync(Guid id, CancellationToken cancellationToken)
+            => _inner.FindByIdAsync(id, cancellationToken);
+
         public Task UpdateAsync(PurchaseTransaction transaction, CancellationToken cancellationToken)
         {
             if (string.Equals(transaction.ProviderTransactionId, _conflictTransactionId, StringComparison.Ordinal))

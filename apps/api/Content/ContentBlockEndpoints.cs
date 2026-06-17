@@ -2,6 +2,7 @@ using System.Security.Claims;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Scenes;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -423,6 +424,14 @@ internal static class ContentBlockEndpoints
             return Forbidden();
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL content block and creates exactly one. A malformed key is a 400, checked AFTER
+        // authorization so an unauthorized caller never receives request-shape feedback (the reveal rule).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         // Create the content block in the scene's own workspace at the initial revision
         // (1). The tenant, workspace and scene ids all come from the loaded scene row, so
         // the block is bound to exactly the scene addressed inside the enforced tenant
@@ -437,7 +446,34 @@ internal static class ContentBlockEndpoints
             request.Body!.Trim(),
             now);
 
-        await deps.ContentBlocks.AddAsync(contentBlock, cancellationToken).ConfigureAwait(false);
+        // The create + the idempotency-key record commit atomically (CORE-DX-004); the scope is per-tenant and
+        // per-operation, so a content-block-create key never collides with another tenant's or another route's.
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                $"content-block-create:{scene.OrganizationId}",
+                now,
+                create: async transactionCancellationToken =>
+                {
+                    await deps.ContentBlocks.AddAsync(contentBlock, transactionCancellationToken).ConfigureAwait(false);
+                    return contentBlock;
+                },
+                resultIdSelector: block => block.Id,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (creation.Replayed)
+        {
+            // A prior request with this key already created the block; return the original (200), creating
+            // nothing. The block is re-loaded through the tenant-, workspace- AND scene-scoped FindByIdAsync, so
+            // a key reused against a different scene resolves to nothing and is a hidden 404 (threats T1/T5).
+            var original = await deps.ContentBlocks
+                .FindByIdAsync(scene.OrganizationId, scene.WorkspaceId, scene.Id, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenScene()
+                : Results.Ok(ContentBlockResponse.From(original));
+        }
 
         var response = ContentBlockResponse.From(contentBlock);
         return Results.Created(
@@ -600,19 +636,21 @@ internal static class ContentBlockEndpoints
         var contentBlocks = services.GetService<IContentBlockRepository>();
         var contentBlockDeletion = services.GetService<ContentBlockDeletionService>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || scenes is null
             || contentBlocks is null
             || contentBlockDeletion is null
-            || workspaceMembers is null)
+            || workspaceMembers is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new ContentBlockEndpointDependencies(
-            resolver, scenes, contentBlocks, contentBlockDeletion, workspaceMembers);
+            resolver, scenes, contentBlocks, contentBlockDeletion, workspaceMembers, idempotency);
         return true;
     }
 
@@ -684,5 +722,6 @@ internal static class ContentBlockEndpoints
         ISceneRepository Scenes,
         IContentBlockRepository ContentBlocks,
         ContentBlockDeletionService ContentBlockDeletion,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        IdempotentResourceCreator Idempotency);
 }

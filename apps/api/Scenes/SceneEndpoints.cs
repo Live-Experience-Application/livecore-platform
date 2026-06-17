@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -417,6 +418,14 @@ internal static class SceneEndpoints
             return ArchivedReadOnly();
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL scene and creates exactly one. A malformed key is a 400, checked AFTER
+        // authorization so an unauthorized caller never receives request-shape feedback (the reveal rule).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         // Append-to-end ordering (CORE-SCENE-001 deferred this to the endpoint story):
         // the new scene's position is the next order after the current maximum in the
         // workspace. An empty workspace gets the first order (0). The order is assigned
@@ -432,11 +441,35 @@ internal static class SceneEndpoints
         var now = timeProvider.GetUtcNow();
         var scene = Scene.Create(context.OrganizationId, workspaceGuid, request.Title!.Trim(), nextOrder, now);
 
-        // A scene has no uniqueness constraint, so there is no 409 outcome to translate;
-        // AddAsync always returns Added on success (a foreign-key violation would surface
-        // as a DbUpdateException, which the membership check above already precludes for a
-        // resolved, existing workspace).
-        await deps.Scenes.AddAsync(scene, cancellationToken).ConfigureAwait(false);
+        // The create + the idempotency-key record commit atomically (CORE-DX-004); the scope is per-tenant and
+        // per-operation. A scene has no uniqueness constraint, so AddAsync always returns Added on success (a
+        // foreign-key violation would surface as a DbUpdateException, which the membership check above already
+        // precludes for a resolved, existing workspace).
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                $"scene-create:{context.OrganizationId}",
+                now,
+                create: async transactionCancellationToken =>
+                {
+                    await deps.Scenes.AddAsync(scene, transactionCancellationToken).ConfigureAwait(false);
+                    return scene;
+                },
+                resultIdSelector: created => created.Id,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (creation.Replayed)
+        {
+            // A prior request with this key already created the scene; return the original (200), creating
+            // nothing and never assigning a second order. The scene is re-loaded WITHIN the resolved tenant.
+            var original = await deps.Scenes
+                .FindByIdInOrganizationAsync(context.OrganizationId, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenScene()
+                : Results.Ok(SceneResponse.From(original));
+        }
 
         var response = SceneResponse.From(scene);
         return Results.Created($"/api/v1/scenes/{scene.Id}", response);
@@ -694,20 +727,22 @@ internal static class SceneEndpoints
         var sceneReorder = services.GetService<SceneReorderService>();
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || scenes is null
             || sceneDeletion is null
             || sceneReorder is null
             || workspaces is null
-            || workspaceMembers is null)
+            || workspaceMembers is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new SceneEndpointDependencies(
-            resolver, scenes, sceneDeletion, sceneReorder, workspaces, workspaceMembers);
+            resolver, scenes, sceneDeletion, sceneReorder, workspaces, workspaceMembers, idempotency);
         return true;
     }
 
@@ -797,5 +832,6 @@ internal static class SceneEndpoints
         SceneDeletionService SceneDeletion,
         SceneReorderService SceneReorder,
         IWorkspaceRepository Workspaces,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        IdempotentResourceCreator Idempotency);
 }

@@ -150,6 +150,25 @@ Reveal and hide (un-reveal) execution must be idempotent for client retry.
 A repeated reveal or hide request with the same idempotency key must not create duplicate events.
 Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.
 
+### Idempotency-Key on create and purchase-verification routes (CORE-DX-004)
+
+Unsafe POSTs that create a resource or have money/entitlement effects also honor an `Idempotency-Key`,
+so a client or network retry cannot double-create a resource or re-run an external verifier:
+
+- Covered routes: session create, scene create, content-block create, workspace create, asset-link create,
+  and the Apple/Google purchase-verification routes.
+- The header is OPTIONAL on these routes (unlike reveal/hide, where it is required): omitting it preserves
+  the prior behavior, so it is non-breaking. A present-but-malformed key (over the length bound or carrying
+  control characters) is a 400, returned only after authorization.
+- On the first request the key is recorded against the produced resource's id, bounded by the existing
+  `idempotency_keys` store (its `result_id` column). A retry under the SAME key returns the ORIGINAL result
+  (`200 OK`) and creates nothing; a create's first response is `201 Created`, its replay `200 OK`. A retried
+  purchase verify short-circuits BEFORE the external verifier and BEFORE any audit fact, returning the
+  originally recorded transaction.
+- Replay is scoped per tenant and per operation for the create routes (`<operation>:{organizationId}`), and
+  per buyer subject for the purchase routes (a purchase is named globally and carries no tenant), so one
+  tenant's or buyer's key never resolves another's resource. A different key creates a new resource.
+
 ## Pagination (CORE-DX-003)
 
 A list endpoint must never return an unbounded array: a single read could otherwise materialize a whole table,

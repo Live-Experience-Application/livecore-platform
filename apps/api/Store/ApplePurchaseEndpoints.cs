@@ -2,6 +2,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.SystemModule;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LiveCore.Api.Store;
@@ -150,12 +151,43 @@ internal static class ApplePurchaseEndpoints
             return ValidationError("The transaction or product reference is invalid.");
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a retried verify under the same key does NOT
+        // re-run the external verifier or re-append the audit facts — it returns the original recorded purchase.
+        // A malformed key is a 400 (after authorization, so an unauthorized caller never receives feedback).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         // Resolve the authenticated BUYER's user profile — the subject the purchase grants premium to, and the
         // actor of the verification audit facts (CORE-SPEC-002) — exactly as /me/entitlements resolves the current
         // user (idempotent on first sight). WHO is buying is the authenticated caller, never anything the client
         // asserts (CORE-MON-002). Resolved before verification so the submission/failure facts carry the buyer.
         var now = deps.TimeProvider.GetUtcNow();
         var profile = await deps.UserProfiles.EnsureUserProfileAsync(principal, cancellationToken).ConfigureAwait(false);
+
+        // Idempotency replay (CORE-DX-004), checked BEFORE the submission audit and the verifier: a purchase is
+        // named globally (no tenant; CORE-STORE-002), so the key is scoped per BUYER subject — one buyer's key
+        // never resolves another's purchase (threat T5). If this key was recorded by a prior successful verify,
+        // re-load that transaction and return its original result WITHOUT re-running the external verifier or
+        // re-appending any audit fact (the story acceptance criterion).
+        var idempotencyScope = $"purchase-apple:{profile.Id}";
+        if (idempotencyKey is not null)
+        {
+            var recorded = await deps.Idempotency
+                .FindAsync(idempotencyScope, idempotencyKey, cancellationToken)
+                .ConfigureAwait(false);
+            if (recorded?.ResultId is { } priorTransactionId)
+            {
+                var prior = await deps.TransactionRepository
+                    .FindByIdAsync(priorTransactionId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (prior is not null)
+                {
+                    return Results.Ok(PurchaseVerificationResponse.From(prior));
+                }
+            }
+        }
 
         // Record the submission as a real audit fact (CORE-SPEC-002: AuditAction.PurchaseVerificationSubmitted, the
         // catalog's PurchaseVerificationSubmitted event). A PLATFORM-level fact (a purchase is deployment-spanning,
@@ -255,6 +287,19 @@ internal static class ApplePurchaseEndpoints
                                     AuditAction.PurchaseVerificationSucceeded, profile.Id, recording.Transaction.Id, now),
                                 unitToken)
                             .ConfigureAwait(false);
+
+                        // Bind the client idempotency key to the recorded transaction (CORE-DX-004), in the SAME
+                        // transaction, so a later retry under this key short-circuits BEFORE the verifier above and
+                        // returns this transaction. A concurrent request that recorded the same key first makes
+                        // this a Duplicate, which is ignored: the record/link/grant are themselves idempotent.
+                        if (idempotencyKey is not null)
+                        {
+                            await deps.Idempotency
+                                .AddAsync(
+                                    IdempotencyKey.Create(idempotencyScope, idempotencyKey, now, recording.Transaction.Id),
+                                    unitToken)
+                                .ConfigureAwait(false);
+                        }
                     }
 
                     return (recording, link);
@@ -285,20 +330,24 @@ internal static class ApplePurchaseEndpoints
         var resolver = services.GetService<PurchaseVerificationProviderResolver>();
         var environmentPolicy = services.GetService<PurchaseEnvironmentPolicy>();
         var transactions = services.GetService<PurchaseTransactionService>();
+        var transactionRepository = services.GetService<IPurchaseTransactionRepository>();
         var billingLinks = services.GetService<BillingAccountLinkService>();
         var grants = services.GetService<ProductEntitlementGrantService>();
         var userProfiles = services.GetService<UserProfileReferenceService>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
+        var idempotency = services.GetService<IIdempotencyKeyStore>();
         var timeProvider = services.GetService<TimeProvider>();
         var auditLog = services.GetService<IAuditLogRepository>();
 
         if (resolver is null
             || environmentPolicy is null
             || transactions is null
+            || transactionRepository is null
             || billingLinks is null
             || grants is null
             || userProfiles is null
             || unitOfWork is null
+            || idempotency is null
             || timeProvider is null
             || auditLog is null)
         {
@@ -310,10 +359,12 @@ internal static class ApplePurchaseEndpoints
             resolver,
             environmentPolicy,
             transactions,
+            transactionRepository,
             billingLinks,
             grants,
             userProfiles,
             unitOfWork,
+            idempotency,
             timeProvider,
             auditLog);
         return true;
@@ -402,10 +453,12 @@ internal static class ApplePurchaseEndpoints
         PurchaseVerificationProviderResolver Resolver,
         PurchaseEnvironmentPolicy EnvironmentPolicy,
         PurchaseTransactionService Transactions,
+        IPurchaseTransactionRepository TransactionRepository,
         BillingAccountLinkService BillingLinks,
         ProductEntitlementGrantService Grants,
         UserProfileReferenceService UserProfiles,
         TransactionalUnitOfWork UnitOfWork,
+        IIdempotencyKeyStore Idempotency,
         TimeProvider TimeProvider,
         IAuditLogRepository AuditLog);
 }

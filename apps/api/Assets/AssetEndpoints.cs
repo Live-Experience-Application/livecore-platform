@@ -3,6 +3,7 @@ using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
@@ -653,15 +654,45 @@ internal static class AssetEndpoints
             return ValidationError("The 'targetId' value is required.");
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL link and creates exactly one. A malformed key is a 400.
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         var now = timeProvider.GetUtcNow();
 
         // The command verifies the target exists in the asset's OWN workspace (the same-workspace coupling
         // for the polymorphic target reference; threats T5/T1) and then persists the link. A target not in
-        // the workspace is hidden as 404; a repeat of the same link is 409 (no duplicate is created).
-        var result = await deps.AssetLinks
-            .LinkAsync(asset, targetType, request.TargetId, context.UserProfileId, now, cancellationToken)
+        // the workspace is hidden as 404; a repeat of the same link is 409 (no duplicate is created). The
+        // link create + the idempotency-key record commit atomically (CORE-DX-004); a non-Linked outcome (an
+        // already-linked target or a missing target) records no key, so a corrected retry can still proceed.
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                $"asset-link-create:{asset.OrganizationId}",
+                now,
+                create: linkCancellationToken => deps.AssetLinks
+                    .LinkAsync(asset, targetType, request.TargetId, context.UserProfileId, now, linkCancellationToken),
+                resultIdSelector: result => result.Outcome == AssetLinkOutcome.Linked ? result.Link!.Id : (Guid?)null,
+                cancellationToken)
             .ConfigureAwait(false);
 
+        if (creation.Replayed)
+        {
+            // A prior request with this key already created the link; return the original (200), creating
+            // nothing. The link is re-loaded through the tenant- AND workspace-scoped FindByIdAsync, so a key
+            // reused against a different asset's workspace resolves to nothing and is a hidden 404 (threats T1/T5).
+            var original = await deps.AssetLinkRepository
+                .FindByIdAsync(asset.OrganizationId, asset.WorkspaceId, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenAsset()
+                : Results.Ok(AssetLinkResponse.From(original));
+        }
+
+        var result = creation.Result;
         return result.Outcome switch
         {
             AssetLinkOutcome.Linked => Results.Created(
@@ -961,9 +992,11 @@ internal static class AssetEndpoints
         var assets = services.GetService<IAssetRepository>();
         var storage = services.GetService<IAssetStorage>();
         var assetLinks = services.GetService<AssetLinkService>();
+        var assetLinkRepository = services.GetService<IAssetLinkRepository>();
         var downloadPolicy = services.GetService<AssetDownloadPolicy>();
         var assetDeletion = services.GetService<AssetDeletionService>();
         var auditLog = services.GetService<IAuditLogRepository>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || workspaceMembers is null
@@ -972,16 +1005,18 @@ internal static class AssetEndpoints
             || assets is null
             || storage is null
             || assetLinks is null
+            || assetLinkRepository is null
             || downloadPolicy is null
             || assetDeletion is null
-            || auditLog is null)
+            || auditLog is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new AssetEndpointDependencies(
-            resolver, workspaceMembers, participants, uploadIntents, assets, storage, assetLinks, downloadPolicy, assetDeletion, auditLog);
+            resolver, workspaceMembers, participants, uploadIntents, assets, storage, assetLinks, assetLinkRepository, downloadPolicy, assetDeletion, auditLog, idempotency);
         return true;
     }
 
@@ -1105,7 +1140,9 @@ internal static class AssetEndpoints
         IAssetRepository Assets,
         IAssetStorage Storage,
         AssetLinkService AssetLinks,
+        IAssetLinkRepository AssetLinkRepository,
         AssetDownloadPolicy DownloadPolicy,
         AssetDeletionService AssetDeletion,
-        IAuditLogRepository AuditLog);
+        IAuditLogRepository AuditLog,
+        IdempotentResourceCreator Idempotency);
 }

@@ -32,7 +32,7 @@ public sealed class IdempotencyKey
     /// <summary>Maximum accepted length of the client idempotency key.</summary>
     public const int MaxKeyLength = 256;
 
-    private IdempotencyKey(Guid id, string scope, string key, DateTimeOffset createdAt)
+    private IdempotencyKey(Guid id, string scope, string key, Guid? resultId, DateTimeOffset createdAt)
     {
         if (id == Guid.Empty)
         {
@@ -49,9 +49,16 @@ public sealed class IdempotencyKey
             throw new ArgumentException("Key violates the key invariants.", nameof(key));
         }
 
+        // A result reference, when present, must address a real resource; an empty Guid is never a valid id.
+        if (resultId == Guid.Empty)
+        {
+            throw new ArgumentException("Result id must not be empty; pass null when there is no result.", nameof(resultId));
+        }
+
         Id = id;
         Scope = scope;
         Key = key;
+        ResultId = resultId;
         // Normalized to UTC so the persisted timestamptz value is offset-independent
         // (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -79,16 +86,27 @@ public sealed class IdempotencyKey
     /// </summary>
     public string Key { get; }
 
+    /// <summary>
+    /// The surrogate id of the single resource this request produced, or <see langword="null"/> when the
+    /// guarded operation produces no single addressable resource (CORE-DX-004). A create route records the
+    /// created resource's id and a purchase-verification route records the recorded transaction's id, so a
+    /// retry under the same key returns the ORIGINAL result by re-loading this resource. A correlation
+    /// identifier only, never response content (threat T7).
+    /// </summary>
+    public Guid? ResultId { get; }
+
     /// <summary>When this idempotency key was first recorded (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
 
     /// <summary>
-    /// Records a new idempotency key in the given scope. The caller composes the scope; the key is the
-    /// client's <c>Idempotency-Key</c> value.
+    /// Records a new idempotency key in the given scope, optionally bound to the id of the resource the
+    /// request produced. The caller composes the scope; the key is the client's <c>Idempotency-Key</c>
+    /// value; <paramref name="resultId"/> is the produced resource's id (omit it for a state-idempotent
+    /// command that produces no single addressable resource).
     /// </summary>
-    /// <exception cref="ArgumentException">The scope or the key violates an invariant.</exception>
-    public static IdempotencyKey Create(string scope, string key, DateTimeOffset createdAt)
-        => new(Guid.CreateVersion7(), scope?.Trim() ?? string.Empty, key?.Trim() ?? string.Empty, createdAt);
+    /// <exception cref="ArgumentException">The scope or key violates an invariant, or the result id is empty.</exception>
+    public static IdempotencyKey Create(string scope, string key, DateTimeOffset createdAt, Guid? resultId = null)
+        => new(Guid.CreateVersion7(), scope?.Trim() ?? string.Empty, key?.Trim() ?? string.Empty, resultId, createdAt);
 
     /// <summary>
     /// Whether the given value is a valid scope: non-blank, within the length bound and free of
@@ -109,9 +127,10 @@ public sealed class IdempotencyKey
             && !value.Any(char.IsControl);
 
     /// <summary>
-    /// Identifier-only representation safe for structured logs: the row id and the (scope, key)
-    /// correlation pair. These are correlation identifiers, not free-form content (threat T7).
+    /// Identifier-only representation safe for structured logs: the row id, the (scope, key)
+    /// correlation pair and the optional result id. These are correlation identifiers, not free-form
+    /// content (threat T7).
     /// </summary>
     public override string ToString()
-        => $"IdempotencyKey {Id} scope={Scope} key={Key}";
+        => $"IdempotencyKey {Id} scope={Scope} key={Key} resultId={ResultId}";
 }

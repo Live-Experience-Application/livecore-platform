@@ -107,4 +107,19 @@ internal sealed class PurchaseTransactionRepository : IPurchaseTransactionReposi
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<PurchaseTransaction?> FindByIdAsync(Guid id, CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored purchase, so the lookup fails fast instead of matching an
+        // arbitrary row.
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Id must not be empty.", nameof(id));
+        }
+
+        return await _dbContext.PurchaseTransactions
+            .FirstOrDefaultAsync(transaction => transaction.Id == id, cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

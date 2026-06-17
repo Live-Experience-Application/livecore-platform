@@ -546,6 +546,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // command below.
     builder.Services.AddScoped<IIdempotencyKeyStore, IdempotencyKeyStore>();
 
+    // Idempotent resource creator (CORE-DX-004): the generic mechanism the create routes (session, scene,
+    // content-block, workspace and asset-link create) share to honor an OPTIONAL client Idempotency-Key, so a
+    // client/network retry under the same key returns the original result and creates exactly one resource. It
+    // reuses the idempotency store above and the CORE-CONC-002 TransactionalUnitOfWork (both scoped), claiming
+    // the key and creating the resource in ONE transaction so the unique idempotency_keys(scope, key) index
+    // closes the concurrent-first-request race rather than a parallel mechanism. Registered here, inside the
+    // persistence conditional, because it depends on the DbContext-backed store and unit of work.
+    builder.Services.AddScoped<IdempotentResourceCreator>();
+
     // Append-only audit log (CORE-VIS-006): the Audit module — FIRST appearing here — owns the
     // tenant-scoped audit_logs table holding the immutable security event records
     // (docs/05_MODULE_CONTRACTS.md: the Audit module owns the "append-only audit log" and "security

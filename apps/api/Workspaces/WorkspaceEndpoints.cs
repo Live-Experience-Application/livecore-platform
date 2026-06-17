@@ -4,6 +4,7 @@ using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
+using LiveCore.Api.SystemModule;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LiveCore.Api.Workspaces;
@@ -275,6 +276,34 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL workspace and creates exactly one. A malformed key is a 400, checked AFTER
+        // authorization so an unauthorized caller never receives request-shape feedback (the reveal rule).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
+        var idempotencyScope = $"workspace-create:{context.OrganizationId}";
+
+        // Fast-path replay BEFORE the quota consume below: a retry under a recorded key returns the original
+        // workspace without consuming a second quota slot (the consume is the irreversible pre-create step here,
+        // unlike the other creates whose pre-create steps are read-only).
+        if (await deps.Idempotency.TryReplayAsync(idempotencyKey, idempotencyScope, cancellationToken).ConfigureAwait(false) is { } replayId)
+        {
+            var replayed = await deps.Workspaces
+                .FindByIdAsync(context.OrganizationId, replayId, cancellationToken)
+                .ConfigureAwait(false);
+            if (replayed is null)
+            {
+                return HiddenWorkspace();
+            }
+
+            var replayVersion = EntityConcurrencyToken.TryRead(deps.DbContext, replayed);
+            SetETag(httpContext, replayVersion);
+            return Results.Ok(WorkspaceResponse.From(replayed, replayVersion));
+        }
+
         // Quota enforcement (CORE-ENTL-004; atomic per CORE-CONC-004): a workspace creation consumes one unit of the
         // creating user's workspace.active.max quota. The atomic check-and-consume runs AFTER role authorization (so
         // quota state is never consulted for an unauthorized caller) and BEFORE the create; it is computed entirely
@@ -314,8 +343,47 @@ internal static class WorkspaceEndpoints
         var now = timeProvider.GetUtcNow();
         var workspace = Workspace.Create(context.OrganizationId, canonicalSlug, request.Name!.Trim(), now);
 
-        var addResult = await deps.Workspaces.AddAsync(workspace, cancellationToken).ConfigureAwait(false);
-        if (addResult == WorkspaceAddResult.DuplicateSlug)
+        // The workspace insert + the idempotency-key record commit atomically (CORE-DX-004). A duplicate slug
+        // produces no recordable resource, so the key is not recorded (its result selector returns null) and a
+        // corrected retry under the same key can still succeed. A concurrent first request that won the unique
+        // (scope, key) race makes this one a replay (Replayed) instead of a second create.
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                idempotencyScope,
+                now,
+                create: createCancellationToken => deps.Workspaces.AddAsync(workspace, createCancellationToken),
+                resultIdSelector: addResult => addResult == WorkspaceAddResult.Added ? workspace.Id : (Guid?)null,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (creation.Replayed)
+        {
+            // A concurrent request with this key created the workspace first; our reserved quota slot is unused,
+            // so release it, then return the original workspace (200) — never a second workspace.
+            await deps.QuotaEnforcement
+                .ReleaseAsync(
+                    EntitlementSubjectType.User,
+                    context.UserProfileId,
+                    QuotaEntitlementKeys.WorkspaceActiveMax,
+                    amount: 1,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var replayed = await deps.Workspaces
+                .FindByIdAsync(context.OrganizationId, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            if (replayed is null)
+            {
+                return HiddenWorkspace();
+            }
+
+            var replayVersion = EntityConcurrencyToken.TryRead(deps.DbContext, replayed);
+            SetETag(httpContext, replayVersion);
+            return Results.Ok(WorkspaceResponse.From(replayed, replayVersion));
+        }
+
+        if (creation.Result == WorkspaceAddResult.DuplicateSlug)
         {
             // Duplicate workspace slug within the organization -> 409 Conflict
             // (docs/08_API_CONTRACTS.md). The error carries no other tenant data.
@@ -1361,6 +1429,7 @@ internal static class WorkspaceEndpoints
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
         var auditLog = services.GetService<IAuditLogRepository>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         // The scoped DbContext the repositories load through, used to read the
         // aggregate's optimistic-concurrency token for the ETag/If-Match surface
@@ -1375,6 +1444,7 @@ internal static class WorkspaceEndpoints
             || quotaEnforcement is null
             || auditLog is null
             || unitOfWork is null
+            || idempotency is null
             || dbContext is null)
         {
             dependencies = default;
@@ -1382,7 +1452,7 @@ internal static class WorkspaceEndpoints
         }
 
         dependencies = new WorkspaceEndpointDependencies(
-            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork, dbContext);
+            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork, idempotency, dbContext);
         return true;
     }
 
@@ -1547,6 +1617,7 @@ internal static class WorkspaceEndpoints
         QuotaEnforcementService QuotaEnforcement,
         IAuditLogRepository AuditLog,
         TransactionalUnitOfWork UnitOfWork,
+        IdempotentResourceCreator Idempotency,
         LiveCoreDbContext DbContext);
 
     /// <summary>

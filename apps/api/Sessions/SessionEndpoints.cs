@@ -6,6 +6,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Realtime;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -468,37 +469,68 @@ internal static class SessionEndpoints
             return QuotaExceeded(quotaDecision);
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL session and creates exactly one. A malformed key is a 400, checked AFTER
+        // authorization (and the quota check) so an unauthorized caller never receives request-shape feedback.
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         // The injected TimeProvider stamps the creation timestamp, exactly like the
         // scene create and the lifecycle handlers. The session is created Prepared with
         // no live timeline (the state behind SessionCreated, docs/09_EVENT_CATALOG.md).
         var now = timeProvider.GetUtcNow();
         var session = Session.Create(context.OrganizationId, workspaceGuid, request.Title!.Trim(), now);
 
-        // ONE unit of work (CORE-CONC-002, CORE-EVT-004): the new session row and the APPEND of its durable
-        // SessionCreated session event commit together in a single database transaction, so a part-way failure
-        // rolls both back and the append-only event stream can never record a session the sessions table does
-        // not hold (or vice versa) — the same commit-then-publish shape the start/end commands use. A session
-        // has no uniqueness constraint, so AddAsync always returns Added on success (a foreign-key violation
-        // would surface as a DbUpdateException, which the membership check above already precludes for a
-        // resolved, existing workspace). Realtime DELIVERY is held until AFTER the commit (below), so a delivery
-        // failure cannot roll back the committed creation.
-        var sessionEvent = await deps.UnitOfWork
-            .ExecuteAsync(
-                async transactionCancellationToken =>
+        // ONE unit of work (CORE-CONC-002, CORE-EVT-004): the new session row, the APPEND of its durable
+        // SessionCreated session event AND — when a client idempotency key is supplied (CORE-DX-004) — the
+        // idempotency-key record commit together in a single database transaction, so a part-way failure rolls
+        // them all back and the append-only event stream can never record a session the sessions table does not
+        // hold (or vice versa). The IdempotentResourceCreator owns that transaction (the same TransactionalUnitOfWork
+        // shape the start/end commands use). A session has no uniqueness constraint, so AddAsync always returns
+        // Added on success (a foreign-key violation would surface as a DbUpdateException, which the membership
+        // check above already precludes for a resolved, existing workspace). Realtime DELIVERY is held until
+        // AFTER the commit (below), so a delivery failure cannot roll back the committed creation.
+        SessionEvent? sessionEvent = null;
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                $"session-create:{context.OrganizationId}",
+                now,
+                create: async transactionCancellationToken =>
                 {
                     await deps.Sessions.AddAsync(session, transactionCancellationToken).ConfigureAwait(false);
-                    return await AppendSessionCreatedEventAsync(deps, context, session, now, transactionCancellationToken)
+                    sessionEvent = await AppendSessionCreatedEventAsync(deps, context, session, now, transactionCancellationToken)
                         .ConfigureAwait(false);
+                    return session;
                 },
+                resultIdSelector: created => created.Id,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        if (creation.Replayed)
+        {
+            // A prior request with this key already created the session; return the original (200), creating
+            // nothing and emitting no second SessionCreated event. The session is re-loaded WITHIN the resolved
+            // tenant, so a key reused against another tenant resolves to nothing and is a hidden 404 (threat T5).
+            var original = await deps.Sessions
+                .FindByIdInOrganizationAsync(context.OrganizationId, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenWorkspace()
+                : Results.Ok(SessionResponse.From(original));
+        }
 
         // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction committed, so deliver the SessionCreated event
         // OUTSIDE it. SessionCreated is a HOST-ONLY preparation event (SessionEventTypes.IsHostOnly), so the
         // recipient resolver delivers it to the session hosts ONLY — never an observer or participant (the
         // catalog's "not always participant-visible"; threats T2/T7) — and reconnect replay re-delivers it to a
         // host later (CORE-RT-005). Delivery is best-effort: a failure cannot roll back the committed creation.
-        await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        if (sessionEvent is not null)
+        {
+            await deps.EventPublisher.DeliverAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+        }
 
         var response = SessionResponse.From(session);
         return Results.Created($"/api/v1/sessions/{session.Id}", response);
@@ -1015,6 +1047,7 @@ internal static class SessionEndpoints
         var auditLog = services.GetService<IAuditLogRepository>();
         var eventPublisher = services.GetService<ISessionEventPublisher>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || sessions is null
@@ -1023,14 +1056,15 @@ internal static class SessionEndpoints
             || quotaEnforcement is null
             || auditLog is null
             || eventPublisher is null
-            || unitOfWork is null)
+            || unitOfWork is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new SessionEndpointDependencies(
-            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement, auditLog, eventPublisher, unitOfWork);
+            resolver, sessions, workspaces, workspaceMembers, quotaEnforcement, auditLog, eventPublisher, unitOfWork, idempotency);
         return true;
     }
 
@@ -1157,5 +1191,6 @@ internal static class SessionEndpoints
         QuotaEnforcementService QuotaEnforcement,
         IAuditLogRepository AuditLog,
         ISessionEventPublisher EventPublisher,
-        TransactionalUnitOfWork UnitOfWork);
+        TransactionalUnitOfWork UnitOfWork,
+        IdempotentResourceCreator Idempotency);
 }
