@@ -16,6 +16,16 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- A typed live realtime client and hub connection contract (CORE-RT-007).
+  `@livecore/contracts` exports the live SignalR hub path, the `SessionEvent`
+  client-method name and the connection-parameter shape as stable constants/types
+  (`RealtimeHubPaths`, `SESSION_EVENT_CLIENT_METHOD`, `SessionHubConnectionParams`,
+  `LiveSessionEvent`), and `@livecore/sdk-ts` exposes a typed live client
+  (`client.realtime.connect`) that joins only server-managed groups via identifiers
+  (never group names), delivers `SessionEventReplayItem`-shaped envelopes through one
+  handler shared with reconnect replay, and fails closed without an access token. The
+  SDK stays free of a SignalR dependency via an injectable `hubConnectionFactory`. See
+  the package changelogs for detail.
 - The typed SDK now covers every implemented v1 route (CORE-SDK-006).
   `@livecore/sdk-ts` exposes a client method for every route in
   `csv/api_routes.csv` (provider-facing store-notification webhooks excepted) —

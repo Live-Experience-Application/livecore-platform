@@ -12,6 +12,26 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- A typed live realtime client over the SignalR session hub (CORE-RT-007):
+  `client.realtime.connect(params, onEvent)` opens `/hubs/session` with the connection
+  identifiers (`SessionHubConnectionParams` — `organizationSlug`, `sessionId` and, for
+  a participant, its own `participantId`, never a group name), registers the single
+  `SessionEvent` client method as ONE handler that delivers the same
+  `SessionEventReplayItem`-shaped envelope (`LiveSessionEvent`) reconnect replay
+  returns, and returns a `LiveSessionConnection` handle whose `stop()` closes the
+  connection. It fails closed without an access token — the token is resolved BEFORE
+  any connection is built or started, so an empty token rejects client-side with a
+  `LiveCoreError` and no hub connection is opened (the token then refreshes on each
+  reconnect via the connection's `accessTokenFactory`, the `access_token` query
+  parameter, so the secret never sits in the composed URL). Because a client supplies
+  only identifiers, it cannot select a group or another participant's feed — the
+  server resolves the authorized server-managed groups (CORE-RT-002; threat T3). To
+  stay free of a SignalR dependency, the SDK takes a new optional
+  `hubConnectionFactory` option (the same injectable-transport seam the REST path uses
+  for `fetch`; a vertical wires it to `@microsoft/signalr`); the
+  `HubConnectionFactory`, `HubConnectionLike`, `HubConnectionRequest` and
+  `LiveSessionConnection` types are exported. The hub is not an `/api/v1` route, so it
+  adds no route method (docs/11, docs/23).
 - Full route coverage (CORE-SDK-006): the typed client now exposes a method for
   EVERY implemented `/api/v1` route in `csv/api_routes.csv` (the provider-facing
   store-notification webhooks excepted), so a vertical no longer hand-writes `fetch`

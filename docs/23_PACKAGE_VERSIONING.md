@@ -98,6 +98,24 @@ event or payload field is a **breaking** change called out under `### Changed` /
 forward-compatible (a plain `string` and a raw JSON string), so a vertical never
 rejects a future event a newer server emits.
 
+### Live realtime hub contract — a non-route surface (CORE-RT-007)
+
+The realtime hub is **not** an `/api/v1` REST route, so its contract is neither in the
+OpenAPI document (CORE-OAS-002) nor in `csv/api_routes.csv`. `@livecore/contracts`
+mirrors the server's live SignalR constants by hand — `RealtimeHubPaths.session`
+(`/hubs/session`), `SESSION_EVENT_CLIENT_METHOD` (`SessionEvent`),
+`REALTIME_ACCESS_TOKEN_QUERY_PARAM` (`access_token`) and the
+`SessionHubConnectionParams` shape — and `@livecore/sdk-ts` exposes the typed live
+client (`client.realtime.connect`). Each addition is a **MINOR** change (new exports, a
+new resource-client method) classified by the same rule above; the hub path and the
+client-method name are pinned by the package build/type tests so a server-side rename
+surfaces as a contract change rather than a silent break.
+
+Because the hub is not a route, the future SDK↔`csv/api_routes.csv` coverage parity gate
+(CORE-SDK-007) must **except** the live client method: `connect` has no route row, so a
+parity check that demanded one per method would fail on it. The drift discipline for the
+hub is the pinned constants here, not a route-coverage gate.
+
 ## Lockstep releases
 
 The four packages are released **together** and always share a single version.

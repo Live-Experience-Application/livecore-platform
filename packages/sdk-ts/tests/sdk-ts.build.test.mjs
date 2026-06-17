@@ -57,6 +57,57 @@ function makeClient(options = {}) {
   return { client, calls };
 }
 
+/**
+ * Builds a client whose live realtime connections are driven by a FAKE
+ * SignalR-style hub connection (CORE-RT-007), so the live client is exercised with
+ * no network and no SignalR dependency. The fake records the composed hub request,
+ * the registered handlers and the start/stop calls, and lets a test deliver an event
+ * to the registered handler with `emit`.
+ */
+function makeHubHarness(options = {}) {
+  const factoryCalls = [];
+  const connections = [];
+  const hubConnectionFactory = (request) => {
+    factoryCalls.push(request);
+    const handlers = new Map();
+    const connection = {
+      request,
+      handlers,
+      started: false,
+      stopped: false,
+      on(methodName, handler) {
+        handlers.set(methodName, handler);
+      },
+      off(methodName) {
+        handlers.delete(methodName);
+      },
+      start() {
+        connection.started = true;
+        return Promise.resolve();
+      },
+      stop() {
+        connection.stopped = true;
+        return Promise.resolve();
+      },
+      emit(methodName, payload) {
+        const handler = handlers.get(methodName);
+        if (handler) {
+          handler(payload);
+        }
+      },
+    };
+    connections.push(connection);
+    return connection;
+  };
+  const client = new LiveCoreClient({
+    baseUrl: BASE_URL,
+    getAccessToken: options.getAccessToken ?? (() => TOKEN),
+    fetch: () => Promise.resolve(jsonResponse(200, {})),
+    ...(options.omitFactory ? {} : { hubConnectionFactory }),
+  });
+  return { client, factoryCalls, connections };
+}
+
 test("the built package exposes its stable name", () => {
   assert.equal(PACKAGE_NAME, "@livecore/sdk-ts");
 });
@@ -272,6 +323,139 @@ test("session event replay forwards optional query params and omits them when un
   assert.equal(
     calls[1].url,
     "https://core.example.test/api/v1/sessions/sess-1/events?organizationSlug=acme",
+  );
+});
+
+// --- CORE-RT-007: the typed live realtime client over the SignalR hub. ----------
+// The live client builds the correct hub URL/params, registers the single
+// server-fixed client method as one handler, surfaces a typed event stream, and
+// fails closed without an access token. Negative checks prove a client supplies only
+// identifiers (never a group name), so it cannot select a group or another
+// participant's feed.
+
+test("the live client connects to the hub with identifier params and surfaces a typed event stream (CORE-RT-007)", async () => {
+  const { client, factoryCalls, connections } = makeHubHarness();
+  const received = [];
+
+  const connection = await client.realtime.connect(
+    { organizationSlug: "acme", sessionId: "sess-1", participantId: "p-1" },
+    (event) => received.push(event),
+  );
+
+  // The hub URL is the origin + the server-owned /hubs/session path + the identifier
+  // query params — NOT under the /api/v1 REST surface.
+  assert.equal(factoryCalls.length, 1);
+  assert.equal(
+    factoryCalls[0].url,
+    "https://core.example.test/hubs/session?organizationSlug=acme&sessionId=sess-1&participantId=p-1",
+  );
+  assert.ok(!factoryCalls[0].url.includes("/api/v1"));
+
+  // The bearer token travels via the connection's accessTokenFactory (the access_token
+  // query param SignalR appends), never baked into the URL the SDK composed (threat T7).
+  assert.ok(!factoryCalls[0].url.includes("access_token"));
+  assert.equal(await factoryCalls[0].accessTokenFactory(), TOKEN);
+
+  // Exactly one handler, registered for the single server-fixed client method, and the
+  // connection is started.
+  assert.equal(connections.length, 1);
+  assert.equal(connections[0].started, true);
+  assert.deepEqual([...connections[0].handlers.keys()], ["SessionEvent"]);
+
+  // A delivered envelope reaches the handler as the recipient-safe replay-item shape,
+  // so a consumer routes live and replayed events through one handler.
+  const envelope = {
+    eventId: "0190f1d4-9b6e-7c3a-8a1e-0c2b3d4e5f60",
+    sequence: 7,
+    eventType: "ContentRevealed",
+    sessionId: "sess-1",
+    payload: '{"ResourceType":"Scene","ResourceId":"sc-1"}',
+    schemaVersion: 1,
+    createdAt: "2026-06-13T00:00:00+00:00",
+    targetParticipantId: null,
+  };
+  connections[0].emit("SessionEvent", envelope);
+  assert.deepEqual(received, [envelope]);
+
+  // The returned handle stops the underlying connection.
+  await connection.stop();
+  assert.equal(connections[0].stopped, true);
+});
+
+test("a host live connection omits the participant id (the server resolves the host/observer groups)", async () => {
+  const { client, factoryCalls } = makeHubHarness();
+
+  await client.realtime.connect(
+    { organizationSlug: "acme", sessionId: "sess-1" },
+    () => {},
+  );
+
+  assert.equal(
+    factoryCalls[0].url,
+    "https://core.example.test/hubs/session?organizationSlug=acme&sessionId=sess-1",
+  );
+});
+
+test("the live client supplies only identifiers — it cannot select a group or another participant's feed (CORE-RT-007)", async () => {
+  const { client, factoryCalls } = makeHubHarness();
+
+  await client.realtime.connect(
+    { organizationSlug: "acme", sessionId: "sess-1", participantId: "p-1" },
+    () => {},
+  );
+
+  const url = factoryCalls[0].url;
+  // There is no group-name parameter on the URL — groups are server-managed, never
+  // client-chosen (CORE-RT-002; threat T3).
+  assert.ok(!/group/i.test(url));
+  const query = new URL(url).searchParams;
+  assert.deepEqual([...query.keys()].sort(), [
+    "organizationSlug",
+    "participantId",
+    "sessionId",
+  ]);
+  // The participant id is the caller's own; there is no API to name another feed.
+  assert.equal(query.get("participantId"), "p-1");
+});
+
+test("fail closed: a live connection without an access token is refused client-side and no hub connection is opened (CORE-RT-007)", async () => {
+  const { client, factoryCalls, connections } = makeHubHarness({
+    getAccessToken: () => "",
+  });
+
+  await assert.rejects(
+    () =>
+      client.realtime.connect(
+        { organizationSlug: "acme", sessionId: "sess-1" },
+        () => {},
+      ),
+    (error) => {
+      assert.ok(error instanceof LiveCoreError);
+      assert.ok(!(error instanceof LiveCoreApiError));
+      return true;
+    },
+  );
+
+  // The token is resolved BEFORE the factory is invoked, so no connection is built or
+  // started — the fail-closed guard runs entirely client-side.
+  assert.equal(factoryCalls.length, 0);
+  assert.equal(connections.length, 0);
+});
+
+test("a live connection without a configured hubConnectionFactory fails closed", async () => {
+  const { client } = makeHubHarness({ omitFactory: true });
+
+  await assert.rejects(
+    () =>
+      client.realtime.connect(
+        { organizationSlug: "acme", sessionId: "sess-1" },
+        () => {},
+      ),
+    (error) => {
+      assert.ok(error instanceof LiveCoreError);
+      assert.ok(!(error instanceof LiveCoreApiError));
+      return true;
+    },
   );
 });
 

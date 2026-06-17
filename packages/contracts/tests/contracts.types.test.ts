@@ -27,6 +27,7 @@ import type {
   HideRequest,
   InviteWorkspaceMemberRequest,
   KnownSessionEventType,
+  LiveSessionEvent,
   MembershipRole,
   PageResponse,
   ParsedSessionEvent,
@@ -36,6 +37,8 @@ import type {
   ReorderSceneRequest,
   RevealRequest,
   SessionEventPayloadMap,
+  SessionEventReplayItem,
+  SessionHubConnectionParams,
   SessionResponse,
   SessionStatus,
   StoreNotificationAck,
@@ -43,7 +46,13 @@ import type {
   VisibilityResourceType,
   WorkspaceResponse,
 } from "../src/index.js";
-import { KnownSessionEventPayloadFields, VERSION } from "../src/index.js";
+import {
+  KnownSessionEventPayloadFields,
+  REALTIME_ACCESS_TOKEN_QUERY_PARAM,
+  RealtimeHubPaths,
+  SESSION_EVENT_CLIENT_METHOD,
+  VERSION,
+} from "../src/index.js";
 // The OpenAPI-derived component schemas, generated from openapi/livecore-v1.json by
 // `pnpm --filter @livecore/contracts run generate` (CORE-OAS-002). The curated DTOs
 // above are validated against these below.
@@ -415,3 +424,48 @@ export function discriminateParsedSessionEvent(
 function assertNeverSessionEvent(event: never): never {
   throw new Error(`unhandled session event: ${JSON.stringify(event)}`);
 }
+
+// --- The live realtime hub contract (CORE-RT-007). -----------------------------
+// The hub path and the client-method name are stable string-literal constants the
+// typed SDK builds its live connection from, and the connection-parameter shape is
+// identifiers ONLY — there is no group-name field, so a client cannot select a group
+// or another participant's feed at the type level (CORE-RT-002; threat T3).
+
+export type RealtimeHubSessionPathIsLiteral = Assert<
+  Equal<(typeof RealtimeHubPaths)["session"], "/hubs/session">
+>;
+
+export type SessionEventClientMethodIsLiteral = Assert<
+  Equal<typeof SESSION_EVENT_CLIENT_METHOD, "SessionEvent">
+>;
+
+export type RealtimeAccessTokenQueryParamIsLiteral = Assert<
+  Equal<typeof REALTIME_ACCESS_TOKEN_QUERY_PARAM, "access_token">
+>;
+
+// The connection parameters are EXACTLY the three identifiers — never a group name —
+// so the published shape cannot grow a way to choose a group or a foreign feed.
+export type SessionHubConnectionParamsKeys = Assert<
+  Equal<
+    keyof SessionHubConnectionParams,
+    "organizationSlug" | "sessionId" | "participantId"
+  >
+>;
+
+export type SessionHubParticipantIdIsOptional = Assert<
+  Equal<SessionHubConnectionParams["participantId"], string | undefined>
+>;
+
+// The live envelope is the SAME recipient-safe shape reconnect replay returns, so a
+// consumer routes a live event and a replayed event through one handler.
+export type LiveSessionEventIsReplayItem = Assert<
+  Equal<LiveSessionEvent, SessionEventReplayItem>
+>;
+
+// A live connection's identifiers are constructible as a participant feed: only the
+// caller's own participant id, never a group name.
+export const sessionHubParticipantConnection: SessionHubConnectionParams = {
+  organizationSlug: "acme",
+  sessionId: "0190f1d4-9b6e-7c3a-8a1e-0c2b3d4e5f60",
+  participantId: "0190f1d4-9b6e-7c3a-8a1e-0c2b3d4e5f61",
+};

@@ -40,7 +40,11 @@ export type {
   FetchLike,
   FetchRequestInit,
   FetchResponse,
+  HubConnectionFactory,
+  HubConnectionLike,
+  HubConnectionRequest,
   LiveCoreClientOptions,
+  LiveSessionConnection,
 } from "./options.js";
 export type { SdkResponse } from "./http.js";
 export type { PageParams } from "./resources/pagination.js";

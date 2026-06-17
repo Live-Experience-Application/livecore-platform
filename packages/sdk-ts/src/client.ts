@@ -83,7 +83,7 @@ export class LiveCoreClient {
     this.entities = new EntitiesClient(http);
     this.entityTypes = new EntityTypesClient(http);
     this.visibility = new VisibilityClient(http);
-    this.realtime = new RealtimeClient(http);
+    this.realtime = new RealtimeClient(http, options.hubConnectionFactory);
     this.recaps = new RecapsClient(http);
     this.assets = new AssetsClient(http);
     this.exports = new ExportsClient(http);

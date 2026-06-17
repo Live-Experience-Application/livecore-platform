@@ -12,6 +12,21 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The live realtime hub contract (CORE-RT-007): the stable mirror of the server's
+  SignalR live path so a vertical can open the live session stream without
+  hard-coding the server's C# constants. `RealtimeHubPaths` (`session` →
+  `/hubs/session`) and the `RealtimeHubPath` union, `SESSION_EVENT_CLIENT_METHOD`
+  (`SessionEvent`, the single client method the server invokes to deliver an event),
+  `REALTIME_ACCESS_TOKEN_QUERY_PARAM` (`access_token`, the query-string token
+  parameter for the hub), and the `SessionHubConnectionParams` connection shape
+  (`organizationSlug`, `sessionId`, optional own `participantId` — identifiers only,
+  never a group name, so a client cannot select a group or another participant's
+  feed). The live envelope is the same recipient-safe shape reconnect replay returns,
+  exported as `LiveSessionEvent` (= `SessionEventReplayItem`), so a consumer routes a
+  live event and a replayed event through one handler. The hub is NOT an `/api/v1`
+  route — it is mounted at the origin under `/hubs`, outside the OpenAPI/route surface
+  — so these are hand-curated constants pinned by the package tests, not generated
+  (docs/11, docs/23). The typed live SDK client that drives them is `@livecore/sdk-ts`.
 - The complete, drift-gated session-event contract (CORE-RT-008):
   `KnownSessionEventTypes` now lists all ten emitted Core events
   (`SessionCreated`, `SessionStarted`, `SessionEnded`, `ParticipantJoined`,

@@ -159,6 +159,31 @@ export class HttpClient {
     this.defaultHeaders = { ...(options.defaultHeaders ?? {}) };
   }
 
+  /**
+   * The Core API origin (the `baseUrl` with any trailing slash trimmed), WITHOUT the
+   * `/api/v1` version prefix. The live realtime client builds the non-versioned hub
+   * URL (`{origin}/hubs/session`) from it (CORE-RT-007).
+   */
+  get origin(): string {
+    return this.baseUrl;
+  }
+
+  /**
+   * Resolves the bearer access token, failing closed when none is available so an
+   * authenticated request or hub connection is never made unauthenticated. Public so
+   * the live realtime client can fail closed BEFORE it opens a hub connection and can
+   * supply a refresh-capable token factory to it (CORE-RT-007).
+   */
+  async resolveAccessToken(): Promise<string> {
+    const token = await this.getAccessToken();
+    if (typeof token !== "string" || token.length === 0) {
+      throw new LiveCoreError(
+        "No access token was provided; refusing to send an unauthenticated request.",
+      );
+    }
+    return token;
+  }
+
   /** Sends one request and returns its parsed JSON body typed as `TResponse`. */
   async send<TResponse>(spec: RequestSpec): Promise<TResponse> {
     const { data } = await this.sendWithETag<TResponse>(spec);
@@ -174,7 +199,7 @@ export class HttpClient {
   async sendWithETag<TResponse>(
     spec: RequestSpec,
   ): Promise<SdkResponse<TResponse>> {
-    const token = await this.resolveToken();
+    const token = await this.resolveAccessToken();
     const url = this.buildUrl(spec);
     const headers = this.buildHeaders(token, spec);
 
@@ -197,17 +222,6 @@ export class HttpClient {
     const etag = response.headers.get("etag");
     const data = await this.readResponse<TResponse>(response);
     return { data, etag };
-  }
-
-  /** Fail closed: never send an authenticated request without a token. */
-  private async resolveToken(): Promise<string> {
-    const token = await this.getAccessToken();
-    if (typeof token !== "string" || token.length === 0) {
-      throw new LiveCoreError(
-        "No access token was provided; refusing to send an unauthenticated request.",
-      );
-    }
-    return token;
   }
 
   private buildUrl(spec: RequestSpec): string {

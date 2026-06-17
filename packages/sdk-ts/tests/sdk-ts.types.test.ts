@@ -16,6 +16,7 @@ import type {
   EntityTypeResponse,
   ExportArtifactResponse,
   HideResponse,
+  LiveSessionEvent,
   MeEntitlementsResponse,
   OrganizationResponse,
   PageResponse,
@@ -32,6 +33,7 @@ import type {
   RevealResponse,
   SceneResponse,
   SessionEventReplayResponse,
+  SessionHubConnectionParams,
   SessionResponse,
   TemplateResponse,
   UploadIntentResponse,
@@ -49,10 +51,12 @@ import type {
   EntitlementsClient,
   ExportsClient,
   HideOptions,
+  HubConnectionFactory,
   IdentityClient,
   LiveCoreApiError,
   LiveCoreClient,
   LiveCoreClientOptions,
+  LiveSessionConnection,
   OrganizationsClient,
   RateLimitInfo,
   RealtimeClient,
@@ -162,6 +166,26 @@ export type ReplayReturn = Assert<
   >
 >;
 
+// --- CORE-RT-007: the live realtime client connects with identifiers and surfaces a
+// typed event stream. The connect parameters are the connection IDENTIFIERS shape
+// (never a group name), the event handler receives the typed `LiveSessionEvent`
+// envelope, and a successful connect resolves to a `LiveSessionConnection` handle.
+
+export type ConnectParamsAreConnectionIdentifiers = Assert<
+  Equal<Parameters<RealtimeClient["connect"]>[0], SessionHubConnectionParams>
+>;
+
+export type ConnectHandlerReceivesTypedEvent = Assert<
+  Equal<
+    Parameters<RealtimeClient["connect"]>[1],
+    (event: LiveSessionEvent) => void
+  >
+>;
+
+export type ConnectReturn = Assert<
+  Equal<Awaited<ReturnType<RealtimeClient["connect"]>>, LiveSessionConnection>
+>;
+
 export type StoreReturn = Assert<
   Equal<
     Awaited<ReturnType<StoreClient["verifyAppleTransaction"]>>,
@@ -234,6 +258,16 @@ export type OptionsKeys = Assert<
     | "fetch"
     | "generateRequestId"
     | "defaultHeaders"
+    | "hubConnectionFactory"
+  >
+>;
+
+// The live realtime hub connection factory is optional (the REST routes never need
+// it; only `realtime.connect` does), so omitting it is valid.
+export type HubConnectionFactoryIsOptional = Assert<
+  Equal<
+    LiveCoreClientOptions["hubConnectionFactory"],
+    HubConnectionFactory | undefined
   >
 >;
 

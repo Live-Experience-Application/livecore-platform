@@ -50,6 +50,73 @@ export type FetchLike = (
   init: FetchRequestInit,
 ) => Promise<FetchResponse>;
 
+/**
+ * The minimal SignalR-style hub connection the live realtime client drives
+ * (CORE-RT-007). A `@microsoft/signalr` `HubConnection` satisfies it, so the SDK
+ * needs no SignalR dependency of its own — the same injectable-transport seam the
+ * REST path uses for `fetch`. The SDK only registers the single server-fixed
+ * client-method handler and starts/stops the connection; everything else (transport
+ * negotiation, automatic reconnect) is the concrete connection's concern.
+ */
+export interface HubConnectionLike {
+  /**
+   * Registers a handler for a server-invoked client method. The SDK registers
+   * exactly one, for the `SessionEvent` method; the delivered argument is a
+   * `SessionEventReplayItem`-shaped envelope.
+   */
+  on(methodName: string, handler: (...args: unknown[]) => void): void;
+  /** Removes a previously registered handler for the client method. */
+  off(methodName: string, handler?: (...args: unknown[]) => void): void;
+  /** Opens the connection. Rejects if the connection cannot be established. */
+  start(): Promise<void>;
+  /** Closes the connection and releases its resources. */
+  stop(): Promise<void>;
+}
+
+/**
+ * What the SDK hands a {@link HubConnectionFactory} to build a live hub connection
+ * (CORE-RT-007). The SDK composes the hub {@link url} from the server-owned hub path
+ * and the caller's connection identifiers (never a group name), and supplies an
+ * {@link accessTokenFactory} the consumer wires to the SignalR client's
+ * `accessTokenFactory` so the bearer token travels on the `access_token` query
+ * parameter and is refreshed on each (re)connect.
+ */
+export interface HubConnectionRequest {
+  /**
+   * The fully composed hub URL: the API origin, the server-owned hub path and the
+   * identifier query parameters. It carries NO access token — that is supplied
+   * separately via {@link accessTokenFactory} so the secret never sits in a URL the
+   * SDK composed.
+   */
+  readonly url: string;
+  /**
+   * Yields the bearer access token for the connection and every reconnect. The SDK
+   * has already verified a token is available before the factory is called (fail
+   * closed); wire this to the SignalR client's `accessTokenFactory`.
+   */
+  readonly accessTokenFactory: () => Promise<string>;
+}
+
+/**
+ * Builds a {@link HubConnectionLike} for a composed {@link HubConnectionRequest}
+ * (CORE-RT-007). A caller supplies one (typically wrapping a
+ * `@microsoft/signalr` `HubConnectionBuilder().withUrl(url, { accessTokenFactory })`)
+ * to enable the live realtime client; without one, opening a live connection fails
+ * closed with a `LiveCoreError`.
+ */
+export type HubConnectionFactory = (
+  request: HubConnectionRequest,
+) => HubConnectionLike;
+
+/**
+ * A started live realtime connection (CORE-RT-007). The handle the live client
+ * returns from a successful connect; call {@link stop} to close it.
+ */
+export interface LiveSessionConnection {
+  /** Closes the live connection and releases its resources. */
+  stop(): Promise<void>;
+}
+
 /** Options for constructing a `LiveCoreClient`. */
 export interface LiveCoreClientOptions {
   /**
@@ -76,4 +143,12 @@ export interface LiveCoreClientOptions {
    * (`Authorization`, `Accept`, `Content-Type`, `Idempotency-Key`).
    */
   defaultHeaders?: Record<string, string>;
+  /**
+   * Builds the SignalR-style hub connection the live realtime client drives
+   * (CORE-RT-007). Supply one — typically wrapping `@microsoft/signalr` — to open a
+   * live session stream with `client.realtime.connect(...)`; the REST routes never
+   * need it. Omitting it keeps the SDK free of a SignalR dependency, and opening a
+   * live connection without one fails closed with a `LiveCoreError`.
+   */
+  hubConnectionFactory?: HubConnectionFactory;
 }

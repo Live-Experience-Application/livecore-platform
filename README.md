@@ -471,6 +471,22 @@ the package, type-checks the compile-time type assertions (`tsconfig.test.json`)
 and runs package-build tests against an injected transport with the Node built-in
 test runner.
 
+The `realtime` group adds a **typed live client** for the SignalR session hub
+(CORE-RT-007). `client.realtime.connect(params, onEvent)` opens `/hubs/session` with
+the connection identifiers (`organizationSlug`, `sessionId` and, for a participant,
+its own `participantId` — never a group name), registers the single `SessionEvent`
+client method as one handler that delivers the same `SessionEventReplayItem`-shaped
+envelope reconnect replay returns, and **fails closed without an access token** (it
+resolves the token before opening any connection, so an empty token rejects
+client-side and no connection is built; the token then refreshes on each reconnect).
+Because a client supplies only identifiers, it cannot select a group or another
+participant's feed — the server resolves the authorized groups (CORE-RT-002). To stay
+free of a SignalR dependency, the SDK takes a `hubConnectionFactory` option (the same
+injectable-transport seam the REST path uses for `fetch`); a vertical wires it to
+`@microsoft/signalr`. The path, client-method name and connection-parameter shape are
+the stable `@livecore/contracts` constants/types `RealtimeHubPaths`,
+`SESSION_EVENT_CLIENT_METHOD` and `SessionHubConnectionParams`.
+
 ### TypeScript design tokens package
 
 `@livecore/design-tokens` (`packages/design-tokens`) is the generic,
@@ -2722,6 +2738,13 @@ hub for live sessions:
 | Hub        | Path            | Authorized callers                          |
 | ---------- | --------------- | ------------------------------------------- |
 | SessionHub | `/hubs/session` | any authenticated caller (valid OIDC token) |
+
+A vertical connects to this hub with the **typed live SDK client**
+(`client.realtime.connect`, CORE-RT-007) rather than hand-wiring SignalR; the path,
+the `SessionEvent` client-method name and the connection-parameter shape are the
+stable `@livecore/contracts` constants/types (`RealtimeHubPaths`,
+`SESSION_EVENT_CLIENT_METHOD`, `SessionHubConnectionParams`). See
+[TypeScript SDK package](#typescript-sdk-package) and `docs/11_REALTIME_SYNC.md`.
 
 SignalR is part of the ASP.NET Core shared framework, so no new dependency is
 added. The hub is `[Authorize]` and mapped with `RequireAuthorization()`, so its

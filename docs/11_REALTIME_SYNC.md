@@ -168,6 +168,39 @@ namespaces the deployment's pub/sub channels and does not leak). The test runs o
 configured (the CI `integration-postgres` job's Redis/Valkey service, `LIVECORE_TEST_REDIS`); a default local
 run skips it. It reuses the unchanged backplane registration and never widens the audience.
 
+## Typed live client and hub contract (CORE-RT-007)
+
+The live path used to exist only as server-side C# constants — the hub route
+(`RealtimeHubRoutes.SessionHub` = `/hubs/session`), the SignalR client method
+(`SessionEventEnvelope.ClientMethod` = `SessionEvent`) and the `access_token`
+query-string auth (`HubBearerToken`) — with no contract mirror or SDK client, so a
+vertical's primary reason to build on Core (live reveal delivery over the hub) had to
+hand-wire the connection. The contract and the typed SDK now close that gap:
+
+- **`@livecore/contracts`** exports the hub path, the client-method name and the
+  connection-parameter shape as stable constants/types: `RealtimeHubPaths.session`,
+  `SESSION_EVENT_CLIENT_METHOD`, `REALTIME_ACCESS_TOKEN_QUERY_PARAM` and the
+  `SessionHubConnectionParams` shape (`organizationSlug`, `sessionId`, optional
+  `participantId` — identifiers only, **never** a group name). A live envelope is the
+  same `SessionEventReplayItem` shape reconnect replay returns, exported as
+  `LiveSessionEvent`.
+- **`@livecore/sdk-ts`** exposes a typed live client, `client.realtime.connect(params,
+  onEvent)`. It builds the hub URL from the identifiers, registers the single
+  `SessionEvent` client method as **one** handler that delivers
+  `SessionEventReplayItem`-shaped envelopes (the same handler a consumer feeds the
+  items reconnect replay returns), and **fails closed without an access token** — it
+  resolves the token before opening any connection, so an empty token rejects
+  client-side and no hub connection is built. The bearer token travels via the
+  connection's `accessTokenFactory` (the `access_token` query parameter), refreshed on
+  each reconnect, never baked into the composed URL (threat T7).
+
+The SDK stays free of a SignalR dependency: the consumer supplies a
+`hubConnectionFactory` (typically wrapping `@microsoft/signalr`), the same injectable
+transport seam the REST path uses for `fetch`. Because a client supplies only
+identifiers and never a group name, it **cannot select a group or another
+participant's feed** — the server resolves the authorized server-managed groups
+(CORE-RT-002; threat T3); the SDK is a typed transport, not a security boundary.
+
 ## Tests
 
 - selected participant receives reveal
@@ -175,3 +208,7 @@ run skips it. It reuses the unchanged backplane registration and never widens th
 - host receives audit/confirmation event
 - reconnect replays only visible events
 - stale connection cannot subscribe to another participant feed
+- the typed live SDK client builds the correct hub URL/params and surfaces a typed
+  event stream; it is refused client-side without an access token; and it supplies
+  only identifiers, so it cannot select a group or another participant's feed
+  (CORE-RT-007)

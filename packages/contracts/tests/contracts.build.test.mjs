@@ -25,8 +25,11 @@ import {
   PACKAGE_NAME,
   ProblemCodes,
   PurchaseProviders,
+  REALTIME_ACCESS_TOKEN_QUERY_PARAM,
+  RealtimeHubPaths,
   RequestHeaders,
   ResponseHeaders,
+  SESSION_EVENT_CLIENT_METHOD,
   SessionStatuses,
   VERSION,
   VisibilityResourceTypes,
@@ -85,6 +88,20 @@ test("the lifecycle and kind vocabularies are the stable Core names", () => {
 
 test("the known session event catalog is exported for typed handling", () => {
   assert.ok(KnownSessionEventTypes.includes("ContentRevealed"));
+});
+
+test("the live realtime hub constants mirror the server (CORE-RT-007)", () => {
+  // The contract mirror of the server's live SignalR path: the hub path
+  // (RealtimeHubRoutes.SessionHub = /hubs + /session), the single client method
+  // (SessionEventEnvelope.ClientMethod) and the query-string token parameter
+  // (HubBearerToken.QueryParameter). A drift in any of these would silently break a
+  // vertical's live connection, so they are pinned here as published constants.
+  assert.equal(RealtimeHubPaths.session, "/hubs/session");
+  assert.equal(SESSION_EVENT_CLIENT_METHOD, "SessionEvent");
+  assert.equal(REALTIME_ACCESS_TOKEN_QUERY_PARAM, "access_token");
+  // The hub is NOT a versioned REST route — it is mounted at the origin under /hubs,
+  // outside the /api/v1 surface — so its path never carries the API base path.
+  assert.ok(!RealtimeHubPaths.session.startsWith(API_BASE_PATH));
 });
 
 test("the transport constants are exported", () => {
