@@ -1657,6 +1657,26 @@ the deleted organization **by id** — never the tenant's name or any content
 so it is not cascade-removed. The audit append and the cascade delete commit in
 **one transaction**.
 
+### Privacy and data protection (self-hoster posture)
+
+[`docs/25_PRIVACY_AND_DATA_PROTECTION.md`](docs/25_PRIVACY_AND_DATA_PROTECTION.md)
+is the single place a self-hoster uses to assess and configure the Core's
+data-protection posture (CORE-PRIV-005). It records the **PII inventory / data map**
+(what personal data Core stores and where), the **controller-vs-processor split**
+(the self-hoster is the controller; Core is operator-run software, not a processor;
+the IdP, object storage and other wired services are the controller's
+sub-processors), the **data-residency** controls (the PostgreSQL database region via
+`ConnectionStrings:Database` and the asset region via
+`Assets__Storage__Endpoint`/`Region`), the **default retention windows**
+(CORE-PRIV-003), and two explicit, dated decisions: **at-rest encryption** is the
+operator's storage-layer responsibility (Core does not field-encrypt PII columns;
+backups are encrypted by the tooling, CORE-DR-001), and Core **does not record
+consent or legal basis** (that is the controller's / vertical's responsibility). It
+is documentation only — no Core source, route, table, event or migration changes —
+so the spec-consistency checks and the boundary scan stay green. It pairs with the
+built data-lifecycle mechanisms (erasure CORE-PRIV-001, tenant deletion
+CORE-PRIV-002, retention CORE-PRIV-003, access/portability export CORE-PRIV-004).
+
 ### Workspace archive (lifecycle end-state)
 
 An owner can archive a workspace so it becomes read-only and drops out of active

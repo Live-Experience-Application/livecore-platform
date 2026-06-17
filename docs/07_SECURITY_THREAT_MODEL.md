@@ -176,7 +176,7 @@ Owner/Admin) closes that gap:
 
 The controller/processor split for self-hosters, the data-residency configuration, the default retention
 windows and the at-rest-encryption expectations are recorded in the privacy/data-protection documentation
-(CORE-PRIV-005).
+(`docs/25_PRIVACY_AND_DATA_PROTECTION.md`, CORE-PRIV-005).
 
 ## Authorized tenant organization deletion (CORE-PRIV-002)
 
@@ -256,7 +256,7 @@ closes that gap and is the read-side counterpart of erasure:
   belonging to another subject or another tenant.
 
 The data-residency configuration, the controller/processor split for self-hosters and the retention windows
-remain in the privacy/data-protection documentation (CORE-PRIV-005).
+remain in the privacy/data-protection documentation (`docs/25_PRIVACY_AND_DATA_PROTECTION.md`, CORE-PRIV-005).
 
 ## Supply chain integrity (CORE-DEP-003)
 
