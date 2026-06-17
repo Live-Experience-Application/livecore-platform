@@ -130,7 +130,14 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         // and — unlike ordering by the DateTimeOffset created_at — is supported by every provider
         // (SQLite cannot ORDER BY a DateTimeOffset); this matches the ordering convention of the other
         // repositories. The created_at column still backs future time-range audit queries (CORE-AUD-005).
+        //
+        // NON-TRACKED read (CORE-SEC-004): the audit log is TAMPER-PROOF in code, not only tamper-evident.
+        // AsNoTracking returns detached entities, so an in-process caller can never load an audit row, mutate
+        // it and have a later SaveChanges silently persist the change — there is nothing tracked to write back.
+        // The AuditLogTamperProtectionInterceptor is the fail-closed backstop if a row is ever tracked anyway,
+        // and the checked-in REVOKE migration is the DB-level prevention.
         return await _dbContext.AuditLogs
+            .AsNoTracking()
             .Where(entry => entry.OrganizationId == organizationId)
             .OrderBy(entry => entry.Id)
             .ToListAsync(cancellationToken)
@@ -167,8 +174,10 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         // unbounded log is never materialized. Ordering by the time-ordered surrogate id (UUIDv7) is
         // provider-independent (SQLite cannot ORDER BY a DateTimeOffset) and stable for an append-only log:
         // a new entry appends at the end (a higher id) and never shifts an already-read page. Skip/Take
-        // translate to the provider's LIMIT/OFFSET.
+        // translate to the provider's LIMIT/OFFSET. NON-TRACKED (CORE-SEC-004) like the other reads, so a read
+        // entry can never be mutated and silently persisted back.
         return await _dbContext.AuditLogs
+            .AsNoTracking()
             .Where(entry => entry.OrganizationId == organizationId)
             .OrderBy(entry => entry.Id)
             .Skip(skip)
@@ -193,8 +202,11 @@ internal sealed class AuditLogRepository : IAuditLogRepository
         // by the per-tenant APPEND sequence (CORE-SEC-003) rather than the event-time-ordered id, because the
         // hash chain is linked in append order: a producer may record an action with an out-of-append-order
         // event time, so only the gap-free sequence walks the chain correctly. The unique
-        // audit_logs(organization_id, sequence) index backs this ordering.
+        // audit_logs(organization_id, sequence) index backs this ordering. NON-TRACKED (CORE-SEC-004): the
+        // verifier only reads the chain, so detached entities are exactly right and a verification can never
+        // accidentally write a row back.
         return await _dbContext.AuditLogs
+            .AsNoTracking()
             .Where(entry => entry.OrganizationId == organizationId)
             .OrderBy(entry => entry.Sequence)
             .ToListAsync(cancellationToken)

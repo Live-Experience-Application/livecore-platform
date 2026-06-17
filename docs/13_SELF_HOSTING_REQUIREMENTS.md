@@ -277,21 +277,36 @@ changed, or a baseline row went stale). A reviewer who has confirmed the change 
 guidance acknowledges it with `scripts/lint-migration-downs.ps1 -UpdateBaseline`. The lint logic is covered by
 `scripts/test-migration-down-lint.ps1`.
 
-### Audit-log tamper-evidence: REVOKE UPDATE/DELETE on `audit_logs` (CORE-SEC-003)
+### Audit-log tamper-evidence and tamper-proofing: REVOKE UPDATE/DELETE on `audit_logs` (CORE-SEC-003, CORE-SEC-004)
 
 The append-only `audit_logs` table is **tamper-evident** at the application level: every entry is sealed into a
 per-tenant SHA-256 **hash chain** (`sequence` + `previous_hash` + `entry_hash`, see
 `docs/10_DATABASE_SCHEMA.md`), and the `AuditLogChainVerifier` routine **detects** any altered, deleted,
-reordered or inserted row. Detection is the in-app control; a deployment should add the matching **prevention**
-at the database role so the audit trail cannot be rewritten silently in the first place.
+reordered or inserted row. Detection is the in-app control; the matching **prevention** lives at the database
+role so the audit trail cannot be rewritten silently in the first place.
 
-Run the application against a database role that holds only the privileges it needs, and **REVOKE `UPDATE` and
-`DELETE` on `audit_logs`** from that role (the application only ever appends to and reads the table — it never
-updates or deletes a row):
+CORE-SEC-004 makes the log **tamper-proof in code**, not only tamper-evident, so it cannot be mutated from inside
+the running process: the audit read paths return non-tracked entities, and the
+`AuditLogTamperProtectionInterceptor` (wired on every runtime context) throws and fails closed if any
+`SaveChanges` would `UPDATE`/`DELETE` an audit row. The database-role prevention below is the third layer.
+
+#### The REVOKE is now a checked-in migration (CORE-SEC-004)
+
+The `RevokeAuditLogMutationFromRuntimeRole` migration ships the REVOKE so a deployment no longer has to remember
+to run it by hand. Because the runtime role's name is deployment-specific, the migration reads it from a custom
+database setting, `livecore.audit_log_app_role`, and is a safe **no-op** when that setting is unset (a
+single-role dev/CI database, or an operator who has not opted in). To turn it on, name your least-privilege
+runtime role once (as the database owner/superuser), then apply migrations as usual:
 
 ```sql
--- Run once, as the database owner/superuser, against the role the application connects as
--- (replace livecore_app with your application role).
+-- Name the runtime application role the migration should REVOKE from (replace livecore_app with your role).
+ALTER DATABASE livecore SET livecore.audit_log_app_role = 'livecore_app';
+```
+
+On its next run the migration REVOKEs `UPDATE`/`DELETE` on `audit_logs` from that role and re-grants the
+`INSERT`/`SELECT` the application still needs — equivalent to running, once, as the owner/superuser:
+
+```sql
 REVOKE UPDATE, DELETE ON TABLE audit_logs FROM livecore_app;
 -- The application still needs INSERT (append) and SELECT (read); keep those:
 GRANT  INSERT, SELECT ON TABLE audit_logs TO livecore_app;
@@ -306,6 +321,8 @@ This is a defence-in-depth pairing:
   otherwise recompute the whole chain after a change. Keeping the migrations/owner role (which legitimately
   needs `DELETE` for a tenant teardown cascade) separate from the runtime application role is what makes the
   REVOKE safe to apply.
+- The **in-process interceptor and non-tracked reads** (CORE-SEC-004, in Core) stop an in-process regression
+  from mutating the table even before the database role is consulted.
 
 Schema migrations are applied by the separate, more-privileged **migration runner** role (see above), not the
 runtime application role, so the REVOKE on the application role does not interfere with applying migrations or

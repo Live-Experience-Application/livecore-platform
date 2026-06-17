@@ -144,6 +144,35 @@ Controls:
 - the chain is unsigned (no secret), so cryptographic signing/external anchoring against a fully privileged
   actor is a documented follow-up
 
+## Audit log tamper-proofing in code (CORE-SEC-004)
+
+CORE-SEC-003 made the audit log tamper-**evident** (the hash chain DETECTS a mutated, deleted, inserted or
+reordered row) but, out of the box, not tamper-**proof**: the per-tenant `AuditLogChainVerifier` is the
+detection control, and the REVOKE was operator documentation only, so a regression inside the running process —
+a read path that forgot `AsNoTracking`, or new code that re-pointed the table — could still have `SaveChanges`
+issue an `UPDATE`/`DELETE` against an audit row, and a deployment that never ran the REVOKE left the runtime
+role free to do the same at the database. This story closes both gaps so the audit log cannot be mutated from
+inside the running process at all, with three defence-in-depth layers UNDER the existing chain (which still
+detects anything that bypasses them):
+
+- **Non-tracked reads.** The three audit read paths (`AuditLogRepository.ListByOrganizationAsync`,
+  `ListPageByOrganizationAsync`, `ListChainByOrganizationAsync`) read with `AsNoTracking`, so a caller (and the
+  chain verifier) gets DETACHED entities. There is nothing tracked to write back, so a read followed by a stray
+  mutation + `SaveChanges` persists nothing.
+- **A fail-closed persistence interceptor.** `AuditLogTamperProtectionInterceptor` (an EF Core
+  `SaveChangesInterceptor` wired on every runtime context — the API host and every worker job — via
+  `UseLiveCoreNpgsql`) inspects the change tracker on every `SaveChanges` and THROWS `AuditLogTamperException`
+  if any `AuditLogEntry` is `Modified` or `Deleted`, aborting the whole save before it reaches the database. An
+  append (`Added`) and the reads are untouched. A raw-SQL `UPDATE`/`DELETE` does not pass through `SaveChanges`,
+  so it is intentionally not caught here — that is the REVOKE's and the chain's job.
+- **A checked-in REVOKE migration.** `RevokeAuditLogMutationFromRuntimeRole` turns the previously
+  documentation-only deployment step into an automated one: when the operator names the runtime role in the
+  `livecore.audit_log_app_role` database setting it `REVOKE`s `UPDATE`/`DELETE` on `audit_logs` from that role
+  (re-granting `INSERT`/`SELECT`); when unset it is a safe no-op (`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+The existing CORE-SEC-003 append path and per-tenant hash chain are unchanged and keep working: the verifier
+still verifies a clean chain and still detects a tampered or deleted row.
+
 ## Data-subject erasure (CORE-PRIV-001)
 
 A data subject has a right to erasure (GDPR Art.17), but until this story Core had **no** erasure path: the

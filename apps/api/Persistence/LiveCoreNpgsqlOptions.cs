@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
+using LiveCore.Api.Audit;
 using Microsoft.EntityFrameworkCore;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 
@@ -134,6 +135,14 @@ internal static class LiveCoreNpgsqlOptions
         ArgumentNullException.ThrowIfNull(tuning);
 
         options.UseNpgsql(connectionString, npgsql => Configure(npgsql, tuning.CommandTimeout));
+
+        // Audit-log TAMPER-PROOFING (CORE-SEC-004): block any in-process SaveChanges that would UPDATE or DELETE
+        // a persisted audit_logs row, fail-closed, on EVERY runtime context (the API host and every worker job).
+        // The append-only audit log is tamper-EVIDENT through the hash chain (CORE-SEC-003); this interceptor makes
+        // it tamper-PROOF in code, paired with the non-tracked audit reads and the DB-level REVOKE migration. It is
+        // stateless and provider-agnostic (it reads the change tracker, not SQL), so it is constructed inline like
+        // the statement-timeout interceptor below; an append (INSERT) and the reads are untouched.
+        options.AddInterceptors(new AuditLogTamperProtectionInterceptor());
 
         // Server-side statement_timeout (CORE-RES-004): the database aborts a stuck query on its own even if the
         // client cancellation is lost. Zero means the operator has disabled it, so nothing is registered.
