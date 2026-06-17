@@ -65,4 +65,23 @@ public class CorsConfigurationTests
     {
         Assert.Throws<ArgumentNullException>(() => CorsConfiguration.ReadAllowedOrigins(null!));
     }
+
+    [Fact]
+    public void ExposedResponseHeaders_is_the_documented_browser_consumer_set()
+    {
+        // CORE-DX-005: the exact headers a cross-origin browser SDK must be able to read. Pinned so the set
+        // (and the agreement with @livecore/contracts ResponseHeaders and docs/08) cannot drift unnoticed. The
+        // end-to-end Access-Control-Expose-Headers behavior is covered by the integration suite.
+        Assert.Equal(
+            [
+                "ETag",
+                "Location",
+                "Retry-After",
+                "X-Request-Id",
+                "RateLimit-Limit",
+                "RateLimit-Remaining",
+                "RateLimit-Reset",
+            ],
+            CorsConfiguration.ExposedResponseHeaders);
+    }
 }

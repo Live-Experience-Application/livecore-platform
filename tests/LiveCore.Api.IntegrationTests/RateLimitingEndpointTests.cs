@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using LiveCore.Api.Hosting;
@@ -178,6 +179,67 @@ public sealed class RateLimitingEndpointTests
         Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
         Assert.Equal("application/problem+json", throttled.Content.Headers.ContentType?.MediaType);
         Assert.True(throttled.Headers.Contains("Retry-After"), "A 429 must carry a Retry-After header.");
+    }
+
+    // ====================================================================
+    // RateLimit-* headers on success and on 429 (CORE-DX-005), and the
+    // 429 carries no tenant/principal detail (threat T7).
+    // ====================================================================
+
+    [Fact]
+    public async Task An_admitted_authenticated_response_carries_the_rate_limit_headers()
+    {
+        // CORE-DX-005: an admitted per-principal request reports its remaining allowance so a browser SDK can
+        // back off before it is throttled. With a window of 5, the first (and only) request reports 4 remaining.
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Global:PermitLimit"] = "5",
+            ["RateLimiting:Global:WindowSeconds"] = "60",
+        });
+        using var client = factory.CreateClientFor("ratelimit-headers-user", _issuer);
+
+        var response = await client.GetAsync("/api/v1/me");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("5", Single(response, RateLimitingConfiguration.RateLimitLimitHeaderName));
+        Assert.Equal("4", Single(response, RateLimitingConfiguration.RateLimitRemainingHeaderName));
+        Assert.Equal("60", Single(response, RateLimitingConfiguration.RateLimitResetHeaderName));
+    }
+
+    [Fact]
+    public async Task A_throttled_response_carries_the_rate_limit_headers_without_principal_detail()
+    {
+        const string subject = "ratelimit-leak-check-user";
+        await using var factory = new RateLimitedApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Global:PermitLimit"] = "1",
+            ["RateLimiting:Global:WindowSeconds"] = "60",
+        });
+        using var client = factory.CreateClientFor(subject, _issuer);
+
+        var allowed = await client.GetAsync("/api/v1/me");
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+
+        var throttled = await client.GetAsync("/api/v1/me");
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, throttled.StatusCode);
+        Assert.Equal("1", Single(throttled, RateLimitingConfiguration.RateLimitLimitHeaderName));
+        Assert.Equal("0", Single(throttled, RateLimitingConfiguration.RateLimitRemainingHeaderName));
+
+        // The reset is a positive seconds-until-window-roll, not a leak.
+        var reset = int.Parse(Single(throttled, RateLimitingConfiguration.RateLimitResetHeaderName), CultureInfo.InvariantCulture);
+        Assert.InRange(reset, 1, 60);
+
+        // The 429 body (and the headers) carry no tenant/principal/resource detail (threat T7).
+        var body = await throttled.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(subject, body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(_issuer, body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string Single(HttpResponseMessage response, string header)
+    {
+        Assert.True(response.Headers.TryGetValues(header, out var values), $"Expected the {header} header.");
+        return Assert.Single(values);
     }
 
     // ====================================================================

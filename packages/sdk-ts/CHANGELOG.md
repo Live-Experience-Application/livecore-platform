@@ -12,6 +12,14 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Rate-limit signals on the error type (CORE-DX-005): `LiveCoreApiError` now
+  surfaces `retryAfter` (seconds, from the `Retry-After` header) and `rateLimit`
+  (`RateLimitInfo { limit, remaining, reset }`, from the `RateLimit-*` headers)
+  parsed from a throttled response instead of discarding the response headers, so a
+  caller can honor the server's back-off. A non-integer `Retry-After` (HTTP-date)
+  is treated as absent rather than guessed; the new `ApiErrorDetails` and
+  `RateLimitInfo` types are exported. The signals leak no tenant/principal detail
+  (threat T7).
 - Optimistic-concurrency round-trip over HTTP (CORE-DX-002): `WorkspacesClient.getWithETag`
   returns the workspace together with its weak `ETag` (`SdkResponse<WorkspaceResponse>`),
   and `WorkspacesClient.update` accepts a `ConditionalWriteOptions { ifMatch }` so a rename

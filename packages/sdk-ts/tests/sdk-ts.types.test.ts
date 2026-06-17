@@ -35,6 +35,7 @@ import type {
   LiveCoreApiError,
   LiveCoreClient,
   LiveCoreClientOptions,
+  RateLimitInfo,
   RealtimeClient,
   RevealOptions,
   ScenesClient,
@@ -221,6 +222,27 @@ export type ApiErrorStatus = Assert<Equal<LiveCoreApiError["status"], number>>;
 
 export type ApiErrorProblem = Assert<
   Equal<LiveCoreApiError["problem"], ProblemDetails | undefined>
+>;
+
+// --- The API error surfaces the rate-limit signals instead of discarding them (CORE-DX-005). ---
+
+export type ApiErrorRetryAfter = Assert<
+  Equal<LiveCoreApiError["retryAfter"], number | undefined>
+>;
+
+export type ApiErrorRateLimit = Assert<
+  Equal<LiveCoreApiError["rateLimit"], RateLimitInfo | undefined>
+>;
+
+export type RateLimitInfoShape = Assert<
+  Equal<
+    RateLimitInfo,
+    {
+      readonly limit?: number;
+      readonly remaining?: number;
+      readonly reset?: number;
+    }
+  >
 >;
 
 // --- The client exposes each resource group as a typed property. ----------------

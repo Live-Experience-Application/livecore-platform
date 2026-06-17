@@ -1133,9 +1133,14 @@ default** (the full deployment guide is in `docs/13_SELF_HOSTING_REQUIREMENTS.md
   wildcard). The default is fail-closed: with no configured origins **no**
   cross-origin browser client is allowed (a disallowed origin's preflight gets no
   `Access-Control-Allow-Origin` header). Configure it as a list, e.g.
-  `Cors__AllowedOrigins__0=https://app.example.com`. CORS is a browser-enforced
-  boundary layered on the OIDC/tenant checks every endpoint already applies — it
-  never widens server-side authorization (`docs/07_SECURITY_THREAT_MODEL.md`).
+  `Cors__AllowedOrigins__0=https://app.example.com`. The policy also **exposes**
+  (`Access-Control-Expose-Headers`) the response headers a browser SDK must read —
+  the weak concurrency `ETag`, `Location`, `Retry-After`, the `RateLimit-*` family
+  and the `X-Request-Id` correlation header (CORE-DX-005) — since a cross-origin
+  `fetch` cannot read a non-simple response header otherwise. CORS is a
+  browser-enforced boundary layered on the OIDC/tenant checks every endpoint already
+  applies — it never widens server-side authorization
+  (`docs/07_SECURITY_THREAT_MODEL.md`).
 - **Forwarded headers (`ForwardedHeaders:KnownProxies` / `:KnownNetworks`).**
   `UseForwardedHeaders` restores the real client scheme/host/IP from the proxy's
   `X-Forwarded-Proto`/`-Host`/`-For` headers, but only when the immediate peer is a
@@ -1186,11 +1191,21 @@ safe, generous defaults so normal traffic is unaffected — 300 requests / 60s p
 (`RateLimiting__Enabled=false`) for a deployment that throttles at its edge instead, in
 which case both limiters become no-ops and the middleware is inert. An excess request gets
 `429 Too Many Requests` as RFC 7807 Problem Details with a `Retry-After` header and no
-tenant/principal/resource detail (threat T7). Rate limiting is a coarse abuse ceiling
-layered **on top of** the OIDC/tenant authorization every endpoint already enforces
-server-side; it never widens authorization (`docs/07_SECURITY_THREAT_MODEL.md`), exactly
-like the CORS allow-list. See `docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration
-keys.
+tenant/principal/resource detail (threat T7).
+
+The limiter also emits the IETF draft **`RateLimit-Limit`/`RateLimit-Remaining`/
+`RateLimit-Reset`** headers (CORE-DX-005) on **both** an admitted response (on the
+authenticated per-principal surface — the surface a browser SDK consumes, read from the
+same limiter that enforces it) and the `429` (where remaining is `0` and reset matches
+`Retry-After`), so a browser consumer can back off **before** it is throttled. These
+headers are numeric ceilings/counts only — never a tenant, principal or resource
+identifier (threat T7) — and the CORS policy exposes them (with `ETag`, `Location` and the
+`X-Request-Id` correlation header) so a cross-origin SDK can read them; the typed SDK
+surfaces them on `LiveCoreApiError` (`retryAfter`, `rateLimit`). Rate limiting is a coarse
+abuse ceiling layered **on top of** the OIDC/tenant authorization every endpoint already
+enforces server-side; it never widens authorization
+(`docs/07_SECURITY_THREAT_MODEL.md`), exactly like the CORS allow-list. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` for the configuration keys.
 
 ### Graceful shutdown and SignalR sticky sessions
 

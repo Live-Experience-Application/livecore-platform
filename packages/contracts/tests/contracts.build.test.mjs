@@ -73,6 +73,17 @@ test("the conditional-write transport constants are exported (CORE-DX-002)", () 
   assert.ok(CoreErrorStatusCodes.includes(412));
 });
 
+test("the browser-consumer response headers are exported (CORE-DX-005)", () => {
+  // The headers the CORS policy exposes so a cross-origin browser SDK can read the rate-limit,
+  // correlation and created-resource signals; the SDK surfaces Retry-After/RateLimit-* on its error type.
+  assert.equal(ResponseHeaders.Location, "Location");
+  assert.equal(ResponseHeaders.RetryAfter, "Retry-After");
+  assert.equal(ResponseHeaders.RequestId, "X-Request-Id");
+  assert.equal(ResponseHeaders.RateLimitLimit, "RateLimit-Limit");
+  assert.equal(ResponseHeaders.RateLimitRemaining, "RateLimit-Remaining");
+  assert.equal(ResponseHeaders.RateLimitReset, "RateLimit-Reset");
+});
+
 test("the Problem Details error-code catalog is the stable published set", () => {
   // The published catalog must mirror the server-side ProblemCodes catalog exactly
   // (apps/api/ProblemCodes.cs); the cross-language drift check is the .NET contract

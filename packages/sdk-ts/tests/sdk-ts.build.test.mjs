@@ -359,6 +359,90 @@ test("defaultHeaders cannot override the Authorization the SDK sets", async () =
   assert.equal(calls[0].init.headers["X-Tenant-Route"], "eu");
 });
 
+test("a 429 surfaces retryAfter and rate-limit info on the error (CORE-DX-005)", async () => {
+  // The Core API exposes Retry-After and the RateLimit-* headers on a throttled response; the SDK must
+  // surface them on the error type instead of discarding the response headers, so a caller can back off.
+  const headers = {
+    "retry-after": "30",
+    "ratelimit-limit": "300",
+    "ratelimit-remaining": "0",
+    "ratelimit-reset": "30",
+  };
+  const { client } = makeClient({
+    handler: () => ({
+      ok: false,
+      status: 429,
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({
+            title: "Too Many Requests",
+            status: 429,
+            code: "rate_limited",
+          }),
+        ),
+    }),
+  });
+
+  let captured;
+  try {
+    await client.workspaces.list({ organizationSlug: "acme" });
+  } catch (error) {
+    captured = error;
+  }
+
+  assert.ok(isLiveCoreApiError(captured));
+  assert.equal(captured.status, 429);
+  assert.equal(captured.retryAfter, 30);
+  assert.deepEqual(captured.rateLimit, { limit: 300, remaining: 0, reset: 30 });
+  // The rate-limit signals leak nothing: only numeric ceilings/counts, never tenant or principal detail.
+  assert.equal(captured.problem?.code, "rate_limited");
+});
+
+test("an error with no rate-limit headers leaves retryAfter and rateLimit undefined", async () => {
+  const { client } = makeClient({
+    handler: () => jsonResponse(403, { title: "Forbidden", status: 403 }),
+  });
+
+  let captured;
+  try {
+    await client.workspaces.create({
+      organizationSlug: "acme",
+      slug: "demo",
+      name: "Demo",
+    });
+  } catch (error) {
+    captured = error;
+  }
+
+  assert.ok(isLiveCoreApiError(captured));
+  assert.equal(captured.retryAfter, undefined);
+  assert.equal(captured.rateLimit, undefined);
+});
+
+test("a non-integer Retry-After (HTTP-date) is treated as absent, not guessed", async () => {
+  const headers = { "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" };
+  const { client } = makeClient({
+    handler: () => ({
+      ok: false,
+      status: 503,
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+      text: () => Promise.resolve(""),
+    }),
+  });
+
+  let captured;
+  try {
+    await client.workspaces.list({ organizationSlug: "acme" });
+  } catch (error) {
+    captured = error;
+  }
+
+  assert.ok(isLiveCoreApiError(captured));
+  assert.equal(captured.retryAfter, undefined);
+  assert.equal(captured.rateLimit, undefined);
+});
+
 test("generateRequestId is sent as the X-Request-Id header", async () => {
   const { client, calls } = makeClient({
     generateRequestId: () => "req-42",

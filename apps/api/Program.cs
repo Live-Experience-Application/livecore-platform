@@ -1176,6 +1176,14 @@ app.UseMiddleware<RequestLogContextMiddleware>();
 // store-notification webhook group's RequireRateLimiting(WebhookPolicyName) per-IP policy is applied here too.
 app.UseRateLimiter();
 
+// RateLimit-Limit/Remaining/Reset on the SUCCESS path (CORE-DX-005). Registered immediately AFTER
+// UseRateLimiter so it runs INSIDE the limiter (the request's lease is held), reporting the per-principal
+// remaining allowance read from the SAME limiter that enforces it; the limiter's own 429 rejection emits the
+// matching headers. The CORS policy exposes them so a browser SDK can read them
+// (CorsConfiguration.ExposedResponseHeaders). It only acts on the authenticated per-principal surface and
+// leaks no tenant/principal detail (threat T7).
+app.UseMiddleware<RateLimitHeaderMiddleware>();
+
 app.UseAuthorization();
 
 // Health endpoints (CORE-FND-004): unauthenticated by convention.

@@ -12,6 +12,13 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- Browser-consumer response header names (CORE-DX-005): `ResponseHeaders` gains
+  `Location`, `RetryAfter` (`Retry-After`), `RequestId` (`X-Request-Id`) and the
+  rate-limit family `RateLimitLimit`/`RateLimitRemaining`/`RateLimitReset`
+  (`RateLimit-Limit`/`-Remaining`/`-Reset`). These are the headers the Core API
+  CORS policy exposes (`Access-Control-Expose-Headers`) so a cross-origin browser
+  SDK can read the rate-limit, correlation and created-resource signals; none
+  carries tenant/principal content (threat T7).
 - The optimistic-concurrency token is surfaced over HTTP (CORE-DX-002):
   `WorkspaceResponse.version` carries the resource's version (the `xmin` token),
   the matching single-resource response sets a weak `ETag` header, and a consumer

@@ -40,6 +40,12 @@ export type RequestHeader =
 
 /**
  * Standard response headers the Core API sets (docs/08_API_CONTRACTS.md).
+ *
+ * A browser/PWA SDK on a different origin can only READ a response header the CORS
+ * policy explicitly exposes; the Core API exposes exactly this set
+ * (`Access-Control-Expose-Headers`, CORE-DX-005), so every header named here is
+ * readable cross-origin. None carries tenant/principal content — they are a version
+ * validator, rate-limit signals, a created-resource path and a correlation id.
  */
 export const ResponseHeaders = {
   /**
@@ -49,6 +55,33 @@ export const ResponseHeaders = {
    * (CORE-DX-002).
    */
   ETag: "ETag",
+  /**
+   * `Location` of a freshly created resource on a `201 Created` response (for
+   * example the new session's `/api/v1/sessions/{id}` path).
+   */
+  Location: "Location",
+  /**
+   * Seconds to wait before retrying, set on a `429 Too Many Requests` (and any
+   * other throttled) response (CORE-SEC-001). The SDK surfaces it as
+   * `LiveCoreApiError.retryAfter`.
+   */
+  RetryAfter: "Retry-After",
+  /**
+   * Per-request correlation/trace id the server returns so a consumer can correlate
+   * a failed call with server logs/traces (CORE-OBS-005). Mirrors the optional
+   * {@link RequestHeaders.RequestId} a client may send.
+   */
+  RequestId: "X-Request-Id",
+  /**
+   * The request quota (permit ceiling) for the caller's current rate-limit window —
+   * the IETF draft `RateLimit` header family (CORE-DX-005). Emitted on an admitted
+   * response and on a `429`. The SDK surfaces it as `LiveCoreApiError.rateLimit.limit`.
+   */
+  RateLimitLimit: "RateLimit-Limit",
+  /** Permits remaining in the caller's current window (`0` on a `429`). */
+  RateLimitRemaining: "RateLimit-Remaining",
+  /** Seconds until the caller's current window resets and the quota refills. */
+  RateLimitReset: "RateLimit-Reset",
 } as const;
 
 /** A standard Core API response header name. */

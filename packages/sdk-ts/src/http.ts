@@ -11,6 +11,7 @@ import { API_BASE_PATH } from "@livecore/contracts";
 import type { ProblemDetails } from "@livecore/contracts";
 
 import { LiveCoreApiError, LiveCoreError } from "./errors.js";
+import type { ApiErrorDetails, RateLimitInfo } from "./errors.js";
 import type {
   AccessTokenProvider,
   FetchLike,
@@ -70,6 +71,51 @@ function resolveGlobalFetch(): FetchLike {
     );
   }
   return candidate as FetchLike;
+}
+
+/** A minimal header bag the SDK reads (the WHATWG fetch `Headers` satisfies it). */
+type HeaderReader = { get(name: string): string | null };
+
+/**
+ * Parses a non-negative integer header value, or `undefined` when the header is
+ * absent or not a non-negative integer. Header lookup is case-insensitive per the
+ * WHATWG fetch `Headers` contract.
+ */
+function readNonNegativeInt(
+  headers: HeaderReader,
+  name: string,
+): number | undefined {
+  const raw = headers.get(name);
+  if (raw === null) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const value = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+/**
+ * Reads the transport details the Core API exposes on a throttled response
+ * (CORE-DX-005): the `Retry-After` delay and the `RateLimit-*` window info. The
+ * Core API emits `Retry-After` as a delta in seconds; any non-integer (HTTP-date)
+ * value is treated as absent rather than guessed. Returns `undefined` for each
+ * field that was not present, so a non-rate-limited error carries neither.
+ */
+function readApiErrorDetails(headers: HeaderReader): ApiErrorDetails {
+  const retryAfter = readNonNegativeInt(headers, "retry-after");
+  const limit = readNonNegativeInt(headers, "ratelimit-limit");
+  const remaining = readNonNegativeInt(headers, "ratelimit-remaining");
+  const reset = readNonNegativeInt(headers, "ratelimit-reset");
+
+  let rateLimit: RateLimitInfo | undefined;
+  if (limit !== undefined || remaining !== undefined || reset !== undefined) {
+    rateLimit = { limit, remaining, reset };
+  }
+
+  return { retryAfter, rateLimit };
 }
 
 /** Best-effort parse of an error body as RFC 7807 Problem Details. */
@@ -214,7 +260,14 @@ export class HttpClient {
   ): Promise<TResponse> {
     const raw = await response.text();
     if (!response.ok) {
-      throw new LiveCoreApiError(response.status, parseProblemDetails(raw));
+      // Surface the rate-limit/Retry-After signals the Core API exposes on a
+      // throttled response (CORE-DX-005) instead of discarding the headers, so a
+      // caller can honor the server's back-off.
+      throw new LiveCoreApiError(
+        response.status,
+        parseProblemDetails(raw),
+        readApiErrorDetails(response.headers),
+      );
     }
     if (raw.length === 0) {
       return undefined as TResponse;

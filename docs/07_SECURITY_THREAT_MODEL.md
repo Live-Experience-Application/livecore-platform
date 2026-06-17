@@ -120,6 +120,12 @@ Controls:
   and a per-principal global limit on the authenticated surface; excess requests get `429`
 - a hard request-body-size cap on the anonymous webhooks beyond the application-level payload cap
 - all limits configurable; `429` Problem Details carry no tenant/principal/resource detail (T7)
+- the limiter emits the IETF draft `RateLimit-Limit`/`RateLimit-Remaining`/`RateLimit-Reset` headers on an
+  admitted response and on the `429` (with `Retry-After`), so a browser SDK can back off before it is throttled
+  (CORE-DX-005); the headers are numeric ceilings/counts only — never a tenant, principal or resource identifier
+  (T7) — and the CORS policy exposes them (with `ETag`, `Location` and the `X-Request-Id` correlation header)
+  via `Access-Control-Expose-Headers` so a cross-origin browser consumer can read them without widening any
+  server-side authorization
 
 ## Audit log integrity (CORE-SEC-003)
 

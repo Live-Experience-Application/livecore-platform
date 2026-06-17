@@ -20,6 +20,11 @@ A single-resource read or mutation of a mutable aggregate also returns an `ETag`
 response header (a weak entity-tag carrying the resource's optimistic-concurrency
 version; see "ETag and If-Match" below).
 
+A browser/PWA SDK on a different origin can only read a response header the CORS
+policy explicitly exposes. The Core API therefore **exposes** the response headers a
+browser consumer must read (`Access-Control-Expose-Headers`; see "Rate-limit headers
+and browser-readable response headers" below).
+
 ## Common error codes
 
 | Status | Meaning |
@@ -252,3 +257,37 @@ commit), never a silent clobber. The `412` body, like the `409`, names only the 
 (threat T7). The token is the existing PostgreSQL `xmin` row version (CORE-CONC-006); the
 weak validator and `If-Match` comparison ignore the weak/strong indicator and the quoting,
 so a consumer may send back either the exact `W/"..."` header or the bare `version` value.
+
+## Rate-limit headers and browser-readable response headers (CORE-DX-005)
+
+A browser `fetch` from a different origin can read only the CORS "simple" response
+headers unless the server explicitly **exposes** the rest. So a vertical's browser/PWA
+SDK could not read the headers it needs to behave correctly — the weak concurrency
+`ETag`, the `Retry-After`/`RateLimit-*` rate-limit signals, the `Location` of a created
+resource, or the request-id correlation header — even though the server sends them. The
+single CORS policy (applied to the REST API and the `/hubs` SignalR endpoint) therefore
+sets `Access-Control-Expose-Headers` to exactly this set:
+
+| Response header | Set on | Meaning |
+|---|---|---|
+| `ETag` | single-resource read/mutation | weak optimistic-concurrency validator (CORE-DX-002) |
+| `Location` | `201 Created` | path of the freshly created resource |
+| `Retry-After` | `429` (and other throttled) | seconds to wait before retrying |
+| `RateLimit-Limit` | admitted response and `429` | request quota for the current window |
+| `RateLimit-Remaining` | admitted response and `429` | permits remaining in the current window (`0` on a `429`) |
+| `RateLimit-Reset` | admitted response and `429` | seconds until the window resets |
+| `X-Request-Id` | every response (CORE-OBS-005) | per-request correlation/trace id |
+
+The rate limiter (CORE-SEC-001) emits the IETF draft `RateLimit-Limit`,
+`RateLimit-Remaining` and `RateLimit-Reset` headers on **both** an admitted response
+(on the authenticated per-principal surface — the surface a browser SDK consumes) and a
+`429` rejection, where `RateLimit-Remaining` is `0` and `RateLimit-Reset` matches
+`Retry-After`. None of these headers carries a tenant, principal or resource identifier —
+they are a version validator, a created-resource path, a correlation id and numeric
+ceilings/counts — so exposing them leaks nothing (threat T7). A `429` body remains RFC
+7807 Problem Details with the `rate_limited` `code`.
+
+The typed SDK surfaces these instead of discarding them: `@livecore/contracts`
+`ResponseHeaders` names each header, and a non-success response raises a
+`LiveCoreApiError` carrying `retryAfter` (seconds) and `rateLimit` (`{ limit, remaining,
+reset }`), so a consumer can honor the server's back-off rather than guess.

@@ -55,6 +55,23 @@ public static class RateLimitingConfiguration
     /// </summary>
     public const string WebhookPolicyName = "LiveCoreStoreNotificationWebhooks";
 
+    /// <summary>
+    /// Response header carrying the request quota (permit ceiling) for the window the caller is in — the IETF
+    /// draft <c>RateLimit</c> header field family (CORE-DX-005). Emitted on both an admitted response and a
+    /// <c>429</c> rejection. A numeric ceiling, never a tenant/principal identifier (threat T7).
+    /// </summary>
+    public const string RateLimitLimitHeaderName = "RateLimit-Limit";
+
+    /// <summary>
+    /// Response header carrying the permits remaining in the caller's current window (<c>0</c> on a <c>429</c>).
+    /// </summary>
+    public const string RateLimitRemainingHeaderName = "RateLimit-Remaining";
+
+    /// <summary>
+    /// Response header carrying the seconds until the caller's current window resets and the quota refills.
+    /// </summary>
+    public const string RateLimitResetHeaderName = "RateLimit-Reset";
+
     /// <summary>Default per-principal global ceiling: permits per window.</summary>
     public const int DefaultGlobalPermitLimit = 300;
 
@@ -150,7 +167,7 @@ public static class RateLimitingConfiguration
             var settings = RateLimitingSettings.Read(configuration);
 
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-            options.OnRejected = WriteRateLimitedProblemAsync;
+            options.OnRejected = (rejected, token) => WriteRateLimitedProblemAsync(rejected, settings, token);
 
             // Per-principal global limiter on the authenticated surface.
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
@@ -236,27 +253,106 @@ public static class RateLimitingConfiguration
     /// <summary>
     /// Writes the fail-closed <c>429</c> response: an RFC 7807 Problem Details body (the same shape every other
     /// endpoint returns via <c>Results.Problem</c>) plus a <c>Retry-After</c> header derived from the limiter
-    /// lease. The body carries no tenant, principal or resource detail (threat T7).
+    /// lease and the IETF draft <c>RateLimit-Limit/Remaining/Reset</c> headers (CORE-DX-005). The body and the
+    /// headers carry no tenant, principal or resource detail — only a numeric ceiling, a remaining count of
+    /// <c>0</c> and a reset delay (threat T7).
     /// </summary>
-    private static ValueTask WriteRateLimitedProblemAsync(OnRejectedContext context, CancellationToken cancellationToken)
+    private static ValueTask WriteRateLimitedProblemAsync(
+        OnRejectedContext context,
+        RateLimitingSettings settings,
+        CancellationToken cancellationToken)
     {
-        var response = context.HttpContext.Response;
+        var httpContext = context.HttpContext;
+        var response = httpContext.Response;
         if (response.HasStarted)
         {
             return ValueTask.CompletedTask;
         }
 
+        // Map the rejection back to the limit that applied: the per-principal global limiter only ever throttles
+        // an authenticated principal, the per-IP webhook policy only the anonymous webhooks, so the principal
+        // check selects the right ceiling/window without leaking which partition was hit.
+        var isPrincipal = TryGetPrincipalPartitionKey(httpContext) is not null;
+        var limit = isPrincipal ? settings.GlobalPermitLimit : settings.WebhookPermitLimit;
+        var resetSeconds = isPrincipal ? settings.GlobalWindowSeconds : settings.WebhookWindowSeconds;
+
+        // The lease's RetryAfter is the exact seconds until the window rolls; it is both the Retry-After value
+        // and the RateLimit-Reset value for a rejected request.
         if (context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
         {
-            response.Headers.RetryAfter =
-                ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+            resetSeconds = (int)Math.Ceiling(retryAfter.TotalSeconds);
+            response.Headers.RetryAfter = resetSeconds.ToString(CultureInfo.InvariantCulture);
         }
+
+        WriteRateLimitHeaders(response, limit, remaining: 0, resetSeconds);
 
         return new ValueTask(CoreProblem.Create(
             statusCode: StatusCodes.Status429TooManyRequests,
             code: ProblemCodes.RateLimited,
             title: "Too Many Requests",
             detail: "The request was rejected because a rate limit was exceeded. Retry after a short delay.")
-            .ExecuteAsync(context.HttpContext));
+            .ExecuteAsync(httpContext));
+    }
+
+    /// <summary>
+    /// Emits the IETF draft <c>RateLimit-Limit/Remaining/Reset</c> headers for a request the per-principal
+    /// global limiter ADMITTED — the success-path counterpart to the same headers a <c>429</c> rejection carries
+    /// (CORE-DX-005). The remaining count is read from the SAME limiter the pipeline enforces with (no parallel
+    /// counter): <see cref="RateLimitHeaderMiddleware"/> calls this while the request's lease is still held, so
+    /// the value is this request's post-admission snapshot. Only the authenticated per-principal surface — the
+    /// surface a browser SDK consumes — carries the headers; an anonymous/unthrottled request, a disabled
+    /// limiter or an already-started response is left untouched. The values leak nothing (threat T7): a numeric
+    /// ceiling, a remaining count and a window length.
+    /// </summary>
+    internal static void TryWriteAdmittedRateLimitHeaders(
+        HttpContext context,
+        RateLimitingSettings settings,
+        PartitionedRateLimiter<HttpContext>? globalLimiter)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        if (!settings.Enabled || globalLimiter is null)
+        {
+            return;
+        }
+
+        var response = context.Response;
+        if (response.HasStarted)
+        {
+            return;
+        }
+
+        // Only the per-principal authenticated surface is bounded by the global limiter; an anonymous request is
+        // left unthrottled there, so it carries no RateLimit-* on the success path.
+        if (TryGetPrincipalPartitionKey(context) is null)
+        {
+            return;
+        }
+
+        var statistics = globalLimiter.GetStatistics(context);
+        if (statistics is null)
+        {
+            return;
+        }
+
+        WriteRateLimitHeaders(
+            response,
+            limit: settings.GlobalPermitLimit,
+            remaining: statistics.CurrentAvailablePermits,
+            resetSeconds: settings.GlobalWindowSeconds);
+    }
+
+    /// <summary>
+    /// Sets the three <c>RateLimit-*</c> headers from a ceiling, a remaining count (clamped to be non-negative)
+    /// and a reset delay in seconds, all formatted invariantly. Shared by the admitted-path helper and the
+    /// rejection writer so both surfaces emit an identical header shape.
+    /// </summary>
+    private static void WriteRateLimitHeaders(HttpResponse response, int limit, long remaining, int resetSeconds)
+    {
+        var clampedRemaining = remaining < 0 ? 0 : remaining;
+        response.Headers[RateLimitLimitHeaderName] = limit.ToString(CultureInfo.InvariantCulture);
+        response.Headers[RateLimitRemainingHeaderName] = clampedRemaining.ToString(CultureInfo.InvariantCulture);
+        response.Headers[RateLimitResetHeaderName] = resetSeconds.ToString(CultureInfo.InvariantCulture);
     }
 }

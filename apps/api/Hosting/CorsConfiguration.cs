@@ -35,6 +35,35 @@ public static class CorsConfiguration
     public const string PolicyName = "LiveCoreBrowserClients";
 
     /// <summary>
+    /// Name of the response header carrying the per-request correlation/trace id a browser SDK reads to
+    /// correlate a failed call with server logs/traces (CORE-OBS-005). It mirrors the documented
+    /// <c>X-Request-Id</c> request header a client may also send (docs/08_API_CONTRACTS.md "Common headers"); a
+    /// correlation token is a non-sensitive identifier, never content (threat T7).
+    /// </summary>
+    public const string RequestIdHeaderName = "X-Request-Id";
+
+    /// <summary>
+    /// The response headers a cross-origin browser/PWA SDK must be able to READ (CORE-DX-005). By default a
+    /// <c>fetch</c> from a different origin can read only the CORS "simple" response headers; any other header
+    /// is invisible to the SDK unless CORS explicitly exposes it (the <c>Access-Control-Expose-Headers</c>
+    /// response header). Without this list a browser SDK silently cannot read the weak optimistic-concurrency
+    /// <c>ETag</c> (CORE-DX-002), the <c>Retry-After</c> and <c>RateLimit-*</c> rate-limit signals
+    /// (CORE-SEC-001 / CORE-DX-005), the <c>Location</c> of a freshly created resource, or the request-id
+    /// correlation header (CORE-OBS-005). None of these leak tenant/principal content (threat T7): they are an
+    /// opaque version validator, a numeric ceiling/remaining/reset, a created-resource path and a correlation id.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ExposedResponseHeaders =
+    [
+        "ETag",
+        "Location",
+        "Retry-After",
+        RequestIdHeaderName,
+        RateLimitingConfiguration.RateLimitLimitHeaderName,
+        RateLimitingConfiguration.RateLimitRemainingHeaderName,
+        RateLimitingConfiguration.RateLimitResetHeaderName,
+    ];
+
+    /// <summary>
     /// Reads and normalizes the configured allow-list under
     /// <c>Cors:AllowedOrigins</c> (<c>Cors:AllowedOrigins:0</c>, <c>:1</c>, …). Each entry is trimmed, has
     /// any trailing slash removed (a CORS origin is scheme+host[+port] with no path) and blanks are
@@ -78,7 +107,9 @@ public static class CorsConfiguration
     /// When the allow-list is empty the policy is left with no permitted origin (fail-closed): every
     /// cross-origin request is denied. When origins are configured the policy permits exactly those
     /// origins with any method and header and with credentials (valid because the origins are an explicit
-    /// set, never a wildcard), which a browser SignalR client requires for the <c>/hubs</c> connection.
+    /// set, never a wildcard), which a browser SignalR client requires for the <c>/hubs</c> connection, and
+    /// EXPOSES the <see cref="ExposedResponseHeaders"/> so a browser SDK can read the rate-limit, concurrency,
+    /// correlation and created-resource response headers (CORE-DX-005).
     /// </summary>
     /// <exception cref="ArgumentNullException">The services or configuration is null.</exception>
     public static IServiceCollection AddLiveCoreCors(
@@ -109,6 +140,7 @@ public static class CorsConfiguration
                     .WithOrigins(origins)
                     .AllowAnyHeader()
                     .AllowAnyMethod()
+                    .WithExposedHeaders([.. ExposedResponseHeaders])
                     .AllowCredentials();
             });
         });

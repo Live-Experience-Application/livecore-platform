@@ -119,6 +119,32 @@ public sealed class CorsPolicyEndpointTests
     }
 
     [Fact]
+    public async Task Actual_request_from_an_allowed_origin_exposes_the_browser_consumer_headers()
+    {
+        // CORE-DX-005: a cross-origin browser SDK can only READ a response header the policy explicitly exposes.
+        // An actual (non-preflight) cross-origin response must carry Access-Control-Expose-Headers listing every
+        // header in the documented set (ETag, Location, Retry-After, the request-id header and the RateLimit-*
+        // family), so a browser fetch can read the concurrency, rate-limit, correlation and created-resource
+        // signals.
+        await using var factory = CreateFactory(_allowedOrigin);
+        using var client = factory.CreateClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/health/live");
+        request.Headers.Add("Origin", _allowedOrigin);
+        using var response = await client.SendAsync(request);
+
+        Assert.True(
+            response.Headers.TryGetValues("Access-Control-Expose-Headers", out var values),
+            "An allowed origin's actual request must expose the browser-consumer response headers.");
+
+        var exposed = string.Join(",", values);
+        foreach (var header in CorsConfiguration.ExposedResponseHeaders)
+        {
+            Assert.Contains(header, exposed, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
     public async Task Default_is_fail_closed_when_no_origins_are_configured()
     {
         // No configured origins (the repository default): every cross-origin request is denied.

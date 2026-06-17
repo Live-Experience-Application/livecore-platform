@@ -34,6 +34,7 @@ export {
   LiveCoreApiError,
   isLiveCoreApiError,
 } from "./errors.js";
+export type { ApiErrorDetails, RateLimitInfo } from "./errors.js";
 export type {
   AccessTokenProvider,
   FetchLike,
