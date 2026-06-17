@@ -51,13 +51,15 @@ public static class RecapGenerationServiceCollectionExtensions
             return false;
         }
 
-        // AddDbContext registers the context and its options with TryAdd semantics, so calling it here and in
-        // the asset cleanup wiring (same connection string) is safe — the second call is a no-op.
+        // DbContext POOLING (CORE-PERF-003): registered with AddDbContextPool, the same pooled registration the
+        // API host uses, so a job sweep reuses a pooled LiveCoreDbContext per scope rather than allocating one
+        // each run. AddDbContextPool registers the context and its options with TryAdd semantics, so calling it
+        // here and in the asset cleanup wiring (same connection string) is safe — the second call is a no-op.
         // Connection resilience (CORE-CONC-003) + per-command timeouts (CORE-RES-004): UseLiveCoreNpgsql turns on
         // the retrying execution strategy so a transient PostgreSQL disruption is retried automatically instead of
         // surfacing as a worker-job exception, and bounds each command at the configured client CommandTimeout and
         // server statement_timeout — the same policy the API host and the other worker jobs apply.
-        services.AddDbContext<LiveCoreDbContext>(options =>
+        services.AddDbContextPool<LiveCoreDbContext>(options =>
             options.UseLiveCoreNpgsql(connectionString, LiveCorePersistenceOptions.FromConfiguration(configuration)));
 
         // The system clock; the generation service stamps each recap's produced time from it. TryAdd so it

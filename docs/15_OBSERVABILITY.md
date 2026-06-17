@@ -197,6 +197,22 @@ The claim is observable without a new metric:
 - a sweep that **throws** still records the `livecore_job_failures_total` counter (`job=export-processing`) and
   logs identifiers only — the claim adds no new failure surface.
 
+### Authorization-lookup cache and DbContext pooling (CORE-PERF-003)
+
+The per-request authorization-lookup cache and DbContext pooling (docs/02_ARCHITECTURE.md) are request-path
+performance optimizations, **observable through the existing signals** and adding **no new telemetry surface**:
+
+- they reduce the number of database round-trips a request makes (the resolver's organization/profile/membership
+  lookups and the per-endpoint role re-queries are served from the cache within the TTL), so their effect shows up
+  in the existing **API request duration** and **database query failures** signals — there is deliberately no
+  separate cache-hit metric;
+- the cache is an in-process structure holding only surrogate identifiers and authorization metadata (an
+  organization id, a subject id, a role) — never content, a token or a tenant name — so it leaks nothing to logs,
+  metrics or traces (threat T7), exactly like the lease owner above;
+- it never changes an authorization decision (positive-only, invalidated on every membership change), so the
+  fail-closed `401`/`403`/`404` paths are still counted and logged exactly as before — caching adds no failure or
+  decision surface to observe.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

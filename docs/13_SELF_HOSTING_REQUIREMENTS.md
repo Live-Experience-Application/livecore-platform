@@ -366,11 +366,26 @@ fails immediately. The timeouts carry no secret (only timespans, threat T7); the
 string, is supplied from configuration as before. This pairs with the DbContext pooling and authz-lookup caching
 of CORE-PERF-003.
 
+### DbContext pooling and the authorization-lookup cache (CORE-PERF-003)
+
+To keep the per-request cost low at a high request rate, the API host and every worker job register the
+`LiveCoreDbContext` with **DbContext pooling** (`AddDbContextPool`), reusing a pool of contexts instead of
+allocating one per request; pooling changes only throughput, and the pool MAXIMUM stays the `Maximum Pool Size`
+guidance above. The tenant context resolver's stable lookups (organization-by-slug, user-profile-by-OIDC,
+organization-membership) and the per-endpoint workspace membership/role re-queries are additionally served from a
+short-TTL, in-process **authorization-lookup cache**. The cache never changes an authorization decision: it caches
+only POSITIVE lookups (a denial is always re-checked, fail-closed) and is INVALIDATED on every membership change
+(removal, erasure, tenant deletion), so revocation still takes effect on the caller's next request. Both knobs are
+deployment policy read from configuration with safe defaults — leave them unset for the documented behaviour, or
+set `AuthorizationCache:Enabled=false` to send every authorization lookup straight to the database.
+
 | Setting (config key)            | Env var                         | Default    | Consumer    | Purpose                                                                 |
 | ------------------------------- | ------------------------------- | ---------- | ----------- | ----------------------------------------------------------------------- |
 | `Persistence:CommandTimeout`    | `Persistence__CommandTimeout`   | `00:00:30` | API, worker | Client-side per-command ceiling (EF Core/Npgsql `CommandTimeout`).      |
 | `Persistence:StatementTimeout`  | `Persistence__StatementTimeout` | `00:00:30` | API, worker | Server-side `statement_timeout`; `00:00:00` disables the server ceiling.|
 | `Maximum Pool Size` (in `ConnectionStrings:Database`) | within `ConnectionStrings__Database` | Npgsql default (`100`) | API, worker | Connection-pool cap; tune to the database `max_connections` across replicas. |
+| `AuthorizationCache:Enabled`    | `AuthorizationCache__Enabled`   | `true`     | API         | Per-request authorization-lookup cache toggle (CORE-PERF-003); `false` forces every lookup to the database. |
+| `AuthorizationCache:Ttl`        | `AuthorizationCache__Ttl`       | `00:00:10` | API         | Absolute TTL of a cached authorization lookup; invalidation on membership change is the primary correctness mechanism. |
 
 ## Edge posture: CORS, forwarded headers and HTTPS (CORE-OPS-003)
 
@@ -955,6 +970,8 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod (set a tuned `Maximum Pool Size`, CORE-RES-004) |
 | `Persistence:CommandTimeout`        | `Persistence__CommandTimeout`      |   no   | no (tunable)            | API, worker | `00:00:30` client-side per-command ceiling (CORE-RES-004) |
 | `Persistence:StatementTimeout`      | `Persistence__StatementTimeout`    |   no   | no (tunable)            | API, worker | `00:00:30` server-side `statement_timeout`; `00:00:00` disables it (CORE-RES-004) |
+| `AuthorizationCache:Enabled`        | `AuthorizationCache__Enabled`      |   no   | no (tunable)            | API         | `true`; per-request authz-lookup cache on, invalidated on membership change (CORE-PERF-003) |
+| `AuthorizationCache:Ttl`            | `AuthorizationCache__Ttl`          |   no   | no (tunable)            | API         | `00:00:10` absolute TTL of a cached authz lookup (CORE-PERF-003) |
 | `Authentication:Oidc:Authority`     | `Authentication__Oidc__Authority`  |   no   | production              | API         | Auth disabled; authenticated routes `401`; not-ready    |
 | `Authentication:Oidc:Audience`      | `Authentication__Oidc__Audience`   |   no   | production              | API         | Refuses to start once Authority is set (CORE-OPS-004)   |
 | `Authentication:Oidc:RequireHttpsMetadata` | `Authentication__Oidc__RequireHttpsMetadata` | no | no (dev only)    | API         | `true` (HTTPS metadata required)                        |

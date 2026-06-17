@@ -61,12 +61,13 @@ public static class DataRetentionServiceCollectionExtensions
             return false;
         }
 
-        // AddDbContext registers the context and its options with TryAdd semantics, so calling it here and in the
-        // other worker job wirings (same connection string) is safe. Connection resilience (CORE-CONC-003) +
-        // per-command timeouts (CORE-RES-004): UseLiveCoreNpgsql turns on the retrying execution strategy and
-        // bounds each command at the configured client CommandTimeout and server statement_timeout — the same
-        // policy the API host and the other worker jobs apply, and the one TransactionalUnitOfWork runs under.
-        services.AddDbContext<LiveCoreDbContext>(options =>
+        // DbContext POOLING (CORE-PERF-003): registered with AddDbContextPool, the same pooled registration the
+        // API host uses. AddDbContextPool registers the context and its options with TryAdd semantics, so calling
+        // it here and in the other worker job wirings (same connection string) is safe. Connection resilience
+        // (CORE-CONC-003) + per-command timeouts (CORE-RES-004): UseLiveCoreNpgsql turns on the retrying execution
+        // strategy and bounds each command at the configured client CommandTimeout and server statement_timeout —
+        // the same policy the API host and the other worker jobs apply, and the one TransactionalUnitOfWork runs under.
+        services.AddDbContextPool<LiveCoreDbContext>(options =>
             options.UseLiveCoreNpgsql(connectionString, LiveCorePersistenceOptions.FromConfiguration(configuration)));
 
         // The system clock; the sweep computes each window's cutoff from it. TryAdd so it composes with the other

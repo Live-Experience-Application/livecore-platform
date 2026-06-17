@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -121,9 +122,22 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
                     .AddEntityFrameworkSqlite()
                     .BuildServiceProvider();
 
-                services.AddDbContext<LiveCoreDbContext>(options => options
-                    .UseSqlite(_connection!, ConfigureSqlite)
-                    .UseInternalServiceProvider(sqliteInternalServices));
+                services.AddDbContext<LiveCoreDbContext>(options =>
+                {
+                    options
+                        .UseSqlite(_connection!, ConfigureSqlite)
+                        .UseInternalServiceProvider(sqliteInternalServices);
+
+                    // A derived factory can observe the production query paths over SQLite (for example the
+                    // CORE-PERF-003 authorization-cache tests count how many org/profile/membership SELECTs a
+                    // request issues). The default adds nothing, so the swapped-in provider behaves exactly like
+                    // production-on-SQLite.
+                    var interceptors = CreateTestDbInterceptors();
+                    if (interceptors.Length > 0)
+                    {
+                        options.AddInterceptors(interceptors);
+                    }
+                });
             }
 
             // Default the authentication AND authorization to the test scheme so
@@ -175,6 +189,16 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
     }
 
     /// <summary>
+    /// Supplies EF Core interceptors to attach to the swapped-in SQLite test DbContext. The default supplies
+    /// none, so the test host behaves exactly like production-on-SQLite. A derived factory overrides this seam to
+    /// observe the production query paths — for example, a command-counting interceptor that asserts the
+    /// CORE-PERF-003 authorization cache stops a repeated request from re-issuing the org/profile/membership
+    /// SELECTs. It is not called when the suite runs against PostgreSQL (the unchanged production registration is
+    /// used there).
+    /// </summary>
+    protected virtual IInterceptor[] CreateTestDbInterceptors() => [];
+
+    /// <summary>
     /// Prepares the swapped-in SQLite database for the test host. The default
     /// creates the schema with <c>EnsureCreated</c> and turns foreign keys on, so
     /// every test sees the full schema. A derived factory can override this seam
@@ -192,9 +216,13 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
 
     /// <summary>
     /// Removes the production EF Core registrations for
-    /// <see cref="LiveCoreDbContext"/> (the context, its options and the options
-    /// configuration the Npgsql <c>AddDbContext</c> added) so the SQLite provider
-    /// can be registered cleanly without two providers colliding.
+    /// <see cref="LiveCoreDbContext"/> (the context, its options, the options
+    /// configuration and the POOLING infrastructure the Npgsql
+    /// <c>AddDbContextPool</c> added) so the SQLite provider can be registered
+    /// cleanly without two providers colliding. Since CORE-PERF-003 the production
+    /// host registers the context with <c>AddDbContextPool</c>, which additionally
+    /// registers the pool and its scoped lease; those are stripped here too so the
+    /// SQLite swap leaves only a single, non-pooled provider behind.
     /// </summary>
     private static void RemoveDbContextRegistrations(IServiceCollection services)
     {
@@ -205,7 +233,9 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
                 || descriptor.ServiceType == typeof(DbContextOptions<LiveCoreDbContext>)
                 || (descriptor.ServiceType.IsGenericType
                     && descriptor.ServiceType.GetGenericTypeDefinition().Name.StartsWith(
-                        "IDbContextOptionsConfiguration", StringComparison.Ordinal)))
+                        "IDbContextOptionsConfiguration", StringComparison.Ordinal))
+                || descriptor.ServiceType.Name.Contains("DbContextPool", StringComparison.Ordinal)
+                || descriptor.ServiceType.Name.Contains("ScopedDbContextLease", StringComparison.Ordinal))
             .ToArray();
 
         foreach (var descriptor in toRemove)

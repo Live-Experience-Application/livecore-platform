@@ -324,8 +324,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // in every worker job context. Retry is safe because every multi-step write runs inside the execution
     // strategy's ExecuteAsync (CORE-CONC-002, TransactionalUnitOfWork) rather than a bare user-initiated
     // BeginTransaction, which a retrying strategy would reject.
+    //
+    // DbContext POOLING (CORE-PERF-003, the "Performance and Scalability" epic): registered with
+    // AddDbContextPool, not AddDbContext, so the host REUSES a small pool of LiveCoreDbContext instances across
+    // requests and hub connects instead of constructing (and tearing down) one per request. At a high request
+    // rate the per-request context allocation is a real cost; pooling resets and returns a context to the pool
+    // on scope dispose, so the steady state is allocation-light. The context is poolable as-is: it has the
+    // single DbContextOptions<LiveCoreDbContext> constructor pooling requires, holds no per-request mutable
+    // field, and the configured interceptors (the failure-metrics singleton plus the stateless audit-tamper
+    // and statement-timeout interceptors) live in the shared, pool-wide options. Pooling changes only
+    // allocation/throughput, never query results or the resilience, timeout and audit posture above, and the
+    // same AddDbContextPool registration is applied identically in every worker job context.
     var persistenceOptions = LiveCorePersistenceOptions.FromConfiguration(builder.Configuration);
-    builder.Services.AddDbContext<LiveCoreDbContext>((serviceProvider, options) => options
+    builder.Services.AddDbContextPool<LiveCoreDbContext>((serviceProvider, options) => options
         .UseLiveCoreNpgsql(databaseConnectionString, persistenceOptions)
         .AddInterceptors(serviceProvider.GetRequiredService<DatabaseFailureMetricsInterceptor>()));
 
@@ -339,10 +350,47 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // CORE-CONC-003 enables retry-on-failure.
     builder.Services.AddScoped<TransactionalUnitOfWork>();
     builder.Services.AddSingleton(TimeProvider.System);
-    builder.Services.AddScoped<IUserProfileRepository, UserProfileRepository>();
-    builder.Services.AddScoped<UserProfileReferenceService>();
-    builder.Services.AddScoped<IOrganizationRepository, OrganizationRepository>();
-    builder.Services.AddScoped<IOrganizationMemberRepository, OrganizationMemberRepository>();
+
+    // Per-request authorization-lookup cache (CORE-PERF-003, the "Performance and Scalability" epic). Every
+    // authenticated request runs the tenant context resolver (organization-by-slug, user-profile-by-OIDC,
+    // organization-membership) before the endpoint, and many endpoints then re-query the caller's workspace
+    // membership/role; at a high request rate the SAME principal re-issues exactly those stable lookups on every
+    // request and hub connect. AddMemoryCache wires the framework's in-process IMemoryCache (part of the shared
+    // framework, NO new dependency); AuthorizationLookupCache is the singleton that holds the SHORT-TTL, POSITIVE-
+    // ONLY cache over it (AuthorizationCacheOptions, read from configuration with safe defaults). It is consumed
+    // ONLY by the caching repository decorators below, so it exists only when persistence is configured. The cache
+    // never changes an authorization decision: a denial (no organization, unknown subject, no membership) is never
+    // cached, and every membership change invalidates the affected subject/organization group — so removal revokes
+    // cached access on the next request, fail-closed (docs/07_SECURITY_THREAT_MODEL.md threats T1/T5). It holds only
+    // surrogate identifiers and authorization metadata, never content (threat T7).
+    builder.Services.AddMemoryCache();
+    builder.Services.AddSingleton(AuthorizationCacheOptions.FromConfiguration(builder.Configuration));
+    builder.Services.AddSingleton<AuthorizationLookupCache>();
+
+    // The IdentityAccess, Organizations and Workspaces repositories are registered as the CONCRETE type plus a
+    // TRANSPARENT caching decorator as the interface (CORE-PERF-003), so the resolver and every endpoint get the
+    // cached read path with no change to their code (the same decorator pattern as MeteredAssetStorage). The
+    // UserProfileReferenceService — the only writer that loads-then-refreshes a profile in place — is wired to the
+    // CONCRETE UserProfileRepository so it never reads-modify-writes a shared cached instance; the resolver's
+    // read-only path goes through the cached decorator.
+    builder.Services.AddScoped<UserProfileRepository>();
+    builder.Services.AddScoped<IUserProfileRepository>(serviceProvider => new CachingUserProfileRepository(
+        serviceProvider.GetRequiredService<UserProfileRepository>(),
+        serviceProvider.GetRequiredService<AuthorizationLookupCache>()));
+    builder.Services.AddScoped(serviceProvider => new UserProfileReferenceService(
+        serviceProvider.GetRequiredService<UserProfileRepository>(),
+        serviceProvider.GetRequiredService<TimeProvider>()));
+
+    builder.Services.AddScoped<OrganizationRepository>();
+    builder.Services.AddScoped<IOrganizationRepository>(serviceProvider => new CachingOrganizationRepository(
+        serviceProvider.GetRequiredService<OrganizationRepository>(),
+        serviceProvider.GetRequiredService<AuthorizationLookupCache>()));
+
+    builder.Services.AddScoped<OrganizationMemberRepository>();
+    builder.Services.AddScoped<IOrganizationMemberRepository>(serviceProvider =>
+        new CachingOrganizationMemberRepository(
+            serviceProvider.GetRequiredService<OrganizationMemberRepository>(),
+            serviceProvider.GetRequiredService<AuthorizationLookupCache>()));
 
     // Data-subject erasure command (CORE-PRIV-001, GDPR Art.17 "right to erasure"): the IdentityAccess module's
     // cross-cutting privacy command. An authorized Owner/Admin (DELETE
@@ -390,7 +438,13 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // organization id and workspace id (the organization boundary is checked
     // before the workspace boundary; threat T5). HTTP endpoints and per-action
     // authorization policies are later stories (CORE-WS-003, CORE-WS-005).
-    builder.Services.AddScoped<IWorkspaceMemberRepository, WorkspaceMemberRepository>();
+    // Wrapped in the transparent CachingWorkspaceMemberRepository (CORE-PERF-003) so the per-endpoint
+    // membership/role re-queries (e.g. the participant-feed Host/CoHost checks) are served from the short-TTL
+    // authorization cache, invalidated fail-closed on removal.
+    builder.Services.AddScoped<WorkspaceMemberRepository>();
+    builder.Services.AddScoped<IWorkspaceMemberRepository>(serviceProvider => new CachingWorkspaceMemberRepository(
+        serviceProvider.GetRequiredService<WorkspaceMemberRepository>(),
+        serviceProvider.GetRequiredService<AuthorizationLookupCache>()));
 
     // Workspace invitation persistence (CORE-WS-004): the Workspaces module owns
     // the workspace-scoped, tenant-scoped workspace_invitations table that backs

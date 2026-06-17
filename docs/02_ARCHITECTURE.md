@@ -145,6 +145,35 @@ HTTP request
   -> response DTO
 ```
 
+### Request-path performance: DbContext pooling and the authorization-lookup cache (CORE-PERF-003)
+
+The request flow above runs on every authenticated request and every hub connect, so its two repeated
+costs are addressed at the platform level under the "Performance and Scalability" epic, without changing a
+single authorization decision:
+
+- **DbContext pooling.** The API host and every worker job register `LiveCoreDbContext` with
+  `AddDbContextPool` (`apps/api/Program.cs`, the worker job extensions), so a small pool of contexts is
+  REUSED across requests rather than allocating (and tearing down) one per request. The context is poolable
+  as-is — a single `DbContextOptions` constructor, no per-request mutable state — and pooling changes only
+  allocation/throughput, never query results or the resilience, timeout and audit-interceptor posture
+  (CORE-CONC-003 / CORE-RES-004 / CORE-SEC-004). The connection-pool MAXIMUM stays in the connection string
+  (`Maximum Pool Size`), supplied by the deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md).
+- **A short-TTL authorization-lookup cache.** The tenant context resolver runs three stable lookups
+  (organization-by-slug, user-profile-by-OIDC, organization-membership) before the endpoint, and many
+  endpoints then re-query the caller's workspace membership/role; at a high request rate the SAME principal
+  re-issues exactly those queries each time. `AuthorizationLookupCache` (an in-process `IMemoryCache`) serves
+  them from a short-TTL cache through TRANSPARENT caching repository decorators, so the queries are not
+  re-issued within the window. Correctness is preserved by two rules: the cache is **positive-only** (a
+  miss — no organization, unknown subject, no membership — is never cached, so a foreign-tenant /
+  unauthorized denial is always re-evaluated against the database, fail-closed), and it is **invalidated on
+  every membership change** (a removal, a data-subject erasure or a tenant deletion evicts the affected
+  subject/organization group), so removing a membership revokes cached access on the very next request,
+  exactly as the un-cached path did. The bearer-token claim check the resolver performs before any database
+  access is never cached, and the cache holds only surrogate identifiers and authorization metadata, never
+  content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md). The cache is configurable
+  (`AuthorizationCache:Enabled` / `AuthorizationCache:Ttl`, docs/13_SELF_HOSTING_REQUIREMENTS.md) and can be
+  disabled to force every lookup straight to the database — a change to throughput only, never to a decision.
+
 ## Realtime flow
 
 ```text
