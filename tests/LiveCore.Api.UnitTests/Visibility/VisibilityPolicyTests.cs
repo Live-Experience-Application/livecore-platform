@@ -629,6 +629,179 @@ public sealed class VisibilityPolicyTests : IDisposable
             id, id, id, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
     }
 
+    // --- In-memory participant visible-set gate (CORE-PERF-004) ----------------
+
+    private static VisibilityRule AudienceWideRule(
+        Guid sessionId, VisibilityResourceType resourceType, Guid resourceId, VisibilityState visibility)
+        => VisibilityRule.Create(Guid.NewGuid(), Guid.NewGuid(), sessionId, resourceType, resourceId, visibility, _createdAt);
+
+    private static VisibilityRule ParticipantRule(
+        Guid sessionId, VisibilityResourceType resourceType, Guid resourceId, Guid targetParticipantId, VisibilityState visibility)
+        => VisibilityRule.CreateForParticipant(
+            Guid.NewGuid(), Guid.NewGuid(), sessionId, resourceType, resourceId, targetParticipantId, visibility, _createdAt);
+
+    private static VisibilityPolicy InMemoryPolicy() => new(new ThrowingVisibilityRuleRepository());
+
+    [Fact]
+    public void Gate_includes_an_audience_wide_visible_resource_for_any_participant()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var rules = new[] { AudienceWideRule(session, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible) };
+
+        var visible = InMemoryPolicy().ComputeVisibleResourcesForParticipant(session, Guid.NewGuid(), rules);
+
+        Assert.Equal(new[] { new VisibleResource(VisibilityResourceType.Scene, resourceId) }, visible);
+    }
+
+    [Fact]
+    public void Gate_includes_a_private_reveal_only_for_its_target()
+    {
+        // The selected-participant guarantee, computed in memory: visible to the target, excluded for another.
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var selected = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var rules = new[] { ParticipantRule(session, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible) };
+
+        Assert.Equal(
+            new[] { new VisibleResource(VisibilityResourceType.Entity, resourceId) },
+            InMemoryPolicy().ComputeVisibleResourcesForParticipant(session, selected, rules));
+        Assert.Empty(InMemoryPolicy().ComputeVisibleResourcesForParticipant(session, other, rules));
+    }
+
+    [Fact]
+    public void Gate_excludes_hidden_rules()
+    {
+        // A hidden rule grants nothing — even a hidden private rule scoped to the participant (fail-closed).
+        var session = Guid.NewGuid();
+        var participant = Guid.NewGuid();
+        var rules = new[]
+        {
+            AudienceWideRule(session, VisibilityResourceType.Scene, Guid.NewGuid(), VisibilityState.Hidden),
+            ParticipantRule(session, VisibilityResourceType.Entity, Guid.NewGuid(), participant, VisibilityState.Hidden),
+        };
+
+        Assert.Empty(InMemoryPolicy().ComputeVisibleResourcesForParticipant(session, participant, rules));
+    }
+
+    [Fact]
+    public void Gate_is_session_scoped_and_excludes_another_sessions_rule()
+    {
+        // A visible rule of a CONCURRENT session of the same workspace never contributes (the cross-session
+        // leak; threat T5/T3): the gate filters by BelongsToSession in memory.
+        var sessionA = Guid.NewGuid();
+        var sessionB = Guid.NewGuid();
+        var participant = Guid.NewGuid();
+        var inA = Guid.NewGuid();
+        var inB = Guid.NewGuid();
+        var rules = new[]
+        {
+            AudienceWideRule(sessionA, VisibilityResourceType.Scene, inA, VisibilityState.Visible),
+            AudienceWideRule(sessionB, VisibilityResourceType.Scene, inB, VisibilityState.Visible),
+        };
+
+        Assert.Equal(
+            new[] { new VisibleResource(VisibilityResourceType.Scene, inA) },
+            InMemoryPolicy().ComputeVisibleResourcesForParticipant(sessionA, participant, rules));
+    }
+
+    [Fact]
+    public void Gate_dedups_a_resource_with_several_granting_rules_and_orders_deterministically()
+    {
+        var session = Guid.NewGuid();
+        var participant = Guid.NewGuid();
+        var scene = Guid.NewGuid();
+        var content = Guid.NewGuid();
+        var entity = Guid.NewGuid();
+        var rules = new[]
+        {
+            // The same entity made visible by BOTH an audience-wide and a participant-scoped rule -> appears once.
+            AudienceWideRule(session, VisibilityResourceType.Entity, entity, VisibilityState.Visible),
+            ParticipantRule(session, VisibilityResourceType.Entity, entity, participant, VisibilityState.Visible),
+            AudienceWideRule(session, VisibilityResourceType.ContentBlock, content, VisibilityState.Visible),
+            AudienceWideRule(session, VisibilityResourceType.Scene, scene, VisibilityState.Visible),
+        };
+
+        var visible = InMemoryPolicy().ComputeVisibleResourcesForParticipant(session, participant, rules);
+
+        // Deterministic order: by resource type (Scene=1, ContentBlock=2, Entity=3) then id; the entity once.
+        Assert.Equal(
+            new[]
+            {
+                new VisibleResource(VisibilityResourceType.Scene, scene),
+                new VisibleResource(VisibilityResourceType.ContentBlock, content),
+                new VisibleResource(VisibilityResourceType.Entity, entity),
+            },
+            visible);
+    }
+
+    [Fact]
+    public void Gate_rejects_empty_ids_and_null_rules()
+    {
+        var policy = InMemoryPolicy();
+        var rules = Array.Empty<VisibilityRule>();
+
+        Assert.Throws<ArgumentException>(() => policy.ComputeVisibleResourcesForParticipant(Guid.Empty, Guid.NewGuid(), rules));
+        Assert.Throws<ArgumentException>(() => policy.ComputeVisibleResourcesForParticipant(Guid.NewGuid(), Guid.Empty, rules));
+        Assert.Throws<ArgumentNullException>(() => policy.ComputeVisibleResourcesForParticipant(Guid.NewGuid(), Guid.NewGuid(), null!));
+    }
+
+    [Fact]
+    public async Task Gate_matches_the_per_candidate_computation_over_the_same_rules()
+    {
+        // EQUIVALENCE (CORE-PERF-004 "feed correctness is unchanged"): the in-memory gate over a single
+        // workspace-rule load returns EXACTLY the set the old per-candidate CanParticipantViewResourceAsync
+        // loop produced, for a mixed workspace (audience-wide, private-to-me, private-to-other, hidden,
+        // another session) and for two different participants.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var sessionA = await SeedSessionAsync(org, ws, "Session A");
+        var sessionB = await SeedSessionAsync(org, ws, "Session B");
+        var me = (await SeedParticipantAsync(org, ws)).Id;
+        var other = (await SeedParticipantAsync(org, ws)).Id;
+
+        var audienceWide = Guid.NewGuid();
+        var privateToMe = Guid.NewGuid();
+        var privateToOther = Guid.NewGuid();
+        var hidden = Guid.NewGuid();
+        var inOtherSession = Guid.NewGuid();
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, audienceWide, VisibilityState.Visible, sessionA.Id);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, privateToMe, me, VisibilityState.Visible, sessionA.Id);
+        await SeedParticipantRuleAsync(org, ws, VisibilityResourceType.Entity, privateToOther, other, VisibilityState.Visible, sessionA.Id);
+        await SeedRuleAsync(org, ws, VisibilityResourceType.ContentBlock, hidden, VisibilityState.Hidden, sessionA.Id);
+        await SeedRuleAsync(org, ws, VisibilityResourceType.Scene, inOtherSession, VisibilityState.Visible, sessionB.Id);
+
+        await using var context = CreateContext();
+        var repository = new VisibilityRuleRepository(context);
+        var policy = new VisibilityPolicy(repository);
+
+        foreach (var participant in new[] { me, other })
+        {
+            // New path: single load + in-memory gate.
+            var workspaceRules = await repository.ListByWorkspaceAsync(org, ws, CancellationToken.None);
+            var gated = policy.ComputeVisibleResourcesForParticipant(sessionA.Id, participant, workspaceRules);
+
+            // Old path: distinct candidates, each decided by the session-scoped per-participant policy.
+            var candidates = workspaceRules
+                .Select(rule => new VisibleResource(rule.ResourceType, rule.ResourceId))
+                .Distinct()
+                .OrderBy(resource => resource.ResourceType)
+                .ThenBy(resource => resource.ResourceId)
+                .ToArray();
+            var perCandidate = new List<VisibleResource>();
+            foreach (var candidate in candidates)
+            {
+                if (await policy.CanParticipantViewResourceAsync(
+                        org, ws, sessionA.Id, participant, candidate.ResourceType, candidate.ResourceId, CancellationToken.None))
+                {
+                    perCandidate.Add(candidate);
+                }
+            }
+
+            Assert.Equal(perCandidate, gated);
+        }
+    }
+
     // --- Guards ----------------------------------------------------------------
 
     [Fact]
@@ -648,5 +821,37 @@ public sealed class VisibilityPolicyTests : IDisposable
             org, Guid.Empty, session, MembershipRole.Owner, VisibilityResourceType.Entity, resource, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentException>(() => policy.CanViewResourceAsync(
             org, ws, session, MembershipRole.Owner, VisibilityResourceType.Entity, Guid.Empty, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// A repository whose every method throws — backs the in-memory gate tests, proving
+    /// <see cref="VisibilityPolicy.ComputeVisibleResourcesForParticipant"/> issues NO database lookup
+    /// (it computes purely over the rules passed in; CORE-PERF-004).
+    /// </summary>
+    private sealed class ThrowingVisibilityRuleRepository : IVisibilityRuleRepository
+    {
+        public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourceAsync(
+            Guid organizationId, Guid workspaceId, Guid sessionId, VisibilityResourceType resourceType, Guid resourceId, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<IReadOnlyList<VisibilityRule>> ListByResourcesAsync(
+            Guid organizationId, Guid workspaceId, Guid sessionId, IReadOnlyCollection<Guid> resourceIds, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task UpdateAsync(VisibilityRule rule, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<int> RemoveByResourceAsync(
+            Guid organizationId, Guid workspaceId, VisibilityResourceType resourceType, Guid resourceId, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
     }
 }

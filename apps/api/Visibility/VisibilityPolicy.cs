@@ -454,4 +454,78 @@ internal sealed class VisibilityPolicy
         // Visible to THIS participant iff some rule is visible AND (audience-wide OR scoped to them).
         return rules.Any(rule => rule.IsVisibleTo(participantId));
     }
+
+    /// <summary>
+    /// Computes the FULL set of resources a SPECIFIC participant may see IN THE GIVEN SESSION from a
+    /// PRE-LOADED workspace rule set (CORE-PERF-004) — the in-memory companion to
+    /// <see cref="CanParticipantViewResourceAsync(Guid, Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>
+    /// that the participant visible-feed (<see cref="VisibilityPreviewService"/>) uses to compute its whole
+    /// feed from the SINGLE workspace-rule load it already holds, instead of issuing one per-candidate policy
+    /// query (the old 1+M fan-out, where every candidate re-fetched rows the feed already had). A participant
+    /// sees a resource iff at least one of its rules IN THIS SESSION makes it visible to THEM — an
+    /// AUDIENCE-WIDE visible rule (visible to everyone) OR a visible rule scoped to exactly this participant
+    /// (a selected-participant reveal). This is exactly the predicate
+    /// <see cref="CanParticipantViewResourceAsync(Guid, Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>
+    /// applies (<c>rules.Any(rule =&gt; rule.IsVisibleTo(participantId))</c>), here evaluated over the rules
+    /// already in memory through the SAME aggregate predicates on <see cref="VisibilityRule"/>
+    /// (<see cref="VisibilityRule.BelongsToSession"/> + <see cref="VisibilityRule.IsVisibleTo"/>), so the
+    /// in-memory feed can never diverge from per-resource access, the role-level decision or the realtime
+    /// recipient gate — the visibility decision lives in exactly ONE place (docs/05_MODULE_CONTRACTS.md "Do
+    /// not duplicate visibility logic elsewhere"; docs/02_ARCHITECTURE.md "entity visibility is not computed
+    /// ad hoc in many places"). The same in-memory gate is reused by the audience-participant entity-search
+    /// path (CORE-PERF-008) so the feed and search cannot diverge.
+    ///
+    /// SESSION-SCOPED. Only rules of <paramref name="sessionId"/> contribute
+    /// (<see cref="VisibilityRule.BelongsToSession"/>), so a resource revealed only in a concurrent session
+    /// of the same workspace is excluded — the cross-session leak (threat T5/T3; CORE-SVIS-001). TENANT- AND
+    /// WORKSPACE-SCOPED BY THE CALLER: the rules are passed already tenant- and workspace-scoped (the feed
+    /// loads them through the tenant- and workspace-scoped
+    /// <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/>, organization boundary before workspace
+    /// boundary), so a foreign tenant's or workspace's rule can never be among them (threat T5), exactly as
+    /// <see cref="ComputeAudienceVisibility"/> trusts its pre-loaded rule set. FAIL-CLOSED: a hidden rule, or
+    /// a visible rule scoped to a DIFFERENT participant, grants nothing (the selected-participant guarantee).
+    /// The result is DISTINCT and in deterministic order (by resource type then id), so a resource carrying
+    /// several granting rules appears exactly once and the feed is stable.
+    /// </summary>
+    /// <param name="sessionId">The session the feed is bounded by; only this session's rules contribute.</param>
+    /// <param name="participantId">The participant whose visible set is computed.</param>
+    /// <param name="workspaceRules">
+    /// The workspace's visibility rules, already tenant- and workspace-scoped by the caller's load. Never null.
+    /// </param>
+    /// <returns>The distinct resources visible to that participant in that session, in deterministic order.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="workspaceRules"/> is null.</exception>
+    /// <exception cref="ArgumentException">The session id or participant id is empty.</exception>
+    public IReadOnlyList<VisibleResource> ComputeVisibleResourcesForParticipant(
+        Guid sessionId,
+        Guid participantId,
+        IEnumerable<VisibilityRule> workspaceRules)
+    {
+        ArgumentNullException.ThrowIfNull(workspaceRules);
+
+        // An empty session can never address a real session, and an empty participant must never be granted a
+        // feed (an audience-wide rule would otherwise leak to a non-participant); fail fast, mirroring the
+        // per-participant decision's empty-id guards (fail-closed).
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        if (participantId == Guid.Empty)
+        {
+            throw new ArgumentException("Participant id must not be empty.", nameof(participantId));
+        }
+
+        // A resource is visible iff SOME of its session-scoped rules grants it to THIS participant — the same
+        // aggregate predicate the per-resource decision uses, evaluated over the rules already in memory.
+        // Selecting the granting rules and taking their DISTINCT resources yields exactly the resources where
+        // a granting rule exists (the old per-candidate "Any" decision, batched in memory). Deterministic
+        // order so the feed is stable.
+        return workspaceRules
+            .Where(rule => rule.BelongsToSession(sessionId) && rule.IsVisibleTo(participantId))
+            .Select(rule => new VisibleResource(rule.ResourceType, rule.ResourceId))
+            .Distinct()
+            .OrderBy(resource => resource.ResourceType)
+            .ThenBy(resource => resource.ResourceId)
+            .ToArray();
+    }
 }

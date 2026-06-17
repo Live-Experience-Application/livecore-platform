@@ -87,6 +87,7 @@ content_blocks(workspace_id, scene_id)
 visibility_rules(session_id, resource_type, resource_id)
 visibility_rules(session_id, resource_type, resource_id) unique where target_participant_id is null
 visibility_rules(session_id, resource_type, resource_id, target_participant_id) unique where target_participant_id is not null
+visibility_rules(workspace_id, resource_type, resource_id)
 session_events(session_id, sequence) unique
 session_events(session_id, created_at, event_id)
 session_event_sequences(session_id)
@@ -273,6 +274,16 @@ recipient gate and reconnect replay) is bounded by `session_id`; the role-level,
 asset-download and entity-search reads remain workspace-wide. The lead index is **non-unique** because it
 spans both dimensions (a resource carries at most the audience-wide rule plus one rule per selected
 participant within a session); it backs the "all rules for this resource in this session" read.
+
+A second, workspace-wide read survives: the **resource-deletion cleanup** (`RemoveByResourceAsync`) removes
+**all** of a deleted resource's rules — the audience-wide rule and every selected-participant rule, **across
+the workspace's sessions** — because `resource_id` is a polymorphic reference the database cannot cascade
+(`docs/adr/0012-resource-deletion-cascades-dependents.md`). That delete is session-**agnostic**, so it is
+backed by the workspace-led cleanup index `visibility_rules(workspace_id, resource_type, resource_id)`
+(CORE-PERF-004). CORE-SVIS-001 re-led the resource read index with `session_id` and dropped the old
+workspace-led composite, which left the cleanup predicate uncovered (only the single-column workspace
+foreign-key index); CORE-PERF-004 restores it, and because `workspace_id` is its prefix the composite also
+serves the workspace foreign key (the separate single-column workspace index is therefore retired).
 
 ## Single rule per dimension (CORE-SVIS-002)
 

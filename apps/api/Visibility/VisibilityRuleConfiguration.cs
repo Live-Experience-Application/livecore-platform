@@ -77,8 +77,20 @@ namespace LiveCore.Api.Visibility;
 ///   The non-unique composite index on (<c>organization_id</c>, <c>workspace_id</c>) keeps the
 ///   tenant boundary check (checked before the workspace boundary) and the organization foreign-key
 ///   check efficient and makes tenant-scoped reads lead with <c>organization_id</c> (threat T5). It
-///   also backs the workspace-wide candidate read (the participant feed) and the role-level
-///   workspace-wide visibility read (asset download), which lead with the tenant then workspace.
+///   also backs the workspace-wide candidate read (the participant feed's single rule load,
+///   <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/>) and the role-level workspace-wide
+///   visibility read (asset download), which lead with the tenant then workspace.
+///   </item>
+///   <item>
+///   The non-unique composite index on (<c>workspace_id</c>, <c>resource_type</c>, <c>resource_id</c>)
+///   is the documented resource-cleanup index <c>visibility_rules(workspace_id, resource_type,
+///   resource_id)</c> (CORE-PERF-004; docs/10_DATABASE_SCHEMA.md) that backs the resource-deletion
+///   cleanup <see cref="IVisibilityRuleRepository.RemoveByResourceAsync"/> — a workspace-wide,
+///   session-AGNOSTIC delete of every rule governing a deleted (polymorphic) resource across the
+///   workspace's sessions. CORE-SVIS-001 re-led the resource READ index with <c>session_id</c> and
+///   dropped this workspace-led shape, leaving the cleanup predicate uncovered; this restores it.
+///   Because <c>workspace_id</c> is its prefix, this composite also serves the workspace foreign-key
+///   index, so EF no longer emits the separate single-column workspace index.
 ///   </item>
 /// </list>
 ///
@@ -190,9 +202,27 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
 
         // Tenant-scoped composite index leading with organization_id: keeps the organization
         // boundary check (checked before the workspace boundary) and tenant-scoped reads efficient
-        // (docs/10_DATABASE_SCHEMA.md; threat T5).
+        // (docs/10_DATABASE_SCHEMA.md; threat T5). It also backs the workspace-wide participant-feed
+        // candidate read (ListByWorkspaceAsync), which leads with the tenant then the workspace.
         builder.HasIndex(rule => new { rule.OrganizationId, rule.WorkspaceId })
             .HasDatabaseName("ix_visibility_rules_organization_id_workspace_id");
+
+        // Resource-cleanup index visibility_rules(workspace_id, resource_type, resource_id) (CORE-PERF-004;
+        // docs/10_DATABASE_SCHEMA.md): the documented critical index the resource-deletion cleanup path
+        // (RemoveByResourceAsync) relies on to remove ALL of a resource's rules — the audience-wide rule and
+        // every selected-participant rule, ACROSS the workspace's sessions — when a polymorphic resource is
+        // deleted (resource_id is not a foreign key, so the database cannot cascade it;
+        // docs/adr/0012-resource-deletion-cascades-dependents.md). The delete predicate is led by
+        // organization_id then workspace_id, resource_type, resource_id; this workspace-led index serves it
+        // (a workspace belongs to exactly one tenant, so the leading organization_id is redundant for the
+        // lookup). CORE-SVIS-001 re-led the resource READ index with session_id and dropped this workspace-led
+        // shape, which left the workspace-wide, session-AGNOSTIC cleanup predicate with no covering index
+        // (only the single-column workspace index the foreign key carried); this restores it. EF's
+        // foreign-key index convention now sees workspace_id covered as this index's prefix, so the separate
+        // single-column workspace index is dropped in favor of this composite (the symmetric reversal of
+        // CORE-SVIS-001's swap).
+        builder.HasIndex(rule => new { rule.WorkspaceId, rule.ResourceType, rule.ResourceId })
+            .HasDatabaseName("ix_visibility_rules_workspace_id_resource_type_resource_id");
 
         // Tenant foreign key: every visibility rule hangs off exactly one organization (the owner of
         // its workspace). Cascade delete removes rules with their tenant.

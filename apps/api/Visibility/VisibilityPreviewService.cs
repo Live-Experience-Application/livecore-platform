@@ -20,19 +20,23 @@ namespace LiveCore.Api.Visibility;
 /// GET /api/v1/participants/{participantId}/visible-feed handler) and the entity-search audience
 /// filtering (CORE-API-006) consume, so those retrofits never grow a parallel visibility filter.
 ///
-/// REUSES THE CENTRAL DECISION — does NOT re-derive it. The participant-visible set is computed by
-/// routing every candidate resource through
+/// REUSES THE CENTRAL DECISION — does NOT re-derive it. The participant-visible set is computed from a
+/// SINGLE workspace-rule load (CORE-PERF-004): the tenant- and workspace-scoped
+/// <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/> is read ONCE, and the visible set is then
+/// computed IN MEMORY over those rows by the central policy's in-memory gate
+/// <see cref="VisibilityPolicy.ComputeVisibleResourcesForParticipant"/>, which applies the SAME aggregate
+/// predicates the per-resource decision
 /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>
-/// (the CORE-VIS-005 participant-aware primitive made session-scoped by CORE-SVIS-001, the SAME one
-/// <see cref="EventRecipientVisibility"/> uses for realtime delivery), so the
-/// REST preview, the realtime recipient calculation and per-resource access can NEVER diverge and the
-/// visibility decision lives in exactly ONE place (docs/05_MODULE_CONTRACTS.md: "Do not duplicate
-/// visibility logic elsewhere"; docs/02_ARCHITECTURE.md: "entity visibility is not computed ad hoc in
-/// many places"). The candidate resources are exactly the resources that have at least one visibility
-/// rule in the workspace (a resource with no rule is host-only by default and the policy denies it to
-/// a participant), drawn from the tenant- and workspace-scoped
-/// <see cref="IVisibilityRuleRepository.ListByWorkspaceAsync"/> — so a rule in another tenant or
-/// workspace can never contribute to this workspace's visible set (threat T5 in
+/// uses (the CORE-VIS-005 participant-aware primitive made session-scoped by CORE-SVIS-001, the SAME one
+/// <see cref="EventRecipientVisibility"/> uses for realtime delivery). So the query count is independent of
+/// resource volume — never one policy query per candidate that re-fetches rows the feed already holds (the
+/// old 1+M fan-out) — while the REST preview, the realtime recipient calculation and per-resource access
+/// still can NEVER diverge and the visibility decision lives in exactly ONE place
+/// (docs/05_MODULE_CONTRACTS.md: "Do not duplicate visibility logic elsewhere"; docs/02_ARCHITECTURE.md:
+/// "entity visibility is not computed ad hoc in many places"). The visible resources are exactly those that
+/// carry at least one rule of THIS session making them visible to this participant (a resource with no such
+/// rule is host-only by default and excluded), drawn from the workspace's rules — so a rule in another
+/// tenant or workspace can never contribute to this workspace's visible set (threat T5 in
 /// docs/07_SECURITY_THREAT_MODEL.md; the organization boundary is checked before the workspace
 /// boundary).
 ///
@@ -72,14 +76,16 @@ internal sealed class VisibilityPreviewService
 
     /// <summary>
     /// Computes the set of resources the given participant may currently see in the given session —
-    /// the preview-as-participant result. Every candidate resource (any resource with a visibility
-    /// rule in the workspace) is decided by the session-scoped
-    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>,
-    /// so the participant sees a resource iff an audience-wide visible rule, or a visible rule scoped to
-    /// exactly them, applies IN THIS SESSION; only those the policy allows are returned, in a deterministic
-    /// order (by resource type then id).
-    /// The set is tenant-, workspace- and session-scoped and fails closed (a resource the participant may not
-    /// see, including one revealed only to another participant, is excluded).
+    /// the preview-as-participant result. The workspace's rules are loaded ONCE (CORE-PERF-004) and the
+    /// visible set is computed IN MEMORY by the central policy's in-memory gate
+    /// <see cref="VisibilityPolicy.ComputeVisibleResourcesForParticipant"/>, which applies the SAME decision
+    /// the session-scoped
+    /// <see cref="VisibilityPolicy.CanParticipantViewResourceAsync(System.Guid, System.Guid, System.Guid, System.Guid, VisibilityResourceType, System.Guid, System.Threading.CancellationToken)"/>
+    /// makes — so the participant sees a resource iff an audience-wide visible rule, or a visible rule scoped
+    /// to exactly them, applies IN THIS SESSION; only those are returned, in a deterministic order (by
+    /// resource type then id). The query count is independent of resource volume (one load, no per-candidate
+    /// query). The set is tenant-, workspace- and session-scoped and fails closed (a resource the participant
+    /// may not see, including one revealed only to another participant, is excluded).
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The participant's workspace whose visible set is computed.</param>
@@ -122,50 +128,23 @@ internal sealed class VisibilityPreviewService
             throw new ArgumentException("Participant id must not be empty.", nameof(participantId));
         }
 
-        // Candidate resources = the resources that carry at least one rule in this workspace (a rule-less
-        // resource is host-only by default and the policy denies it to a participant). The candidate set
-        // spans the workspace's sessions; each candidate is then decided by the SESSION-SCOPED policy
-        // below, so a resource revealed only in another session resolves to "not visible" and is excluded.
-        // The list is tenant- and workspace-scoped, so no foreign tenant/workspace rule contributes
-        // (threat T5). Distinct, deterministically ordered, so the result is stable.
-        var allRules = await _rules
+        // THE single rule load (CORE-PERF-004): read the workspace's rules ONCE, then compute the visible set
+        // IN MEMORY over the rows already held — never one per-candidate policy query that re-fetches rows the
+        // feed already has (the old 1+M fan-out). The list is tenant- and workspace-scoped (organization
+        // boundary before workspace boundary), so no foreign tenant's or workspace's rule contributes
+        // (threat T5); it spans the workspace's sessions and is filtered to THIS session in memory below.
+        var workspaceRules = await _rules
             .ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken)
             .ConfigureAwait(false);
 
-        var candidates = allRules
-            .Select(rule => new VisibleResource(rule.ResourceType, rule.ResourceId))
-            .Distinct()
-            .OrderBy(resource => resource.ResourceType)
-            .ThenBy(resource => resource.ResourceId)
-            .ToArray();
-
-        var visible = new List<VisibleResource>(candidates.Length);
-        foreach (var candidate in candidates)
-        {
-            // Route every candidate through the canonical SESSION-SCOPED per-participant decision
-            // (CORE-VIS-005 + CORE-SVIS-001), so the preview can never diverge from per-resource access or
-            // the realtime recipient gate and the visibility decision lives in exactly one place (docs/05).
-            // Visible to THIS participant IN THIS SESSION iff an audience-wide visible rule, or a visible
-            // rule scoped to exactly them, exists for this session; a reveal to a different participant, or
-            // a reveal in a different session, is excluded (fail-closed; the selected-participant and
-            // session-scope guarantees).
-            var canView = await _policy
-                .CanParticipantViewResourceAsync(
-                    organizationId,
-                    workspaceId,
-                    sessionId,
-                    participantId,
-                    candidate.ResourceType,
-                    candidate.ResourceId,
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (canView)
-            {
-                visible.Add(candidate);
-            }
-        }
-
-        return visible;
+        // Compute the participant's visible set in memory through the central policy's in-memory gate
+        // (CORE-PERF-004): a resource is visible iff some SESSION-SCOPED rule makes it visible to THIS
+        // participant — the SAME decision CanParticipantViewResourceAsync makes (rules.Any(IsVisibleTo)),
+        // applied over the pre-loaded rules. So this REST feed, per-resource access and the realtime recipient
+        // gate can never diverge and the visibility decision lives in exactly one place (docs/05). A reveal to
+        // a different participant, or a reveal in a different session, is excluded (fail-closed; the
+        // selected-participant and session-scope guarantees), and the result is distinct and deterministically
+        // ordered.
+        return _policy.ComputeVisibleResourcesForParticipant(sessionId, participantId, workspaceRules);
     }
 }

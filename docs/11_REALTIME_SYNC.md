@@ -132,6 +132,29 @@ Replay is now **bounded** and **cursored** end to end:
   entitled to**; a non-full page sets `nextSequence` to null (caught up). A sequence number is not sensitive
   content (a host already sees every sequence, and a participant already detects gaps by design — threat T7).
 
+## In-memory participant-visible feed (CORE-PERF-004)
+
+The participant-visible feed (`GET /api/v1/participants/{participantId}/visible-feed`) used to load the
+workspace's visibility rules once and then, **for every candidate resource**, ask the policy
+`CanParticipantViewResourceAsync` — which issued **another** `ListByResourceAsync` per candidate, re-fetching
+rows the feed already held. A workspace with `M` ruled resources therefore did `1+M` `visibility_rules`
+lookups inside one request, so a host previewing a busy session paid a query count that grew with the
+session's content (threat T9 in `docs/07_SECURITY_THREAT_MODEL.md`).
+
+The feed now computes the participant's visible set from a **single** workspace-rule load
+(`VisibilityRuleRepository.ListByWorkspaceAsync`) **gated in memory**: `VisibilityPreviewService` reads the
+rules once and `VisibilityPolicy.ComputeVisibleResourcesForParticipant` selects, **over the rows already in
+memory**, the distinct resources whose rules of the requested `sessionId` make them visible to the
+participant — the SAME aggregate predicate (`VisibilityRule.BelongsToSession` + `IsVisibleTo`) the
+per-resource `CanParticipantViewResourceAsync` applies. So the per-feed rule-lookup count is **one**,
+independent of resource volume, and the visible set is **byte-for-byte** what the old per-candidate
+computation produced — **feed correctness is unchanged** and fail-closed: a Hidden resource, a reveal in a
+concurrent session, and a reveal scoped to a different participant are all excluded (the session-scope and
+selected-participant guarantees; threats T5/T3). Because the gate reuses the central `VisibilityRule`
+predicates, the REST feed can never diverge from per-resource access or the realtime recipient set
+(`docs/05_MODULE_CONTRACTS.md`: visibility is decided in one place). The same in-memory gate is the one the
+audience-participant entity-search path reuses (CORE-PERF-008), so feed and search stay consistent.
+
 ## Per-session event sequence (CORE-RTC-001)
 
 Every session event carries a **per-session, gap-free, strictly monotonic** `sequence` number, and both live
