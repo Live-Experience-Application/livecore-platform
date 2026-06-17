@@ -418,6 +418,40 @@ Every limit stays runtime configuration (`RateLimiting:Anonymous:*`, `RateLimiti
 only (threat T7). Rate limiting remains a coarse abuse ceiling layered ON TOP OF the OIDC/tenant authorization
 every endpoint already enforces; it never widens authorization.
 
+## Baseline HTTP security response headers (CORE-SEC-009)
+
+CORE-SEC-005 added the transport-security headers (HSTS / HTTPS redirect), but the API still served every
+JSON and Problem Details response with NO content-handling defense: the pipeline (`apps/api/Program.cs`) wired
+no response-header middleware — only Kestrel's `AddServerHeader = false` — so a response carried no
+anti-sniffing, no referrer policy and no framing/embedding defense.
+
+Risk:
+
+- a browser MIME-sniffs an API response into a type the server never declared, or embeds the responses in a
+  frame, or leaks the request URL (which can carry a resource id) through the onward `Referer`
+
+Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Baseline HTTP security response headers"):
+
+- a small configurable response-header middleware (`SecurityHeadersMiddleware`) adds to EVERY API, error and
+  SignalR-negotiate response — and a 404/406/500 alike — three baseline headers:
+  - `X-Content-Type-Options: nosniff` — stop MIME content-sniffing;
+  - `Referrer-Policy: no-referrer` — keep the request URL out of the onward `Referer`;
+  - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` — a DENY-ALL policy, defensible
+    because the API returns only `application/json`/`application/problem+json` and NEVER renders HTML, so no
+    script/style source needs allowing; `frame-ancestors 'none'` forbids framing and subsumes
+    `X-Frame-Options`, so no separate framing header is added;
+- the headers are applied from a `HttpResponse.OnStarting` callback registered early (right after
+  `UseForwardedHeaders`, alongside the CORE-SEC-005 headers), so they survive the `Response.Clear()` the global
+  exception and concurrency-conflict middleware perform on an error path — the baseline rides on a `500`/`409`
+  Problem Details, not only the success path;
+- the feature is ON BY DEFAULT (`SecurityHeaders:Enabled`) and each header is INDIVIDUALLY configurable: turning
+  one header off (`SecurityHeaders:<Header>:Enabled=false`) removes exactly that header and leaves the others,
+  and a blank configured value falls back to the documented default rather than emitting an empty header;
+- every value is a STATIC directive string — never a tenant, principal, resource or request value — so the
+  headers leak no tenant/principal detail (threat T7). Like the CORS allow-list, the rate limiter and transport
+  security, they are a coarse browser-facing defense layered ON TOP OF the OIDC/tenant authorization every
+  endpoint already enforces; they never widen authorization. This complements CORE-SEC-005.
+
 ## Required test categories
 
 - foreign workspace ID denial

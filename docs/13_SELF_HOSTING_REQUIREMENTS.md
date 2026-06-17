@@ -538,6 +538,42 @@ and transport security never widens server-side authorization — it is a coarse
 defense layered on the OIDC/tenant checks every endpoint already enforces, exactly
 like CORS and rate limiting.
 
+### Baseline HTTP security response headers (`SecurityHeaders:*`) (CORE-SEC-009)
+
+The API adds three baseline security headers to **every** API, error and
+SignalR-negotiate response (a `404`/`406`/`500` Problem Details included), so a
+browser handles the JSON responses safely. They are **on by default** — the API
+serves only `application/json`/`application/problem+json` and renders **no HTML**,
+so the conservative deny-all posture is always safe — and each is individually
+configurable:
+
+- **`X-Content-Type-Options: nosniff`** (`SecurityHeaders:ContentTypeOptions:*`)
+  stops a browser MIME-sniffing a response into a type the server did not declare.
+- **`Referrer-Policy: no-referrer`** (`SecurityHeaders:ReferrerPolicy:*`) keeps the
+  request URL (which can carry a resource id) out of the `Referer` of any onward
+  navigation.
+- **`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`**
+  (`SecurityHeaders:ContentSecurityPolicy:*`) is a **deny-all** policy: the API
+  renders no HTML, so no script/style source needs allowing, and
+  `frame-ancestors 'none'` forbids embedding the responses in a frame — which
+  subsumes `X-Frame-Options`, so no separate framing header is added.
+
+Configuration:
+
+- `SecurityHeaders__Enabled=false` turns the whole feature off (default `true`).
+- `SecurityHeaders__<Header>__Enabled=false` removes **exactly that** header and
+  leaves the others — e.g. `SecurityHeaders__ContentSecurityPolicy__Enabled=false`
+  drops only the CSP.
+- `SecurityHeaders__<Header>__Value=…` overrides a header's directive; a blank
+  value falls back to the documented default rather than emitting an empty header.
+
+Every value is a **static directive string** (never a tenant/principal/resource
+value), so the headers leak no tenant/principal detail (threat T7), and — like
+CORS, the rate limiter and transport security — they are a coarse browser-facing
+defense layered on the OIDC/tenant authorization every endpoint already enforces;
+they never widen authorization. This complements the transport headers above
+(CORE-SEC-005).
+
 ### Constrained host header (`AllowedHosts`)
 
 `AllowedHosts` is constrained (no longer `*`): the repository default permits only
@@ -926,6 +962,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
 | `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
 | `HttpsSecurity:HttpsRedirection:Enabled` / `Hsts:Enabled` | `HttpsSecurity__HttpsRedirection__Enabled`, `HttpsSecurity__Hsts__Enabled` | no | only without a TLS-terminating proxy | API | Both OFF: the proxy owns the redirect/HSTS (CORE-SEC-005) |
+| `SecurityHeaders:Enabled` / `<Header>:Enabled` / `<Header>:Value` | `SecurityHeaders__Enabled`, `SecurityHeaders__ContentTypeOptions__Enabled`, `SecurityHeaders__ContentSecurityPolicy__Value`, … | no | no (tunable) | API | Baseline headers ON: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, deny-all CSP on every response (CORE-SEC-009) |
 | `RateLimiting:Enabled` / `Global:*` / `Anonymous:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, `RateLimiting__Anonymous__PermitLimit`, `RateLimiting__Webhooks__FloorPermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 300/60s per anonymous IP, 60/60s per webhook IP; non-disableable webhook floor 600/60s (CORE-SEC-001, CORE-SEC-007) |
 | `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |

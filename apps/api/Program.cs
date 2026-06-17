@@ -129,6 +129,19 @@ builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 // enabled redirect does not fire and does not fight the edge (threat T7).
 builder.Services.AddLiveCoreHttpsSecurity(builder.Configuration);
 
+// Baseline HTTP security response headers (CORE-SEC-009, the "Audit Integrity and Security Hardening" epic).
+// Before this story the pipeline wired NO response-header middleware (only Kestrel AddServerHeader=false above),
+// so every JSON/Problem-Details response was served with no anti-sniffing or framing defense. This registers the
+// resolved SecurityHeadersSettings the SecurityHeadersMiddleware (added to the pipeline below) reads; the
+// middleware adds X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer and a deny-all
+// Content-Security-Policy (default-src 'none'; frame-ancestors 'none') to every API, error and SignalR-negotiate
+// response. The deny-all CSP is defensible because the API renders no HTML (no script/style sources to allow);
+// frame-ancestors subsumes X-Frame-Options. The feature is ON by default and each header is individually
+// configurable (SecurityHeaders:*); the values are static directives that leak no tenant/principal detail
+// (threat T7). It complements CORE-SEC-005 (HSTS/HTTPS-redirect) and, like CORS/the rate limiter, never widens
+// the OIDC/tenant authorization every endpoint already enforces.
+builder.Services.AddLiveCoreSecurityHeaders(builder.Configuration);
+
 // Graceful shutdown drain window (CORE-DEP-002, the "Deployment and Supply Chain" epic). On a rolling restart
 // the orchestrator sends this instance a termination signal; the host then stops accepting new connections and
 // DRAINS its in-flight work before exiting. This applies ONE explicit, tuned, configurable
@@ -1197,6 +1210,17 @@ if (missingRequiredSettings.Count > 0)
 // (framework default) and the configured known proxies/networks are trusted, so
 // an untrusted client cannot spoof the scheme (threat T7).
 app.UseForwardedHeaders();
+
+// Baseline HTTP security response headers (CORE-SEC-009). Wired here — immediately AFTER UseForwardedHeaders and
+// alongside the transport-security headers below — so its OnStarting callback is enrolled for EVERY request
+// before any other middleware can short-circuit it (a redirect, a 401 challenge, the rate limiter's 429). It
+// adds X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer and a deny-all Content-Security-Policy to
+// every API, error and SignalR-negotiate response. It applies the headers from an OnStarting callback (not
+// inline) so they survive the Response.Clear() the global exception / concurrency-conflict middleware perform on
+// an error path — so the baseline rides on a 500/409 Problem Details too. On by default and individually
+// configurable (SecurityHeaders:*); the values are static directives carrying no tenant/principal detail
+// (threat T7). When SecurityHeaders:Enabled=false the middleware enrols nothing and passes through.
+app.UseMiddleware<SecurityHeadersMiddleware>();
 
 // App-level HSTS and HTTPS redirection (CORE-SEC-005). Wired here — immediately AFTER UseForwardedHeaders so
 // the request scheme already reflects the real client (the proxy's forwarded X-Forwarded-Proto when behind a
