@@ -13,6 +13,8 @@ Use PostgreSQL.
 - session events are append-only
 - audit logs are append-only
 - avoid hard-delete for business data; use soft delete where needed
+- high-value domain invariants are enforced as `CHECK` constraints, not only in aggregate guards (see
+  "Domain-invariant CHECK constraints")
 
 ## Core tables
 
@@ -430,6 +432,36 @@ sequence): it is appended unsequenced (`sequence` 0, null hashes), exactly the a
 `purchase_events` trail has, and the per-tenant chain and `audit_log_sequences` are unchanged. The tenant-scoped
 reads filter by a concrete `organization_id`, so a platform fact is never returned through any tenant's id
 (threat T5). The unique `audit_logs(organization_id, sequence)` index is unchanged.
+
+## Domain-invariant CHECK constraints (CORE-CONC-009)
+
+The high-value invariants the aggregates enforce in memory are **also** enforced at the database as additive
+`CHECK` constraints, so a code-impossible state cannot be persisted by a path that bypasses the aggregate — a
+direct DB write (the migration/owner role legitimately keeps `DELETE` for tenant teardown), a future raw-SQL
+path or a mapping regression. This is the **defence-in-depth** sibling of the audit log's tamper resistance
+(CORE-SEC-004): the aggregate guards remain the primary enforcement, and the constraints are the backstop that
+makes the invariant true of the data, not only of the code that normally writes it.
+
+The constraints are **additive and behaviour-neutral** (expand-only): every value the aggregates produce
+already satisfies them, so valid writes are unaffected and only an out-of-range value is rejected at the
+database. The migration that adds them (`AddDomainInvariantCheckConstraints`) only `ADD`s constraints; its
+`Down()` only `DROP`s them (no `DropColumn`/`DropTable`), so it loses no row data and is **not** a destructive
+`Down()` — the destructive-down review (`csv/migration_destructive_down_review.csv`) is unaffected.
+
+- **status-enum ranges** — `workspaces`, `workspace_invitations`, `sessions`, `participants`, `export_jobs`
+  and `assets` each persist their lifecycle status by its stable enum **name** (a real string column), so the
+  constraint allowlists exactly that enum's defined names (e.g. `sessions.status IN ('Prepared', 'Live',
+  'Ended', 'Cancelled')`).
+- **`scenes.scene_order >= 0`** — the non-negative ordering position.
+- **`content_blocks.revision_number >= 1`** — the monotonic revision counter starts at 1.
+- **`quota_usage.used_amount >= 0`** — recorded usage never goes negative.
+- **`assets.size_bytes`** is `NULL` (while the asset is pending) **or** `>= 0` — the byte counter.
+- **`session_events.sequence >= 1`** — the per-session position is strictly positive (the append path stamps a
+  real position before the row is saved; the unassigned `0` a fresh event carries never reaches the table).
+
+These deliberately do **not** add the intentionally-absent polymorphic foreign keys (the `CORE-SPEC-003`
+register; e.g. `visibility_rules.resource_id`, `session_events.visibility_subject_id`), which stay non-FK
+references by design.
 
 ## JSONB use
 

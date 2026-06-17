@@ -45,7 +45,16 @@ internal sealed class WorkspaceInvitationConfiguration : IEntityTypeConfiguratio
 {
     public void Configure(EntityTypeBuilder<WorkspaceInvitation> builder)
     {
-        builder.ToTable("workspace_invitations");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the status column stores the
+        // WorkspaceInvitationStatus enum by its stable NAME, an invariant the aggregate enforces in memory
+        // (Pending -> Accepted / Revoked). The database constraint rejects any other value, so a direct DB
+        // write, a future raw-SQL path or a mapping regression can never persist a code-impossible status.
+        // Additive and behaviour-neutral.
+        builder.ToTable(
+            "workspace_invitations",
+            table => table.HasCheckConstraint(
+                "ck_workspace_invitations_status",
+                "status IN ('Pending', 'Accepted', 'Revoked')"));
 
         builder.HasKey(invitation => invitation.Id);
 

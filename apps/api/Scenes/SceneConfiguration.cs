@@ -74,7 +74,15 @@ internal sealed class SceneConfiguration : IEntityTypeConfiguration<Scene>
 {
     public void Configure(EntityTypeBuilder<Scene> builder)
     {
-        builder.ToTable("scenes");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the ordering position is a NON-negative integer,
+        // an invariant the aggregate already enforces (Scene.Create / Scene.Reorder reject a negative order).
+        // The database constraint rejects a direct DB write, a future raw-SQL path or a mapping regression that
+        // would otherwise persist a negative order. Additive and behaviour-neutral.
+        builder.ToTable(
+            "scenes",
+            table => table.HasCheckConstraint(
+                "ck_scenes_scene_order",
+                "scene_order >= 0"));
 
         builder.HasKey(scene => scene.Id);
 

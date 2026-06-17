@@ -179,6 +179,10 @@ public sealed class SessionCancelEndpointTests
             var sessionEvent = SessionEvent.Create(
                 org.Id, workspace.Id, session.Id, "ContentRevealed", user.Id,
                 targetParticipantId: null, payload: "{}", schemaVersion: 1, createdAt: TestData.SeedTime);
+            // Stamp the per-session sequence the append path would assign before persisting, so the seeded
+            // row carries a real position (at least 1) exactly as production does and satisfies the
+            // ck_session_events_sequence CHECK constraint (CORE-CONC-009).
+            sessionEvent.AssignSequence(1);
             seededEventId = sessionEvent.Id;
             db.SessionEvents.Add(sessionEvent);
 

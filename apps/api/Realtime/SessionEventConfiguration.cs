@@ -41,7 +41,17 @@ internal sealed class SessionEventConfiguration : IEntityTypeConfiguration<Sessi
 {
     public void Configure(EntityTypeBuilder<SessionEvent> builder)
     {
-        builder.ToTable("session_events");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the per-session sequence is a strictly positive
+        // position (at least 1), an invariant the append path enforces (SessionEvent.AssignSequence rejects a
+        // non-positive value before the row is persisted, so a persisted event always carries a real
+        // position). The database constraint rejects a direct DB write, a future raw-SQL path or a mapping
+        // regression that would otherwise persist a below-one (e.g. unassigned 0) sequence. Additive and
+        // behaviour-neutral.
+        builder.ToTable(
+            "session_events",
+            table => table.HasCheckConstraint(
+                "ck_session_events_sequence",
+                "sequence >= 1"));
 
         builder.HasKey(sessionEvent => sessionEvent.Id);
 

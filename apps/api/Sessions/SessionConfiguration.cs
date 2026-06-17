@@ -68,7 +68,16 @@ internal sealed class SessionConfiguration : IEntityTypeConfiguration<Session>
 {
     public void Configure(EntityTypeBuilder<Session> builder)
     {
-        builder.ToTable("sessions");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the status column stores the SessionStatus enum
+        // by its stable NAME, an invariant the aggregate enforces in memory (the Prepared -> Live -> Ended /
+        // Cancelled state machine). The database constraint rejects any other value, so a direct DB write, a
+        // future raw-SQL path or a mapping regression can never persist a code-impossible status. Additive and
+        // behaviour-neutral: every value the aggregate produces is in the allowlist.
+        builder.ToTable(
+            "sessions",
+            table => table.HasCheckConstraint(
+                "ck_sessions_status",
+                "status IN ('Prepared', 'Live', 'Ended', 'Cancelled')"));
 
         builder.HasKey(session => session.Id);
 

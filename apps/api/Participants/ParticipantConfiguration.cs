@@ -73,7 +73,15 @@ internal sealed class ParticipantConfiguration : IEntityTypeConfiguration<Partic
 {
     public void Configure(EntityTypeBuilder<Participant> builder)
     {
-        builder.ToTable("participants");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the status column stores the ParticipantStatus
+        // enum by its stable NAME, an invariant the aggregate enforces in memory. The database constraint
+        // rejects any other value, so a direct DB write, a future raw-SQL path or a mapping regression can
+        // never persist a code-impossible status. Additive and behaviour-neutral.
+        builder.ToTable(
+            "participants",
+            table => table.HasCheckConstraint(
+                "ck_participants_status",
+                "status IN ('Active', 'Removed')"));
 
         builder.HasKey(participant => participant.Id);
 

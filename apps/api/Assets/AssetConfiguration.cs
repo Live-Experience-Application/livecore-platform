@@ -73,7 +73,25 @@ internal sealed class AssetConfiguration : IEntityTypeConfiguration<Asset>
 {
     public void Configure(EntityTypeBuilder<Asset> builder)
     {
-        builder.ToTable("assets");
+        // Defence-in-depth CHECK constraints (CORE-CONC-009), each mirroring an invariant the aggregate
+        // already enforces in memory:
+        //  - the status column stores the AssetStatus enum by its stable NAME (Pending -> Available), so the
+        //    allowlist rejects any other value;
+        //  - the size byte counter is a NON-negative count, null while the asset is pending and stamped on
+        //    confirmation, so the constraint allows null OR a non-negative value.
+        // The constraints reject a direct DB write, a future raw-SQL path or a mapping regression that would
+        // otherwise persist a code-impossible state. Additive and behaviour-neutral.
+        builder.ToTable(
+            "assets",
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "ck_assets_status",
+                    "status IN ('Pending', 'Available')");
+                table.HasCheckConstraint(
+                    "ck_assets_size_bytes",
+                    "size_bytes IS NULL OR size_bytes >= 0");
+            });
 
         builder.HasKey(asset => asset.Id);
 

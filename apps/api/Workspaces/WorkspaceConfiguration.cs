@@ -53,7 +53,15 @@ internal sealed class WorkspaceConfiguration : IEntityTypeConfiguration<Workspac
 {
     public void Configure(EntityTypeBuilder<Workspace> builder)
     {
-        builder.ToTable("workspaces");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the status column stores the WorkspaceStatus enum
+        // by its stable NAME, an invariant the aggregate enforces in memory (Active -> Archived). The database
+        // constraint rejects any other value, so a direct DB write, a future raw-SQL path or a mapping
+        // regression can never persist a code-impossible status. Additive and behaviour-neutral.
+        builder.ToTable(
+            "workspaces",
+            table => table.HasCheckConstraint(
+                "ck_workspaces_status",
+                "status IN ('Active', 'Archived')"));
 
         builder.HasKey(workspace => workspace.Id);
 

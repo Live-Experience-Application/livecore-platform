@@ -72,7 +72,16 @@ internal sealed class ContentBlockConfiguration : IEntityTypeConfiguration<Conte
 {
     public void Configure(EntityTypeBuilder<ContentBlock> builder)
     {
-        builder.ToTable("content_blocks");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the revision counter starts at the initial
+        // revision number (1) on creation and only ever increments, an invariant the aggregate enforces
+        // (ContentBlock.Create / Revise). The database constraint rejects a direct DB write, a future raw-SQL
+        // path or a mapping regression that would otherwise persist a below-one revision. Additive and
+        // behaviour-neutral.
+        builder.ToTable(
+            "content_blocks",
+            table => table.HasCheckConstraint(
+                "ck_content_blocks_revision_number",
+                "revision_number >= 1"));
 
         builder.HasKey(contentBlock => contentBlock.Id);
 

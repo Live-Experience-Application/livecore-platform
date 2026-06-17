@@ -34,7 +34,16 @@ internal sealed class QuotaUsageConfiguration : IEntityTypeConfiguration<QuotaUs
 {
     public void Configure(EntityTypeBuilder<QuotaUsage> builder)
     {
-        builder.ToTable("quota_usage");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): recorded usage is a NON-negative amount, an
+        // invariant the quota math enforces (QuotaUsage.Record clamps at zero; the atomic limit-guarded
+        // increment never drives it below zero). The database constraint rejects a direct DB write, a future
+        // raw-SQL path or a mapping regression that would otherwise persist negative usage. Additive and
+        // behaviour-neutral.
+        builder.ToTable(
+            "quota_usage",
+            table => table.HasCheckConstraint(
+                "ck_quota_usage_used_amount",
+                "used_amount >= 0"));
 
         builder.HasKey(usage => usage.Id);
 

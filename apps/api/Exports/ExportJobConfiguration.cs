@@ -61,7 +61,16 @@ internal sealed class ExportJobConfiguration : IEntityTypeConfiguration<ExportJo
 {
     public void Configure(EntityTypeBuilder<ExportJob> builder)
     {
-        builder.ToTable("export_jobs");
+        // Defence-in-depth CHECK constraint (CORE-CONC-009): the status column stores the ExportJobStatus enum
+        // by its stable NAME, an invariant the aggregate enforces in memory (Pending -> Running -> Completed /
+        // Failed). The database constraint rejects any other value, so a direct DB write, a future raw-SQL
+        // path or a mapping regression can never persist a code-impossible status. Additive and
+        // behaviour-neutral.
+        builder.ToTable(
+            "export_jobs",
+            table => table.HasCheckConstraint(
+                "ck_export_jobs_status",
+                "status IN ('Pending', 'Running', 'Completed', 'Failed')"));
 
         builder.HasKey(job => job.Id);
 
