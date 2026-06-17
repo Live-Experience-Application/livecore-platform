@@ -161,6 +161,44 @@ public sealed class QueuedExportJobReaderTests : IDisposable
             () => reader.ListQueuedWorkspaceExportsAsync(-1, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Surfaces_each_jobs_lease_state_so_the_processor_can_skip_or_reclaim_it()
+    {
+        // CORE-RES-003: the read does not filter on the lease (a DateTimeOffset cannot be compared in SQL on
+        // SQLite, and an expired lease must still be surfaced to be reclaimed). A leased job is returned WITH its
+        // lease owner and expiry so the processor decides claimability — and reclaim — in memory; an unleased job
+        // is returned with both null.
+        var organization = await SeedOrganizationAsync("northwind-labs");
+        var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
+        var user = await SeedUserAsync(_subject);
+        var unleased = await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Pending);
+        var leasedJob = await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Pending);
+
+        var leaseOwner = Guid.NewGuid();
+        var leasedUntil = _startedAt + TimeSpan.FromMinutes(5);
+        await using (var claimContext = CreateContext())
+        {
+            Assert.True(await new ExportJobRepository(claimContext).ClaimAsync(
+                organization.Id, workspace.Id, leasedJob.Id,
+                observedLeaseOwner: null, leaseOwner, leasedUntil, _startedAt, CancellationToken.None));
+        }
+
+        await using var context = CreateContext();
+        var queued = await new QueuedExportJobReader(context).ListQueuedWorkspaceExportsAsync(50, CancellationToken.None);
+
+        var unleasedEntry = Assert.Single(queued, item => item.ExportJobId == unleased.Id);
+        Assert.Null(unleasedEntry.LeaseOwner);
+        Assert.Null(unleasedEntry.LeasedUntil);
+        Assert.True(unleasedEntry.IsClaimable(_startedAt));
+
+        var leasedEntry = Assert.Single(queued, item => item.ExportJobId == leasedJob.Id);
+        Assert.Equal(leaseOwner, leasedEntry.LeaseOwner);
+        Assert.Equal(leasedUntil, leasedEntry.LeasedUntil);
+        // Not claimable while the lease is live, but reclaimable once it has expired.
+        Assert.False(leasedEntry.IsClaimable(_startedAt));
+        Assert.True(leasedEntry.IsClaimable(leasedUntil + TimeSpan.FromMinutes(1)));
+    }
+
     // Seeding helpers --------------------------------------------------------------------------------------------
 
     private async Task<Organization> SeedOrganizationAsync(string slug)

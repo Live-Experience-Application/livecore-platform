@@ -552,4 +552,177 @@ public sealed class ExportJobRepositoryTests : IDisposable
         var remaining = await context.ExportJobs.CountAsync(CancellationToken.None);
         Assert.Equal(0, remaining);
     }
+
+    // ---- CORE-RES-003: the worker job claim/lease ----------------------------------------------------------------
+
+    private static readonly DateTimeOffset _leaseNow = new(2026, 6, 12, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _leaseUntil = _leaseNow + TimeSpan.FromMinutes(5);
+
+    [Fact]
+    public async Task Claims_a_free_pending_job_and_records_the_lease()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var job = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+        var owner = Guid.NewGuid();
+
+        await using (var context = CreateContext())
+        {
+            var claimed = await new ExportJobRepository(context).ClaimAsync(
+                organization.Id, workspace.Id, job.Id,
+                observedLeaseOwner: null, leaseOwner: owner, _leaseUntil, _leaseNow, CancellationToken.None);
+            Assert.True(claimed);
+        }
+
+        // The lease columns and the update timestamp were recorded; the status is untouched (still Pending).
+        await using (var context = CreateContext())
+        {
+            var leased = await new ExportJobRepository(context)
+                .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+            Assert.NotNull(leased);
+            Assert.Equal(owner, leased.LeaseOwner);
+            Assert.Equal(_leaseUntil, leased.LeasedUntil);
+            Assert.Equal(_leaseNow, leased.UpdatedAt);
+            Assert.Equal(ExportJobStatus.Pending, leased.Status);
+        }
+    }
+
+    [Fact]
+    public async Task A_second_claim_of_an_already_leased_job_fails_so_two_replicas_never_both_win()
+    {
+        // The compare-and-swap: once replica A claims a free job (its owner is no longer null), a second replica
+        // that observed it free (observed owner = null) matches nothing and loses — no double-processing.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var job = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+        var ownerA = Guid.NewGuid();
+        var ownerB = Guid.NewGuid();
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+
+        Assert.True(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, null, ownerA, _leaseUntil, _leaseNow, CancellationToken.None));
+
+        // Replica B still observes the job as free (owner null) and tries to claim it: the CAS fails.
+        Assert.False(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, null, ownerB, _leaseUntil, _leaseNow, CancellationToken.None));
+
+        await using var assertContext = CreateContext();
+        var leased = await new ExportJobRepository(assertContext)
+            .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+        Assert.Equal(ownerA, leased!.LeaseOwner);
+    }
+
+    [Fact]
+    public async Task Reclaims_an_expired_lease_only_via_the_observed_owner()
+    {
+        // A crashed replica's lease is reclaimed by passing its owner as the OBSERVED owner; a wrong observed
+        // owner (a replica that lost a concurrent reclaim race) matches nothing and loses.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var job = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+        var crashedOwner = Guid.NewGuid();
+        var reclaimer = Guid.NewGuid();
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+
+        Assert.True(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, null, crashedOwner, _leaseUntil, _leaseNow, CancellationToken.None));
+
+        // A reclaim that observed a DIFFERENT owner (lost the race) fails.
+        Assert.False(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, Guid.NewGuid(), reclaimer, _leaseUntil, _leaseNow, CancellationToken.None));
+
+        // A reclaim that observed the crashed owner wins and takes over the lease.
+        Assert.True(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, crashedOwner, reclaimer, _leaseUntil, _leaseNow, CancellationToken.None));
+
+        await using var assertContext = CreateContext();
+        var leased = await new ExportJobRepository(assertContext)
+            .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+        Assert.Equal(reclaimer, leased!.LeaseOwner);
+    }
+
+    [Fact]
+    public async Task Does_not_claim_a_terminal_job()
+    {
+        // A finished export is never re-processed: claiming a Completed job affects no rows.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var job = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new ExportJobRepository(context);
+            var loaded = await repository.FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+            loaded!.Start(_startedAt);
+            loaded.Complete(_finishedAt);
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using var claimContext = CreateContext();
+        var claimed = await new ExportJobRepository(claimContext).ClaimAsync(
+            organization.Id, workspace.Id, job.Id, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None);
+        Assert.False(claimed);
+    }
+
+    [Fact]
+    public async Task A_foreign_tenant_or_workspace_can_never_claim_the_job()
+    {
+        // NEGATIVE authorization / tenant isolation (threat T5): the claim is tenant- AND workspace-scoped, so a
+        // claim addressed with another organization's or another workspace's id can never lease this job, even
+        // though the surrogate id is correct. Fail-closed.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var job = await SeedJobAsync(organization.Id, workspace.Id, user.Id);
+
+        var foreignOrganization = await SeedOrganizationAsync(_organizationSlugB);
+        var foreignWorkspace = await SeedWorkspaceAsync(foreignOrganization.Id, _workspaceSlugB);
+
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+
+        // Wrong tenant: the job belongs to `organization`, never to `foreignOrganization`.
+        Assert.False(await repository.ClaimAsync(
+            foreignOrganization.Id, workspace.Id, job.Id, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+
+        // Wrong workspace within the right tenant: still scoped out.
+        Assert.False(await repository.ClaimAsync(
+            organization.Id, foreignWorkspace.Id, job.Id, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+
+        // The job was never leased by any foreign-scoped attempt.
+        await using var assertContext = CreateContext();
+        var stored = await new ExportJobRepository(assertContext)
+            .FindByIdAsync(organization.Id, workspace.Id, job.Id, CancellationToken.None);
+        Assert.Null(stored!.LeaseOwner);
+        Assert.Null(stored.LeasedUntil);
+
+        // The correctly-scoped claim still works, proving the negatives were the scoping, not a broken claim.
+        Assert.True(await repository.ClaimAsync(
+            organization.Id, workspace.Id, job.Id, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Rejects_empty_ids_or_an_empty_lease_owner_on_claim()
+    {
+        await using var context = CreateContext();
+        var repository = new ExportJobRepository(context);
+        var realId = Guid.NewGuid();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ClaimAsync(
+            Guid.Empty, realId, realId, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ClaimAsync(
+            realId, Guid.Empty, realId, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ClaimAsync(
+            realId, realId, Guid.Empty, null, Guid.NewGuid(), _leaseUntil, _leaseNow, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ClaimAsync(
+            realId, realId, realId, null, Guid.Empty, _leaseUntil, _leaseNow, CancellationToken.None));
+    }
 }

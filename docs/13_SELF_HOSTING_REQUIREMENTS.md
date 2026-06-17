@@ -537,6 +537,33 @@ aggregating endpoint make a **single** hung loop detectable.
   file go stale, which is fail-safe). It carries only a timestamp — no identifiers, no
   secrets (threat T7).
 
+### Multi-replica worker safety (CORE-RES-003)
+
+The worker is **horizontally scalable**: you may run more than one replica for availability or throughput, and a
+job is never redundantly processed by two of them. Each worker loop is safe under concurrency by a mechanism
+matched to its work:
+
+- **Export processing** (`ExportProcessingBackgroundService`) **claims/leases** each job before doing any work.
+  A sweep atomically leases a job to this replica — a compare-and-swap that records `export_jobs.lease_owner`
+  and a `leased_until` expiry — so a job an unexpired lease is already held on is skipped and two replicas never
+  both build one export's manifest. A replica that **crashes mid-job** lets its lease lapse, after which the next
+  sweep **reclaims** the job and finishes it, so work is never stranded. Correctness rests on the claim, not
+  solely on the downstream unique `export_manifests(export_job_id)` index (kept as a backstop). Tune the lease
+  with `Exports:Processing:LeaseDuration` (`Exports__Processing__LeaseDuration`, a `TimeSpan`; default
+  **5 minutes**): keep it above the time to process one job, and at or above the sweep interval so a crashed
+  lease is reclaimed on the following sweep.
+- **Asset cleanup** (`AssetCleanupBackgroundService`) deletes each abandoned upload-intent row **inside the
+  per-item guard**, so a concurrent-delete race — another replica removing the same row first — is treated as
+  already-removed and never aborts the rest of the batch (object-first-then-row still holds; CORE-RES-003).
+- The other loops are concurrency-safe through their own data-layer invariants: **recap generation** admits at
+  most one system recap per session through a partial unique index (CORE-RCP-001); the **store-notification
+  reconciliation** and **data-retention** sweeps use idempotent, by-id set operations whose overlapping runs
+  never double-apply or error.
+
+No replica-affinity, sticky scheduling or external lock service is required — the guarantees live in the database
+(`docs/15_OBSERVABILITY.md` covers how the claim/lease is observed). A single-replica worker behaves identically;
+the lease is simply never contended.
+
 ## Object storage (CORE-OPS-006)
 
 An asset's binary content lives in a **private**, S3-compatible bucket, never in

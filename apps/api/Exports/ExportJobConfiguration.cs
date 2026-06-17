@@ -132,6 +132,21 @@ internal sealed class ExportJobConfiguration : IEntityTypeConfiguration<ExportJo
             .HasMaxLength(ExportJob.MaxArtifactObjectKeyLength)
             .IsRequired(false);
 
+        // Worker processing LEASE (CORE-RES-003): the replica that currently holds the job and when its lease
+        // expires. Both are NULLABLE (an unleased job has neither) and set/cleared together. They are operational
+        // metadata only — never a lookup key by themselves (the claim is a compare-and-swap addressed by the
+        // primary key within the tenant/workspace scope) and never content (threat T7), so they are not indexed.
+        // The owner is an opaque per-replica identifier; the expiry is a plain timestamptz the worker compares
+        // in-memory (the SQLite test provider cannot compare a DateTimeOffset in SQL, exactly as the retention
+        // reads note), never in a SQL predicate.
+        builder.Property(job => job.LeaseOwner)
+            .HasColumnName("lease_owner")
+            .IsRequired(false);
+
+        builder.Property(job => job.LeasedUntil)
+            .HasColumnName("leased_until")
+            .IsRequired(false);
+
         // Documented critical index export_jobs(workspace_id, id): workspace reads lead with the workspace
         // column (docs/10_DATABASE_SCHEMA.md critical indexes).
         builder.HasIndex(job => new { job.WorkspaceId, job.Id })

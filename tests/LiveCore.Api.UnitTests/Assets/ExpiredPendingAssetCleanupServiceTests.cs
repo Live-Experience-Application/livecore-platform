@@ -1,4 +1,5 @@
 using LiveCore.Api.Assets;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace LiveCore.Api.UnitTests.Assets;
@@ -151,6 +152,34 @@ public class ExpiredPendingAssetCleanupServiceTests
         Assert.True(repository.Contains(failing.Id));
     }
 
+    [Fact]
+    public async Task CleanUp_continues_the_batch_when_a_row_is_concurrently_deleted()
+    {
+        // CORE-RES-003: another sweep/replica removes one expired pending row between this sweep's candidate read
+        // and its own row delete (a DbUpdateConcurrencyException). The row delete now lives INSIDE the per-item
+        // guard, so the race is treated as already-removed and the REST of the batch still completes — it never
+        // aborts the run.
+        var first = CreatePending(_now - TimeSpan.FromDays(3));
+        var concurrentlyDeleted = CreatePending(_now - TimeSpan.FromDays(3));
+        var third = CreatePending(_now - TimeSpan.FromDays(3));
+        var repository = new RecordingAssetRepository(first, concurrentlyDeleted, third);
+        repository.SimulateConcurrentDeleteOf(concurrentlyDeleted.Id);
+        var storage = new ConfigurableAssetStorage();
+        var service = CreateService(repository, storage);
+
+        var result = await service.CleanUpExpiredPendingAssetsAsync(CancellationToken.None);
+
+        // The whole batch was examined and the two non-raced rows were removed; the concurrent delete is not a
+        // failure (the row is gone either way), and the sweep did not abort.
+        Assert.Equal(3, result.Examined);
+        Assert.Equal(2, result.Removed);
+        Assert.Equal(0, result.Failed);
+        Assert.False(result.StorageUnavailable);
+        Assert.Equal(new[] { first.Id, third.Id }, repository.Deleted);
+        // Every object was deleted object-first, including the raced one (idempotent), before the row delete.
+        Assert.Equal(new[] { first.Id, concurrentlyDeleted.Id, third.Id }, storage.DeletedObjects);
+    }
+
     private static ExpiredPendingAssetCleanupService CreateService(
         IAssetRepository repository, IAssetStorage storage)
         => new(
@@ -186,6 +215,7 @@ public class ExpiredPendingAssetCleanupServiceTests
     private sealed class RecordingAssetRepository : IAssetRepository
     {
         private readonly List<Asset> _pending;
+        private readonly HashSet<Guid> _concurrentlyDeleted = [];
 
         public RecordingAssetRepository(params Asset[] pending) => _pending = [.. pending];
 
@@ -196,6 +226,13 @@ public class ExpiredPendingAssetCleanupServiceTests
         public List<Guid> Deleted { get; } = [];
 
         public bool Contains(Guid id) => _pending.Exists(asset => asset.Id == id);
+
+        /// <summary>
+        /// Marks an asset as one another sweep/replica removes first, so this repository's
+        /// <see cref="DeleteAsync"/> throws a <see cref="DbUpdateConcurrencyException"/> for it — exactly what
+        /// EF Core throws when a tracked row's delete affects zero rows (CORE-RES-003).
+        /// </summary>
+        public void SimulateConcurrentDeleteOf(Guid id) => _concurrentlyDeleted.Add(id);
 
         public Task<IReadOnlyList<Asset>> ListExpiredPendingAsync(
             DateTimeOffset createdBefore, int maxCount, CancellationToken cancellationToken)
@@ -208,8 +245,15 @@ public class ExpiredPendingAssetCleanupServiceTests
 
         public Task DeleteAsync(Asset asset, CancellationToken cancellationToken)
         {
-            Deleted.Add(asset.Id);
             _pending.RemoveAll(stored => stored.Id == asset.Id);
+            if (_concurrentlyDeleted.Contains(asset.Id))
+            {
+                // The row was already removed by a concurrent sweep, so the delete affects zero rows and EF
+                // throws a concurrency conflict — the race the per-item guard must absorb.
+                throw new DbUpdateConcurrencyException("the asset row was concurrently removed by another sweep");
+            }
+
+            Deleted.Add(asset.Id);
             return Task.CompletedTask;
         }
 

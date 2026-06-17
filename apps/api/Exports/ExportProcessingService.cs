@@ -35,14 +35,25 @@ namespace LiveCore.Api.Exports;
 /// </para>
 ///
 /// <para>
-/// IDEMPOTENT and CRASH-SAFE. The processor relies on the existing data-layer invariants rather than a parallel
-/// lock: the queued read excludes terminal jobs (a completed export is never re-processed), and the unique
+/// SAFE FOR MULTIPLE REPLICAS — the worker job CLAIM/LEASE (CORE-RES-003). Before processing a job the sweep
+/// ATOMICALLY claims it for this replica through <see cref="IExportJobRepository.ClaimAsync"/> — a set-based
+/// compare-and-swap that leases the row to exactly one replica (see the method for the mechanics). A job an
+/// unexpired lease is already held on is skipped, so two replicas never both do the full work of one export; a
+/// replica that crashes mid-job lets its lease EXPIRE, after which the next sweep reclaims and finishes the job.
+/// Correctness therefore rests on the claim, not solely on the downstream unique
+/// <c>export_manifests(export_job_id)</c> index — which remains a final backstop for the rare case of a replica
+/// that runs past its own lease. The lease duration is <see cref="ExportProcessingOptions.LeaseDuration"/>.
+/// </para>
+///
+/// <para>
+/// IDEMPOTENT and CRASH-SAFE. The processor also relies on the existing data-layer invariants: the queued read
+/// excludes terminal jobs (a completed export is never re-processed), and the unique
 /// <c>export_manifests(export_job_id)</c> index admits a job's manifest at most once. So a job produces exactly
 /// one manifest no matter how many sweeps — or concurrent workers — run: a lost create race surfaces as
 /// <see cref="ExportManifestAddResult.DuplicateExportJob"/>, and because the manifest and the status transitions
 /// commit atomically, the losing attempt's transitions roll back WITH the rejected insert (the job is left
 /// exactly as the winning attempt completed it, never half-applied). A crash BEFORE the commit leaves the job
-/// untouched (Pending), so the next sweep simply reprocesses it from scratch.
+/// untouched (Pending) and its lease lapses, so the next sweep reclaims and reprocesses it from scratch.
 /// </para>
 ///
 /// <para>
@@ -85,6 +96,13 @@ public sealed class ExportProcessingService
     private readonly ExportProcessingOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ExportProcessingService> _logger;
+
+    // This worker replica's lease owner (CORE-RES-003): a fresh, opaque per-instance identifier the sweep stamps
+    // onto every job it CLAIMS, so each claimed job records which replica is processing it and a crashed
+    // replica's expired lease can be reclaimed by another. It is operational only — never a tenant, a user or any
+    // content (threat T7) — and each scoped sweep instance gets its own, which is all the claim's compare-and-swap
+    // needs to keep replicas from double-processing.
+    private readonly Guid _leaseOwner = Guid.NewGuid();
 
     /// <summary>Creates the processing service over the queued read, the export job and manifest repositories, the inventory read and the policy.</summary>
     public ExportProcessingService(
@@ -189,11 +207,12 @@ public sealed class ExportProcessingService
     }
 
     /// <summary>
-    /// Processes a single queued export job: re-resolves it within its own tenant/workspace, drives its guarded
-    /// <see cref="ExportJob.Start"/>/<see cref="ExportJob.Complete"/> transitions, inventories its workspace and
-    /// produces and appends its workspace export manifest. When the atomic work FAILS, the failed attempt is
-    /// recorded on the job's attempt counter and the job is dead-lettered if it has exhausted its attempt budget
-    /// (CORE-RES-002). Returns the per-job outcome.
+    /// Processes a single queued export job: ATOMICALLY claims it for this replica (CORE-RES-003) — backing off if
+    /// a live replica still holds its lease — then re-resolves it within its own tenant/workspace, drives its
+    /// guarded <see cref="ExportJob.Start"/>/<see cref="ExportJob.Complete"/> transitions, inventories its
+    /// workspace and produces and appends its workspace export manifest. When the atomic work FAILS, the failed
+    /// attempt is recorded on the job's attempt counter, the lease is released and the job is dead-lettered if it
+    /// has exhausted its attempt budget (CORE-RES-002). Returns the per-job outcome.
     /// </summary>
     private async Task<ProcessOutcome> ProcessOneAsync(QueuedExportJob queuedJob, CancellationToken cancellationToken)
     {
@@ -201,9 +220,38 @@ public sealed class ExportProcessingService
         // deterministic under test (the same TimeProvider the rest of the platform uses).
         var processedAt = _timeProvider.GetUtcNow();
 
+        // Skip a job a LIVE replica still holds an unexpired lease on (CORE-RES-003): only claim a free job, or
+        // one whose lease has already lapsed (a crashed replica, reclaimable). This in-memory check just avoids a
+        // doomed claim — the atomic compare-and-swap below is the real serialization point.
+        if (!queuedJob.IsClaimable(processedAt))
+        {
+            return ProcessOutcome.NotProcessed;
+        }
+
+        // ATOMICALLY claim the job for this replica before doing any work, so two replicas never both process the
+        // same export (the claim, not the downstream unique manifest index, is the correctness anchor). The
+        // compare-and-swap matches on the lease owner this sweep observed, so if another replica claimed or
+        // reclaimed the job between the queued read and now, our claim affects zero rows and we back off.
+        var claimed = await _exportJobs
+            .ClaimAsync(
+                queuedJob.OrganizationId,
+                queuedJob.WorkspaceId,
+                queuedJob.ExportJobId,
+                queuedJob.LeaseOwner,
+                _leaseOwner,
+                processedAt + _options.LeaseDuration,
+                processedAt,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!claimed)
+        {
+            // Another replica owns the lease now; leave the job to it. Idempotent no-op.
+            return ProcessOutcome.NotProcessed;
+        }
+
         // Re-resolve the tracked aggregate, re-scoped by tenant + workspace (defence in depth: the surrogate id
         // is never trusted alone, threat T5/T1). The organization boundary is checked before the workspace
-        // boundary inside the repository.
+        // boundary inside the repository. It now reflects the lease this sweep just took.
         var job = await _exportJobs
             .FindByIdAsync(queuedJob.OrganizationId, queuedJob.WorkspaceId, queuedJob.ExportJobId, cancellationToken)
             .ConfigureAwait(false);
@@ -316,9 +364,11 @@ public sealed class ExportProcessingService
     /// rolled back, so the job is re-read through <see cref="IExportJobRepository.ReloadAsync"/> (which discards
     /// the rolled-back in-memory transitions and returns the durable row), its attempt counter is incremented,
     /// and — if the budget is exhausted — it is driven to the terminal <see cref="ExportJobStatus.Failed"/> via
-    /// the aggregate's own <see cref="ExportJob.Fail"/> guard with a generic, product-neutral reason. The
-    /// increment (and any dead-letter) commit in their OWN unit of work, so a failed attempt is counted even
-    /// though the work did not commit. All logging is identifier-only (job id, attempt and run counts; threat T7).
+    /// the aggregate's own <see cref="ExportJob.Fail"/> guard with a generic, product-neutral reason. The same
+    /// unit of work also RELEASES this replica's lease (CORE-RES-003) so a still-retryable job is reclaimable
+    /// immediately rather than after its lease lapses. The increment, the lease release (and any dead-letter)
+    /// commit in their OWN unit of work, so a failed attempt is counted even though the work did not commit. All
+    /// logging is identifier-only (job id, attempt and run counts; threat T7).
     /// </summary>
     private async Task<ProcessOutcome> RecordFailedAttemptAsync(
         QueuedExportJob queuedJob,
@@ -352,8 +402,14 @@ public sealed class ExportProcessingService
             job.Fail(DeadLetterReason(_options.MaxAttempts), processedAt);
         }
 
-        // Commit the attempt increment (and any dead-letter transition) in its own unit of work, separate from
-        // the rolled-back work, so the failed attempt is durable.
+        // Release this replica's lease (CORE-RES-003) in the SAME unit of work that records the failed attempt,
+        // so a still-retryable job is immediately reclaimable by the next sweep instead of waiting out its lease;
+        // a dead-lettered (terminal) job is excluded from the queued read anyway, so clearing its lease is just
+        // tidiness.
+        job.ReleaseLease(processedAt);
+
+        // Commit the attempt increment, the lease release (and any dead-letter transition) in its own unit of
+        // work, separate from the rolled-back work, so the failed attempt is durable.
         await _exportJobs.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
 
         if (exhausted)

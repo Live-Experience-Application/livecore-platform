@@ -3228,11 +3228,25 @@ transitions never leak — so the attempt is counted even though the work did no
 a dead-lettered job is terminal it drops out of the queued read, so a permanently-failing ("poison") low-id job
 **stops re-consuming a batch slot** every sweep and newer work is no longer starved behind it. The broken
 export **surfaces as failed to its requester** — instead of staying `Pending` forever — and the export read
-route (`GET /api/v1/exports/{id}`) returns a distinct `409` that says the export *failed* (only after
+route (`GET /api/v1/exports/{id}`) returns a distinct `409` that says the export _failed_ (only after
 authorization, so the state never leaks to an unauthorized caller). Dead-lettered jobs are observable via that
 terminal state, the worker's identifier-only dead-letter WARNING log, and the sweep summary's `dead-lettered`
 count (`docs/15_OBSERVABILITY.md`; the dedicated dead-letter **metric** is CORE-OBS-007). An export-request HTTP
 route and a user-data export pipeline remain follow-up stories.
+
+**Multi-replica claim/lease (CORE-RES-003).** The worker is **horizontally scalable** and now **lease-safe**:
+before doing any work a sweep **atomically claims** each job by leasing it (`export_jobs.lease_owner` +
+`export_jobs.leased_until`), a compare-and-swap on the lease owner that leases the row to exactly one replica.
+A job an unexpired lease is already held on is skipped, so two replicas never both build one export's manifest;
+a replica that **crashes mid-job** lets its lease lapse so the next sweep **reclaims** and finishes it (work is
+never stranded). Correctness now rests on the claim rather than solely on the downstream unique
+`export_manifests(export_job_id)` index (kept as a backstop), and the lease window is tunable
+(`Exports:Processing:LeaseDuration`, default 5 minutes). The lease-expiry decision is made in memory by the
+worker (a `DateTimeOffset` is never compared in SQL — the SQLite test provider cannot), so the claim's
+compare-and-swap matches only the lease **owner** (a `Guid`) and the status. The same story also moves the asset
+cleanup job's **row delete inside the per-item guard**, so a concurrent-delete race — another replica removing
+the same abandoned upload-intent row first — is treated as already-removed and never aborts the rest of the
+batch (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, `docs/15_OBSERVABILITY.md`).
 
 ### Store notification reconciliation job
 

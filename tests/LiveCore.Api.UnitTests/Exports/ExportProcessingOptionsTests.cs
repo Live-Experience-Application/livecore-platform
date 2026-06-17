@@ -16,11 +16,13 @@ public class ExportProcessingOptionsTests
     [Fact]
     public void Constructor_keeps_valid_values()
     {
-        var options = new ExportProcessingOptions(TimeSpan.FromMinutes(30), 250, maxAttempts: 7);
+        var options = new ExportProcessingOptions(
+            TimeSpan.FromMinutes(30), 250, maxAttempts: 7, leaseDuration: TimeSpan.FromMinutes(2));
 
         Assert.Equal(TimeSpan.FromMinutes(30), options.SweepInterval);
         Assert.Equal(250, options.BatchSize);
         Assert.Equal(7, options.MaxAttempts);
+        Assert.Equal(TimeSpan.FromMinutes(2), options.LeaseDuration);
     }
 
     [Fact]
@@ -28,6 +30,17 @@ public class ExportProcessingOptionsTests
         => Assert.Equal(
             ExportProcessingOptions.DefaultMaxAttempts,
             new ExportProcessingOptions(TimeSpan.FromHours(1), 50).MaxAttempts);
+
+    [Fact]
+    public void Constructor_defaults_the_lease_duration_when_unspecified()
+        => Assert.Equal(
+            ExportProcessingOptions.DefaultLeaseDuration,
+            new ExportProcessingOptions(TimeSpan.FromHours(1), 50).LeaseDuration);
+
+    [Fact]
+    public void Constructor_rejects_a_non_positive_lease_duration()
+        => Assert.Throws<ArgumentOutOfRangeException>(
+            () => new ExportProcessingOptions(TimeSpan.FromHours(1), 50, leaseDuration: TimeSpan.Zero));
 
     [Fact]
     public void Constructor_rejects_a_non_positive_sweep_interval()
@@ -58,6 +71,7 @@ public class ExportProcessingOptionsTests
         Assert.Equal(ExportProcessingOptions.DefaultSweepInterval, options.SweepInterval);
         Assert.Equal(ExportProcessingOptions.DefaultBatchSize, options.BatchSize);
         Assert.Equal(ExportProcessingOptions.DefaultMaxAttempts, options.MaxAttempts);
+        Assert.Equal(ExportProcessingOptions.DefaultLeaseDuration, options.LeaseDuration);
     }
 
     [Fact]
@@ -69,6 +83,7 @@ public class ExportProcessingOptionsTests
                 ["Exports:Processing:SweepInterval"] = "00:15:00",
                 ["Exports:Processing:BatchSize"] = "500",
                 ["Exports:Processing:MaxAttempts"] = "9",
+                ["Exports:Processing:LeaseDuration"] = "00:10:00",
             })
             .Build();
 
@@ -77,6 +92,33 @@ public class ExportProcessingOptionsTests
         Assert.Equal(TimeSpan.FromMinutes(15), options.SweepInterval);
         Assert.Equal(500, options.BatchSize);
         Assert.Equal(9, options.MaxAttempts);
+        Assert.Equal(TimeSpan.FromMinutes(10), options.LeaseDuration);
+    }
+
+    [Fact]
+    public void FromConfiguration_rejects_a_malformed_lease_duration()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Exports:Processing:LeaseDuration"] = "not-a-timespan",
+            })
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() => ExportProcessingOptions.FromConfiguration(configuration));
+    }
+
+    [Fact]
+    public void FromConfiguration_rejects_a_non_positive_lease_duration()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Exports:Processing:LeaseDuration"] = "00:00:00",
+            })
+            .Build();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => ExportProcessingOptions.FromConfiguration(configuration));
     }
 
     [Fact]

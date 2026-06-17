@@ -113,6 +113,60 @@ public interface IExportJobRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// ATOMICALLY CLAIMS (leases) the export job for the given worker replica so two replicas can never both
+    /// process it (CORE-RES-003). It is a set-based COMPARE-AND-SWAP on the lease owner: a single
+    /// <c>UPDATE ... SET lease_owner = @leaseOwner, leased_until = @leasedUntil WHERE organization_id = @org AND
+    /// workspace_id = @ws AND id = @id AND status IN ('Pending','Running') AND lease_owner [IS NOT DISTINCT FROM]
+    /// @observedLeaseOwner</c>. The claim succeeds (returns <see langword="true"/>) only when EXACTLY ONE row
+    /// matched — i.e. the job is still non-terminal AND its lease owner is still the one the caller observed
+    /// (either still free, <paramref name="observedLeaseOwner"/> = <see langword="null"/>, or still held by the
+    /// crashed replica being reclaimed). If another replica claimed or reclaimed it first, its owner no longer
+    /// matches the observed value and the update affects zero rows, so this replica backs off
+    /// (<see langword="false"/>). Because the FIRST successful claim moves the owner away from the observed
+    /// value, concurrent claims of the same row all fail — the atomicity does NOT rely on the downstream unique
+    /// manifest index.
+    ///
+    /// <para>
+    /// The LEASE-EXPIRY decision (is a held lease stale enough to reclaim?) is made by the CALLER in memory
+    /// before invoking this — never compared in SQL — because a lease expiry is a <see cref="DateTimeOffset"/>
+    /// the SQLite test provider cannot compare in a SQL predicate (the same constraint the retention reads work
+    /// around). The compare-and-swap here therefore only compares the lease OWNER (a <see cref="Guid"/>) and the
+    /// status (a name), both provider-portable.
+    /// </para>
+    ///
+    /// <para>
+    /// The update is tenant- AND workspace-scoped (the organization boundary leads), so it can NEVER claim a job
+    /// under another tenant or workspace even when the surrogate id matches (threat T5/T1). It touches only the
+    /// lease columns and the update timestamp — never the tenant, workspace, requester, scope or status — so a
+    /// claim can never move the job or widen its scope (threats T5/T8). It bypasses the change tracker (a direct
+    /// <c>ExecuteUpdate</c>), so the caller re-reads the freshly leased row through
+    /// <see cref="FindByIdAsync"/> before processing it.
+    /// </para>
+    /// </summary>
+    /// <param name="organizationId">The tenant that owns the job (leads the scope; threat T5).</param>
+    /// <param name="workspaceId">The workspace that owns the job.</param>
+    /// <param name="id">The job to claim.</param>
+    /// <param name="observedLeaseOwner">
+    /// The lease owner the caller observed when it read the job (<see langword="null"/> for a free job, or the
+    /// crashed replica's id when reclaiming an expired lease). The compare-and-swap matches on exactly this value.
+    /// </param>
+    /// <param name="leaseOwner">This replica's non-empty worker identifier taking the lease.</param>
+    /// <param name="leasedUntil">When the new lease expires (UTC).</param>
+    /// <param name="now">The current UTC time, recorded as the job's update timestamp.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns><see langword="true"/> when this replica won the claim; otherwise <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentException">An id or the lease owner is empty.</exception>
+    Task<bool> ClaimAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        Guid? observedLeaseOwner,
+        Guid leaseOwner,
+        DateTimeOffset leasedUntil,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists up to <paramref name="maxCount"/> COMPLETED export jobs created before <paramref name="createdBefore"/>
     /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). This is
     /// a SYSTEM maintenance read that deliberately spans ALL tenants and workspaces (the retention sweep is a

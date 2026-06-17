@@ -41,14 +41,23 @@ internal sealed class QueuedExportJobReader : IQueuedExportJobReader
         // surrogate job id (UUIDv7, chronological and provider-independent — SQLite cannot ORDER BY a
         // DateTimeOffset), so the oldest queued jobs sort first and the bounded batch (Take(maxCount)) surfaces
         // them, with repeated sweeps covering the rest. The projection reads only the tenant/workspace/job
-        // coordinates the processor needs to re-resolve the job — never the requester or any content (threat
-        // T7).
+        // coordinates the processor needs to re-resolve the job and its LEASE STATE (CORE-RES-003) — never the
+        // requester or any content (threat T7).
+        //
+        // The read deliberately does NOT filter on the lease in SQL: a job's lease expiry is a DateTimeOffset,
+        // which the SQLite test provider cannot compare in SQL (the same reason the retention reads order by id
+        // and threshold in memory), and filtering by lease OWNER alone would hide an expired lease that must be
+        // reclaimed (its owner is non-null). So every non-terminal job is surfaced WITH its lease coordinates and
+        // the processor decides claimability in memory (QueuedExportJob.IsClaimable), then claims atomically; an
+        // actively-leased job is simply skipped there. The lease owner is an opaque worker-replica id, never a
+        // tenant, a user or content (threat T7).
         return await _dbContext.ExportJobs
             .Where(job => job.Scope == ExportScope.Workspace)
             .Where(job => job.Status == ExportJobStatus.Pending || job.Status == ExportJobStatus.Running)
             .OrderBy(job => job.Id)
             .Take(maxCount)
-            .Select(job => new QueuedExportJob(job.OrganizationId, job.WorkspaceId, job.Id))
+            .Select(job => new QueuedExportJob(
+                job.OrganizationId, job.WorkspaceId, job.Id, job.LeaseOwner, job.LeasedUntil))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }

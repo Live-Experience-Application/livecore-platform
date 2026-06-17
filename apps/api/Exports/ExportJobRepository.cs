@@ -189,6 +189,70 @@ internal sealed class ExportJobRepository : IExportJobRepository
     }
 
     /// <inheritdoc />
+    public async Task<bool> ClaimAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid id,
+        Guid? observedLeaseOwner,
+        Guid leaseOwner,
+        DateTimeOffset leasedUntil,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored job, so the claim fails fast instead of updating an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Export job id must not be empty.", nameof(id));
+        }
+
+        if (leaseOwner == Guid.Empty)
+        {
+            throw new ArgumentException("Lease owner must not be empty.", nameof(leaseOwner));
+        }
+
+        // The tenant- AND workspace-scoped, non-terminal predicate. The organization boundary leads, so a job
+        // under another tenant or workspace is never claimed even when the surrogate id matches (threat T5/T1).
+        // Only Pending/Running jobs are claimable — a terminal job is never re-processed.
+        var claimable = _dbContext.ExportJobs
+            .Where(job => job.OrganizationId == organizationId
+                && job.WorkspaceId == workspaceId
+                && job.Id == id
+                && (job.Status == ExportJobStatus.Pending || job.Status == ExportJobStatus.Running));
+
+        // COMPARE-AND-SWAP on the lease owner: the update matches only while the owner is still EXACTLY the one
+        // the caller observed (still free, or still the crashed replica being reclaimed). The first successful
+        // claim moves the owner away from the observed value, so any concurrent claim of the same row then
+        // matches nothing — two replicas can never both win. The null and non-null cases are written separately
+        // so the SQL is a provider-portable `IS NULL` / `= @owner` rather than a null-unsafe parameter equality.
+        claimable = observedLeaseOwner is { } expectedOwner
+            ? claimable.Where(job => job.LeaseOwner == expectedOwner)
+            : claimable.Where(job => job.LeaseOwner == null);
+
+        // A single set-based UPDATE (no DateTimeOffset is compared in SQL — only the owner Guid and the status
+        // name). It bypasses the change tracker, so the caller re-reads the leased row before processing it.
+        var affected = await claimable
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(job => job.LeaseOwner, leaseOwner)
+                    .SetProperty(job => job.LeasedUntil, leasedUntil)
+                    .SetProperty(job => job.UpdatedAt, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected == 1;
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<ExportJob>> ListCompletedForRetentionAsync(
         DateTimeOffset createdBefore,
         int maxCount,

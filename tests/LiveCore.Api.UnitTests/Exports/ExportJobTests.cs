@@ -440,4 +440,92 @@ public class ExportJobTests
     [InlineData("bucket", "has space")]
     public void RecordArtifact_rejects_a_broken_coordinate(string bucket, string objectKey)
         => Assert.Throws<ArgumentException>(() => CreatePending().RecordArtifact(bucket, objectKey, _finishedAt));
+
+    // --- Lease (CORE-RES-003) --------------------------------------------------
+
+    private static readonly DateTimeOffset _leaseUntil = _startedAt + TimeSpan.FromMinutes(5);
+
+    [Fact]
+    public void Create_starts_unleased()
+    {
+        var job = CreatePending();
+
+        Assert.Null(job.LeaseOwner);
+        Assert.Null(job.LeasedUntil);
+        Assert.True(job.CanAcquireLease(_startedAt));
+    }
+
+    [Fact]
+    public void AcquireLease_records_the_owner_and_expiry_and_stamps_updated_at()
+    {
+        var job = CreatePending();
+        var owner = Guid.CreateVersion7();
+
+        job.AcquireLease(owner, _leaseUntil, _startedAt);
+
+        Assert.Equal(owner, job.LeaseOwner);
+        Assert.Equal(_leaseUntil, job.LeasedUntil);
+        Assert.Equal(_startedAt, job.UpdatedAt);
+        // The lifecycle status is untouched — a claim only records lease metadata.
+        Assert.Equal(ExportJobStatus.Pending, job.Status);
+    }
+
+    [Fact]
+    public void CanAcquireLease_is_false_while_a_live_lease_is_held_and_true_once_it_expires()
+    {
+        var job = CreatePending();
+        job.AcquireLease(Guid.CreateVersion7(), _leaseUntil, _startedAt);
+
+        // While the lease is live the job cannot be re-claimed (another replica owns it)...
+        Assert.False(job.CanAcquireLease(_startedAt + TimeSpan.FromMinutes(1)));
+        // ...but once the lease has lapsed it is reclaimable (a crashed replica).
+        Assert.True(job.CanAcquireLease(_leaseUntil));
+        Assert.True(job.CanAcquireLease(_leaseUntil + TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void AcquireLease_rejects_stealing_a_live_lease()
+    {
+        var job = CreatePending();
+        job.AcquireLease(Guid.CreateVersion7(), _leaseUntil, _startedAt);
+
+        // A second acquire before the lease expires is an invalid operation, not a silent steal.
+        Assert.Throws<InvalidOperationException>(
+            () => job.AcquireLease(Guid.CreateVersion7(), _leaseUntil + TimeSpan.FromMinutes(5), _startedAt + TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void AcquireLease_is_rejected_on_a_terminal_job()
+    {
+        var job = CreatePending();
+        job.Start(_startedAt);
+        job.Complete(_finishedAt);
+
+        Assert.False(job.CanAcquireLease(_finishedAt));
+        Assert.Throws<InvalidOperationException>(
+            () => job.AcquireLease(Guid.CreateVersion7(), _finishedAt + TimeSpan.FromMinutes(5), _finishedAt));
+    }
+
+    [Fact]
+    public void AcquireLease_rejects_an_empty_owner_or_a_non_future_expiry()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreatePending().AcquireLease(Guid.Empty, _leaseUntil, _startedAt));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => CreatePending().AcquireLease(Guid.CreateVersion7(), _startedAt, _startedAt));
+    }
+
+    [Fact]
+    public void ReleaseLease_clears_the_lease_so_the_job_is_reclaimable()
+    {
+        var job = CreatePending();
+        job.AcquireLease(Guid.CreateVersion7(), _leaseUntil, _startedAt);
+
+        job.ReleaseLease(_finishedAt);
+
+        Assert.Null(job.LeaseOwner);
+        Assert.Null(job.LeasedUntil);
+        Assert.Equal(_finishedAt, job.UpdatedAt);
+        Assert.True(job.CanAcquireLease(_finishedAt));
+    }
 }

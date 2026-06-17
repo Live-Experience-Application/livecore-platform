@@ -38,3 +38,4 @@ migration,operations,policy
 20260617010526_AddIdempotencyKeyResultId,DropColumn,roll-forward-only
 20260617045517_AddExportArtifactCoordinates,DropColumn,roll-forward-only
 20260617072806_AddExportJobAttemptCount,DropColumn,roll-forward-only
+20260617081103_AddExportJobLease,DropColumn,roll-forward-only

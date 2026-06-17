@@ -176,6 +176,27 @@ Dead-lettering is observable without a new metric (the dedicated dead-letter **m
 The same bounded-retry/dead-letter posture is intended to generalize to the other worker loops; `CORE-OBS-007`
 adds the dead-letter metric and worker backlog/duration SLIs on top of this.
 
+#### Worker job claim/lease visibility (CORE-RES-003)
+
+Export processing is safe to run on **multiple worker replicas**: before doing any work a sweep **atomically
+claims** each job by leasing it (`export_jobs.lease_owner` + `export_jobs.leased_until`), a compare-and-swap that
+leases the row to exactly one replica, so two replicas never both do the full work of one export and a replica
+that crashes mid-job lets its lease **expire** so the next sweep reclaims and finishes the job. Correctness rests
+on the claim, not solely on the downstream unique `export_manifests(export_job_id)` index (still a backstop). The
+lease duration is `Exports:Processing:LeaseDuration` (default 5 minutes; keep it above the time to process one
+job, and at or above the sweep interval so a crashed lease is reclaimed on the following sweep).
+
+The claim is observable without a new metric:
+
+- the lease lives on the `export_jobs` row (`lease_owner`, an opaque per-replica id — never a tenant, a user or
+  content, threat T7; `leased_until`), so the replica currently processing a job, and a stale (crashed) lease, are
+  both visible in the row;
+- the export-processing **sweep summary** log counts `examined` separately from `processed`/`failed`/
+  `dead-lettered`, so a gap (jobs examined but skipped because another replica still holds their lease) is
+  visible as routine multi-replica contention rather than an error;
+- a sweep that **throws** still records the `livecore_job_failures_total` counter (`job=export-processing`) and
+  logs identifiers only — the claim adds no new failure surface.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

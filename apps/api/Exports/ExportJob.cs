@@ -229,6 +229,29 @@ public sealed class ExportJob
     public DateTimeOffset UpdatedAt { get; private set; }
 
     /// <summary>
+    /// The background worker REPLICA that currently holds this job's processing LEASE (CORE-RES-003), or
+    /// <see langword="null"/> when the job is unleased. Paired with <see cref="LeasedUntil"/>: both are set
+    /// together when a replica CLAIMS the job and both cleared together when the lease is released. It is an
+    /// opaque per-replica worker identifier (a generated <see cref="Guid"/>) — never a tenant, a user or any
+    /// content (threat T7), and never an authorization key (a job is always re-scoped by
+    /// <see cref="OrganizationId"/>/<see cref="WorkspaceId"/>; threat T5). Its purpose is purely operational: it
+    /// lets exactly one replica process a job at a time and lets a crashed replica's expired lease be reclaimed
+    /// (the claim is a compare-and-swap on this owner; see <see cref="ExportJobRepository"/>).
+    /// </summary>
+    public Guid? LeaseOwner { get; private set; }
+
+    /// <summary>
+    /// When the current processing LEASE EXPIRES (UTC), or <see langword="null"/> when the job is unleased
+    /// (CORE-RES-003). While the lease is unexpired (<see cref="LeasedUntil"/> is in the future) the holding
+    /// replica owns the job and no other replica processes it; once it has lapsed the job is RECLAIMABLE, so a
+    /// replica that crashed mid-job cannot strand the job forever — the next sweep reclaims the expired lease and
+    /// finishes the work. The lease therefore makes correctness rest on the claim rather than solely on the
+    /// downstream unique <c>export_manifests(export_job_id)</c> index (which remains a backstop). It carries no
+    /// content (threat T7).
+    /// </summary>
+    public DateTimeOffset? LeasedUntil { get; private set; }
+
+    /// <summary>
     /// The private object-storage BUCKET that holds the completed export's downloadable ARTIFACT (its produced
     /// blob), or <see langword="null"/> when the export has no object-storage artifact. Paired with
     /// <see cref="ArtifactObjectKey"/>: both are set together by <see cref="RecordArtifact"/> or both null.
@@ -440,6 +463,76 @@ public sealed class ExportJob
         }
 
         AttemptCount++;
+        UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// Whether a worker replica may CLAIM (lease) this job right now (CORE-RES-003): only a NON-TERMINAL job
+    /// whose lease is absent or has already EXPIRED at <paramref name="now"/> is claimable. A live, unexpired
+    /// lease means another replica is processing the job, so it is left alone; an expired lease (a crashed
+    /// replica) is reclaimable. A terminal (<see cref="ExportJobStatus.Completed"/>/<see cref="ExportJobStatus.Failed"/>)
+    /// job is never claimable — a finished export is never re-processed.
+    /// </summary>
+    /// <param name="now">The current UTC time the lease expiry is judged against.</param>
+    public bool CanAcquireLease(DateTimeOffset now)
+        => !IsTerminal && (LeasedUntil is null || LeasedUntil.Value <= now);
+
+    /// <summary>
+    /// CLAIMS this job for the given worker replica until <paramref name="leasedUntil"/> (CORE-RES-003): records
+    /// the <paramref name="leaseOwner"/> and the lease expiry so exactly one replica processes the job at a time.
+    /// The tenant, workspace, requester, scope and status are untouched — a claim never moves the job or widens
+    /// its scope (threats T5/T8), it only records operational lease metadata.
+    ///
+    /// <para>
+    /// The atomic, cross-replica claim is performed set-based by
+    /// <see cref="ExportJobRepository.ClaimAsync"/> (a compare-and-swap on <see cref="LeaseOwner"/> so two
+    /// replicas can never both claim the same row); this in-memory method models the SAME state transition on a
+    /// loaded aggregate (for example a single-process worker) and GUARDS it: a job that is not currently
+    /// <see cref="CanAcquireLease"/> throws rather than silently stealing a live lease.
+    /// </para>
+    /// </summary>
+    /// <param name="leaseOwner">The non-empty worker-replica identifier taking the lease.</param>
+    /// <param name="leasedUntil">When the lease expires (must be strictly after <paramref name="now"/>).</param>
+    /// <param name="now">The current UTC time the lease is taken at.</param>
+    /// <exception cref="ArgumentException">The lease owner is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The lease expiry is not after <paramref name="now"/>.</exception>
+    /// <exception cref="InvalidOperationException">The job is terminal or already holds an unexpired lease.</exception>
+    public void AcquireLease(Guid leaseOwner, DateTimeOffset leasedUntil, DateTimeOffset now)
+    {
+        if (leaseOwner == Guid.Empty)
+        {
+            throw new ArgumentException("Lease owner must not be empty.", nameof(leaseOwner));
+        }
+
+        if (leasedUntil <= now)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(leasedUntil), leasedUntil, "The lease expiry must be after the current time.");
+        }
+
+        if (!CanAcquireLease(now))
+        {
+            throw new InvalidOperationException(
+                "The export job is terminal or already holds an unexpired lease and cannot be claimed.");
+        }
+
+        LeaseOwner = leaseOwner;
+        LeasedUntil = leasedUntil.ToUniversalTime();
+        UpdatedAt = now.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// RELEASES any lease this job holds (CORE-RES-003): clears <see cref="LeaseOwner"/> and
+    /// <see cref="LeasedUntil"/> so the job is immediately reclaimable. The worker calls this after a FAILED
+    /// processing attempt (in the same unit of work that records the attempt) so the job does not have to wait
+    /// out its lease before the next sweep retries it. Releasing an already-unleased job is an idempotent no-op,
+    /// not an error. The tenant, workspace, requester and scope are untouched (threats T5/T8).
+    /// </summary>
+    /// <param name="updatedAt">When the lease was released (UTC).</param>
+    public void ReleaseLease(DateTimeOffset updatedAt)
+    {
+        LeaseOwner = null;
+        LeasedUntil = null;
         UpdatedAt = updatedAt.ToUniversalTime();
     }
 

@@ -296,9 +296,44 @@ public sealed class ExportProcessingServiceTests
                 .Where(job => job.Scope == ExportScope.Workspace && !job.IsTerminal)
                 .OrderBy(job => job.Id)
                 .Take(maxCount)
-                .Select(job => new QueuedExportJob(job.OrganizationId, job.WorkspaceId, job.Id))
+                .Select(job => new QueuedExportJob(
+                    job.OrganizationId, job.WorkspaceId, job.Id, job.LeaseOwner, job.LeasedUntil))
                 .ToList();
             return Task.FromResult(queued);
+        }
+
+        // IExportJobRepository (claim) -------------------------------------------------------------------------
+
+        public Task<bool> ClaimAsync(
+            Guid organizationId,
+            Guid workspaceId,
+            Guid id,
+            Guid? observedLeaseOwner,
+            Guid leaseOwner,
+            DateTimeOffset leasedUntil,
+            DateTimeOffset now,
+            CancellationToken cancellationToken)
+        {
+            if (organizationId == Guid.Empty || workspaceId == Guid.Empty || id == Guid.Empty)
+            {
+                throw new ArgumentException("Ids must not be empty.");
+            }
+
+            if (leaseOwner == Guid.Empty)
+            {
+                throw new ArgumentException("Lease owner must not be empty.", nameof(leaseOwner));
+            }
+
+            // Mirror the real ExecuteUpdate compare-and-swap: claim only a non-terminal, free-or-expired job whose
+            // current owner is EXACTLY the one observed (null-safe), so two callers can never both win.
+            var job = _jobs.SingleOrDefault(candidate => candidate.Identifies(organizationId, workspaceId, id));
+            if (job is null || job.LeaseOwner != observedLeaseOwner || !job.CanAcquireLease(now))
+            {
+                return Task.FromResult(false);
+            }
+
+            job.AcquireLease(leaseOwner, leasedUntil, now);
+            return Task.FromResult(true);
         }
 
         // IExportJobRepository ---------------------------------------------------------------------------------

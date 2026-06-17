@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+
 namespace LiveCore.Api.Assets;
 
 /// <summary>
@@ -26,7 +28,9 @@ namespace LiveCore.Api.Assets;
 ///   <item>
 ///   OBJECT FIRST, THEN ROW. The storage object is deleted BEFORE the metadata row, so a row is never
 ///   removed while its object remains: cleanup never produces an orphaned object. If object deletion fails
-///   transiently, the row is kept and the next sweep retries it.
+///   transiently, the row is kept and the next sweep retries it. The row delete itself runs INSIDE the
+///   per-item guard (CORE-RES-003), so a concurrent-delete race — another sweep or replica removing the same
+///   abandoned row first — is treated as already-removed and never aborts the rest of the batch.
 ///   </item>
 ///   <item>
 ///   FAIL CLOSED WHEN STORAGE IS UNCONFIGURED. If the fail-closed <see cref="UnconfiguredAssetStorage"/> is
@@ -143,8 +147,38 @@ public sealed class ExpiredPendingAssetCleanupService
                 continue;
             }
 
-            // The object is gone (or never existed); now remove the metadata row. Its links cascade away.
-            await _assets.DeleteAsync(asset, cancellationToken).ConfigureAwait(false);
+            // The object is gone (or never existed); now remove the metadata row. The delete is INSIDE the
+            // per-item guard (CORE-RES-003) so a concurrent-delete race — another sweep or replica removing the
+            // same row first — cannot abort the rest of the batch.
+            try
+            {
+                await _assets.DeleteAsync(asset, cancellationToken).ConfigureAwait(false);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Another sweep/replica concurrently removed this same row between our candidate read and our
+                // delete (its delete affected zero rows here). The object was already deleted object-first, so the
+                // net state is correct — the row is gone either way — so treat it as already-removed and continue
+                // the batch rather than aborting. Identifier-only log (threat T7).
+                _logger.LogInformation(
+                    "Expired pending asset {AssetId} was concurrently removed by another sweep; continuing.",
+                    asset.Id);
+                continue;
+            }
+            catch (DbUpdateException exception)
+            {
+                // A transient persistence failure deleting the row (not a concurrent delete): keep the row for the
+                // next sweep to retry and continue, exactly as a transient object-delete failure does above. The
+                // object is already gone, so the next sweep's idempotent object delete is a no-op. Asset id only
+                // (threat T7).
+                failed++;
+                _logger.LogWarning(
+                    exception,
+                    "Failed to delete the metadata row for expired pending asset {AssetId}; keeping its record for retry.",
+                    asset.Id);
+                continue;
+            }
+
             removed++;
             _logger.LogInformation("Removed expired pending asset {AssetId}.", asset.Id);
         }
