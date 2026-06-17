@@ -394,11 +394,13 @@ responsible for:
 - keeping the OIDC discovery over HTTPS — `Authentication:Oidc:RequireHttpsMetadata`
   stays `true` in production (docs/07_SECURITY_THREAT_MODEL.md).
 
-The API host does not add an HTTPS redirect or HSTS middleware, because the public
-HTTPS boundary lives at the proxy; doing it in the app as well would either
-double-redirect or fight the proxy. If a deployment ever runs the API with **no**
-proxy in front, it must terminate TLS in Kestrel directly — that is a deployment
-choice, not a Core default.
+By default the API host adds neither an HTTPS redirect nor an HSTS header, because
+in this posture the public HTTPS boundary lives at the proxy; doing it in the app as
+well would either double-redirect or fight the proxy. A deployment that runs the API
+with **no** terminating proxy — terminating TLS in Kestrel directly — can instead
+turn on **app-level** HSTS and HTTPS redirection (see "App-level HSTS and HTTPS
+redirection" below, `HttpsSecurity:*`, CORE-SEC-005); both toggles are off by default
+so this posture is unchanged.
 
 ### OIDC audience is mandatory in Production (CORE-OPS-004)
 
@@ -489,6 +491,52 @@ an insecure request was secure (threat T7).
     more than one proxy in the chain (the default is one).
 - With nothing configured, only loopback is trusted, so an arbitrary internet
   client can never spoof the scheme or host.
+
+### App-level HSTS and HTTPS redirection (`HttpsSecurity:*`) (CORE-SEC-005)
+
+In the **default** TLS-terminating reverse-proxy posture the proxy owns the public
+HTTPS boundary — the `http`→`https` redirect and the `Strict-Transport-Security`
+(HSTS) header — and the app trusts the proxy's forwarded scheme (above), so the API
+adds **neither** of its own. Both toggles are therefore **off by default**, and a
+proxy-terminated deployment leaves them off (it is **disabled only where the
+documented proxy terminates TLS**).
+
+A deployment that runs the API with **no** terminating proxy — terminating TLS in
+Kestrel directly — turns them on so it still gets an app-level redirect and HSTS
+header. Both are ASP.NET Core's built-in middleware (`UseHttpsRedirection` /
+`UseHsts`, part of the shared framework — no new dependency), wired immediately
+**after** `UseForwardedHeaders`:
+
+- **HTTPS redirection (`HttpsSecurity:HttpsRedirection:Enabled`).** Redirects an
+  insecure `http` request to `https`. Because forwarded headers are restored first,
+  behind a trusted terminating proxy the app already sees `https` and the redirect
+  **does not fire**, so enabling it never double-redirects or fights the edge.
+  - `HttpsSecurity__HttpsRedirection__Enabled=true` turns it on (default `false`).
+  - `HttpsSecurity__HttpsRedirection__StatusCode` is the redirect status (default
+    `308` permanent; set `307` for a temporary redirect). A value outside `3xx`
+    falls back to the default.
+  - `HttpsSecurity__HttpsRedirection__Port` pins the target https port. When unset
+    the framework resolves it from `HTTPS_PORT`/`ASPNETCORE_HTTPS_PORT` or the
+    server's https address; if none can be determined the request passes through
+    un-redirected rather than redirecting to an unknown port.
+- **HSTS (`HttpsSecurity:Hsts:Enabled`).** Emits the `Strict-Transport-Security`
+  response header on a **secure** response, telling the browser to use `https` for
+  the configured max-age. The framework's default excluded hosts (loopback —
+  `localhost`/`127.0.0.1`/`[::1]`) are left intact, so local development is never
+  pinned to `https`.
+  - `HttpsSecurity__Hsts__Enabled=true` turns it on (default `false`).
+  - `HttpsSecurity__Hsts__MaxAgeDays` is the `max-age` in days (default `365`; a
+    non-positive value falls back to the default). One year is the conventional
+    production value and the floor for HSTS preload-list eligibility.
+  - `HttpsSecurity__Hsts__IncludeSubDomains` / `HttpsSecurity__Hsts__Preload`
+    (both default `false`) add the `includeSubDomains` / `preload` directives. Only
+    set `Preload=true` once every subdomain is committed to long-lived HTTPS — a
+    preload entry is hard to undo.
+
+The header and the redirect carry no tenant/principal/resource detail (threat T7),
+and transport security never widens server-side authorization — it is a coarse edge
+defense layered on the OIDC/tenant checks every endpoint already enforces, exactly
+like CORS and rate limiting.
 
 ### Constrained host header (`AllowedHosts`)
 
@@ -868,6 +916,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Cors:AllowedOrigins:N`             | `Cors__AllowedOrigins__0`          |   no   | for a cross-origin PWA  | API         | No cross-origin browser client allowed                  |
 | `ForwardedHeaders:KnownProxies:N` / `:KnownNetworks:N` | `ForwardedHeaders__KnownProxies__0` | no | behind a non-loopback proxy | API | Only loopback is a trusted proxy                  |
 | `AllowedHosts`                      | `AllowedHosts`                     |   no   | recommended in prod     | API         | `localhost;127.0.0.1`                                   |
+| `HttpsSecurity:HttpsRedirection:Enabled` / `Hsts:Enabled` | `HttpsSecurity__HttpsRedirection__Enabled`, `HttpsSecurity__Hsts__Enabled` | no | only without a TLS-terminating proxy | API | Both OFF: the proxy owns the redirect/HSTS (CORE-SEC-005) |
 | `RateLimiting:Enabled` / `Global:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 60/60s per webhook IP (CORE-SEC-001) |
 | `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |

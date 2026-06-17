@@ -1362,8 +1362,17 @@ default** (the full deployment guide is in `docs/13_SELF_HOSTING_REQUIREMENTS.md
   **trusted** proxy: loopback by default, plus any proxy IP / CIDR network named in
   configuration (e.g. `ForwardedHeaders__KnownNetworks__0=10.0.0.0/8`). With
   nothing configured only loopback is trusted, so an untrusted client cannot spoof
-  `X-Forwarded-Proto: https` (threat T7). TLS is terminated at the proxy; the app
-  adds no HTTPS redirect/HSTS of its own (that boundary lives at the edge).
+  `X-Forwarded-Proto: https` (threat T7). In the default proxy posture TLS is
+  terminated at the proxy and the app adds no HTTPS redirect/HSTS of its own (that
+  boundary lives at the edge).
+- **App-level HSTS and HTTPS redirection (`HttpsSecurity:*`, CORE-SEC-005).** Both
+  **off by default** (the proxy owns the redirect/HSTS, so the proxy posture is
+  unchanged). A deployment that terminates TLS in the app itself — running with no
+  terminating proxy — enables `HttpsSecurity__HttpsRedirection__Enabled` and/or
+  `HttpsSecurity__Hsts__Enabled` to get an app-level `http`→`https` redirect and a
+  `Strict-Transport-Security` header. They are wired right after `UseForwardedHeaders`,
+  so behind a trusted proxy the forwarded `https` scheme means an enabled redirect
+  never fires (no double-redirect, no fight with the edge).
 - **Constrained host header (`AllowedHosts`).** No longer `*` — the default permits
   only `localhost;127.0.0.1`, and a deployment sets its real public host(s) (e.g.
   `AllowedHosts=app.example.com`) so requests with an unexpected `Host` are

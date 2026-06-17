@@ -343,6 +343,39 @@ Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Pinned base images, SBOM and 
 - cryptographic build provenance/attestation (e.g. cosign) is a documented follow-up (it needs signing-key
   management out of scope here)
 
+## Transport security: HSTS and HTTPS redirection (CORE-SEC-005)
+
+The Core API is documented to run BEHIND a TLS-terminating reverse proxy (CORE-OPS-003;
+`docs/13_SELF_HOSTING_REQUIREMENTS.md`), where the public HTTPS boundary — the `http`→`https` redirect and the
+`Strict-Transport-Security` (HSTS) header — lives at the edge and the app sees the real client scheme through the
+trusted proxy's `X-Forwarded-Proto` (restored by `UseForwardedHeaders`, which runs FIRST in the pipeline). But
+before this story the host wired NEITHER `UseHsts` NOR `UseHttpsRedirection`, so TLS/HSTS was entirely delegated
+to an edge the app cannot verify exists: a deployment that runs WITHOUT a terminating proxy — terminating TLS in
+Kestrel directly — had no app-level transport-security defense at all.
+
+Risk:
+
+- a deployment that is not behind a TLS-terminating proxy serves the API with no `http`→`https` redirect and no
+  HSTS header, so a client can be downgraded to or kept on plain `http` (a man-in-the-middle / SSL-strip surface)
+
+Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "App-level HSTS and HTTPS redirection"):
+
+- ASP.NET Core's built-in middleware (`Microsoft.AspNetCore.HttpsPolicy`, part of the shared framework — NO new
+  dependency), each guarded by its own configuration toggle under `HttpsSecurity:*`:
+  - `UseHttpsRedirection` redirects an insecure `http` request to `https`; because `UseForwardedHeaders` runs
+    first, behind a trusted terminating proxy the app already sees `Request.Scheme == "https"`, so the redirect
+    does NOT fire — the proxy posture is unchanged (no double-redirect, no fight with the edge);
+  - `UseHsts` emits `Strict-Transport-Security` on a secure response (the framework's default excluded loopback
+    hosts are left intact, so local development is never pinned to `https`);
+- both toggles are **fail-safe OFF by default**, so the documented proxy posture (the proxy terminates TLS and
+  owns the redirect/HSTS) is the unchanged default; a deployment that terminates TLS in the app itself enables
+  them, so the toggles are disabled only where the documented proxy terminates TLS;
+- every value is read from configuration only (`HttpsSecurity:*`), and a misconfigured max-age / redirect status
+  / port falls back to the safe default rather than crashing the host or producing a degenerate redirect;
+- the header and the redirect carry no tenant/principal/resource detail (threat T7), and transport security is a
+  coarse edge defense layered ON TOP OF the OIDC/tenant authorization every endpoint already enforces — it never
+  widens authorization, exactly like the CORS allow-list and the rate limiter.
+
 ## Required test categories
 
 - foreign workspace ID denial

@@ -116,6 +116,19 @@ builder.Services.AddLiveCoreCors(builder.Configuration);
 // the scheme (threat T7).
 builder.Services.AddLiveCoreForwardedHeaders(builder.Configuration);
 
+// App-level HSTS and HTTPS redirection posture (CORE-SEC-005, the "Audit Integrity and Security Hardening"
+// epic). The Core API is documented to run behind a TLS-terminating reverse proxy (CORE-OPS-003), where the
+// public HTTPS boundary — the http->https redirect and the Strict-Transport-Security header — lives at the
+// edge; before this story the host wired NEITHER UseHsts NOR UseHttpsRedirection, so a deployment that runs
+// WITHOUT a terminating proxy (terminating TLS in Kestrel directly) had no app-level transport-security
+// defense. This registers the framework's HstsOptions/HttpsRedirectionOptions (part of the shared framework, NO
+// new dependency) configured from HttpsSecurity:*, and the resolved HttpsSecuritySettings the pipeline reads to
+// decide whether to add UseHsts/UseHttpsRedirection below. Both toggles are FAIL-SAFE OFF by default, so the
+// documented proxy posture is unchanged and a deployment opts in only when it terminates TLS itself. Because
+// UseForwardedHeaders runs first, behind a trusted proxy the app already sees the forwarded https scheme, so an
+// enabled redirect does not fire and does not fight the edge (threat T7).
+builder.Services.AddLiveCoreHttpsSecurity(builder.Configuration);
+
 // Graceful shutdown drain window (CORE-DEP-002, the "Deployment and Supply Chain" epic). On a rolling restart
 // the orchestrator sends this instance a termination signal; the host then stops accepting new connections and
 // DRAINS its in-flight work before exiting. This applies ONE explicit, tuned, configurable
@@ -1176,6 +1189,26 @@ if (missingRequiredSettings.Count > 0)
 // (framework default) and the configured known proxies/networks are trusted, so
 // an untrusted client cannot spoof the scheme (threat T7).
 app.UseForwardedHeaders();
+
+// App-level HSTS and HTTPS redirection (CORE-SEC-005). Wired here — immediately AFTER UseForwardedHeaders so
+// the request scheme already reflects the real client (the proxy's forwarded X-Forwarded-Proto when behind a
+// trusted terminating proxy), and BEFORE any other middleware — and each guarded by its own configuration
+// toggle, both fail-safe OFF by default. With the documented proxy posture (the default) neither runs, so it is
+// unchanged. When a deployment terminates TLS in the app itself it enables them: UseHsts emits
+// Strict-Transport-Security on a secure response, and UseHttpsRedirection redirects an insecure http request to
+// https — but behind a trusted proxy the forwarded https scheme means an enabled redirect never fires, so it
+// cannot double-redirect or fight the edge. The header/redirect carry no tenant/principal/resource detail
+// (threat T7; docs/13_SELF_HOSTING_REQUIREMENTS.md).
+var httpsSecurity = app.Services.GetRequiredService<HttpsSecurityConfiguration.HttpsSecuritySettings>();
+if (httpsSecurity.HstsEnabled)
+{
+    app.UseHsts();
+}
+
+if (httpsSecurity.HttpsRedirectionEnabled)
+{
+    app.UseHttpsRedirection();
+}
 
 // Request metrics (CORE-OBS-001) run first among the application middleware so they time the WHOLE request
 // (including authentication and authorization) and record its duration and server-error count onto
