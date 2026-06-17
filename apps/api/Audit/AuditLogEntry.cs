@@ -1912,6 +1912,26 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Discards a PRIOR append attempt's chain linkage so the append path can re-seal this entry on a retry
+    /// (CORE-CONC-008). The append now runs inside a unit of work (CORE-CONC-002,
+    /// <see cref="LiveCore.Api.Persistence.TransactionalUnitOfWork"/>), and under the retrying execution strategy
+    /// (CORE-CONC-003) a transient failure rolls the attempt's <c>audit_log_sequences</c> allocation back and
+    /// EF Core re-runs the WHOLE append from scratch — which must RE-allocate a fresh sequence and re-read the
+    /// predecessor visible on the retry, then re-seal. <see cref="Seal"/> deliberately throws on a second call to
+    /// catch a double-link bug, so <see cref="AuditLogRepository.AppendAsync"/> clears the rolled-back linkage
+    /// with this before re-sealing. It touches ONLY the chain linkage
+    /// (<see cref="Sequence"/>/<see cref="PreviousHash"/>/<see cref="EntryHash"/>); every recorded fact is left
+    /// untouched, so a retry can never alter an audited value. Called only by the append path on an entry that
+    /// has NOT yet been persisted (a persisted entry is protected by the tamper interceptor and the hash chain).
+    /// </summary>
+    internal void ClearChainLinkageForReseal()
+    {
+        Sequence = 0;
+        PreviousHash = null;
+        EntryHash = null;
+    }
+
+    /// <summary>
     /// Identifier-only representation that is safe for structured logs: the row id, tenant, workspace,
     /// action, actor, governed resource, target and the before/after state names. Every field is an
     /// identifier, an enum or a generic state name, never free-form content (threat T7 in

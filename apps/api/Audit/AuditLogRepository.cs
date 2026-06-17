@@ -26,6 +26,46 @@ internal sealed class AuditLogRepository : IAuditLogRepository
     {
         ArgumentNullException.ThrowIfNull(entry);
 
+        // UNIT OF WORK (CORE-CONC-008). A chained append must hold the per-tenant audit_log_sequences row lock
+        // from the allocation through the insert COMMIT. The lock is only held until its enclosing transaction
+        // commits, so the allocation, the previous-hash read and the insert must all run inside ONE transaction;
+        // otherwise a concurrent same-tenant append can allocate the next number, read a predecessor that has not
+        // committed yet and seal off a FORKED chain — which the AuditLogChainVerifier (CORE-SEC-003) later reports
+        // as tampering, a false positive that masks real detection.
+        //
+        // When a CORE-CONC-002 command already opened a transaction on this context — the reveal/hide, session,
+        // deletion, retention and store handlers append from INSIDE their TransactionalUnitOfWork — this append
+        // simply ENROLS in that ambient transaction, so its lock is already held until the command commits (the
+        // behaviour before this story). When there is no ambient transaction — the previously direct appends:
+        // organization/workspace member changes, the personal-data export, the quota-exceeded fact — it opens its
+        // OWN unit of work so the same guarantee holds. Reusing the existing TransactionalUnitOfWork (CORE-CONC-002)
+        // keeps the append correct under the retrying execution strategy (CORE-CONC-003) like every other write.
+        if (_dbContext.Database.CurrentTransaction is not null)
+        {
+            await AppendCoreAsync(entry, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await new TransactionalUnitOfWork(_dbContext)
+            .ExecuteAsync(
+                async transactionCancellationToken =>
+                {
+                    await AppendCoreAsync(entry, transactionCancellationToken).ConfigureAwait(false);
+                    return true;
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Performs the append itself on the (ambient or freshly opened) transaction set up by
+    /// <see cref="AppendAsync"/>: a platform-level fact is inserted unsealed, while a tenant fact is sealed into
+    /// the per-tenant hash chain and inserted. It never opens or commits a transaction of its own, so it is the
+    /// single body run both when enrolling in a CORE-CONC-002 command's transaction and inside this repository's
+    /// own unit of work (CORE-CONC-008).
+    /// </summary>
+    private async Task AppendCoreAsync(AuditLogEntry entry, CancellationToken cancellationToken)
+    {
         // PLATFORM-LEVEL fact (CORE-SPEC-002): a deployment-spanning, not tenant-scoped audit fact (a purchase
         // grant/revocation, a purchase verification or a store notification, docs/21) carries no organization. The
         // per-tenant tamper-evident hash chain (CORE-SEC-003) is the per-TENANT append sequence, so a tenant-less
@@ -40,13 +80,22 @@ internal sealed class AuditLogRepository : IAuditLogRepository
             return;
         }
 
+        // RETRY SAFETY (CORE-CONC-008): if a PRIOR attempt of this append already sealed the entry but its
+        // transaction rolled back (a transient failure under the retrying strategy, CORE-CONC-003), discard that
+        // stale linkage so this attempt re-seals with the freshly RE-allocated sequence and the predecessor
+        // visible now. The first attempt's entry is unsealed, so this is a no-op then.
+        if (entry.EntryHash is not null)
+        {
+            entry.ClearChainLinkageForReseal();
+        }
+
         // TAMPER-EVIDENT CHAIN (CORE-SEC-003). Allocate the per-tenant, gap-free, strictly monotonic APPEND
         // sequence and seal the entry into the tenant's hash chain BEFORE the insert. The allocation takes a row
-        // lock on the tenant's audit_log_sequences counter, so two concurrent appends to the SAME tenant
-        // serialize — the second blocks until the first commits and then chains off the just-committed entry
-        // rather than forking the chain. Because the allocation and the insert run on the same context, for the
-        // transactional commands (CORE-CONC-002) they commit or roll back atomically: a rollback reclaims the
-        // number and the chain stays gap-free.
+        // lock on the tenant's audit_log_sequences counter; because the whole append runs inside one transaction
+        // (CORE-CONC-008) that lock is held until the insert commits, so two concurrent appends to the SAME tenant
+        // serialize — the second blocks until the first commits and then chains off the just-committed entry rather
+        // than forking the chain. The allocation and the insert run on the same context/transaction, so they commit
+        // or roll back atomically: a rollback reclaims the number and the chain stays gap-free.
         var sequence = await AllocateNextSequenceAsync(organizationId, cancellationToken).ConfigureAwait(false);
         var previousHash = await ReadPreviousHashAsync(organizationId, sequence, cancellationToken)
             .ConfigureAwait(false);

@@ -173,6 +173,35 @@ detects anything that bypasses them):
 The existing CORE-SEC-003 append path and per-tenant hash chain are unchanged and keep working: the verifier
 still verifies a clean chain and still detects a tampered or deleted row.
 
+## Audit appends inside a unit of work (CORE-CONC-008)
+
+The per-tenant hash chain (CORE-SEC-003) is only fork-proof if the append's `audit_log_sequences` row lock is
+held until the insert commits. That lock lives only as long as its enclosing transaction, so the allocation, the
+previous-hash read and the insert must run inside ONE transaction. `AuditLogRepository.AppendAsync` was atomic
+when it ran INSIDE a CORE-CONC-002 unit of work (the reveal/hide, session, deletion, retention and store
+commands), but the previously DIRECT appends — an organization/workspace member change, a personal-data export,
+a quota-exceeded fact — allocated the sequence in its own auto-committed statement, releasing the lock BEFORE the
+insert. Two concurrent same-tenant appends could then each read a predecessor the other had not committed yet and
+seal off a FORKED chain — which the `AuditLogChainVerifier` later reports as tampering: a **false positive that
+masks real detection**.
+
+This story closes that window by making the append itself transactional, paired with CORE-SEC-004:
+
+- **Every append runs inside a unit of work.** `AuditLogRepository.AppendAsync` now reuses the CORE-CONC-002
+  `TransactionalUnitOfWork`: when a command has already opened a transaction on the context it ENROLS in it
+  (unchanged behaviour); otherwise it opens its OWN unit of work, so the sequence allocation, the previous-hash
+  read and the insert always commit together. The row lock is held until the insert commits, so a concurrent
+  same-tenant append blocks on it and chains off the just-committed predecessor instead of forking. A platform-
+  level (null-organization) fact joins no chain, so it is simply inserted; the tenant-scoped reads still never
+  return it.
+- **Correct under retry.** Because the append now runs inside the retrying execution strategy (CORE-CONC-003), a
+  transient failure rolls the attempt's sequence allocation back and re-runs the whole append; the entry's
+  rolled-back chain linkage is discarded so the retry re-seals with the freshly re-allocated sequence and the
+  predecessor visible now (the chain stays gap-free).
+
+The result: many concurrent same-tenant audited actions produce a single unbroken, gap-free hash chain — no
+fork, and no false-positive tamper detection.
+
 ## Data-subject erasure (CORE-PRIV-001)
 
 A data subject has a right to erasure (GDPR Art.17), but until this story Core had **no** erasure path: the
