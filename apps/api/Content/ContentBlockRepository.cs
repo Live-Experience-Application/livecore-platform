@@ -141,6 +141,56 @@ internal sealed class ContentBlockRepository : IContentBlockRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<ContentBlock>> ListPageBySceneAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sceneId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored scene's content blocks, so the lookup fails fast (mirrors the
+        // unbounded list).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sceneId == Guid.Empty)
+        {
+            throw new ArgumentException("Scene id must not be empty.", nameof(sceneId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same tenant-, workspace- AND scene-scoped, deterministic (UUIDv7 id) read as ListBySceneAsync
+        // (predicate leads with organization_id then workspace_id then scene_id, threat T5/T1), but bounded by
+        // Skip/Take so an unbounded list is never materialized (threat T9).
+        return await _dbContext.ContentBlocks
+            .Where(contentBlock => contentBlock.OrganizationId == organizationId
+                && contentBlock.WorkspaceId == workspaceId
+                && contentBlock.SceneId == sceneId)
+            .OrderBy(contentBlock => contentBlock.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<ContentBlockAddResult> AddAsync(
         ContentBlock contentBlock,
         CancellationToken cancellationToken)

@@ -87,6 +87,27 @@ public interface IWorkspaceRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the ACTIVE workspaces in the given organization that the given subject is a
+    /// member of, in the same deterministic (UUIDv7 id) order as <see cref="ListByMemberAsync"/>, limited to
+    /// <paramref name="take"/> rows starting at <paramref name="skip"/>, backing the bounded workspace list
+    /// route (<c>GET /api/v1/workspaces</c>, CORE-DX-003). It applies the same deny-by-default scoping
+    /// (organization AND a membership row for the subject; archived workspaces excluded), so a workspace the
+    /// subject is not a member of, and any workspace in another organization, are never returned (threat T5/T1).
+    /// The caller over-fetches one extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c> without a second
+    /// COUNT. Bounding the read means a single list response can never materialize an unbounded array (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or subject id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<Workspace>> ListPageByMemberAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new workspace. Returns
     /// <see cref="WorkspaceAddResult.DuplicateSlug"/> when a workspace with the
     /// same slug already exists in the same organization (enforced by the unique

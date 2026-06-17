@@ -101,11 +101,13 @@ internal static class EntityEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/workspaces/{workspaceId}/entities?organizationSlug={slug}
+    // GET /api/v1/workspaces/{workspaceId}/entities?organizationSlug={slug}&limit={n}&offset={n}
     private static async Task<IResult> ListEntitiesAsync(
         HttpContext httpContext,
         string workspaceId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -152,16 +154,36 @@ internal static class EntityEndpoints
             return HiddenEntity();
         }
 
+        // Authorized. Only now validate the optional paging parameters, so a non-member never receives
+        // request-shape feedback (mirrors the audit read): a present-but-malformed limit/offset is a 400, an
+        // absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
         // The entities are returned in the deterministic (UUIDv7) id order the repository enforces, PROJECTED
         // BY ROLE: an entity IS content, so the host-content roles (Owner/Admin/Host/CoHost) receive the full
         // host shape and every other role (audience, audit, undefined) the stripped participant shape
-        // (EntityProjection). The SET of entities is unchanged — only the per-entity SHAPE differs by role
-        // (deciding WHICH entities an audience may see is the entity-search/Visibility concern, not this).
-        var entities = await deps.Entities
-            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+        // (EntityProjection). The per-entity SHAPE differs by role (deciding WHICH entities an audience may see
+        // is the entity-search/Visibility concern, not this).
+        //
+        // BOUNDED (CORE-DX-003): the page is read through the tenant- and workspace-scoped paged repository,
+        // fetching ONE extra row so HasMore is set without a second COUNT; the trimmed page is then
+        // role-projected into the PageResponse envelope. A list can never return the whole table (threat T9).
+        var rows = await deps.Entities
+            .ListPageByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
 
-        return Results.Ok(EntityProjection.Project(entities, member.Role));
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit).ToArray() : rows;
+
+        return Results.Ok(EntityProjection.ProjectPage(pageRows, member.Role, pageOffset, pageLimit, hasMore));
     }
 
     // GET /api/v1/workspaces/{workspaceId}/entities/{entityId}?organizationSlug={slug}

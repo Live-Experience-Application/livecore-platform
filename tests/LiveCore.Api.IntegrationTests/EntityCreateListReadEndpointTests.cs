@@ -413,7 +413,7 @@ public sealed class EntityCreateListReadEndpointTests
                 .OrderBy(n => n, StringComparer.Ordinal),
             properties.OrderBy(n => n, StringComparer.Ordinal));
 
-        var entities = Deserialize<EntityDto[]>(body);
+        var entities = Deserialize<PageDto<EntityDto>>(body).Items;
         var entity = Assert.Single(entities);
         Assert.Equal("Lantern", entity.Name);
         Assert.Equal(workspaceId, entity.WorkspaceId);
@@ -467,7 +467,7 @@ public sealed class EntityCreateListReadEndpointTests
         Assert.DoesNotContain(_attributeMarker, body, StringComparison.Ordinal);
 
         // The participant still receives the entity (the SET is unchanged; only the SHAPE is stripped).
-        var entities = Deserialize<ParticipantEntityDto[]>(body);
+        var entities = Deserialize<PageDto<ParticipantEntityDto>>(body).Items;
         var entity = Assert.Single(entities);
         Assert.Equal("Lantern", entity.Name);
         Assert.NotEqual(Guid.Empty, entity.Id);
@@ -971,9 +971,10 @@ public sealed class EntityCreateListReadEndpointTests
 
     private static async Task<EntityDto[]> ReadHostEntitiesAsync(HttpResponseMessage response)
     {
-        var dtos = await response.Content.ReadFromJsonAsync<EntityDto[]>(_json);
-        Assert.NotNull(dtos);
-        return dtos;
+        // The entity list is a bounded page envelope (CORE-DX-003): read the page and return its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<EntityDto>>(_json);
+        Assert.NotNull(page);
+        return page.Items.ToArray();
     }
 
     private static async Task<EntityDto> ReadEntityAsync(HttpResponseMessage response)
@@ -991,14 +992,18 @@ public sealed class EntityCreateListReadEndpointTests
     }
 
     /// <summary>
-    /// Returns the EXACT set of top-level JSON property names on the FIRST element of a JSON-array response
-    /// body. The shape-leak guard that fails if a host-only field is ever added to the participant projection.
+    /// Returns the EXACT set of top-level JSON property names on the FIRST item of an entity LIST response
+    /// body. The body is the bounded page envelope (CORE-DX-003), so the entities are under its <c>items</c>
+    /// array; this digs into <c>items[0]</c>. The shape-leak guard that fails if a host-only field is ever
+    /// added to the participant projection.
     /// </summary>
     private static string[] FirstElementPropertyNames(string body)
     {
         using var document = JsonDocument.Parse(body);
-        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
-        var first = document.RootElement[0];
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+        var items = document.RootElement.GetProperty("items");
+        Assert.Equal(JsonValueKind.Array, items.ValueKind);
+        var first = items[0];
         Assert.Equal(JsonValueKind.Object, first.ValueKind);
         return first.EnumerateObject().Select(p => p.Name).ToArray();
     }

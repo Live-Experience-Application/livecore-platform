@@ -174,6 +174,52 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceInvitation>> ListPendingPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a tenant or workspace, so the lookup fails fast (mirrors the unbounded
+        // list).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same tenant- AND workspace-scoped, Pending-only, oldest-first (UUIDv7 id) read as
+        // ListPendingByWorkspaceAsync (threats T1/T5), but bounded by Skip/Take so an unbounded list is never
+        // materialized (threat T9). Tracking-free (it never mutates); the endpoint projects to a PII-safe DTO
+        // that never emits the token hash (threats T6/T7).
+        return await _dbContext.WorkspaceInvitations
+            .AsNoTracking()
+            .Where(invitation => invitation.OrganizationId == organizationId
+                && invitation.WorkspaceId == workspaceId
+                && invitation.Status == WorkspaceInvitationStatus.Pending)
+            .OrderBy(invitation => invitation.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task UpdateAsync(WorkspaceInvitation invitation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(invitation);

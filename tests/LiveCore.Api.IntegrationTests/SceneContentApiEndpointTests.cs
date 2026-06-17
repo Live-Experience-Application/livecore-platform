@@ -254,8 +254,8 @@ public sealed class SceneContentApiEndpointTests
             new[] { "id", "organizationId", "workspaceId", "title", "order", "createdAt", "updatedAt" }
                 .OrderBy(n => n, StringComparer.Ordinal),
             properties.OrderBy(n => n, StringComparer.Ordinal));
-        // The full host DTO deserializes with its boundaries populated.
-        var scenes = Deserialize<SceneDto[]>(body);
+        // The full host DTO deserializes with its boundaries populated (from the page envelope's items).
+        var scenes = Deserialize<PageDto<SceneDto>>(body).Items;
         var scene = Assert.Single(scenes);
         Assert.Equal("Opening", scene.Title);
         Assert.Equal(workspaceId, scene.WorkspaceId);
@@ -314,8 +314,8 @@ public sealed class SceneContentApiEndpointTests
 
         // The participant shape still deserializes its audience-safe fields, and the
         // participant still receives ALL of the workspace's scenes (the SET is
-        // unchanged; only the SHAPE is stripped).
-        var scenes = Deserialize<ParticipantSceneDto[]>(body);
+        // unchanged; only the SHAPE is stripped). The scenes are under the page envelope's items.
+        var scenes = Deserialize<PageDto<ParticipantSceneDto>>(body).Items;
         var scene = Assert.Single(scenes);
         Assert.Equal("Opening", scene.Title);
         Assert.Equal(0, scene.Order);
@@ -1116,9 +1116,10 @@ public sealed class SceneContentApiEndpointTests
 
     private static async Task<SceneDto[]> ReadHostScenesAsync(HttpResponseMessage response)
     {
-        var dtos = await response.Content.ReadFromJsonAsync<SceneDto[]>(_json);
-        Assert.NotNull(dtos);
-        return dtos;
+        // The scene list is a bounded page envelope (CORE-DX-003): read the page and return its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<SceneDto>>(_json);
+        Assert.NotNull(page);
+        return page.Items.ToArray();
     }
 
     private static async Task<SceneDto> ReadSceneAsync(HttpResponseMessage response)
@@ -1138,14 +1139,17 @@ public sealed class SceneContentApiEndpointTests
 
     /// <summary>
     /// Returns the EXACT set of top-level JSON property names on the FIRST scene of a
-    /// scene-list response body (the body is a JSON array). This is the shape-leak guard
-    /// that fails if a host-only field is ever added to the participant projection.
+    /// scene-list response body. The body is the bounded page envelope (CORE-DX-003), so the scenes are under
+    /// its <c>items</c> array; this digs into <c>items[0]</c>. This is the shape-leak guard that fails if a
+    /// host-only field is ever added to the participant projection.
     /// </summary>
     private static string[] FirstScenePropertyNames(string body)
     {
         using var document = JsonDocument.Parse(body);
-        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
-        var first = document.RootElement[0];
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+        var items = document.RootElement.GetProperty("items");
+        Assert.Equal(JsonValueKind.Array, items.ValueKind);
+        var first = items[0];
         Assert.Equal(JsonValueKind.Object, first.ValueKind);
         return first.EnumerateObject().Select(p => p.Name).ToArray();
     }

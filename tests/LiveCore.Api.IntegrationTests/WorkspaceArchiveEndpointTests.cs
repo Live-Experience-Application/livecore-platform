@@ -424,9 +424,10 @@ public sealed class WorkspaceArchiveEndpointTests
     private static async Task<IReadOnlyList<WorkspaceDto>> ReadWorkspacesAsync(HttpResponseMessage response)
     {
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var dto = await response.Content.ReadFromJsonAsync<List<WorkspaceDto>>(_json);
-        Assert.NotNull(dto);
-        return dto;
+        // The list is a bounded page envelope (CORE-DX-003): read the page and return its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<WorkspaceDto>>(_json);
+        Assert.NotNull(page);
+        return page.Items;
     }
 
     private static async Task AssertWorkspaceStatusAsync(

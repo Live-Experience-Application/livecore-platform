@@ -29,6 +29,7 @@ export const VERSION = "0.1.0";
 
 export * from "./scalars.js";
 export * from "./http.js";
+export * from "./pagination.js";
 export * from "./problem-details.js";
 export * from "./enums.js";
 export * from "./events.js";

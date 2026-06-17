@@ -13,6 +13,7 @@ import type {
   ContentBlockType,
   CreateWorkspaceRequest,
   MembershipRole,
+  PageResponse,
   ProblemCode,
   ProblemDetails,
   PurchaseProvider,
@@ -152,6 +153,15 @@ export const workspaceExample: WorkspaceResponse = {
   createdAt: "2026-06-13T00:00:00+00:00",
   updatedAt: "2026-06-13T00:00:00+00:00",
   version: "8147",
+};
+
+// The bounded-list page envelope (CORE-DX-003) wraps any item shape with the stable
+// offset/limit/hasMore/items fields.
+export const workspacePageExample: PageResponse<WorkspaceResponse> = {
+  offset: 0,
+  limit: 50,
+  hasMore: true,
+  items: [workspaceExample],
 };
 
 export const adEligibilityExample: AdEligibilityResponse = {

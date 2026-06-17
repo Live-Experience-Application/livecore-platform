@@ -126,6 +126,52 @@ internal sealed class SessionRepository : ISessionRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Session>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's sessions, so the lookup
+        // fails fast instead of returning an arbitrary set of rows (mirrors the
+        // unbounded list and the audit page).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same tenant- AND workspace-scoped, deterministically ordered read as
+        // ListByWorkspaceAsync (predicate leads with organization_id then workspace_id, threat T5/T1; ordered by
+        // the time-ordered UUIDv7 id, which is provider-independent — SQLite cannot ORDER BY a DateTimeOffset),
+        // but bounded by Skip/Take so an unbounded list is never materialized (threat T9). Skip/Take translate to
+        // the provider's OFFSET/LIMIT.
+        return await _dbContext.Sessions
+            .Where(session => session.OrganizationId == organizationId
+                && session.WorkspaceId == workspaceId)
+            .OrderBy(session => session.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<SessionAddResult> AddAsync(Session session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);

@@ -93,8 +93,10 @@ public sealed class WorkspacePendingInvitationListEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        var invitations = await response.Content.ReadFromJsonAsync<PendingWorkspaceInvitationResponse[]>();
-        Assert.NotNull(invitations);
+        // The list is a bounded page envelope (CORE-DX-003): read the page and assert over its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<PendingWorkspaceInvitationResponse>>();
+        Assert.NotNull(page);
+        var invitations = page.Items;
 
         // Exactly the two PENDING invitations, never the accepted or revoked ones.
         Assert.Equal(new[] { pendingOneId, pendingTwoId }.OrderBy(id => id), invitations.Select(i => i.Id).OrderBy(id => id));
@@ -138,9 +140,9 @@ public sealed class WorkspacePendingInvitationListEndpointTests
         var response = await client.GetAsync(ListRoute(workspaceId, _orgA));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var invitations = await response.Content.ReadFromJsonAsync<PendingWorkspaceInvitationResponse[]>();
-        Assert.NotNull(invitations);
-        Assert.Empty(invitations);
+        var page = await response.Content.ReadFromJsonAsync<PageDto<PendingWorkspaceInvitationResponse>>();
+        Assert.NotNull(page);
+        Assert.Empty(page.Items);
     }
 
     // ---- 403: authenticated org member without Owner/Admin -------------------

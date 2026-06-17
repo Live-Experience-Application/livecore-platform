@@ -98,6 +98,29 @@ public interface IContentBlockRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given scene's content blocks (of the given workspace, owned by the given
+    /// organization) in the same deterministic (UUIDv7 id) order as <see cref="ListBySceneAsync"/>, limited to
+    /// <paramref name="take"/> rows starting at <paramref name="skip"/>, backing the bounded content-block list
+    /// route (<c>GET /api/v1/scenes/{sceneId}/content-blocks</c>, CORE-DX-003). The page is exactly tenant-,
+    /// workspace- AND scene-scoped (the predicate leads with <c>organization_id</c> then matches
+    /// <c>workspace_id</c> and <c>scene_id</c>), so a foreign tenant's, workspace's or scene's blocks are NEVER
+    /// returned (threat T5/T1). The caller over-fetches one extra row (<c>take = limit + 1</c>) to decide
+    /// <c>hasMore</c> without a second COUNT. Bounding the read means a single list response can never
+    /// materialize the whole table (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id, workspace id or scene id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<ContentBlock>> ListPageBySceneAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sceneId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new content block. A content block has no natural key (it is
     /// identified only by its surrogate id), so there is no uniqueness outcome to
     /// report; the result is always <see cref="ContentBlockAddResult.Added"/> on

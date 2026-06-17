@@ -131,6 +131,7 @@ internal static class SessionEndpoints
             .MapGroup("/api/v1/sessions")
             .RequireAuthorization();
 
+        byId.MapGet("/{sessionId}", GetSessionByIdAsync);
         byId.MapPost("/{sessionId}/start", StartSessionAsync);
         byId.MapPost("/{sessionId}/end", EndSessionAsync);
         byId.MapPost("/{sessionId}/cancel", CancelSessionAsync);
@@ -149,11 +150,13 @@ internal static class SessionEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/workspaces/{workspaceId}/sessions?organizationSlug={slug}
+    // GET /api/v1/workspaces/{workspaceId}/sessions?organizationSlug={slug}&limit={n}&offset={n}
     private static async Task<IResult> ListSessionsAsync(
         HttpContext httpContext,
         string workspaceId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -206,6 +209,19 @@ internal static class SessionEndpoints
             return HiddenWorkspace();
         }
 
+        // Authorized. Only now validate the optional paging parameters, so a non-member never receives
+        // request-shape feedback (mirrors the audit read): a present-but-malformed limit/offset is a 400, an
+        // absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
         // The "Filtered" note on this route (csv/api_routes.csv) is the tenant- AND
         // workspace-scoping the repository enforces: the list never crosses the tenant
         // or workspace boundary, so a member only ever sees their own workspace's
@@ -217,12 +233,100 @@ internal static class SessionEndpoints
         // Sessions themselves are not gated by visibility rules (those govern
         // scenes/content/entities, not the session aggregate); deciding which session
         // CONTENT an audience may see remains the Visibility module's concern.
-        var sessions = await deps.Sessions
-            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+        //
+        // BOUNDED (CORE-DX-003): the page is read through the tenant- and workspace-scoped paged repository,
+        // fetching ONE extra row so HasMore is set without a second COUNT; if it comes back, trim it off and
+        // report that a further page exists. A list can never return the whole table (threat T9).
+        var rows = await deps.Sessions
+            .ListPageByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
 
-        var response = sessions.Select(SessionResponse.From).ToArray();
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
+
+        var response = PageResponse.From(
+            pageRows.Select(SessionResponse.From).ToArray(), pageOffset, pageLimit, hasMore);
         return Results.Ok(response);
+    }
+
+    // GET /api/v1/sessions/{sessionId}?organizationSlug={slug}
+    //
+    // Reads ONE session by id within the query-supplied organization (CORE-DX-003, the by-session-id read of
+    // docs/08_API_CONTRACTS.md). The flow mirrors the lifecycle command pipeline (fail-closed,
+    // load-then-authorize, hidden-404): the tenant comes from the required organizationSlug query, the session
+    // is loaded within that tenant via FindByIdInOrganizationAsync, its own workspace is discovered from the
+    // loaded row AFTER the tenant boundary is enforced, and the caller's membership in that workspace is checked.
+    // Like the session LIST, a session is a single generic resource with no host-vs-participant content split
+    // (SessionResponse carries only ids, the title, the lifecycle status and the server timestamps; threat T7),
+    // so "role-projected" here means membership-gated to the session's workspace and projected through the SAME
+    // generic SessionResponse the list uses — any workspace member receives that same safe shape. A
+    // foreign/unknown session, or one in a workspace the caller does not belong to, is an indistinguishable
+    // hidden 404 (threats T1/T5).
+    private static async Task<IResult> GetSessionByIdAsync(
+        HttpContext httpContext,
+        string sessionId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the start/end/cancel commands.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed session id can never address a stored session; treat it as hidden (404), never echoing why.
+        if (!Guid.TryParse(sessionId, out var sessionGuid) || sessionGuid == Guid.Empty)
+        {
+            return HiddenSession();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the session as 404 so a foreign or non-existent tenant is
+            // indistinguishable from a missing session (threat T5).
+            return HiddenSession();
+        }
+
+        var context = resolution.Context;
+
+        // Load the session WITHIN the resolved tenant. The lookup leads with the organization id, so a session
+        // in another tenant is never returned even when the surrogate id matches; a cross-tenant or unknown
+        // session is hidden as 404 (threats T1/T5). The session's own workspace id is then discovered from the
+        // loaded row, AFTER the tenant boundary has been enforced.
+        var session = await deps.Sessions
+            .FindByIdInOrganizationAsync(context.OrganizationId, sessionGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (session is null)
+        {
+            return HiddenSession();
+        }
+
+        // Object-level authorization: the caller must be a member of the SESSION'S own workspace. The read is
+        // allowed to ANY membership role ("workspace members", the same rule as the session list); a non-member
+        // is hidden as 404 (not 403) so resource existence is not leaked (threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, session.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenSession();
+        }
+
+        return Results.Ok(SessionResponse.From(session));
     }
 
     // POST /api/v1/workspaces/{workspaceId}/sessions

@@ -670,9 +670,10 @@ public sealed class SessionCreateListEndpointTests
 
     private static async Task<IReadOnlyList<SessionDto>> ReadSessionListAsync(HttpResponseMessage response)
     {
-        var dtos = await response.Content.ReadFromJsonAsync<List<SessionDto>>(_json);
-        Assert.NotNull(dtos);
-        return dtos;
+        // The list is a bounded page envelope (CORE-DX-003): read the page and return its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<SessionDto>>(_json);
+        Assert.NotNull(page);
+        return page.Items;
     }
 
     private sealed record SessionDto(

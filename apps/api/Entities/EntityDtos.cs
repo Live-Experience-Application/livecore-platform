@@ -222,6 +222,30 @@ internal static class EntityProjection
     }
 
     /// <summary>
+    /// Projects ONE BOUNDED PAGE of entities into the role-appropriate
+    /// <see cref="LiveCore.Api.PageResponse{T}"/> envelope (CORE-DX-003), boxed as <see cref="object"/> so the
+    /// endpoint can return either the host (<see cref="EntityResponse"/>) or the participant
+    /// (<see cref="ParticipantEntityResponse"/>) page as the response body. The role split is the SAME
+    /// fail-closed <see cref="ReceivesHostShape"/> classification the unbounded <see cref="Project"/> uses, so
+    /// the per-entity SHAPE never diverges between the bounded and unbounded list; only the SET is now bounded.
+    /// The caller has already resolved the page bounds and trimmed <paramref name="entities"/> to at most
+    /// <paramref name="limit"/> items and computed <paramref name="hasMore"/>.
+    /// </summary>
+    public static object ProjectPage(
+        IReadOnlyList<Entity> entities,
+        MembershipRole role,
+        int offset,
+        int limit,
+        bool hasMore)
+    {
+        ArgumentNullException.ThrowIfNull(entities);
+
+        return ReceivesHostShape(role)
+            ? PageResponse.From(entities.Select(EntityResponse.From).ToArray(), offset, limit, hasMore)
+            : PageResponse.From(entities.Select(ParticipantEntityResponse.From).ToArray(), offset, limit, hasMore);
+    }
+
+    /// <summary>
     /// Projects a SINGLE entity into the role-appropriate response, boxed as <see cref="object"/> so the
     /// by-id read can return either the full host shape (<see cref="EntityResponse"/>) or the stripped
     /// participant shape (<see cref="ParticipantEntityResponse"/>) — the SAME host-vs-participant DTO split

@@ -12,6 +12,7 @@ import type {
   EntityResponse,
   EntityTypeResponse,
   ExportArtifactResponse,
+  PageResponse,
   ParticipantEntityResponse,
   ParticipantSceneResponse,
   ProblemDetails,
@@ -73,8 +74,12 @@ export type VersionIsSemanticVersion = Assert<
 
 // --- Each method returns the EXACT contract response type. ----------------------
 
+// The workspace list is a bounded page envelope (CORE-DX-003), never an unbounded array.
 export type ListWorkspacesReturn = Assert<
-  Equal<Awaited<ReturnType<WorkspacesClient["list"]>>, WorkspaceResponse[]>
+  Equal<
+    Awaited<ReturnType<WorkspacesClient["list"]>>,
+    PageResponse<WorkspaceResponse>
+  >
 >;
 
 export type CreateWorkspaceReturn = Assert<
@@ -142,21 +147,21 @@ export type StoreReturn = Assert<
   >
 >;
 
-// --- The scene list is the role-projected union, not a single shape. ------------
+// --- The scene list is the role-projected union of bounded pages (CORE-DX-003). ---
 
 export type SceneListReturn = Assert<
   Equal<
     Awaited<ReturnType<ScenesClient["list"]>>,
-    SceneResponse[] | ParticipantSceneResponse[]
+    PageResponse<SceneResponse> | PageResponse<ParticipantSceneResponse>
   >
 >;
 
-// --- The entity list/read are the role-projected union; create is the host shape.
+// --- The entity list is the role-projected union of bounded pages; create is host. ---
 
 export type EntityListReturn = Assert<
   Equal<
     Awaited<ReturnType<EntitiesClient["list"]>>,
-    EntityResponse[] | ParticipantEntityResponse[]
+    PageResponse<EntityResponse> | PageResponse<ParticipantEntityResponse>
   >
 >;
 

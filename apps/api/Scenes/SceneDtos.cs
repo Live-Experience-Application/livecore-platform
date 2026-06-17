@@ -277,6 +277,30 @@ internal static class SceneProjection
     }
 
     /// <summary>
+    /// Projects ONE BOUNDED PAGE of scenes into the role-appropriate
+    /// <see cref="LiveCore.Api.PageResponse{T}"/> envelope (CORE-DX-003), boxed as <see cref="object"/> so the
+    /// endpoint can return either the host (<see cref="SceneResponse"/>) or the participant
+    /// (<see cref="ParticipantSceneResponse"/>) page as the response body. The role split is the SAME fail-closed
+    /// <see cref="ReceivesHostShape"/> classification the unbounded <see cref="Project"/> uses, so the per-scene
+    /// SHAPE never diverges between the bounded and unbounded list; only the SET is now bounded. The caller has
+    /// already resolved the page bounds and trimmed <paramref name="scenes"/> to at most <paramref name="limit"/>
+    /// items and computed <paramref name="hasMore"/>.
+    /// </summary>
+    public static object ProjectPage(
+        IReadOnlyList<Scene> scenes,
+        MembershipRole role,
+        int offset,
+        int limit,
+        bool hasMore)
+    {
+        ArgumentNullException.ThrowIfNull(scenes);
+
+        return ReceivesHostShape(role)
+            ? PageResponse.From(scenes.Select(SceneResponse.From).ToArray(), offset, limit, hasMore)
+            : PageResponse.From(scenes.Select(ParticipantSceneResponse.From).ToArray(), offset, limit, hasMore);
+    }
+
+    /// <summary>
     /// Projects a SINGLE scene into the role-appropriate response, boxed as
     /// <see cref="object"/> so the by-scene-id read (<c>GET /api/v1/scenes/{sceneId}</c>,
     /// CORE-API-007) can return either the full host shape (<see cref="SceneResponse"/>) or

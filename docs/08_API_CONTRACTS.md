@@ -103,6 +103,7 @@ POST   /api/v1/workspaces/{workspaceId}/invitations/accept
 DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}
 GET    /api/v1/workspaces/{workspaceId}/sessions
 POST   /api/v1/workspaces/{workspaceId}/sessions
+GET    /api/v1/sessions/{sessionId}
 POST   /api/v1/sessions/{sessionId}/start
 POST   /api/v1/sessions/{sessionId}/end
 POST   /api/v1/sessions/{sessionId}/cancel
@@ -148,6 +149,36 @@ Reveal and hide (un-reveal) execution must be idempotent for client retry.
 
 A repeated reveal or hide request with the same idempotency key must not create duplicate events.
 Reveal and hide use separate idempotency scopes, so the same key value may pair a reveal with its hide.
+
+## Pagination (CORE-DX-003)
+
+A list endpoint must never return an unbounded array: a single read could otherwise materialize a whole table,
+a consumability problem and a DoS/amplification surface (threat T9 in `docs/07_SECURITY_THREAT_MODEL.md`). So
+**every** list endpoint is bounded and returns a stable `items + hasMore` page envelope, modelled on the
+audit-log read (`AuditLogPageResponse`):
+
+```jsonc
+{ "offset": 0, "limit": 50, "hasMore": true, "items": [ /* … */ ] }
+```
+
+- The optional `limit` query parameter is the page size: **default `50`**, **clamped to a maximum of `200`** (a
+  larger request is silently reduced to the maximum, never rejected). A present-but-malformed `limit` (not a
+  positive integer) is a `400`.
+- The optional `offset` query parameter is the zero-based start of the page (**default `0`**). A
+  present-but-malformed `offset` (not a non-negative integer) is a `400`. Request the next page at
+  `offset = offset + items.length`.
+- `hasMore` tells the client whether at least one further item exists after this page, computed without a second
+  `COUNT` (the server over-fetches one row). The paging parameters are validated **after** authorization, so an
+  unauthorized caller never receives request-shape feedback (the audit read's rule).
+- The page items keep the endpoint's existing per-item shape, including any **role projection** (for example the
+  scene/entity/content-block lists still project the host vs participant DTO per item); only the SET is bounded.
+  As with any collection response, a list item carries no per-item `ETag`/`version` (conditional requests target
+  a single resource).
+
+The paginated list endpoints are the workspace list, the workspace-scoped session/scene/entity lists, the
+scene-scoped content-block list and the workspace pending-invitations list; the audit-log read was already
+paged. Single-resource reads (for example `GET /api/v1/sessions/{sessionId}`) return the resource directly, not
+a page.
 
 ## Optimistic concurrency (CORE-CONC-001, CORE-CONC-006, CORE-WS-006)
 

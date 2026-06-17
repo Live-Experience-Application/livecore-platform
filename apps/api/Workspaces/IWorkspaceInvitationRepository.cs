@@ -101,6 +101,29 @@ public interface IWorkspaceInvitationRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the PENDING invitations of exactly the given organization and workspace,
+    /// oldest first, in the same scoped/ordered way as <see cref="ListPendingByWorkspaceAsync"/>, limited to
+    /// <paramref name="take"/> rows starting at <paramref name="skip"/>, backing the bounded pending-invitations
+    /// list route (<c>GET /api/v1/workspaces/{workspaceId}/invitations</c>, CORE-DX-003). The organization and
+    /// workspace both scope the read (the organization boundary checked before the workspace boundary), so a
+    /// foreign-tenant or wrong-workspace caller never sees another scope's invites (threats T1/T5); the token
+    /// hash rides along on the aggregate but the endpoint projects it to a PII-safe DTO that never emits it
+    /// (threats T6/T7). The caller over-fetches one extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c>
+    /// without a second COUNT. Bounding the read means a single list response can never materialize an unbounded
+    /// array (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<WorkspaceInvitation>> ListPendingPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists changes to an invitation previously loaded through this repository
     /// (CORE-WS-006). The tenant, workspace, invited email, role, token hash and
     /// expiry of an invitation are immutable (<see cref="WorkspaceInvitation"/>);

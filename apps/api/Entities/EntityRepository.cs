@@ -87,6 +87,49 @@ internal sealed class EntityRepository : IEntityRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Entity>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's entities, so the lookup fails fast (mirrors the
+        // unbounded list).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same tenant- AND workspace-scoped, deterministic (UUIDv7 id) read as ListByWorkspaceAsync
+        // (predicate leads with organization_id then workspace_id, threat T5/T1), but bounded by Skip/Take so an
+        // unbounded list is never materialized (threat T9).
+        return await _dbContext.Entities
+            .Where(entity => entity.OrganizationId == organizationId
+                && entity.WorkspaceId == workspaceId)
+            .OrderBy(entity => entity.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<Entity>> ListByTypeAsync(
         Guid organizationId,
         Guid workspaceId,

@@ -119,6 +119,52 @@ internal sealed class WorkspaceRepository : IWorkspaceRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Workspace>> ListPageByMemberAsync(
+        Guid organizationId,
+        Guid userProfileId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (userProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Subject (user profile) id must not be empty.", nameof(userProfileId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same deny-by-default, tenant- AND membership-scoped, archived-excluded query as
+        // ListByMemberAsync (the active workspace list; threat T5/T1), but bounded by Skip/Take so an unbounded
+        // list is never materialized (threat T9). Ordering by the time-ordered UUIDv7 id keeps the page stable.
+        return await _dbContext.Workspaces
+            .AsNoTracking()
+            .Where(workspace => workspace.OrganizationId == organizationId
+                && workspace.Status == WorkspaceStatus.Active
+                && _dbContext.WorkspaceMembers.Any(member =>
+                    member.WorkspaceId == workspace.Id
+                    && member.OrganizationId == organizationId
+                    && member.UserProfileId == userProfileId))
+            .OrderBy(workspace => workspace.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<WorkspaceAddResult> AddAsync(
         Workspace workspace,
         CancellationToken cancellationToken)

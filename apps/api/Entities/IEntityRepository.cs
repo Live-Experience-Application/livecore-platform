@@ -73,6 +73,27 @@ public interface IEntityRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given workspace's entities (owned by the given organization) in the same
+    /// deterministic (UUIDv7 id) order as <see cref="ListByWorkspaceAsync"/>, limited to <paramref name="take"/>
+    /// rows starting at <paramref name="skip"/>, backing the bounded entity list route
+    /// (<c>GET /api/v1/workspaces/{workspaceId}/entities</c>, CORE-DX-003). The page is exactly tenant- AND
+    /// workspace-scoped (the predicate leads with <c>organization_id</c> then matches <c>workspace_id</c>), so a
+    /// foreign tenant's or workspace's entities are NEVER returned (threat T5/T1). The caller over-fetches one
+    /// extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c> without a second COUNT. Bounding the read
+    /// means a single list response can never materialize the whole table (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<Entity>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists every entity of the given entity type WITHIN the given organization and workspace in a
     /// deterministic order — sorted by the surrogate id (UUIDv7, time-ordered), so the sequence is
     /// stable and repeatable. The list is tenant-, workspace- AND type-scoped: the predicate leads

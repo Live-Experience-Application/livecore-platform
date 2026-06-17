@@ -42,6 +42,7 @@ export type {
   LiveCoreClientOptions,
 } from "./options.js";
 export type { SdkResponse } from "./http.js";
+export type { PageParams } from "./resources/pagination.js";
 
 export { WorkspacesClient } from "./resources/workspaces.js";
 export type { ConditionalWriteOptions } from "./resources/workspaces.js";

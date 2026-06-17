@@ -281,7 +281,7 @@ public sealed class ContentBlockListReadEndpointTests
 
         // The host shape DOES carry the body content.
         Assert.Contains(_bodyMarker, body, StringComparison.Ordinal);
-        var blocks = Deserialize<ContentBlockDto[]>(body);
+        var blocks = Deserialize<PageDto<ContentBlockDto>>(body).Items;
         var block = Assert.Single(blocks);
         Assert.Equal(_body, block.Body);
     }
@@ -331,7 +331,7 @@ public sealed class ContentBlockListReadEndpointTests
         Assert.DoesNotContain(_bodyMarker, body, StringComparison.Ordinal);
 
         // The participant still receives the block (the SET is unchanged; only the SHAPE is stripped).
-        var blocks = Deserialize<ParticipantContentBlockDto[]>(body);
+        var blocks = Deserialize<PageDto<ParticipantContentBlockDto>>(body).Items;
         var block = Assert.Single(blocks);
         Assert.Equal(nameof(ContentBlockType.Text), block.Type);
         Assert.NotEqual(Guid.Empty, block.Id);
@@ -716,9 +716,10 @@ public sealed class ContentBlockListReadEndpointTests
 
     private static async Task<ContentBlockDto[]> ReadHostBlocksAsync(HttpResponseMessage response)
     {
-        var dtos = await response.Content.ReadFromJsonAsync<ContentBlockDto[]>(_json);
-        Assert.NotNull(dtos);
-        return dtos;
+        // The content-block list is a bounded page envelope (CORE-DX-003): read the page and return its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<ContentBlockDto>>(_json);
+        Assert.NotNull(page);
+        return page.Items.ToArray();
     }
 
     private static async Task<ContentBlockDto> ReadHostBlockAsync(HttpResponseMessage response)
@@ -736,14 +737,18 @@ public sealed class ContentBlockListReadEndpointTests
     }
 
     /// <summary>
-    /// Returns the EXACT set of top-level JSON property names on the FIRST element of a JSON-array response
-    /// body. The shape-leak guard that fails if a host-only field is ever added to the participant projection.
+    /// Returns the EXACT set of top-level JSON property names on the FIRST item of a content-block LIST
+    /// response body. The body is the bounded page envelope (CORE-DX-003), so the blocks are under its
+    /// <c>items</c> array; this digs into <c>items[0]</c>. The shape-leak guard that fails if a host-only field
+    /// is ever added to the participant projection.
     /// </summary>
     private static string[] FirstElementPropertyNames(string body)
     {
         using var document = JsonDocument.Parse(body);
-        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
-        var first = document.RootElement[0];
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+        var items = document.RootElement.GetProperty("items");
+        Assert.Equal(JsonValueKind.Array, items.ValueKind);
+        var first = items[0];
         Assert.Equal(JsonValueKind.Object, first.ValueKind);
         return first.EnumerateObject().Select(p => p.Name).ToArray();
     }

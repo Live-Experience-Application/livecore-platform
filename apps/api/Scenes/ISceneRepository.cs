@@ -108,6 +108,42 @@ public interface ISceneRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given workspace's scenes (owned by the given organization) in the same
+    /// deterministic (scene_order, id) order as <see cref="ListByWorkspaceAsync"/>, limited to
+    /// <paramref name="take"/> rows starting at <paramref name="skip"/>, backing the bounded scene list route
+    /// (<c>GET /api/v1/workspaces/{workspaceId}/scenes</c>, CORE-DX-003). The page is exactly tenant- AND
+    /// workspace-scoped (the predicate leads with <c>organization_id</c> then matches <c>workspace_id</c>), so a
+    /// foreign tenant's or workspace's scenes are NEVER returned (threat T5/T1). The caller over-fetches one
+    /// extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c> without a second COUNT. Bounding the read
+    /// means a single list response can never materialize the whole table (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<Scene>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns the maximum <see cref="Scene.Order"/> among the given workspace's scenes (owned by the given
+    /// organization), or <see langword="null"/> when the workspace has no scenes yet. It backs the server-side
+    /// append-to-end ordering of the scene create route (CORE-DX-003): the create computes the next order WITHOUT
+    /// materializing the whole scene list, so it can never load an unbounded number of rows just to find the
+    /// maximum (threat T9; benefits the CORE-PERF-001 path). The aggregation is exactly tenant- AND
+    /// workspace-scoped (the predicate leads with <c>organization_id</c> then matches <c>workspace_id</c>), so a
+    /// foreign tenant's or workspace's scenes never influence the result (threat T5/T1).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    Task<int?> GetMaxOrderByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new scene. A scene has no natural key and a deliberately non-unique
     /// order column (it is identified only by its surrogate id), so there is no
     /// uniqueness outcome to report; the result is always

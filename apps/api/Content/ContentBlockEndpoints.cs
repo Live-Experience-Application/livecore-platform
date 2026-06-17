@@ -132,6 +132,8 @@ internal static class ContentBlockEndpoints
         HttpContext httpContext,
         string sceneId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -190,17 +192,36 @@ internal static class ContentBlockEndpoints
             return HiddenScene();
         }
 
+        // Authorized. Only now validate the optional paging parameters, so a non-member never receives
+        // request-shape feedback (mirrors the audit read): a present-but-malformed limit/offset is a 400, an
+        // absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
         // The blocks are returned in the deterministic (UUIDv7) id order the repository enforces, PROJECTED BY
         // ROLE: a content block IS content, so the host-content roles (Owner/Admin/Host/CoHost) receive the
         // full host shape WITH the body and every other role (audience, audit, undefined) the body-stripped
-        // participant shape (ContentBlockProjection). The SET of blocks is unchanged — only the per-block SHAPE
-        // differs by role (deciding WHICH bodies an audience may see is the session-scoped Visibility concern,
-        // not this projection; threat T2).
-        var contentBlocks = await deps.ContentBlocks
-            .ListBySceneAsync(context.OrganizationId, scene.WorkspaceId, scene.Id, cancellationToken)
+        // participant shape (ContentBlockProjection). The per-block SHAPE differs by role (deciding WHICH bodies
+        // an audience may see is the session-scoped Visibility concern, not this projection; threat T2).
+        //
+        // BOUNDED (CORE-DX-003): the page is read through the tenant-, workspace- and scene-scoped paged
+        // repository, fetching ONE extra row so HasMore is set without a second COUNT; the trimmed page is then
+        // role-projected into the PageResponse envelope. A list can never return the whole table (threat T9).
+        var rows = await deps.ContentBlocks
+            .ListPageBySceneAsync(context.OrganizationId, scene.WorkspaceId, scene.Id, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
 
-        return Results.Ok(ContentBlockProjection.Project(contentBlocks, member.Role));
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit).ToArray() : rows;
+
+        return Results.Ok(ContentBlockProjection.ProjectPage(pageRows, member.Role, pageOffset, pageLimit, hasMore));
     }
 
     // GET /api/v1/scenes/{sceneId}/content-blocks/{contentBlockId}?organizationSlug={slug}

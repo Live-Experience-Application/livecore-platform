@@ -135,10 +135,12 @@ internal static class WorkspaceEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/workspaces?organizationSlug={slug}
+    // GET /api/v1/workspaces?organizationSlug={slug}&limit={n}&offset={n}
     private static async Task<IResult> ListWorkspacesAsync(
         HttpContext httpContext,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -172,15 +174,36 @@ internal static class WorkspaceEndpoints
         }
 
         var context = resolution.Context;
-        var workspaces = await deps.Workspaces
-            .ListByMemberAsync(context.OrganizationId, context.UserProfileId, cancellationToken)
+
+        // Authorized to the tenant. Only now validate the optional paging parameters, so a non-entitled caller
+        // (hidden 404 above) never receives request-shape feedback (mirrors the audit read): a
+        // present-but-malformed limit/offset is a 400, an absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // BOUNDED (CORE-DX-003): the page of the caller's active workspace memberships is read through the
+        // tenant- and membership-scoped paged repository, fetching ONE extra row so HasMore is set without a
+        // second COUNT. A list can never return the whole set as an unbounded array (threat T9).
+        var rows = await deps.Workspaces
+            .ListPageByMemberAsync(context.OrganizationId, context.UserProfileId, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
+
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
 
         // The list is a collection projection: each item carries no per-row ETag/version
         // (the list query does not track a token per row, and HTTP conditional requests
         // target a single resource), so the version is left null here — CORE-DX-002
         // surfaces the token on the single-resource read/mutation responses.
-        var response = workspaces.Select(workspace => WorkspaceResponse.From(workspace)).ToArray();
+        var response = PageResponse.From(
+            pageRows.Select(workspace => WorkspaceResponse.From(workspace)).ToArray(), pageOffset, pageLimit, hasMore);
         return Results.Ok(response);
     }
 
@@ -786,6 +809,8 @@ internal static class WorkspaceEndpoints
         HttpContext httpContext,
         string workspaceId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -844,14 +869,33 @@ internal static class WorkspaceEndpoints
             return Forbidden();
         }
 
-        // Read the pending invitations WITHIN this tenant and workspace; an invitation in another workspace or
-        // tenant is never returned (threats T1/T5). The aggregates carry the token hash, but the response is the
-        // PII-safe projection, which never emits it (threats T6/T7).
-        var invitations = await deps.WorkspaceInvitations
-            .ListPendingByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+        // Authorized. Only now validate the optional paging parameters, so a non-Owner/Admin (403 above) or a
+        // hidden workspace (404) never receives request-shape feedback (mirrors the audit read): a
+        // present-but-malformed limit/offset is a 400, an absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // Read ONE BOUNDED PAGE of the pending invitations WITHIN this tenant and workspace; an invitation in
+        // another workspace or tenant is never returned (threats T1/T5). Fetch ONE extra row so HasMore is set
+        // without a second COUNT. The aggregates carry the token hash, but the response is the PII-safe
+        // projection, which never emits it (threats T6/T7). Bounded so a list never returns an unbounded array
+        // (threat T9).
+        var rows = await deps.WorkspaceInvitations
+            .ListPendingPageByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
 
-        var response = invitations.Select(PendingWorkspaceInvitationResponse.From).ToArray();
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
+
+        var response = PageResponse.From(
+            pageRows.Select(PendingWorkspaceInvitationResponse.From).ToArray(), pageOffset, pageLimit, hasMore);
         return Results.Ok(response);
     }
 

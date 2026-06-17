@@ -543,4 +543,114 @@ public sealed class SceneRepositoryTests : IDisposable
         await Assert.ThrowsAsync<DbUpdateException>(
             () => repository.AddAsync(ghost, CancellationToken.None));
     }
+
+    // --- Bounded pagination + max-order (CORE-DX-003) ---------------------------
+
+    [Fact]
+    public async Task ListPageByWorkspace_returns_a_bounded_page_in_the_deterministic_order()
+    {
+        // The paged read returns at most `take` scenes starting at `skip`, in the SAME (scene_order, id) order
+        // as the unbounded list — so a caller can page deterministically without ever materializing the whole
+        // workspace (threat T9).
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var first = await SeedSceneAsync(organization.Id, workspace.Id, "First", 0);
+        var second = await SeedSceneAsync(organization.Id, workspace.Id, "Second", 1);
+        var third = await SeedSceneAsync(organization.Id, workspace.Id, "Third", 2);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var firstPage = await repository.ListPageByWorkspaceAsync(
+            organization.Id, workspace.Id, skip: 0, take: 2, CancellationToken.None);
+        var secondPage = await repository.ListPageByWorkspaceAsync(
+            organization.Id, workspace.Id, skip: 2, take: 2, CancellationToken.None);
+
+        Assert.Equal(new[] { first.Id, second.Id }, firstPage.Select(scene => scene.Id).ToArray());
+        Assert.Equal(new[] { third.Id }, secondPage.Select(scene => scene.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task ListPageByWorkspace_never_returns_another_tenants_scenes()
+    {
+        // The paged read is tenant-scoped exactly like the unbounded list: organization B's id never returns
+        // organization A's scenes even when the workspace id is correct (threat T5).
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspaceInA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        await SeedSceneAsync(organizationA.Id, workspaceInA.Id, "Segment", 0);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var underB = await repository.ListPageByWorkspaceAsync(
+            organizationB.Id, workspaceInA.Id, skip: 0, take: 50, CancellationToken.None);
+
+        Assert.Empty(underB);
+    }
+
+    [Fact]
+    public async Task ListPageByWorkspace_rejects_a_negative_skip_or_non_positive_take()
+    {
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListPageByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), skip: -1, take: 10, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListPageByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), skip: 0, take: 0, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetMaxOrderByWorkspace_returns_null_for_an_empty_workspace()
+    {
+        // The append-to-end create relies on this null to assign the first order (0) without loading any scenes.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var max = await repository.GetMaxOrderByWorkspaceAsync(
+            organization.Id, workspace.Id, CancellationToken.None);
+
+        Assert.Null(max);
+    }
+
+    [Fact]
+    public async Task GetMaxOrderByWorkspace_returns_the_largest_order_scoped_to_the_workspace()
+    {
+        // The maximum is computed server-side and is tenant- AND workspace-scoped: a sibling workspace's higher
+        // order never influences the result, so the create appends to the end of the RIGHT workspace.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var sibling = await SeedWorkspaceAsync(organization.Id, _workspaceSlugB);
+        await SeedSceneAsync(organization.Id, workspace.Id, "A", 0);
+        await SeedSceneAsync(organization.Id, workspace.Id, "B", 7);
+        await SeedSceneAsync(organization.Id, sibling.Id, "Sibling", 99);
+
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        var max = await repository.GetMaxOrderByWorkspaceAsync(
+            organization.Id, workspace.Id, CancellationToken.None);
+
+        Assert.Equal(7, max);
+    }
+
+    [Fact]
+    public async Task GetMaxOrderByWorkspace_rejects_empty_ids()
+    {
+        await using var context = CreateContext();
+        var repository = new SceneRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.GetMaxOrderByWorkspaceAsync(
+                Guid.Empty, Guid.CreateVersion7(), CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.GetMaxOrderByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
+    }
 }

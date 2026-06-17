@@ -1346,6 +1346,11 @@ The workspace routes implemented so far:
 | `DELETE` | `/api/v1/workspaces/{workspaceId}/invitations/{invitationId}` | organization `Owner` or `Admin` (revoke invite — see below)               |
 | `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` (remove member — see below)               |
 
+`GET /api/v1/workspaces` (the caller's active workspace memberships) is **bounded**
+(CORE-DX-003): optional `?limit=` (default 50, max 200) and `?offset=` page it, and it
+returns the `items + hasMore` envelope rather than an unbounded array — like every Core
+list endpoint (`docs/08_API_CONTRACTS.md` "Pagination").
+
 ### Workspace member invites (scoped tokens)
 
 `POST /api/v1/workspaces/{workspaceId}/members` creates a workspace invitation
@@ -1365,6 +1370,9 @@ half of the invite flow; until now there was no way to see which invites were
 outstanding). "Pending" is the lifecycle status only: an already-accepted or
 already-revoked invitation is never listed. The route resolves its tenant from a
 required `?organizationSlug=` query parameter (like the other workspace by-id routes).
+The list is **bounded** (CORE-DX-003): optional `?limit=` (default 50, max 200) and
+`?offset=` page it, and it returns the `items + hasMore` envelope, so it never returns
+an unbounded array.
 
 The response is a **PII-safe projection** — id, invited email, role, status and expiry
 (plus the tenant/workspace ids and the creation timestamp). The **invited email is the
@@ -1528,18 +1536,19 @@ Every successful archive appends an append-only `WorkspaceArchived` audit record
 transition — never any content (threats T1/T5/T7). Unlike a deletion, the archive
 records the before/after status because the workspace survives.
 
-### Session create and list
+### Session create, list and read
 
 The Sessions module exposes the workspace-scoped create and list API
-(CORE-API-003), so a session is reachable over HTTP before its start/end
-lifecycle commands operate on it:
+(CORE-API-003) and a by-session-id read (CORE-DX-003), so a session is reachable
+over HTTP before its start/end lifecycle commands operate on it:
 
 | Method | Route                                       | Authorized callers                             |
 | ------ | ------------------------------------------- | ---------------------------------------------- |
 | `GET`  | `/api/v1/workspaces/{workspaceId}/sessions` | any member of that workspace                   |
 | `POST` | `/api/v1/workspaces/{workspaceId}/sessions` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/sessions/{sessionId}`              | any member of the session's workspace          |
 
-Both routes carry the `{workspaceId}` in the path and resolve the target
+The workspace-scoped routes carry the `{workspaceId}` in the path and resolve the target
 organization from a required `organizationSlug` (a query parameter on the `GET`,
 a body field on the `POST`), run the same token-claim-and-membership tenant check
 as the other workspace-scoped routes, and then authorize the caller by their role
@@ -1558,11 +1567,23 @@ owned by `start` (which consumes a slot) and `end` (which releases it), so a
 created `Prepared` session never double-counts against the live ceiling. When no
 quota governs the deployment the create proceeds unchanged.
 
-`GET` lists the workspace's sessions (filtered to that tenant and workspace, so a
-member only ever sees their own workspace's sessions). Unlike the scene list there
-is no host-vs-participant projection split: a session is a single generic resource
-with no hidden content, so every workspace member receives the same safe DTO
-(identifiers, the display title, the lifecycle status and the server timestamps).
+`GET .../sessions` lists the workspace's sessions (filtered to that tenant and
+workspace, so a member only ever sees their own workspace's sessions). Unlike the
+scene list there is no host-vs-participant projection split: a session is a single
+generic resource with no hidden content, so every workspace member receives the
+same safe DTO (identifiers, the display title, the lifecycle status and the server
+timestamps). The list is **bounded** (CORE-DX-003): it accepts optional `?limit=`
+(default 50, server-clamped to a max of 200) and zero-based `?offset=`, and returns
+the `items + hasMore` page envelope, so it can never return the whole table as an
+unbounded array (the same shape as the audit-log read).
+
+`GET /api/v1/sessions/{sessionId}` reads one session by id within the
+`?organizationSlug=` tenant (CORE-DX-003): the session is loaded inside the tenant
+boundary, its own workspace is discovered from the row, and the caller's membership
+in that workspace is checked. Because a session has no host-vs-participant content
+split, the read is membership-gated and returns the same generic session DTO the
+list does; a foreign/unknown session, or one in a workspace the caller does not
+belong to, is an indistinguishable hidden `404`.
 
 ### Session lifecycle commands
 
@@ -2114,8 +2135,13 @@ receive the full scene metadata, while audience roles (`Participant`, `Observer`
 receive a stripped, audience-safe projection (scene id, title and order only — no
 internal tenant/workspace ids, no host preparation timestamps, no authorization
 rationale). Only the response shape differs by role; every member still receives
-all of the workspace's scenes, since deciding which scenes an audience may
-actually see is the later Visibility epic.
+the same page of the workspace's scenes, since deciding which scenes an audience may
+actually see is the later Visibility epic. The scene list is **bounded**
+(CORE-DX-003): optional `?limit=` (default 50, max 200) and `?offset=` page it, and
+it returns the role-projected `items + hasMore` envelope rather than an unbounded
+array. Creating a scene computes its append-to-end order with a single
+`MAX(scene_order)` query rather than loading the whole scene list, so the create
+never materializes an unbounded number of rows either.
 
 A content block's body is validated per type before it is stored: `Text` is
 bounded plain text, `Media` a bounded reference string (the real asset linkage is
@@ -2170,10 +2196,13 @@ audience roles (`Participant`, `Observer`), the audit role (`Auditor`) and any
 undefined role receive a stripped, audience-safe projection (entity id and name only —
 no attribute-values content, no internal tenant/workspace/type ids, no host
 timestamps, no authorization rationale; threats T2/T7). Only the response shape differs
-by role; every member still receives all of the workspace's entities, since deciding
-which entities an audience may actually _see_ is the entity-search read (CORE-ENT-005)
-and the Visibility module's concern. No vertical entity-type logic lives in Core: every
-entity behaves identically and is defined entirely by its stored data and its type id.
+by role; every member still receives the same page of the workspace's entities, since
+deciding which entities an audience may actually _see_ is the entity-search read
+(CORE-ENT-005) and the Visibility module's concern. The entity list is **bounded**
+(CORE-DX-003): optional `?limit=` (default 50, max 200) and `?offset=` page it, and it
+returns the role-projected `items + hasMore` envelope rather than an unbounded array. No
+vertical entity-type logic lives in Core: every entity behaves identically and is
+defined entirely by its stored data and its type id.
 
 ### Entity-type authoring API (create, list, read)
 

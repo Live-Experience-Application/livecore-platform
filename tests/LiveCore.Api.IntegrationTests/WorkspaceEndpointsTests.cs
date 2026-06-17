@@ -368,9 +368,10 @@ public sealed class WorkspaceEndpointsTests
         var response = await client.GetAsync($"/api/v1/workspaces?organizationSlug={_orgA}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var workspaces = await response.Content.ReadFromJsonAsync<WorkspaceDto[]>(_json);
-        Assert.NotNull(workspaces);
-        var only = Assert.Single(workspaces);
+        // The list is a bounded page envelope (CORE-DX-003): read the page and assert over its items.
+        var page = await response.Content.ReadFromJsonAsync<PageDto<WorkspaceDto>>(_json);
+        Assert.NotNull(page);
+        var only = Assert.Single(page.Items);
         Assert.Equal(memberWorkspaceId, only.Id);
         Assert.Equal("member-show", only.Slug);
     }

@@ -133,11 +133,13 @@ internal static class SceneEndpoints
         return endpoints;
     }
 
-    // GET /api/v1/workspaces/{workspaceId}/scenes?organizationSlug={slug}
+    // GET /api/v1/workspaces/{workspaceId}/scenes?organizationSlug={slug}&limit={n}&offset={n}
     private static async Task<IResult> ListScenesAsync(
         HttpContext httpContext,
         string workspaceId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -193,6 +195,19 @@ internal static class SceneEndpoints
             return HiddenWorkspace();
         }
 
+        // Authorized. Only now validate the optional paging parameters, so a non-member never receives
+        // request-shape feedback (mirrors the audit read): a present-but-malformed limit/offset is a 400, an
+        // absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
         // The scenes are returned in the deterministic (scene_order, id) order the
         // repository enforces. The list is then PROJECTED BY ROLE (CORE-SCENE-004,
         // csv/api_routes.csv line 15 "Projection by role"): host-capable and
@@ -201,17 +216,22 @@ internal static class SceneEndpoints
         // "View workspace metadata" is "limited" in docs/06_AUTHORIZATION_MATRIX.md)
         // receive the host-only-field-stripped participant shape
         // (ParticipantSceneResponse). Only the per-scene SHAPE changes by role — every
-        // member still receives ALL of the workspace's scenes (the SET is unchanged;
-        // deciding WHICH scenes an audience may see is the Visibility module's later
-        // concern, not this projection). MembershipRole is non-linear, so the
-        // classification is EXACT set membership, never a >/< comparison
-        // (SceneProjection.ReceivesHostShape).
-        var scenes = await deps.Scenes
-            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+        // member still receives the SAME page of the workspace's scenes (deciding WHICH
+        // scenes an audience may see is the Visibility module's later concern, not this
+        // projection). MembershipRole is non-linear, so the classification is EXACT set
+        // membership, never a >/< comparison (SceneProjection.ReceivesHostShape).
+        //
+        // BOUNDED (CORE-DX-003): the page is read through the tenant- and workspace-scoped paged repository,
+        // fetching ONE extra row so HasMore is set without a second COUNT; the trimmed page is then
+        // role-projected into the PageResponse envelope. A list can never return the whole table (threat T9).
+        var rows = await deps.Scenes
+            .ListPageByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
             .ConfigureAwait(false);
 
-        var response = SceneProjection.Project(scenes, member.Role);
-        return Results.Ok(response);
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit).ToArray() : rows;
+
+        return Results.Ok(SceneProjection.ProjectPage(pageRows, member.Role, pageOffset, pageLimit, hasMore));
     }
 
     // GET /api/v1/scenes/{sceneId}?organizationSlug={slug}
@@ -400,15 +420,14 @@ internal static class SceneEndpoints
         // Append-to-end ordering (CORE-SCENE-001 deferred this to the endpoint story):
         // the new scene's position is the next order after the current maximum in the
         // workspace. An empty workspace gets the first order (0). The order is assigned
-        // server-side; the client never supplies one. The scenes list is the tenant-
-        // and workspace-scoped, deterministic (scene_order, id) order, so the maximum is
-        // the order of the last element.
-        var existingScenes = await deps.Scenes
-            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+        // server-side; the client never supplies one. The maximum is computed by the
+        // database (MAX(scene_order)) rather than by materializing the whole scene list,
+        // so the create can never load an unbounded number of rows just to find the next
+        // position (CORE-DX-003: no unbounded load; threat T9; benefits CORE-PERF-001).
+        var maxOrder = await deps.Scenes
+            .GetMaxOrderByWorkspaceAsync(context.OrganizationId, workspaceGuid, cancellationToken)
             .ConfigureAwait(false);
-        var nextOrder = existingScenes.Count == 0
-            ? 0
-            : existingScenes.Max(scene => scene.Order) + 1;
+        var nextOrder = maxOrder is { } currentMax ? currentMax + 1 : 0;
 
         var now = timeProvider.GetUtcNow();
         var scene = Scene.Create(context.OrganizationId, workspaceGuid, request.Title!.Trim(), nextOrder, now);

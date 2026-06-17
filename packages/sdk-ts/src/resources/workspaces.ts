@@ -8,6 +8,7 @@
 import type {
   CreateWorkspaceRequest,
   InviteWorkspaceMemberRequest,
+  PageResponse,
   UpdateWorkspaceRequest,
   Uuid,
   WorkspaceInvitationResponse,
@@ -15,6 +16,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient, SdkResponse } from "../http.js";
+import { pageQuery, type PageParams } from "./pagination.js";
 
 /** Options for a conditional workspace write (CORE-DX-002). */
 export interface ConditionalWriteOptions {
@@ -30,12 +32,21 @@ export interface ConditionalWriteOptions {
 export class WorkspacesClient {
   constructor(private readonly http: HttpClient) {}
 
-  /** `GET /api/v1/workspaces` — workspaces the caller is a member of. */
-  list(params: { organizationSlug: string }): Promise<WorkspaceResponse[]> {
-    return this.http.send<WorkspaceResponse[]>({
+  /**
+   * `GET /api/v1/workspaces` — workspaces the caller is a member of, as a bounded
+   * page (CORE-DX-003). Pass optional `limit`/`offset` to page; the result is the
+   * `items + hasMore` envelope, never an unbounded array.
+   */
+  list(
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<WorkspaceResponse>> {
+    return this.http.send<PageResponse<WorkspaceResponse>>({
       method: "GET",
       path: "/workspaces",
-      query: { organizationSlug: params.organizationSlug },
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
     });
   }
 

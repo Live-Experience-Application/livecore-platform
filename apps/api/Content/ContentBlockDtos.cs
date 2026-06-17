@@ -228,6 +228,31 @@ internal static class ContentBlockProjection
     }
 
     /// <summary>
+    /// Projects ONE BOUNDED PAGE of content blocks into the role-appropriate
+    /// <see cref="LiveCore.Api.PageResponse{T}"/> envelope (CORE-DX-003), boxed as <see cref="object"/> so the
+    /// endpoint can return either the host (<see cref="ContentBlockResponse"/>, with the body) or the
+    /// participant (<see cref="ParticipantContentBlockResponse"/>, body stripped) page as the response body. The
+    /// role split is the SAME fail-closed <see cref="ReceivesHostShape"/> classification the unbounded
+    /// <see cref="Project"/> uses, so the per-block SHAPE never diverges between the bounded and unbounded list
+    /// and an audience role never receives a body (threat T2); only the SET is now bounded. The caller has
+    /// already resolved the page bounds and trimmed <paramref name="contentBlocks"/> to at most
+    /// <paramref name="limit"/> items and computed <paramref name="hasMore"/>.
+    /// </summary>
+    public static object ProjectPage(
+        IReadOnlyList<ContentBlock> contentBlocks,
+        MembershipRole role,
+        int offset,
+        int limit,
+        bool hasMore)
+    {
+        ArgumentNullException.ThrowIfNull(contentBlocks);
+
+        return ReceivesHostShape(role)
+            ? PageResponse.From(contentBlocks.Select(ContentBlockResponse.From).ToArray(), offset, limit, hasMore)
+            : PageResponse.From(contentBlocks.Select(ParticipantContentBlockResponse.From).ToArray(), offset, limit, hasMore);
+    }
+
+    /// <summary>
     /// Projects a SINGLE content block into the role-appropriate response, boxed as <see cref="object"/> so the
     /// by-id read can return either the full host shape (<see cref="ContentBlockResponse"/>) or the stripped
     /// participant shape (<see cref="ParticipantContentBlockResponse"/>) — the SAME host-vs-participant DTO

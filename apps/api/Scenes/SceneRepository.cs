@@ -123,6 +123,81 @@ internal sealed class SceneRepository : ISceneRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<Scene>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's scenes, so the lookup fails
+        // fast instead of returning an arbitrary set of rows (mirrors the unbounded list).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // The same tenant- AND workspace-scoped, deterministic (scene_order, id) read as ListByWorkspaceAsync
+        // (predicate leads with organization_id then workspace_id, threat T5/T1; backed by the
+        // ix_scenes_workspace_id_scene_order index), but bounded by Skip/Take so an unbounded list is never
+        // materialized (threat T9).
+        return await _dbContext.Scenes
+            .Where(scene => scene.OrganizationId == organizationId
+                && scene.WorkspaceId == workspaceId)
+            .OrderBy(scene => scene.Order)
+            .ThenBy(scene => scene.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int?> GetMaxOrderByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored workspace's scenes, so the lookup fails fast.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        // The same tenant- AND workspace-scoped predicate as the list, but the database computes the MAX(order)
+        // server-side instead of materializing every row, so the create's append-to-end ordering can never load
+        // an unbounded number of scenes just to find the next position (threat T9). The cast to int? makes the
+        // aggregate return NULL (translated to null here) for an empty workspace rather than throwing, so the
+        // create assigns the first order (0) when there are no scenes yet.
+        return await _dbContext.Scenes
+            .Where(scene => scene.OrganizationId == organizationId
+                && scene.WorkspaceId == workspaceId)
+            .Select(scene => (int?)scene.Order)
+            .MaxAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<SceneAddResult> AddAsync(Scene scene, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(scene);

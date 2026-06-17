@@ -95,15 +95,17 @@ test("create workspace POSTs the body with the bearer token", async () => {
   });
 });
 
-test("list workspaces sends organizationSlug as a query parameter and no body", async () => {
+test("list workspaces returns the bounded page envelope and sends only the org slug when unpaged", async () => {
+  const page = { offset: 0, limit: 50, hasMore: false, items: [] };
   const { client, calls } = makeClient({
-    handler: () => jsonResponse(200, []),
+    handler: () => jsonResponse(200, page),
   });
 
   const result = await client.workspaces.list({ organizationSlug: "acme" });
 
-  assert.deepEqual(result, []);
+  assert.deepEqual(result, page);
   const { url, init } = calls[0];
+  // No limit/offset supplied, so neither is added to the URL (the server applies its defaults).
   assert.equal(
     url,
     "https://core.example.test/api/v1/workspaces?organizationSlug=acme",
@@ -112,6 +114,25 @@ test("list workspaces sends organizationSlug as a query parameter and no body", 
   assert.equal(init.body, undefined);
   assert.equal(init.headers["Content-Type"], undefined);
   assert.equal(init.headers.Authorization, "Bearer test-access-token");
+});
+
+test("list workspaces forwards the limit/offset paging parameters in the query (CORE-DX-003)", async () => {
+  const page = { offset: 50, limit: 25, hasMore: true, items: [] };
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(200, page),
+  });
+
+  const result = await client.workspaces.list({
+    organizationSlug: "acme",
+    limit: 25,
+    offset: 50,
+  });
+
+  assert.deepEqual(result, page);
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/workspaces?organizationSlug=acme&limit=25&offset=50",
+  );
 });
 
 test("reveal sends the Idempotency-Key header and the org slug in the body", async () => {

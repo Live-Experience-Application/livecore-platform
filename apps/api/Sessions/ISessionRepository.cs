@@ -113,6 +113,28 @@ public interface ISessionRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given workspace's sessions (owned by the given organization) in the same
+    /// deterministic, tenant- AND workspace-scoped order as <see cref="ListByWorkspaceAsync"/> — by the
+    /// time-ordered surrogate id (UUIDv7) — but limited to <paramref name="take"/> rows starting at
+    /// <paramref name="skip"/>, backing the bounded workspace session list route
+    /// (<c>GET /api/v1/workspaces/{workspaceId}/sessions</c>, CORE-DX-003). The page is exactly tenant- and
+    /// workspace-scoped (the predicate leads with <c>organization_id</c> then matches <c>workspace_id</c>), so a
+    /// foreign tenant's or workspace's sessions are NEVER returned (threat T5/T1). The caller over-fetches one
+    /// extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c> without a second COUNT, mirroring the audit
+    /// page. Bounding the read means a single list response can never materialize the whole table (threat T9).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<Session>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new session. A session has no natural key (it is identified only
     /// by its surrogate id), so there is no uniqueness outcome to report; the result
     /// is always <see cref="SessionAddResult.Added"/> on success. Foreign-key
