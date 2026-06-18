@@ -48,12 +48,12 @@ The optional overlay [`docker-compose.full.yml`](docker-compose.full.yml) closes
 that gap. It is a **separate, opt-in** file (so the minimal stack stays minimal)
 that adds the three supporting services and **pre-wires** the api/worker to them:
 
-| Service       | Role                                                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `keycloak`    | OIDC provider. Imports the bundled `livecore` realm, so the api validates real bearer tokens — **authenticated traffic**. |
-| `minio`       | S3-compatible object storage (private buckets only) — **asset upload/download**.                                          |
-| `minio-setup` | one-shot job: waits for MinIO, creates the private `livecore-assets` bucket, exits `0`.                                   |
-| `valkey`      | Redis/Valkey realtime backplane — **multi-instance realtime** (SignalR scale-out).                                        |
+| Service        | Role                                                                                                                                                               |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `keycloak`     | OIDC provider. Imports the bundled `livecore` realm, so the api validates real bearer tokens — **authenticated traffic**.                                          |
+| `rustfs`       | The default example S3-compatible object store (Apache-2.0 RustFS), private buckets only — **asset upload/download**. Any S3-compatible provider works (ADR 0006). |
+| `rustfs-setup` | one-shot job (the AWS CLI, an S3-standard client): waits for RustFS, creates the private `livecore-assets` bucket, exits `0`.                                      |
+| `valkey`       | Redis/Valkey realtime backplane — **multi-instance realtime** (SignalR scale-out).                                                                                 |
 
 Bring up the merged stack from this directory:
 
@@ -61,7 +61,7 @@ Bring up the merged stack from this directory:
 docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
 ```
 
-Compose merges the overlay onto the base manifest: the `keycloak`/`minio`/`valkey`
+Compose merges the overlay onto the base manifest: the `keycloak`/`rustfs`/`valkey`
 services are added, the api/worker get the `Authentication__Oidc__*`,
 `Assets__Storage__*` and `Realtime__Backplane__*` env (the **same documented config
 contract keys** the base stack leaves unset), and the base **migrate-before-API
@@ -74,7 +74,7 @@ wired together end-to-end.
 
 Every supporting-service knob has a safe **local default** (documented in
 [`.env.example`](.env.example) under "Full local stack"); override them in `.env`.
-The bundled admin/credential defaults (`admin`/`admin`, `minioadmin`/`minioadmin`,
+The bundled admin/credential defaults (`admin`/`admin`, `rustfsadmin`/`rustfsadmin`,
 the realm's `demo` user) are well-known **local** values for a throwaway machine —
 the same posture as the base stack's `livecore`/`livecore` database login — **not
 production secrets**. Harden them (and the realm) before exposing this anywhere.
@@ -88,6 +88,16 @@ for management only. The realm ships a public `livecore-app` client with direct
 access grants and an audience mapper, so a local developer can mint a token for the
 `demo` user that the api accepts. The hardcoded `organization` claim is a starter —
 point it at the slug of an Organization you create through the api.
+
+**Object storage.** RustFS publishes its S3 API on the host (`http://localhost:9000`)
+and a web console (`http://localhost:9001`, login `rustfsadmin`/`rustfsadmin` by
+default) for inspecting the private `livecore-assets` bucket — the RustFS equivalent of
+any vendor object-store console, for management only; the api/worker talk to the
+in-network `http://rustfs:9000` endpoint. RustFS is only the **default example**: set
+the `Assets__Storage__*` keys to any S3-compatible provider to bring your own (ADR
+0006). Override the published ports with `LIVECORE_RUSTFS_PORT` /
+`LIVECORE_RUSTFS_CONSOLE_PORT` and the login with `RUSTFS_ACCESS_KEY` /
+`RUSTFS_SECRET_KEY` in `.env`.
 
 **Scaling realtime.** With the Valkey backplane wired, multiple api instances fan
 realtime out to every connection. Scale with

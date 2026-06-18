@@ -48,7 +48,7 @@ internal sealed class S3AssetStorageOptions
     public const string ConfigurationSection = "Assets:Storage";
 
     /// <summary>
-    /// Default signing region when none is configured. Many S3-compatible backends (RustFS/MinIO) accept any
+    /// Default signing region when none is configured. Many S3-compatible backends (such as RustFS) accept any
     /// region; <c>us-east-1</c> is the conventional neutral default used in the SigV4 signature.
     /// </summary>
     public const string DefaultRegion = "us-east-1";
@@ -114,7 +114,7 @@ internal sealed class S3AssetStorageOptions
     /// <summary>
     /// Whether to address the bucket path-style (<c>endpoint/bucket/key</c>) rather than virtual-hosted-style
     /// (<c>bucket.endpoint/key</c>). Defaults to <see langword="true"/>: path-style is what self-hosted
-    /// S3-compatible backends (RustFS/MinIO) require.
+    /// S3-compatible backends (such as RustFS) require.
     /// </summary>
     public bool ForcePathStyle { get; }
 

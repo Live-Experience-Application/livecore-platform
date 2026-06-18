@@ -11,6 +11,7 @@
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
+#   storage-docs         - grep backstop: keep RustFS the default example S3-compatible backend in the storage/self-hosting docs, no leftover MinIO setup guidance, any-S3-compatible contract stated (CORE-STOR-002)
 #   action-pin-lint      - fail the build on any workflow uses: ref not pinned to a full 40-char commit SHA (CORE-DEP-008)
 #   log-redaction        - enforce ID-only structured logging: fail the build on a content/PII/secret or interpolated log template (CORE-OBS-006, threat T7)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
@@ -520,6 +521,26 @@ jobs:
 
       - name: Flag any unreviewed destructive migration Down()
         run: pwsh -NoProfile -File scripts/lint-migration-downs.ps1
+
+  storage-docs:
+    name: Storage docs RustFS backstop (CORE-STOR-002)
+    runs-on: ubuntu-latest
+    # CORE-STOR-002: after the MinIO -> RustFS object-store migration (CORE-STOR-001),
+    # the self-hosting and storage docs must keep RustFS named as the default example
+    # S3-compatible backend, carry no leftover MinIO setup/console/credential guidance,
+    # and keep the any-S3-compatible contract stated so operators may still bring their
+    # own provider (ADR 0006). The test step proves the backstop logic over fixtures (a
+    # doc still naming MinIO fails; a clean RustFS doc passes) and then guards the real
+    # docs. Pure docs/scripts check, no build needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Test the storage-docs RustFS backstop logic
+        run: pwsh -NoProfile -File scripts/test-storage-docs-rustfs.ps1
+
+      - name: Fail on any remaining MinIO setup guidance in the storage docs
+        run: pwsh -NoProfile -File scripts/lint-storage-docs-rustfs.ps1
 
   action-pin-lint:
     name: GitHub Actions commit-SHA pinning (CORE-DEP-008)
@@ -1619,6 +1640,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - storage-docs
       - action-pin-lint
       - log-redaction
       - backup-restore-drill
@@ -1892,6 +1914,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - storage-docs
       - action-pin-lint
       - log-redaction
       - backup-restore-drill

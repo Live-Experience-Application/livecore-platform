@@ -2,12 +2,16 @@
 
 ## Storage abstraction
 
-Core uses an S3-compatible storage adapter.
+Core uses an S3-compatible storage adapter, so **any S3-compatible provider works**:
+the adapter speaks the standard S3 protocol and never depends on a specific vendor
+(ADR 0006). RustFS is the **default example** backend the in-repo stack bundles — an
+Apache-2.0-licensed, S3-compatible object store — but it is only the example default;
+an operator may still bring their own S3-compatible provider.
 
 Supported deployment options:
 
-- RustFS for self-hosted S3-compatible object storage
-- any S3-compatible provider in hosted environments
+- RustFS for self-hosted S3-compatible object storage (the bundled default example)
+- any S3-compatible provider in hosted or self-hosted environments (bring your own)
 
 ### Adapter port (CORE-AST-002)
 

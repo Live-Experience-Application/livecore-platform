@@ -102,10 +102,12 @@ that, but it is a separate checkout).
 [`deploy/compose/docker-compose.full.yml`](../deploy/compose/docker-compose.full.yml)
 is an **optional, opt-in overlay** that closes the gap **from this repository
 alone**, while keeping the minimal stack minimal. It adds the three supporting
-services from the "Local development" list — `keycloak` (OIDC), `minio`
-(S3-compatible object storage, with a one-shot `minio-setup` job that creates the
-private `livecore-assets` bucket) and `valkey` (the Redis/Valkey backplane) — and
-**pre-wires** the api/worker to them. Bring up the merged stack from
+services from the "Local development" list — `keycloak` (OIDC), `rustfs` (the
+**default example** S3-compatible object store — Apache-2.0-licensed RustFS, with a
+one-shot `rustfs-setup` job that creates the private `livecore-assets` bucket; Core
+speaks the standard S3 protocol, so **any S3-compatible provider works** and an
+operator may bring their own — ADR 0006) and `valkey` (the Redis/Valkey backplane) —
+and **pre-wires** the api/worker to them. Bring up the merged stack from
 `deploy/compose`:
 
 ```bash
@@ -119,7 +121,7 @@ It is **a separate file, not a change to the minimal stack**: a plain
   only fills the same `Authentication:Oidc:*` (`Authentication__Oidc__*`),
   `Assets:Storage:*` (`Assets__Storage__*`) and `Realtime:Backplane:*`
   (`Realtime__Backplane__*`) keys the base manifest already exposes unset — pointing
-  them at the bundled `keycloak`/`minio`/`valkey` services — so authenticated
+  them at the bundled `keycloak`/`rustfs`/`valkey` services — so authenticated
   traffic, asset upload/download and multi-instance realtime work with no manual
   setup. Every supporting-service knob has a safe local default, documented in
   `deploy/compose/.env.example` under "Full local stack".
@@ -1683,7 +1685,7 @@ variable (threat T7).
 
 The private asset bucket (`Assets:Storage:*`, CORE-OPS-006) is backed up by **mirroring** it to a separate,
 equally private destination — ideally a different bucket in another region or provider — with whatever
-S3-compatible tool the deployment already uses (`aws s3 sync`, MinIO/RustFS `mc mirror`, or `rclone sync`).
+S3-compatible tool the deployment already uses (`aws s3 sync`, `rclone sync`, or another S3-compatible mirror).
 Enable **object versioning** and a lifecycle policy on the destination so an overwrite or delete is itself
 recoverable. The mirror destination stays **private** — no public access and no public listing — exactly like the
 source (threat T4).

@@ -51,7 +51,7 @@ runner, the API and the worker; configure its `Authentication__Oidc__*` values
 against your OIDC provider (the bundled stack leaves them unset, so authenticated
 routes answer `401` until you do — see `deploy/compose/README.md` and `docs/13`).
 For a turnkey local setup, the opt-in overlay `deploy/compose/docker-compose.full.yml`
-(CORE-DEP-006) adds a pre-wired Keycloak (OIDC) + MinIO (storage) + Valkey (backplane)
+(CORE-DEP-006) adds a pre-wired Keycloak (OIDC) + RustFS (storage) + Valkey (backplane)
 and a `livecore` realm, so you get a real OIDC provider and API to talk to without
 configuring one by hand:
 

@@ -81,7 +81,7 @@ public static class AssetStorageServiceCollectionExtensions
     /// </summary>
     private static IAmazonS3 CreateClient(S3AssetStorageOptions options)
     {
-        // Modern S3-compatible backends (RustFS/MinIO and current AWS S3) require AWS Signature Version 4 for
+        // Modern S3-compatible backends (RustFS and current AWS S3) require AWS Signature Version 4 for
         // pre-signed URLs; legacy SigV2 is rejected by them. The AWS SDK v4 always signs S3 requests with SigV4
         // (SigV2 was removed entirely), so pre-signing against a custom ServiceURL is SigV4 with no process-global
         // knob to set — the v3 AWSConfigsS3.UseSignatureVersion4 toggle no longer exists.
