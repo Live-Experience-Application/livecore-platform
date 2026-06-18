@@ -8,12 +8,13 @@ using Microsoft.Extensions.DependencyInjection;
 namespace LiveCore.Api.IntegrationTests;
 
 /// <summary>
-/// Integration tests for the operational metrics surface (CORE-OBS-001) — the story's required test: "the
-/// metrics endpoint responds and emits the documented meters". They boot the real API host and assert that
-/// <c>GET /metrics</c> responds in the Prometheus exposition format and that all eight signals
-/// docs/15_OBSERVABILITY.md requires (request duration, error rate, realtime connections, reveal latency,
-/// event-delivery failures, asset failures, database failures and background-job failures) surface on it,
-/// end-to-end through the real OpenTelemetry pipeline.
+/// Integration tests for the operational metrics surface (CORE-OBS-001, with the CORE-OBS-007 SLIs) — the
+/// story's required test: "the metrics endpoint responds and emits the documented meters". They boot the real
+/// API host and assert that <c>GET /metrics</c> responds in the Prometheus exposition format and that the
+/// documented signals (request duration, error rate, realtime connections, reveal latency, event-delivery
+/// failures, asset failures, database failures and background-job failures, plus the CORE-OBS-007 service-level
+/// indicators — auth-failure rate, rate-limit rejections, and per-loop worker job success/duration/backlog)
+/// surface on it, end-to-end through the real OpenTelemetry pipeline.
 ///
 /// The signals are driven through the SAME <see cref="LiveCoreMetrics"/> instruments the production seams
 /// record onto (resolved from the running host), plus a real HTTP request that exercises the request-duration
@@ -27,12 +28,17 @@ public sealed class MetricsEndpointTests
     [
         "livecore_api_request_duration",
         "livecore_api_request_errors",
+        "livecore_api_auth_failures",
+        "livecore_api_rate_limit_rejections",
         "livecore_realtime_connections",
         "livecore_reveal_duration",
         "livecore_event_delivery_failures",
         "livecore_asset_failures",
         "livecore_database_failures",
         "livecore_job_failures",
+        "livecore_job_successes",
+        "livecore_job_duration",
+        "livecore_job_backlog",
     ];
 
     [Fact]
@@ -47,12 +53,17 @@ public sealed class MetricsEndpointTests
         // Drive each documented signal through the real instruments the production seams record onto.
         var metrics = factory.Services.GetRequiredService<LiveCoreMetrics>();
         metrics.RecordApiRequest("POST", "/api/v1/sessions/{sessionId}/reveal", statusCode: 500, durationSeconds: 0.02);
+        metrics.RecordApiRequest("GET", "/api/v1/me", statusCode: 401, durationSeconds: 0.01);
+        metrics.RecordApiRequest("GET", "/api/v1/me", statusCode: 429, durationSeconds: 0.01);
         metrics.RecordRealtimeConnectionOpened();
         metrics.RecordRevealCommand(0.03, operation: "reveal");
         metrics.RecordEventDeliveryFailure();
         metrics.RecordAssetFailure("upload");
         metrics.RecordDatabaseFailure();
         metrics.RecordBackgroundJobFailure("asset-cleanup");
+        metrics.RecordBackgroundJobSuccess("asset-cleanup");
+        metrics.RecordBackgroundJobDuration("asset-cleanup", 0.5);
+        metrics.RecordBackgroundJobBacklog("asset-cleanup", 3);
 
         using var response = await client.GetAsync("/metrics");
 

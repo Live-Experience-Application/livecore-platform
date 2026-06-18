@@ -86,6 +86,21 @@ internal sealed class RecordedMetrics : IDisposable
         }
     }
 
+    /// <summary>
+    /// The distinct union of tag KEYS across every recorded measurement for the named instrument. Used to prove
+    /// an instrument carries only low-cardinality, non-sensitive dimensions (no tenant/principal tag; threat T7).
+    /// </summary>
+    public IReadOnlyCollection<string> TagKeys(string instrumentName)
+    {
+        lock (_gate)
+        {
+            return _measurements
+                .Where(measurement => measurement.Name == instrumentName)
+                .SelectMany(measurement => measurement.Tags.Keys)
+                .ToHashSet();
+        }
+    }
+
     public void Dispose() => _listener.Dispose();
 
     private sealed record Measurement(string Name, double Value, IReadOnlyDictionary<string, object?> Tags);

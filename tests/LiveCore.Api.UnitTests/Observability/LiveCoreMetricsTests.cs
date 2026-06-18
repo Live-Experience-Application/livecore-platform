@@ -6,14 +6,15 @@ using LiveCore.Api.Observability;
 namespace LiveCore.Api.UnitTests.Observability;
 
 /// <summary>
-/// Tests for <see cref="LiveCoreMetrics"/> (CORE-OBS-001), the single owner of the eight operational signals
-/// docs/15_OBSERVABILITY.md requires Core to track. They assert — through a real
-/// <see cref="System.Diagnostics.Metrics.MeterListener"/> (<see cref="RecordedMetrics"/>), the same
-/// subscription mechanism the OpenTelemetry SDK uses — that every documented <c>Record*</c> method emits a
-/// measurement on the expected instrument, that the realtime gauge moves up and down, that the API error
-/// counter fires only for server (5xx) statuses, and that the operation/job dimensions are attached. This is
-/// the deterministic proof that all eight documented meters are real and emit; the integration test proves
-/// they surface on the Prometheus scrape endpoint end-to-end.
+/// Tests for <see cref="LiveCoreMetrics"/> (CORE-OBS-001, with the CORE-OBS-007 service-level indicators), the
+/// single owner of the operational signals docs/15_OBSERVABILITY.md requires Core to track. They assert —
+/// through a real <see cref="System.Diagnostics.Metrics.MeterListener"/> (<see cref="RecordedMetrics"/>), the
+/// same subscription mechanism the OpenTelemetry SDK uses — that every documented <c>Record*</c> method emits a
+/// measurement on the expected instrument, that the realtime gauge moves up and down, that the API status
+/// classification routes 5xx/401-403/429 to the error/auth-failure/rate-limit counters respectively, that the
+/// worker job success/duration/backlog SLIs emit, and that every dimension is low-cardinality and non-sensitive
+/// (no tenant/principal tag; threat T7). This is the deterministic proof that the documented meters are real
+/// and emit; the integration test proves they surface on the Prometheus scrape endpoint end-to-end.
 ///
 /// The class shares the serialized "LiveCore metrics" collection so its listener never captures another
 /// metric test's measurements.
@@ -36,12 +37,17 @@ public sealed class LiveCoreMetricsTests
     }
 
     [Theory]
-    [InlineData(500, 1)]
-    [InlineData(503, 1)]
-    [InlineData(404, 0)]
-    [InlineData(403, 0)]
-    [InlineData(200, 0)]
-    public void RecordApiRequest_counts_only_server_errors(int statusCode, int expectedErrors)
+    // status, expected: errors, auth-failures, rate-limit rejections. The three SLI counters are mutually
+    // exclusive by status; the duration histogram always fires.
+    [InlineData(500, 1, 0, 0)]
+    [InlineData(503, 1, 0, 0)]
+    [InlineData(401, 0, 1, 0)]
+    [InlineData(403, 0, 1, 0)]
+    [InlineData(429, 0, 0, 1)]
+    [InlineData(404, 0, 0, 0)]
+    [InlineData(200, 0, 0, 0)]
+    public void RecordApiRequest_classifies_status_into_the_right_sli_counter(
+        int statusCode, int expectedErrors, int expectedAuthFailures, int expectedRateLimitRejections)
     {
         using var metrics = new LiveCoreMetrics();
         using var recorded = new RecordedMetrics();
@@ -50,8 +56,50 @@ public sealed class LiveCoreMetricsTests
 
         // The duration histogram is recorded for every request regardless of status.
         Assert.Equal(1, recorded.Count("livecore.api.request.duration"));
-        // The fail-closed client statuses (4xx) are not faults; only 5xx increments the error counter.
+        // Only genuine server faults (5xx) are errors; the fail-closed 401/403 and the 429 go to their own SLIs.
         Assert.Equal(expectedErrors, recorded.Count("livecore.api.request.errors"));
+        Assert.Equal(expectedAuthFailures, recorded.Count("livecore.api.auth.failures"));
+        Assert.Equal(expectedRateLimitRejections, recorded.Count("livecore.api.rate_limit.rejections"));
+    }
+
+    [Fact]
+    public void RecordApiRequest_sli_counters_carry_only_low_cardinality_non_sensitive_tags()
+    {
+        using var metrics = new LiveCoreMetrics();
+        using var recorded = new RecordedMetrics();
+
+        metrics.RecordApiRequest("GET", "/api/v1/me", statusCode: 401, durationSeconds: 0.01);
+        metrics.RecordApiRequest("GET", "/api/v1/me", statusCode: 429, durationSeconds: 0.01);
+
+        // The auth-failure and rate-limit series carry ONLY the method, the route TEMPLATE and the status code —
+        // no tenant, principal, token or resource label (threat T7).
+        string[] expected = ["http.request.method", "http.route", "http.response.status_code"];
+        Assert.Equal(expected.OrderBy(k => k), recorded.TagKeys("livecore.api.auth.failures").OrderBy(k => k));
+        Assert.Equal(expected.OrderBy(k => k), recorded.TagKeys("livecore.api.rate_limit.rejections").OrderBy(k => k));
+        // The status code distinguishes 401/403 within the auth-failure series.
+        Assert.True(recorded.HasTag("livecore.api.auth.failures", "http.response.status_code", 401));
+    }
+
+    [Fact]
+    public void Worker_job_sli_instruments_each_emit_tagged_by_job_only()
+    {
+        using var metrics = new LiveCoreMetrics();
+        using var recorded = new RecordedMetrics();
+
+        metrics.RecordBackgroundJobSuccess("export-processing");
+        metrics.RecordBackgroundJobDuration("export-processing", 0.25);
+        metrics.RecordBackgroundJobBacklog("export-processing", 7);
+
+        Assert.Equal(1, recorded.Count("livecore.job.successes"));
+        Assert.Equal(1, recorded.Count("livecore.job.duration"));
+        Assert.Equal(1, recorded.Count("livecore.job.backlog"));
+
+        // Each worker SLI carries ONLY the coarse job name — never a tenant/principal/content label (threat T7).
+        foreach (var instrument in new[] { "livecore.job.successes", "livecore.job.duration", "livecore.job.backlog" })
+        {
+            Assert.Equal(["job"], recorded.TagKeys(instrument));
+            Assert.True(recorded.HasTag(instrument, "job", "export-processing"));
+        }
     }
 
     [Fact]

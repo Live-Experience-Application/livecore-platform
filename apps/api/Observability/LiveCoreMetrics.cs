@@ -7,16 +7,21 @@ using System.Diagnostics.Metrics;
 namespace LiveCore.Api.Observability;
 
 /// <summary>
-/// The single owner of the Core platform's operational metrics (CORE-OBS-001). It defines, on one
-/// <see cref="Meter"/> (<see cref="MeterName"/>), the eight signals docs/15_OBSERVABILITY.md requires Core to
-/// track — API request duration, API error rate, realtime connections, reveal command latency, event
-/// delivery failures, asset upload/download failures, database query failures and background job failures —
-/// and exposes a small <c>Record*</c> method per signal that the existing seams call (the request pipeline,
-/// the realtime hub, the reveal command, the event publisher, the asset storage adapter, the persistence
-/// layer and the worker's background job). Concentrating the instrument definitions here keeps the metric
-/// CONTRACT in one place — the names, kinds and units a Prometheus/OTLP surface exposes — rather than
-/// scattering ad-hoc meters across modules, exactly as the Visibility module is the single place visibility
-/// is decided (docs/05_MODULE_CONTRACTS.md).
+/// The single owner of the Core platform's operational metrics (CORE-OBS-001, extended with the
+/// service-level indicators of CORE-OBS-007). It defines, on one <see cref="Meter"/> (<see cref="MeterName"/>),
+/// the eight signals docs/15_OBSERVABILITY.md originally requires Core to track — API request duration, API
+/// error rate, realtime connections, reveal command latency, event delivery failures, asset upload/download
+/// failures, database query failures and background job failures — PLUS the five key service-level indicators
+/// CORE-OBS-007 adds so an operator can alert on an auth-failure spike, a rate-limit storm or a worker falling
+/// behind: the authentication/authorization-failure (401/403) rate, the rate-limit (429) rejection count, and
+/// per-loop worker job success count, duration histogram and backlog/queue depth. It exposes a small
+/// <c>Record*</c> method per signal that the existing seams call (the request pipeline, the realtime hub, the
+/// reveal command, the event publisher, the asset storage adapter, the persistence layer and the worker's
+/// background loops). Concentrating the instrument definitions here keeps the metric CONTRACT in one place —
+/// the names, kinds and units a Prometheus/OTLP surface exposes — rather than scattering ad-hoc meters across
+/// modules, exactly as the Visibility module is the single place visibility is decided
+/// (docs/05_MODULE_CONTRACTS.md). The SLIs REUSE this same meter and the existing low-cardinality tag keys (no
+/// new meter, no new dependency).
 ///
 /// The instruments use <see cref="System.Diagnostics.Metrics"/> — the vendor-neutral .NET metrics API the
 /// OpenTelemetry SDK collects from — so recording a measurement is decoupled from how it is exported. The
@@ -55,16 +60,22 @@ public sealed class LiveCoreMetrics : IDisposable
 
     private readonly Histogram<double> _requestDuration;
     private readonly Counter<long> _requestErrors;
+    private readonly Counter<long> _authFailures;
+    private readonly Counter<long> _rateLimitRejections;
     private readonly UpDownCounter<long> _realtimeConnections;
     private readonly Histogram<double> _revealDuration;
     private readonly Counter<long> _eventDeliveryFailures;
     private readonly Counter<long> _assetFailures;
     private readonly Counter<long> _databaseFailures;
     private readonly Counter<long> _jobFailures;
+    private readonly Counter<long> _jobSuccesses;
+    private readonly Histogram<double> _jobDuration;
+    private readonly Gauge<long> _jobBacklog;
 
     /// <summary>
-    /// Creates the meter and its eight instruments. Constructed once per host as a singleton; the meter is
-    /// disposed with the container.
+    /// Creates the meter and its thirteen instruments (the eight original signals plus the five CORE-OBS-007
+    /// service-level indicators). Constructed once per host as a singleton; the meter is disposed with the
+    /// container.
     /// </summary>
     public LiveCoreMetrics()
     {
@@ -85,6 +96,25 @@ public sealed class LiveCoreMetrics : IDisposable
             "livecore.api.request.errors",
             unit: "{error}",
             description: "API requests that completed with a server-error (5xx) status.");
+
+        // Authentication/authorization-failure rate (SLI, CORE-OBS-007). A counter of requests the
+        // authorization model rejected fail-closed with a 401 (unauthenticated) or 403 (forbidden). These are
+        // client-side statuses the error counter above deliberately does NOT count as server faults, so a spike
+        // of credential/permission failures (a brute-force or token-replay attempt, a misconfigured client) was
+        // previously invisible; this makes it alertable. The status-code dimension keeps 401 and 403 distinct.
+        _authFailures = _meter.CreateCounter<long>(
+            "livecore.api.auth.failures",
+            unit: "{failure}",
+            description: "API requests rejected with an authentication/authorization failure (401 or 403).");
+
+        // Rate-limit rejection count (SLI, CORE-OBS-007). A counter of requests the rate limiter rejected with
+        // 429 (CORE-SEC-001). Like the auth-failure counter it is a 4xx the error counter does not count, so a
+        // rate-limit storm — an abusive client or a misconfigured caller hammering the limiter — is alertable
+        // on its own series rather than hidden among normal 4xx traffic.
+        _rateLimitRejections = _meter.CreateCounter<long>(
+            "livecore.api.rate_limit.rejections",
+            unit: "{rejection}",
+            description: "API requests rejected by the rate limiter with a 429 (Too Many Requests) status.");
 
         // Realtime connections (docs/15). An up/down counter of currently-open authenticated realtime hub
         // connections: incremented when a connection is admitted to its server-managed groups and decremented
@@ -131,14 +161,42 @@ public sealed class LiveCoreMetrics : IDisposable
             "livecore.job.failures",
             unit: "{failure}",
             description: "Background job runs that failed with an unhandled error.");
+
+        // Background job success count (SLI, CORE-OBS-007). A counter, tagged by the coarse job name, of sweep
+        // runs that COMPLETED without throwing — the success counterpart to the failure counter above. Together
+        // they give the per-loop success/failure ratio, so a loop that is silently failing every sweep (or that
+        // has stopped succeeding) is visible rather than only the absolute failure rate.
+        _jobSuccesses = _meter.CreateCounter<long>(
+            "livecore.job.successes",
+            unit: "{success}",
+            description: "Background job runs that completed without an unhandled error.");
+
+        // Background job duration (SLI, CORE-OBS-007). A histogram, tagged by the coarse job name, of how long
+        // one sweep took, in seconds — so a loop whose sweeps are getting slower (approaching its interval) is
+        // observable before it falls behind.
+        _jobDuration = _meter.CreateHistogram<double>(
+            "livecore.job.duration",
+            unit: "s",
+            description: "Duration of one background job sweep run, in seconds.");
+
+        // Background job backlog/queue depth (SLI, CORE-OBS-007). A gauge, tagged by the coarse job name, set
+        // after each sweep to the number of pending items that sweep observed (its examined count). A depth
+        // that stays saturated at the batch size sweep after sweep is the "worker falling behind" signal an
+        // operator alerts on — a queue could previously back up while every existing metric stayed green.
+        _jobBacklog = _meter.CreateGauge<long>(
+            "livecore.job.backlog",
+            unit: "{item}",
+            description: "Pending items a background job sweep observed (its queue/backlog depth).");
     }
 
     /// <summary>
     /// Records one completed API request: its handling <paramref name="durationSeconds"/> on the duration
-    /// histogram (tagged with the method, the route TEMPLATE and the status code), and — when the status is a
-    /// server error (5xx) — one increment of the error counter with the same tags. The caller passes the
-    /// route TEMPLATE (e.g. <c>/api/v1/sessions/{sessionId}/reveal</c>), never the concrete path, so no
-    /// resource id becomes a label (threat T7).
+    /// histogram (tagged with the method, the route TEMPLATE and the status code), and one increment of the
+    /// matching service-level counter with the SAME tags — the error counter for a server error (5xx), the
+    /// auth-failure counter for a fail-closed 401/403 (CORE-OBS-007) and the rate-limit counter for a 429
+    /// (CORE-OBS-007). The three are mutually exclusive by status, so a request increments at most one. The
+    /// caller passes the route TEMPLATE (e.g. <c>/api/v1/sessions/{sessionId}/reveal</c>), never the concrete
+    /// path, so no resource id becomes a label, and no tenant/principal detail is ever attached (threat T7).
     /// </summary>
     public void RecordApiRequest(string method, string route, int statusCode, double durationSeconds)
     {
@@ -151,9 +209,20 @@ public sealed class LiveCoreMetrics : IDisposable
 
         _requestDuration.Record(durationSeconds, tags);
 
+        // Classify the status into the matching SLI counter. Only genuine server faults (5xx) are errors; the
+        // fail-closed 401/403 and the 429 are client-side statuses tracked on their own SLI series so an
+        // operator can alert on an auth-failure spike or a rate-limit storm without conflating them with faults.
         if (statusCode >= 500)
         {
             _requestErrors.Add(1, tags);
+        }
+        else if (statusCode is 401 or 403)
+        {
+            _authFailures.Add(1, tags);
+        }
+        else if (statusCode == 429)
+        {
+            _rateLimitRejections.Add(1, tags);
         }
     }
 
@@ -190,6 +259,37 @@ public sealed class LiveCoreMetrics : IDisposable
     /// </summary>
     public void RecordBackgroundJobFailure(string job)
         => _jobFailures.Add(1, new TagList { { _jobTag, job } });
+
+    /// <summary>
+    /// Increments the background job-SUCCESS counter for the named <paramref name="job"/> — one sweep run that
+    /// completed without throwing (SLI, CORE-OBS-007). The coarse job name is the only dimension; no tenant,
+    /// principal or content is ever attached (threat T7).
+    /// </summary>
+    public void RecordBackgroundJobSuccess(string job)
+        => _jobSuccesses.Add(1, new TagList { { _jobTag, job } });
+
+    /// <summary>
+    /// Records the <paramref name="durationSeconds"/> of one sweep run of the named <paramref name="job"/> on
+    /// the job-duration histogram (SLI, CORE-OBS-007), tagged only by the coarse job name (threat T7).
+    /// </summary>
+    public void RecordBackgroundJobDuration(string job, double durationSeconds)
+        => _jobDuration.Record(durationSeconds, new TagList { { _jobTag, job } });
+
+    /// <summary>
+    /// Sets the backlog/queue-depth gauge for the named <paramref name="job"/> to <paramref name="depth"/> —
+    /// the number of pending items the latest sweep observed (SLI, CORE-OBS-007), tagged only by the coarse job
+    /// name (threat T7). A depth that stays saturated sweep after sweep signals a loop falling behind.
+    /// </summary>
+    public void RecordBackgroundJobBacklog(string job, long depth)
+        => _jobBacklog.Record(depth, new TagList { { _jobTag, job } });
+
+    /// <summary>
+    /// This instance's underlying <see cref="Meter"/>. Exposed to the test assemblies only (the meter name is
+    /// process-global, so a test that listens by name alone would capture another concurrently-running host's
+    /// measurements; a test scopes its <see cref="MeterListener"/> to THIS reference for a deterministic
+    /// assertion). Not part of the public surface.
+    /// </summary>
+    internal Meter Meter => _meter;
 
     /// <inheritdoc />
     public void Dispose() => _meter.Dispose();

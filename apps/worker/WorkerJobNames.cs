@@ -4,10 +4,12 @@
 namespace LiveCore.Worker;
 
 /// <summary>
-/// The stable, coarse names of the worker's four background job loops (CORE-DR-003). One name per loop, used
-/// as both the <c>job</c> tag on the <c>livecore_job_failures_total</c> metric (so a failing loop is
-/// attributable on the scrape surface) and the key of each loop's own liveness heartbeat (so one hung loop is
-/// detectable independently of the others — see <see cref="WorkerJobHeartbeats"/>).
+/// The stable, coarse names of the worker's background job loops (CORE-DR-003). One name per loop, used
+/// as both the <c>job</c> tag on the worker SLI metrics — <c>livecore_job_failures_total</c> and the
+/// CORE-OBS-007 <c>livecore_job_successes_total</c>, <c>livecore_job_duration_seconds</c> and
+/// <c>livecore_job_backlog</c> — (so a failing or falling-behind loop is attributable on the scrape surface)
+/// and the key of each loop's own liveness heartbeat (so one hung loop is detectable independently of the
+/// others — see <see cref="WorkerJobHeartbeats"/>).
 ///
 /// <para>
 /// Concentrating the names here keeps the metric/heartbeat CONTRACT in one place rather than letting each

@@ -58,9 +58,11 @@ _ = SourceOffer.ForRunningBuild(builder.Configuration);
 
 builder.Services.AddHealthChecks();
 
-// Operational metrics (CORE-OBS-001). LiveCoreMetrics owns the eight signals docs/15_OBSERVABILITY.md
-// requires (request duration/error rate, realtime connections, reveal latency, event-delivery failures,
-// asset failures, database failures, background-job failures) on a single OpenTelemetry-collected meter, and
+// Operational metrics (CORE-OBS-001, extended with the CORE-OBS-007 service-level indicators). LiveCoreMetrics
+// owns the eight original signals docs/15_OBSERVABILITY.md requires (request duration/error rate, realtime
+// connections, reveal latency, event-delivery failures, asset failures, database failures, background-job
+// failures) plus the SLIs (auth-failure rate, rate-limit rejections, and per-loop worker job success/duration/
+// backlog) on a single OpenTelemetry-collected meter, and
 // this wires the MeterProvider plus the Prometheus exporter that backs the /metrics scrape endpoint
 // (mapped below). It is registered UNCONDITIONALLY (no persistence/identity needed), so the surface exists
 // even when the host runs without a database, exactly like the health endpoints. The instrumentation seams

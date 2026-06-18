@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
+using System.Diagnostics;
 using LiveCore.Api.Observability;
 using LiveCore.Api.Retention;
 
@@ -104,12 +105,21 @@ internal sealed class DataRetentionSweepBackgroundService : BackgroundService
 
     private async Task RunSweepAsync(CancellationToken stoppingToken)
     {
+        var startTimestamp = Stopwatch.GetTimestamp();
         try
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             var sweep = scope.ServiceProvider.GetRequiredService<DataRetentionSweepService>();
 
             var result = await sweep.SweepAsync(stoppingToken).ConfigureAwait(false);
+
+            // SLI signals (CORE-OBS-007): the sweep completed without throwing, so record one job success, the
+            // sweep duration and the observed backlog/queue depth (the total candidate records it examined across
+            // every family) — so a loop falling behind is alertable. Counts only, tagged by the coarse loop
+            // name, never a tenant/principal/content detail (threat T7).
+            _metrics.RecordBackgroundJobSuccess(_jobName);
+            _metrics.RecordBackgroundJobDuration(_jobName, Stopwatch.GetElapsedTime(startTimestamp).TotalSeconds);
+            _metrics.RecordBackgroundJobBacklog(_jobName, result.TotalExamined);
 
             if (result.TotalExamined > 0)
             {
@@ -134,10 +144,11 @@ internal sealed class DataRetentionSweepBackgroundService : BackgroundService
         catch (Exception exception)
         {
             // A failed sweep must never crash the worker; record the docs/15_OBSERVABILITY.md "background job
-            // failures" signal (CORE-OBS-001), log it (identifiers and counts only) and let the next tick try
-            // again. Counting only — the exception detail goes to the structured log, never a metric label
-            // (threat T7).
+            // failures" signal (CORE-OBS-001) and the sweep duration up to the throw (CORE-OBS-007), log it
+            // (identifiers and counts only) and let the next tick try again. Counting only — the exception
+            // detail goes to the structured log, never a metric label (threat T7).
             _metrics.RecordBackgroundJobFailure(_jobName);
+            _metrics.RecordBackgroundJobDuration(_jobName, Stopwatch.GetElapsedTime(startTimestamp).TotalSeconds);
             _logger.LogError(exception, "Data-retention sweep failed; it will be retried on the next interval.");
         }
     }

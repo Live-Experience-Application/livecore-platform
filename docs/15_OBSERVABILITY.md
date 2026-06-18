@@ -98,12 +98,13 @@ Track:
 
 The eight signals above are implemented with OpenTelemetry metrics over the vendor-neutral
 `System.Diagnostics.Metrics` API. A single owner, `LiveCoreMetrics` (`apps/api/Observability/`), defines one
-meter named `LiveCore` carrying all eight instruments, and the existing seams record onto it: a request
+meter named `LiveCore` carrying all eight instruments (plus the five CORE-OBS-007 service-level indicators
+below — they REUSE the same meter), and the existing seams record onto it: a request
 middleware (request duration + error rate), the realtime hub (connections), the reveal endpoint (reveal
 latency), the session-event publisher (event-delivery failures), a transparent `IAssetStorage` decorator
 (asset upload/download failures), an EF Core command interceptor (database failures) and the worker's
 background jobs (job failures, tagged by a coarse `job` name — one per loop: `asset-cleanup`,
-`recap-generation`, `export-processing` and `store-notification-reconciliation`).
+`recap-generation`, `export-processing`, `store-notification-reconciliation` and `data-retention`).
 
 The API host exposes a **Prometheus scrape endpoint** at `GET /metrics` (the OpenTelemetry Prometheus
 exporter). It is registered unconditionally — like the health endpoints, it needs no database or identity
@@ -113,18 +114,49 @@ provider. The instruments and their exported Prometheus series:
 | ---------------------------- | ----------------------------------- | ------------- | ------------------------------------- |
 | API request duration         | `livecore.api.request.duration`     | histogram (s) | `livecore_api_request_duration_seconds` |
 | API error rate               | `livecore.api.request.errors`       | counter       | `livecore_api_request_errors_total`   |
+| Auth-failure rate (SLI)      | `livecore.api.auth.failures`        | counter       | `livecore_api_auth_failures_total`    |
+| Rate-limit rejections (SLI)  | `livecore.api.rate_limit.rejections`| counter       | `livecore_api_rate_limit_rejections_total` |
 | Realtime connections         | `livecore.realtime.connections`     | up/down gauge | `livecore_realtime_connections`       |
 | Reveal command latency       | `livecore.reveal.duration`          | histogram (s) | `livecore_reveal_duration_seconds`    |
 | Event delivery failures      | `livecore.event.delivery.failures`  | counter       | `livecore_event_delivery_failures_total` |
 | Asset upload/download failures| `livecore.asset.failures`          | counter       | `livecore_asset_failures_total`       |
 | Database query failures      | `livecore.database.failures`        | counter       | `livecore_database_failures_total`    |
 | Background job failures      | `livecore.job.failures`             | counter       | `livecore_job_failures_total`         |
+| Background job successes (SLI)| `livecore.job.successes`           | counter       | `livecore_job_successes_total`        |
+| Background job duration (SLI)| `livecore.job.duration`             | histogram (s) | `livecore_job_duration_seconds`       |
+| Background job backlog (SLI) | `livecore.job.backlog`              | gauge         | `livecore_job_backlog`                |
 
 Dimensions are kept **low-cardinality and non-sensitive** (threat T7): the request duration is tagged with
 the HTTP method, the route **template** (never the concrete path, so no resource id becomes a label) and the
 status code; the others carry only a coarse `operation`/`job` name. The error counter increments only for
 server errors (5xx); the fail-closed 401/403/404 the authorization model returns by design are client-side
 statuses and are not counted as errors.
+
+#### Service-level indicators (CORE-OBS-007)
+
+The eight instruments above leave three key service-level indicators uncovered: the error counter increments
+only on `5xx`, so an **auth-failure spike** (a brute-force or token-replay attempt, a misconfigured client
+hammering `401`/`403`) is counted nowhere; the `429` rate-limit path records no metric, so a **rate-limit
+storm** is invisible; and the worker records only `job.failures`, so a loop whose queue **backs up** (or whose
+sweeps slow down) does so with every existing metric staying green. CORE-OBS-007 adds five SLIs on the SAME
+`LiveCore` meter (no new meter, no new dependency) so an operator can alert on each:
+
+- **Auth-failure rate** (`livecore.api.auth.failures`) and **rate-limit rejections**
+  (`livecore.api.rate_limit.rejections`) are recorded by the SAME request-metrics middleware that records the
+  duration/error signals (`RequestMetricsMiddleware` → `LiveCoreMetrics.RecordApiRequest`). The status is
+  classified into exactly one SLI counter: `5xx` → error, `401`/`403` → auth-failure, `429` → rate-limit. They
+  carry the SAME low-cardinality tags as the duration (method, route **template**, status code) — the status
+  tag distinguishes `401` from `403` — and never a tenant, principal or resource label. Because the middleware
+  wraps the whole pipeline (it sits OUTSIDE the rate limiter and the authorization step), a fail-closed
+  `401`/`403` and a limiter `429` flow back through it and are counted exactly once, without any new seam.
+- **Per-loop worker job successes** (`livecore.job.successes`, the counterpart to `job.failures`),
+  **duration** (`livecore.job.duration`, a histogram in seconds) and **backlog/queue depth**
+  (`livecore.job.backlog`, a gauge) are recorded by each of the worker's background loops on its existing sweep
+  path, tagged only by the coarse `job` name. A completed sweep records one success, the sweep duration and the
+  pending-item count it observed (its `examined` count) as the backlog gauge; a failed sweep records the
+  failure and the duration up to the throw. The backlog gauge **saturating at the batch size sweep after
+  sweep** is the "worker falling behind" signal — the success/failure ratio and the duration trend round out
+  the per-loop health. No tenant, principal or content is ever attached (threat T7).
 
 #### Best-effort realtime delivery (CORE-RES-001)
 
@@ -167,10 +199,11 @@ locked restore over the whole solution so the closure cannot float, and the rele
 CVE-scanned before publish (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, CORE-DEP-003). The pin is revisited when a
 stable `OpenTelemetry.Exporter.Prometheus.AspNetCore` is published.
 
-The background **worker** records job failures onto the same `LiveCore` meter from all four of its job loops
-(asset cleanup, recap generation, export processing and the billing-gated store-notification reconciliation),
-and it now exposes its OWN Prometheus scrape endpoint at `GET /metrics` (CORE-DR-003), wired exactly as the
-API host wires it (`AddLiveCorePrometheusMetrics` + `MapLiveCoreMetricsEndpoint`) — so the
+The background **worker** records job failures — and, since CORE-OBS-007, the per-loop success count, sweep
+duration and backlog/queue depth SLIs — onto the same `LiveCore` meter from each of its job loops (asset
+cleanup, recap generation, export processing, the billing-gated store-notification reconciliation and the
+data-retention sweep), and it exposes its OWN Prometheus scrape endpoint at `GET /metrics` (CORE-DR-003), wired
+exactly as the API host wires it (`AddLiveCorePrometheusMetrics` + `MapLiveCoreMetricsEndpoint`) — so the
 `livecore_job_failures_total` counters each loop records on failure are actually scrapeable, not recorded onto
 an unobserved meter. The worker binds the surface on a configurable listen URL (`Worker:Metrics:Url`, default
 port 9464) and, like the API's `/metrics`, it is unauthenticated by convention and restricted at the network

@@ -11,7 +11,8 @@ namespace LiveCore.Api.Observability;
 /// single <see cref="LiveCoreMetrics"/> instrument set to an OpenTelemetry <c>MeterProvider</c> and exposes
 /// it on a Prometheus scrape endpoint, realizing the docs/15_OBSERVABILITY.md metrics surface.
 ///
-/// WHY OPENTELEMETRY (the justified new dependency). docs/15 mandates eight operational metrics; none
+/// WHY OPENTELEMETRY (the justified new dependency). docs/15 mandates eight operational metrics (the
+/// CORE-OBS-007 service-level indicators later add five more on the SAME meter, no new dependency); none
 /// existed (no meter, no scrape/OTLP surface). <see cref="LiveCoreMetrics"/> defines the instruments on the
 /// vendor-neutral <see cref="System.Diagnostics.Metrics"/> API, but a process still needs an SDK to
 /// aggregate those measurements and serve them in a scrapeable format. OpenTelemetry is the CNCF-standard,

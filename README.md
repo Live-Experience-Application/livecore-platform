@@ -891,8 +891,13 @@ middleware), **realtime connections** (the SignalR hub), **reveal command latenc
 (the reveal endpoint), **event-delivery failures** (the session-event publisher),
 **asset upload/download failures** (a transparent `IAssetStorage` decorator),
 **database query failures** (an EF Core command interceptor) and **background job
-failures** (the worker's cleanup job). The OpenTelemetry SDK aggregates them and the
-Prometheus exporter serves `/metrics`.
+failures** (the worker's cleanup job) — plus the five **service-level indicators**
+CORE-OBS-007 adds on the same meter so an operator can alert on an auth-failure spike,
+a rate-limit storm or a worker falling behind: the **auth-failure rate**
+(`401`/`403`, same request middleware), **rate-limit rejections** (`429`, same
+middleware) and per-loop worker job **success count**, **duration** histogram and
+**backlog/queue depth** (each worker loop). The OpenTelemetry SDK aggregates them and
+the Prometheus exporter serves `/metrics`.
 
 Like `/health/*`, `/metrics` is **unauthenticated by convention** — a Prometheus
 server scrapes it from inside the deployment network — and a deployment restricts it
@@ -901,7 +906,8 @@ at the reverse-proxy/network edge. It carries only low-cardinality aggregate ser
 identifier, token, asset coordinate or resource content is ever a metric label, so
 the surface cannot leak content (threat T7 in `docs/07_SECURITY_THREAT_MODEL.md`).
 The error counter counts only server errors (5xx); the fail-closed `401`/`403`/`404`
-the authorization model returns by design are not counted as errors. Two new
+the authorization model returns by design are not counted as errors — the `401`/`403`
+auth-failure and `429` rate-limit rejections are tracked on their own SLI series. Two new
 dependencies are added to `apps/api`: `OpenTelemetry.Extensions.Hosting` (the SDK +
 host integration) and `OpenTelemetry.Exporter.Prometheus.AspNetCore` (the scrape
 endpoint). The Prometheus exporter is pinned to a **prerelease** (`1.16.0-beta.1`)
@@ -957,10 +963,10 @@ ASP.NET Core shared framework the referenced API project already brings, so **no
 dependency** — bound to a configurable listen URL (`Worker:Metrics:Url`, default
 `http://0.0.0.0:9464`):
 
-| Endpoint       | Purpose                                                                                                                                                                                                                                                                        |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/metrics`     | The Prometheus scrape endpoint, wired exactly as the API's (`AddLiveCorePrometheusMetrics`). It exposes the same `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on failure is scrapeable (it was recorded onto an unobserved meter before). |
-| `/health/live` | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                    |
+| Endpoint       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/metrics`     | The Prometheus scrape endpoint, wired exactly as the API's (`AddLiveCorePrometheusMetrics`). It exposes the same `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on failure — and the CORE-OBS-007 per-loop `livecore_job_successes_total`, `livecore_job_duration_seconds` and `livecore_job_backlog` SLIs — are scrapeable (they were recorded onto an unobserved meter before). |
+| `/health/live` | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                                                                                                                                                          |
 
 Each of the four loops (asset cleanup, recap generation, export processing, and the
 billing-gated store-notification reconciliation) writes the current UTC timestamp to
