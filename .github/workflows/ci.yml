@@ -18,6 +18,7 @@
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
+#   compose-full-smoke   - full local stack overlay starts (Core + Keycloak OIDC + MinIO storage + Valkey backplane) and the documented probes answer 200 (CORE-DEP-006)
 #   helm-chart           - render/validate the Kubernetes Helm chart: static gate + helm lint + helm template + kubeconform schema validation, asserting the pre-install migrate Job, the probes and no hardcoded secret (CORE-DEP-004)
 #   observability-assets - validate the example Prometheus rules/scrape config + SLO/dashboard assets (promtool check + consistency gate) (CORE-OBS-008)
 #   publish-dry-run      - verify image tags + image-scan gate test + cosign verification gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), and a cosign sign/attest/verify round-trip against the locally-built digest with a throwaway key, no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-SEC-008, CORE-CMP-003)
@@ -811,6 +812,84 @@ jobs:
         working-directory: deploy/compose
         run: docker compose down -v --remove-orphans || true
 
+  compose-full-smoke:
+    name: Full local stack smoke (CORE-DEP-006)
+    runs-on: ubuntu-latest
+    # CORE-DEP-006: the OPTIONAL full-stack overlay (deploy/compose/docker-compose.full.yml)
+    # brings the Core up together with an OIDC provider (Keycloak), S3-compatible object
+    # storage (MinIO) and a Redis/Valkey backplane, PRE-WIRED so an operator or a vertical
+    # author can run the platform end-to-end locally (authenticated traffic, asset
+    # upload/download, multi-instance realtime) without standing up external services by
+    # hand. The static half - that the overlay wires the OIDC/storage/backplane services and
+    # the api/worker reference them - is asserted by scripts/test-compose-deploy.ps1 in the
+    # compose-smoke job. This job proves the overlay STARTS (the "or a documented subset"
+    # half of the acceptance criteria - here the full profile):
+    #   1. RENDERS: `docker compose -f base -f overlay config` merges cleanly.
+    #   2. STARTS + GATE: brings the merged stack up; the base migrate-before-API gate still
+    #      holds and the api/worker come up wired to keycloak/minio/valkey.
+    #   3. PROBES: the documented health/readiness/liveness endpoints answer 200. Crucially
+    #      /health/ready is green ONLY when the configured OIDC, object-storage and backplane
+    #      dependencies are all REACHABLE (the deep readiness probes, CORE-OBS-009), so a
+    #      green readiness proves the full stack is wired together end-to-end.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Render the merged full-stack overlay
+        working-directory: deploy/compose
+        run: docker compose -f docker-compose.yml -f docker-compose.full.yml config
+
+      - name: Start the full local stack (postgres -> migrate gate -> api + worker, plus keycloak + minio + valkey)
+        working-directory: deploy/compose
+        run: docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+
+      - name: The migrations runner ran to completion (exit 0)
+        working-directory: deploy/compose
+        run: |
+          set -euo pipefail
+          migrate_cid="$(docker compose -f docker-compose.yml -f docker-compose.full.yml ps -aq migrate)"
+          exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$migrate_cid")"
+          echo "migrate exit code: $exit_code"
+          if [ "$exit_code" != "0" ]; then
+            docker compose -f docker-compose.yml -f docker-compose.full.yml logs migrate
+            echo "Migrations runner did not exit 0."
+            exit 1
+          fi
+
+      - name: The documented probes answer 200 (readiness is green only when OIDC + storage + backplane are reachable)
+        run: |
+          set -euo pipefail
+          probe() {
+            local url="$1"
+            local attempts="$2"
+            for attempt in $(seq 1 "$attempts"); do
+              if curl --fail --silent --output /dev/null "$url"; then
+                echo "OK: $url answered after $attempt attempt(s)."
+                return 0
+              fi
+              sleep 2
+            done
+            echo "FAILED: $url did not answer 200 in time."
+            return 1
+          }
+          # Liveness/metrics come up with the process; readiness waits for the deep OIDC/
+          # storage/backplane reachability probes, so give it a generous budget (the OIDC
+          # realm import is the slowest step) — its success is the end-to-end wiring proof.
+          probe http://localhost:8080/health/live  30    # API liveness
+          probe http://localhost:9464/health/live  30    # worker per-loop heartbeat liveness
+          probe http://localhost:9464/metrics      30    # worker Prometheus scrape
+          probe http://localhost:8080/health/ready 90    # API readiness (OIDC + storage + backplane reachable)
+
+      - name: Dump container logs on failure
+        if: failure()
+        working-directory: deploy/compose
+        run: docker compose -f docker-compose.yml -f docker-compose.full.yml logs
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: deploy/compose
+        run: docker compose -f docker-compose.yml -f docker-compose.full.yml down -v --remove-orphans || true
+
   helm-chart:
     name: Helm chart render and schema validation (CORE-DEP-004)
     runs-on: ubuntu-latest
@@ -1463,6 +1542,7 @@ jobs:
       - powershell-lint
       - docker
       - compose-smoke
+      - compose-full-smoke
       - observability-assets
       - publish-dry-run
       - migrations
@@ -1735,6 +1815,7 @@ jobs:
       - powershell-lint
       - docker
       - compose-smoke
+      - compose-full-smoke
       - observability-assets
       - publish-dry-run
       - publish-packages-dry-run

@@ -86,6 +86,68 @@ the documented probes (no Docker needed), and the `compose-smoke` CI job
 the migrations runner exits `0`, the API and worker start **only after** it
 completes, and every probe endpoint answers `200`.
 
+### Full local stack overlay (CORE-DEP-006)
+
+The minimal stack above deliberately omits the OIDC provider, object storage and
+the realtime backplane — `docker-compose.yml` defines only `postgres`/`migrate`/
+`api`/`worker`, with those seams **unset** so it comes up green with no external
+services. The right default for small self-hosting, but it means nobody can run an
+**authenticated, asset-serving, scale-out** Core locally out of the box (the
+larger `livecore-deploy` stack listed under "Local development" exists for exactly
+that, but it is a separate checkout).
+
+[`deploy/compose/docker-compose.full.yml`](../deploy/compose/docker-compose.full.yml)
+is an **optional, opt-in overlay** that closes the gap **from this repository
+alone**, while keeping the minimal stack minimal. It adds the three supporting
+services from the "Local development" list — `keycloak` (OIDC), `minio`
+(S3-compatible object storage, with a one-shot `minio-setup` job that creates the
+private `livecore-assets` bucket) and `valkey` (the Redis/Valkey backplane) — and
+**pre-wires** the api/worker to them. Bring up the merged stack from
+`deploy/compose`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+```
+
+It is **a separate file, not a change to the minimal stack**: a plain
+`docker compose up` is unchanged. Compose merges the overlay onto the base, so:
+
+- **It reuses the documented configuration contract** (CORE-OPS-008): the overlay
+  only fills the same `Authentication:Oidc:*` (`Authentication__Oidc__*`),
+  `Assets:Storage:*` (`Assets__Storage__*`) and `Realtime:Backplane:*`
+  (`Realtime__Backplane__*`) keys the base manifest already exposes unset — pointing
+  them at the bundled `keycloak`/`minio`/`valkey` services — so authenticated
+  traffic, asset upload/download and multi-instance realtime work with no manual
+  setup. Every supporting-service knob has a safe local default, documented in
+  `deploy/compose/.env.example` under "Full local stack".
+- **It inherits the existing migrate gate.** The merged api/worker still depend on
+  the one-shot `migrate` runner with
+  `condition: service_completed_successfully`, and now additionally wait for the
+  supporting services (the object-storage bucket setup completing, the backplane
+  healthy). The gate is preserved, not re-implemented.
+- **The probes are unchanged and prove the wiring.** The same `/health/live`,
+  `/health/ready` and `/metrics` ports are published. Because `/health/ready` runs
+  the deep dependency reachability probes (CORE-OBS-009) for each configured
+  dependency, a green readiness on the full stack means the OIDC provider, object
+  storage and backplane are all reachable — i.e. the stack is wired together
+  end-to-end.
+
+The OIDC issuer is the in-network URL `http://keycloak:8080/realms/livecore`, so a
+vertical app that obtains tokens should run inside the Compose network and use that
+authority (the `examples/minimal-consumer` reference integration, CORE-PUB-003,
+which this overlay underpins). The bundled admin/credential defaults are well-known
+**local** values for a throwaway machine — the same posture as the base stack's
+`livecore`/`livecore` database login — **not** production secrets; harden them and
+the imported realm before exposing the stack. `deploy/compose/README.md` documents
+the realm, token issuance and scaling realtime (`--scale api=N` behind a sticky
+proxy).
+
+**Tested.** `scripts/test-compose-deploy.ps1` statically validates that the overlay
+defines the OIDC/storage/backplane services and that the api/worker reference them
+(no Docker needed), and the `compose-full-smoke` CI job (`.github/workflows/ci.yml`)
+renders the merged manifest, brings the full stack up and asserts the documented
+probe endpoints answer `200`.
+
 ## Production options
 
 - single VPS with Docker Compose — the in-repo stack at

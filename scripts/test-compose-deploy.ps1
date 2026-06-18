@@ -167,6 +167,131 @@ AssertTrue ($realModel.Services['api'].DependsOn['migrate'] -eq 'service_complet
 AssertTrue ($realModel.Services['worker'].DependsOn['migrate'] -eq 'service_completed_successfully') `
     'the real worker service gates on migrate completion (service_completed_successfully)'
 
+# =============================================================================
+# Full local stack overlay (docker-compose.full.yml, CORE-DEP-006)
+# =============================================================================
+# The optional overlay brings up the Core together with an OIDC provider, S3-
+# compatible object storage and a Redis/Valkey backplane, pre-wired so the
+# platform runs end-to-end locally. Test-LiveCoreComposeFullStack statically
+# validates the overlay defines those three supporting services and that the
+# merged api/worker reference them.
+
+# A minimal, well-formed full-stack overlay fixture. Stage- and indentation-
+# faithful to the real overlay; each switch perturbs exactly one invariant.
+function Get-FixtureFullStack {
+    param(
+        [switch]$OmitBackplaneService,
+        [switch]$BreakApiOidc,
+        [switch]$OmitWorkerStorage
+    )
+
+    $backplane = if ($OmitBackplaneService) { '' } else { @'
+  valkey:
+    image: valkey/valkey:8
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+'@ }
+
+    $apiAuthority = if ($BreakApiOidc) {
+        'Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-}'
+    }
+    else {
+        'Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-http://keycloak:8080/realms/livecore}'
+    }
+
+    $workerStorage = if ($OmitWorkerStorage) { '' } else { @'
+    environment:
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
+'@ }
+
+    return @"
+name: livecore
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1
+    command: ["start-dev", "--import-realm"]
+  minio:
+    image: minio/minio:latest
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+$backplane
+  api:
+    environment:
+      $apiAuthority
+      Assets__Storage__Endpoint: `${Assets__Storage__Endpoint:-http://minio:9000}
+      Realtime__Backplane__ConnectionString: `${Realtime__Backplane__ConnectionString:-valkey:6379}
+    depends_on:
+      keycloak:
+        condition: service_started
+      valkey:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+  worker:
+$workerStorage
+volumes:
+  livecore-minio-data:
+"@
+}
+
+# --- Parser + validator: the well-formed overlay fixture is valid. ---
+$fullModel = Get-LiveCoreComposeModel -Content (Get-FixtureFullStack)
+AssertTrue ($fullModel.Services.ContainsKey('keycloak')) 'the parser finds the keycloak (OIDC) service in the overlay'
+AssertTrue ($fullModel.Services['api'].Environment['Realtime__Backplane__ConnectionString'] -match 'valkey') `
+    'the parser reads the api -> backplane env value'
+AssertTrue ((Test-LiveCoreComposeFullStack -Model $fullModel).IsValid) `
+    'a well-formed full-stack overlay passes validation (OIDC + storage + backplane wired, api/worker reference them)'
+
+# --- Negative: dropping the backplane service is rejected. ---
+$noBackplane = Get-LiveCoreComposeModel -Content (Get-FixtureFullStack -OmitBackplaneService)
+$noBackplaneResult = Test-LiveCoreComposeFullStack -Model $noBackplane
+AssertTrue (-not $noBackplaneResult.IsValid) 'a full-stack overlay missing the backplane service is rejected'
+AssertTrue (($noBackplaneResult.Findings -join "`n") -match 'BACKPLANE') `
+    'the rejection names the missing backplane service'
+
+# --- Negative: an api whose OIDC authority does not reference the OIDC service is rejected. ---
+$brokenOidc = Get-LiveCoreComposeModel -Content (Get-FixtureFullStack -BreakApiOidc)
+$brokenOidcResult = Test-LiveCoreComposeFullStack -Model $brokenOidc
+AssertTrue (-not $brokenOidcResult.IsValid) 'a full-stack overlay whose api does not wire the OIDC authority to keycloak is rejected'
+AssertTrue (($brokenOidcResult.Findings -join "`n") -match 'Authentication__Oidc__Authority') `
+    'the rejection names the unwired OIDC authority'
+
+# --- Negative: a worker that does not reference object storage is rejected. ---
+$noWorkerStorage = Get-LiveCoreComposeModel -Content (Get-FixtureFullStack -OmitWorkerStorage)
+$noWorkerStorageResult = Test-LiveCoreComposeFullStack -Model $noWorkerStorage
+AssertTrue (-not $noWorkerStorageResult.IsValid) 'a full-stack overlay whose worker does not wire object storage is rejected'
+AssertTrue (($noWorkerStorageResult.Findings -join "`n") -match "worker.*Assets__Storage__Endpoint") `
+    'the rejection names the worker object-storage wiring'
+
+# --- Guard the real checked-in overlay. ---
+$fullComposePath = Join-Path $repoRoot 'deploy/compose/docker-compose.full.yml'
+AssertTrue (Test-Path -LiteralPath $fullComposePath) 'the deploy/compose/docker-compose.full.yml overlay exists'
+$realFullModel = Get-LiveCoreComposeModel -Path $fullComposePath
+$realFullResult = Test-LiveCoreComposeFullStack -Model $realFullModel
+
+if (-not $realFullResult.IsValid) {
+    foreach ($finding in $realFullResult.Findings) {
+        $failures.Add("FAIL (real overlay): $finding")
+    }
+}
+else {
+    Write-Host 'PASS: the real deploy/compose/docker-compose.full.yml wires the OIDC, object-storage and backplane services and the api/worker reference them'
+}
+
+# Spot-check that the real overlay gates the api on the supporting services (so they
+# are up before the api starts) and that the worker shares the object storage.
+AssertTrue ($realFullModel.Services['api'].DependsOn.ContainsKey('keycloak')) `
+    'the real overlay api depends on the keycloak (OIDC) service'
+AssertTrue ($realFullModel.Services['api'].DependsOn['minio-setup'] -eq 'service_completed_successfully') `
+    'the real overlay api gates on the object-storage bucket setup completing'
+AssertTrue ($realFullModel.Services['api'].DependsOn['valkey'] -eq 'service_healthy') `
+    'the real overlay api waits for the backplane to be healthy'
+AssertTrue ($realFullModel.Services['worker'].Environment['Assets__Storage__Endpoint'] -match 'minio') `
+    'the real overlay worker references the object-storage endpoint'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Compose deployment manifest tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -177,5 +302,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Compose deployment manifest tests passed: the migrate-before-API gate, the postgres healthcheck and the documented probes are wired as required.' -ForegroundColor Green
+Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck and the documented probes, and the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them.' -ForegroundColor Green
 exit 0

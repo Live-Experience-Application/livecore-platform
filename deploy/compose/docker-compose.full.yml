@@ -1,0 +1,177 @@
+# LiveCore FULL LOCAL STACK overlay — Docker Compose (CORE-DEP-006).
+#
+# The minimal stack (docker-compose.yml) deliberately ships only postgres +
+# migrate + api + worker, with the OIDC, object-storage and realtime-backplane
+# seams UNSET so it comes up green with no external services. That is the right
+# default for a small self-hosting deployment, but it means nobody can run an
+# AUTHENTICATED, ASSET-SERVING, SCALE-OUT Core locally out of the box.
+#
+# This OVERLAY adds the three supporting services the Core integrates with and
+# PRE-WIRES the api/worker to them, so an operator or a vertical author can run
+# the platform end-to-end on one machine without standing anything up by hand:
+#
+#   keycloak    — an OIDC provider (docs/02 "Auth: Keycloak for local/self-hosted
+#                 auth"). Imports the bundled `livecore` realm (an API-audience
+#                 client, a public client with an audience mapper and a demo user),
+#                 so the api validates real bearer tokens — authenticated traffic.
+#   minio       — S3-compatible object storage (docs/02 "Storage: RustFS/MinIO").
+#                 Private buckets only; the api/worker mint short-lived signed URLs
+#                 against it — asset upload/download.
+#   minio-setup — a one-shot job (the mc client) that waits for MinIO, creates the
+#                 private `livecore-assets` bucket and exits 0. The api/worker gate
+#                 on its completion, so the bucket always exists before they start.
+#   valkey      — a Redis/Valkey realtime backplane (docs/02 "Valkey or Redis-
+#                 compatible backplane for realtime scale-out"). The api publishes
+#                 SignalR group sends through it, so a delivery reaches connections
+#                 on EVERY api instance — multi-instance realtime (scale with
+#                 `docker compose ... up --scale api=N` behind a sticky proxy).
+#
+# IT IS A SEPARATE, OPT-IN OVERLAY so the minimal stack stays minimal: it is
+# merged ON TOP of the base manifest only when you ask for it —
+#
+#   docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+#
+# A plain `docker compose up` (base file only) is unchanged and adds none of these
+# services. The overlay REUSES THE DOCUMENTED CONFIG CONTRACT (CORE-OPS-008): it
+# only fills the same `Authentication__Oidc__*` / `Assets__Storage__*` /
+# `Realtime__Backplane__*` env keys the base manifest already exposes (unset there),
+# and it inherits the base migrate-before-API gate and the published probe ports
+# untouched. Every supporting-service knob has a safe LOCAL default, documented in
+# deploy/compose/.env.example ("Full local stack"); override them in `.env`.
+#
+# LOCAL DEVELOPMENT POSTURE. The bundled credentials/admin accounts below are
+# well-known LOCAL defaults for a throwaway machine, not production secrets — the
+# same posture as the base stack's `livecore`/`livecore` PostgreSQL login. Harden
+# them (and the OIDC realm) before exposing this anywhere; see deploy/compose/README.md.
+# The OIDC issuer is the IN-NETWORK url `http://keycloak:8080/realms/livecore`, so a
+# vertical app that obtains tokens should run in this compose network and use that
+# authority; Keycloak's admin console is published on the host for management only.
+name: livecore
+
+services:
+  # --- OIDC provider (authenticated traffic) ---
+  keycloak:
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.1}
+    # Dev mode: HTTP enabled, relaxed hostname, issuer follows the request host
+    # (so the in-network http://keycloak:8080 issuer matches the api authority
+    # below). --import-realm loads the bundled realm from the mounted file.
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Bootstrap admin for the console only (the realm + clients come from the
+      # imported file; the discovery endpoint the api reads is public).
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./keycloak/realm-livecore.json:/opt/keycloak/data/import/realm-livecore.json:ro
+    ports:
+      # Admin console / human token testing on the host (in-network auth uses
+      # http://keycloak:8080 directly — see the issuer note in the header).
+      - "${LIVECORE_KEYCLOAK_PORT:-8081}:8080"
+    restart: unless-stopped
+
+  # --- S3-compatible object storage (asset upload/download) ---
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - livecore-minio-data:/data
+    ports:
+      - "${LIVECORE_MINIO_PORT:-9000}:9000"
+      - "${LIVECORE_MINIO_CONSOLE_PORT:-9001}:9001"
+    restart: unless-stopped
+
+  # One-shot: wait for MinIO, create the PRIVATE assets bucket, exit 0. The
+  # api/worker depend on it with service_completed_successfully, so the bucket the
+  # signed-URL adapter writes to always exists before they start (mirrors the
+  # migrate gate's run-before-then-start pattern).
+  minio-setup:
+    image: ${MINIO_CLIENT_IMAGE:-minio/mc:latest}
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      LIVECORE_ASSET_BUCKET: ${Assets__Storage__Bucket:-livecore-assets}
+    depends_on:
+      minio:
+        condition: service_started
+    # $$ escapes Compose interpolation so the container shell expands these, not
+    # Compose. `mc anonymous set none` keeps the bucket private (no public access).
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        until mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "waiting for object storage..."; sleep 2;
+        done
+        mc mb --ignore-existing "local/$$LIVECORE_ASSET_BUCKET"
+        mc anonymous set none "local/$$LIVECORE_ASSET_BUCKET"
+        echo "object storage ready: private bucket $$LIVECORE_ASSET_BUCKET"
+    restart: "no"
+
+  # --- Realtime scale-out backplane (multi-instance realtime) ---
+  valkey:
+    image: ${VALKEY_IMAGE:-valkey/valkey:8}
+    # Ephemeral cache/backplane: no persistence needed for realtime fan-out.
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${LIVECORE_VALKEY_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # --- Pre-wire the API to all three supporting services ---
+  # Compose MERGES this into the base `api`: these env keys override the base's
+  # unset defaults, and these depends_on entries are added to the base postgres +
+  # migrate gate (so the gate is preserved untouched).
+  api:
+    environment:
+      # OIDC active (an Authority is configured), so authenticated routes validate
+      # real bearer tokens against Keycloak. RequireHttpsMetadata=false allows the
+      # local http issuer; the Audience must match the realm's audience mapper.
+      Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-http://keycloak:8080/realms/livecore}
+      Authentication__Oidc__Audience: ${Authentication__Oidc__Audience:-livecore-api}
+      Authentication__Oidc__RequireHttpsMetadata: ${Authentication__Oidc__RequireHttpsMetadata:-false}
+      # Object storage wired to MinIO (path-style is required for S3-compatible
+      # self-hosted backends). The access key/secret reuse the MinIO root login.
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
+      Assets__Storage__AccessKeyId: ${MINIO_ROOT_USER:-minioadmin}
+      Assets__Storage__SecretAccessKey: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      Assets__Storage__Region: ${Assets__Storage__Region:-us-east-1}
+      Assets__Storage__ForcePathStyle: ${Assets__Storage__ForcePathStyle:-true}
+      Assets__Storage__Bucket: ${Assets__Storage__Bucket:-livecore-assets}
+      # Realtime backplane wired to Valkey (StackExchange.Redis connection string),
+      # so multiple api instances fan realtime out to every connection.
+      Realtime__Backplane__ConnectionString: ${Realtime__Backplane__ConnectionString:-valkey:6379}
+    depends_on:
+      keycloak:
+        condition: service_started
+      valkey:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+
+  # --- Pre-wire the worker to object storage ---
+  # The asset-cleanup loop deletes the objects of abandoned upload intents, so it
+  # shares the same storage configuration as the api.
+  worker:
+    environment:
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
+      Assets__Storage__AccessKeyId: ${MINIO_ROOT_USER:-minioadmin}
+      Assets__Storage__SecretAccessKey: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      Assets__Storage__Region: ${Assets__Storage__Region:-us-east-1}
+      Assets__Storage__ForcePathStyle: ${Assets__Storage__ForcePathStyle:-true}
+      Assets__Storage__Bucket: ${Assets__Storage__Bucket:-livecore-assets}
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+
+volumes:
+  # Named volume so the object store survives `docker compose down` (use
+  # `docker compose down -v` to discard it alongside the database volume).
+  livecore-minio-data:

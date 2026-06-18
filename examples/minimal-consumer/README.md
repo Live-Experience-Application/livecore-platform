@@ -49,8 +49,16 @@ You need a running Core with OIDC configured and a bearer token your provider is
 The in-repo Compose stack (`deploy/compose`) brings up PostgreSQL, the migrations
 runner, the API and the worker; configure its `Authentication__Oidc__*` values
 against your OIDC provider (the bundled stack leaves them unset, so authenticated
-routes answer `401` until you do — see `deploy/compose/README.md` and `docs/13`). A
-pre-wired local OIDC/storage/backplane profile is tracked separately (CORE-DEP-006).
+routes answer `401` until you do — see `deploy/compose/README.md` and `docs/13`).
+For a turnkey local setup, the opt-in overlay `deploy/compose/docker-compose.full.yml`
+(CORE-DEP-006) adds a pre-wired Keycloak (OIDC) + MinIO (storage) + Valkey (backplane)
+and a `livecore` realm, so you get a real OIDC provider and API to talk to without
+configuring one by hand:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+```
+
 Then, from the repository root:
 
 ```bash

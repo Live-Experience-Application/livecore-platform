@@ -36,6 +36,71 @@ Tear it down (add `-v` to also discard the database volume):
 docker compose down
 ```
 
+## Full local stack overlay (CORE-DEP-006)
+
+The bundled stack above is deliberately **minimal** — postgres + migrate + api +
+worker, with the OIDC, object-storage and realtime-backplane seams **unset** so it
+comes up green with no external services. That is the right default for small
+self-hosting, but it means you cannot run an **authenticated, asset-serving,
+scale-out** Core locally out of the box.
+
+The optional overlay [`docker-compose.full.yml`](docker-compose.full.yml) closes
+that gap. It is a **separate, opt-in** file (so the minimal stack stays minimal)
+that adds the three supporting services and **pre-wires** the api/worker to them:
+
+| Service       | Role                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `keycloak`    | OIDC provider. Imports the bundled `livecore` realm, so the api validates real bearer tokens — **authenticated traffic**. |
+| `minio`       | S3-compatible object storage (private buckets only) — **asset upload/download**.                                          |
+| `minio-setup` | one-shot job: waits for MinIO, creates the private `livecore-assets` bucket, exits `0`.                                   |
+| `valkey`      | Redis/Valkey realtime backplane — **multi-instance realtime** (SignalR scale-out).                                        |
+
+Bring up the merged stack from this directory:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+```
+
+Compose merges the overlay onto the base manifest: the `keycloak`/`minio`/`valkey`
+services are added, the api/worker get the `Authentication__Oidc__*`,
+`Assets__Storage__*` and `Realtime__Backplane__*` env (the **same documented config
+contract keys** the base stack leaves unset), and the base **migrate-before-API
+gate is preserved** (the api/worker still wait for the migrations runner, and now
+also for the supporting services). The same probe ports are published, so the
+health/readiness/liveness checks above work unchanged — and `/health/ready` is now
+green only once the OIDC, storage and backplane dependencies are all reachable (the
+deep readiness probes, CORE-OBS-009), so a passing readiness proves the stack is
+wired together end-to-end.
+
+Every supporting-service knob has a safe **local default** (documented in
+[`.env.example`](.env.example) under "Full local stack"); override them in `.env`.
+The bundled admin/credential defaults (`admin`/`admin`, `minioadmin`/`minioadmin`,
+the realm's `demo` user) are well-known **local** values for a throwaway machine —
+the same posture as the base stack's `livecore`/`livecore` database login — **not
+production secrets**. Harden them (and the realm) before exposing this anywhere.
+
+**Obtaining a token.** The OIDC issuer is the in-network URL
+`http://keycloak:8080/realms/livecore`, so a vertical app that obtains tokens should
+run **inside this Compose network** and use that authority (the API's
+`minimal-consumer` example, CORE-PUB-003, is the reference integration). Keycloak's
+admin console is published on the host (`http://localhost:8081`, admin `admin`/`admin`)
+for management only. The realm ships a public `livecore-app` client with direct
+access grants and an audience mapper, so a local developer can mint a token for the
+`demo` user that the api accepts. The hardcoded `organization` claim is a starter —
+point it at the slug of an Organization you create through the api.
+
+**Scaling realtime.** With the Valkey backplane wired, multiple api instances fan
+realtime out to every connection. Scale with
+`docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --scale api=N`
+behind a sticky-session load balancer (the api publishes a single host port, so put
+a reverse proxy in front when running more than one instance — see the README
+"Graceful shutdown and SignalR sticky sessions").
+
+**Tested.** `scripts/test-compose-deploy.ps1` statically validates that the overlay
+wires the OIDC/storage/backplane services and that the api/worker reference them
+(no Docker needed), and the `compose-full-smoke` CI job brings the merged stack up
+and asserts the documented probes answer `200`.
+
 ## The migrate-before-API gate
 
 The API host **never** applies migrations implicitly on startup — that is unsafe

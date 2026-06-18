@@ -124,6 +124,7 @@ function Get-LiveCoreComposeServiceModel {
     $hasHealthcheck = $false
     $dependsOn = @{}
     $environmentKeys = New-Object System.Collections.Generic.List[string]
+    $environment = @{}
 
     for ($i = 0; $i -lt $BlockLine.Count; $i++) {
         $line = $BlockLine[$i]
@@ -153,8 +154,16 @@ function Get-LiveCoreComposeServiceModel {
                 if ([string]::IsNullOrWhiteSpace($envLine)) { continue }
                 if ((Get-LiveCoreComposeIndent -Line $envLine) -le 4) { break }
                 $envTrim = $envLine.Trim()
-                if ($envTrim -match '^-\s*([A-Za-z0-9_.:-]+)=') { $environmentKeys.Add($Matches[1]) }
-                elseif ($envTrim -match '^([A-Za-z0-9_.:-]+):') { $environmentKeys.Add($Matches[1]) }
+                # Capture the key AND its value (a service may set an env value to a
+                # ${VAR:-default} reference to another service, which the full-stack
+                # wiring check inspects). Both the list form (`- KEY=value`) and the
+                # mapping form (`KEY: value`) are supported.
+                if ($envTrim -match '^-\s*([A-Za-z0-9_.:-]+)=(.*)$') {
+                    $environmentKeys.Add($Matches[1]); $environment[$Matches[1]] = $Matches[2].Trim()
+                }
+                elseif ($envTrim -match '^([A-Za-z0-9_.:-]+):\s*(.*)$') {
+                    $environmentKeys.Add($Matches[1]); $environment[$Matches[1]] = $Matches[2].Trim()
+                }
             }
             continue
         }
@@ -167,6 +176,7 @@ function Get-LiveCoreComposeServiceModel {
         HasHealthcheck  = $hasHealthcheck
         DependsOn       = $dependsOn
         EnvironmentKeys = $environmentKeys.ToArray()
+        Environment     = $environment
     }
 }
 
@@ -285,9 +295,123 @@ function Test-LiveCoreComposeDeployment {
     }
 }
 
+function Add-LiveCoreFullStackReferenceFinding {
+    <#
+    .SYNOPSIS
+        Adds a finding when a service does not wire a configuration key to the
+        expected supporting service (CORE-DEP-006).
+    .DESCRIPTION
+        A pure helper for Test-LiveCoreComposeFullStack: the api/worker must SET the
+        OIDC/storage/backplane key AND its value must REFERENCE the supporting
+        service (so the wiring actually points at keycloak/minio/valkey rather than
+        being declared empty). Appends a finding to $Findings when either is missing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Service,
+        [Parameter(Mandatory = $true)][string]$ServiceLabel,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [AllowNull()][AllowEmptyString()][string]$Target,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Findings
+    )
+
+    $value = $null
+    if ($Service.Environment -and $Service.Environment.ContainsKey($Key)) {
+        $value = $Service.Environment[$Key]
+    }
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $Findings.Add("WIRING: the '$ServiceLabel' service must set '$Key' to reference the supporting service")
+        return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Target) -and ($value -notmatch [regex]::Escape($Target))) {
+        $Findings.Add("WIRING: the '$ServiceLabel' service's '$Key' ('$value') must reference the '$Target' service")
+    }
+}
+
+function Test-LiveCoreComposeFullStack {
+    <#
+    .SYNOPSIS
+        Asserts the full local stack overlay wires OIDC, object storage and the
+        realtime backplane and that the api/worker reference them (CORE-DEP-006).
+    .DESCRIPTION
+        The optional overlay (deploy/compose/docker-compose.full.yml) brings up the
+        Core together with an OIDC provider (Keycloak), S3-compatible object storage
+        (MinIO/RustFS) and a Redis/Valkey backplane, pre-wired so the platform runs
+        end-to-end locally (authenticated traffic, asset upload/download, multi-
+        instance realtime). This statically validates the overlay defines those three
+        supporting services and that the merged api/worker actually reference them, so
+        an overlay that drops a supporting service or leaves a seam unwired fails the
+        build. It is the full-stack sibling of Test-LiveCoreComposeDeployment, which
+        guards the minimal stack.
+    .OUTPUTS
+        A PSCustomObject with IsValid (bool) and Findings (string[]). Findings is
+        empty exactly when every invariant holds.
+    #>
+    [CmdletBinding()]
+    [OutputType([psobject])]
+    param([Parameter(Mandatory = $true)][psobject]$Model)
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $services = $Model.Services
+
+    # The supporting services the full local stack adds. docs/02_ARCHITECTURE.md names
+    # Keycloak for OIDC, RustFS/MinIO for S3-compatible storage and Valkey/Redis for the
+    # backplane, so each dependency accepts either documented option by service name.
+    $oidcCandidates = @('keycloak')
+    $storageCandidates = @('minio', 'rustfs')
+    $backplaneCandidates = @('valkey', 'redis')
+
+    $oidcService = $oidcCandidates | Where-Object { $services.ContainsKey($_) } | Select-Object -First 1
+    $storageService = $storageCandidates | Where-Object { $services.ContainsKey($_) } | Select-Object -First 1
+    $backplaneService = $backplaneCandidates | Where-Object { $services.ContainsKey($_) } | Select-Object -First 1
+
+    if (-not $oidcService) {
+        $findings.Add('MISSING OIDC SERVICE: the full-stack overlay must define an OIDC provider service (keycloak)')
+    }
+    if (-not $storageService) {
+        $findings.Add('MISSING STORAGE SERVICE: the full-stack overlay must define an S3-compatible object storage service (minio or rustfs)')
+    }
+    if (-not $backplaneService) {
+        $findings.Add('MISSING BACKPLANE SERVICE: the full-stack overlay must define a Redis/Valkey backplane service (valkey or redis)')
+    }
+
+    # The api references all three seams: the OIDC authority (authenticated traffic),
+    # the object-storage endpoint (assets) and the backplane connection string
+    # (multi-instance realtime), each pointing at the supporting service.
+    if (-not $services.ContainsKey('api')) {
+        $findings.Add("API: the full-stack overlay must extend the 'api' service to wire OIDC, object storage and the backplane")
+    }
+    else {
+        $api = $services['api']
+        Add-LiveCoreFullStackReferenceFinding -Service $api -ServiceLabel 'api' `
+            -Key 'Authentication__Oidc__Authority' -Target $oidcService -Findings $findings
+        Add-LiveCoreFullStackReferenceFinding -Service $api -ServiceLabel 'api' `
+            -Key 'Assets__Storage__Endpoint' -Target $storageService -Findings $findings
+        Add-LiveCoreFullStackReferenceFinding -Service $api -ServiceLabel 'api' `
+            -Key 'Realtime__Backplane__ConnectionString' -Target $backplaneService -Findings $findings
+    }
+
+    # The worker shares the object storage (its asset-cleanup loop deletes objects).
+    if (-not $services.ContainsKey('worker')) {
+        $findings.Add("WORKER: the full-stack overlay must extend the 'worker' service to wire object storage")
+    }
+    else {
+        Add-LiveCoreFullStackReferenceFinding -Service $services['worker'] -ServiceLabel 'worker' `
+            -Key 'Assets__Storage__Endpoint' -Target $storageService -Findings $findings
+    }
+
+    return [pscustomobject]@{
+        IsValid  = ($findings.Count -eq 0)
+        Findings = $findings.ToArray()
+    }
+}
+
 Export-ModuleMember -Function `
     Get-LiveCoreComposeModel, `
     Get-LiveCoreComposeServiceModel, `
     Get-LiveCoreComposeDependsOn, `
     Test-LiveCoreComposeDeployment, `
+    Test-LiveCoreComposeFullStack, `
     Get-LiveCoreComposeIndent

@@ -312,13 +312,13 @@ scripts/test-action-pin-lint.ps1  tests for the action-pin lint (a SHA-pinned re
 scripts/LiveCoreLogRedaction.psm1  C#-aware ID-only-logging analysis: flags an ILogger template that is interpolated, concatenates a value, or names a content/PII/secret structured property (CORE-OBS-006, threat T7)
 scripts/lint-log-redaction.ps1  CI lint that fails the build on a content-bearing/interpolated log template in apps/ source (CORE-OBS-006)
 scripts/test-log-redaction.ps1  tests for the log-redaction guardrail (a seeded content-bearing/interpolated template is flagged; the real ID-only logs pass — CORE-OBS-006)
-scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001)
-scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001)
+scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001) + full-stack overlay validation (OIDC/storage/backplane services wired and referenced by the api/worker; CORE-DEP-006)
+scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001) and the full local stack overlay deploy/compose/docker-compose.full.yml (CORE-DEP-006)
 scripts/LiveCoreHelmChart.psm1  Helm chart validation (pre-install/pre-upgrade migrate Job hook, documented probes, ConfigMap/Secret externalization, no baked secret; CORE-DEP-004)
 scripts/test-helm-chart.ps1  tests the Helm chart validation and guards deploy/helm/livecore (CORE-DEP-004)
 scripts/LiveCoreObservabilityAssets.psm1  observability-assets validation logic: every livecore_* series the example rules/dashboard reference is documented in docs/15 or a defined recording rule; lints the dashboard JSON and alert severity/annotation (CORE-OBS-008)
 scripts/test-observability-assets.ps1  tests the observability-assets validation and guards deploy/observability/ (an undocumented series, a severity-less alert, a malformed dashboard JSON are rejected; the real assets pass — CORE-OBS-008)
-deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001)
+deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001); plus the optional full local stack overlay docker-compose.full.yml that adds Keycloak (OIDC) + MinIO (object storage) + Valkey (backplane) and pre-wires the API/worker for end-to-end local use (CORE-DEP-006)
 deploy/helm              in-repo Kubernetes Helm chart: API + worker + a pre-install/pre-upgrade migrations Job (the migrate-before-API gate), externalized ConfigMap/Secret config with no baked secret, documented probes, Service/Ingress (CORE-DEP-004)
 deploy/observability     example Prometheus scrape config + recording/alert rules, documented SLO targets and a starter Grafana dashboard over the livecore_* metrics (CORE-OBS-008)
 docs/                    architecture and product documentation
@@ -860,6 +860,24 @@ production hardening in [`deploy/compose/README.md`](deploy/compose/README.md). 
 migrate gate and the documented health/readiness/liveness probes are tested by
 `scripts/test-compose-deploy.ps1` and the `compose-smoke` CI job. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo deployment manifest").
+
+Need to run the platform **end-to-end** locally — authenticated traffic, asset
+upload/download and multi-instance realtime? The minimal stack omits the OIDC
+provider, object storage and the backplane on purpose. The optional, opt-in overlay
+[`deploy/compose/docker-compose.full.yml`](deploy/compose/docker-compose.full.yml)
+(CORE-DEP-006) adds **Keycloak** (OIDC), **MinIO** (S3-compatible object storage)
+and **Valkey** (the realtime backplane) and pre-wires the API/worker to them, while
+keeping the minimal stack minimal:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml up -d --build
+```
+
+It reuses the same documented config keys (filling the OIDC/storage/backplane seams
+the base stack leaves unset), inherits the migrate gate, and is validated by
+`scripts/test-compose-deploy.ps1` and the `compose-full-smoke` CI job. See
+[`deploy/compose/README.md`](deploy/compose/README.md) ("Full local stack overlay")
+and `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Full local stack overlay").
 
 ### Deploy to Kubernetes with Helm
 
