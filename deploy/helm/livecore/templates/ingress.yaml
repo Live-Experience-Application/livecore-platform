@@ -2,7 +2,19 @@
 # Optional Ingress to the API Service. Core does not terminate TLS itself
 # (CORE-OPS-003): terminate it at the ingress and forward the original
 # scheme/host/IP (set config.ForwardedHeaders__KnownNetworks__0 to the ingress pod
-# network). For a multi-replica API, enable SignalR sticky sessions here (CORE-DEP-002).
+# network).
+#
+# SignalR sticky-session affinity (CORE-DEP-002 / CORE-DEP-013). A multi-replica API
+# (api.replicaCount > 1) serving SignalR needs each client's negotiate + transport
+# handshake pinned to the replica that issued its connectionId — the hub keeps the full
+# transport set (it does NOT force WebSockets-only), so the non-WebSocket fallbacks make
+# follow-up requests that must all reach that same replica. When ingress.sessionAffinity
+# is enabled (the default) AND api.replicaCount > 1, the chart MERGES the cookie-affinity
+# annotations (ingress.sessionAffinity.annotations) onto this Ingress automatically; at
+# the default single replica it adds nothing, so the single-replica path is unaffected.
+# Operator-supplied .Values.ingress.annotations win on a key conflict. Set
+# ingress.sessionAffinity.enabled=false to opt out (a WebSockets-only client transport, or
+# a non-nginx controller you annotate yourself through ingress.annotations).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -10,7 +22,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "livecore.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- $annotations := deepCopy .Values.ingress.annotations }}
+  {{- if and .Values.ingress.sessionAffinity.enabled (gt (int .Values.api.replicaCount) 1) }}
+  {{- $annotations = merge $annotations .Values.ingress.sessionAffinity.annotations }}
+  {{- end }}
+  {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

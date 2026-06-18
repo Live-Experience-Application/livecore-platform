@@ -419,6 +419,31 @@ function Test-LiveCoreHelmChart {
         $findings.Add('BACKPLANE GUARD: the chart must fail the render when api.replicaCount > 1 without a realtime backplane - a guard tying api.replicaCount to Realtime__Backplane__ConnectionString via `fail` (CORE-DEP-009)')
     }
 
+    # 11. CORE-DEP-013 / CORE-DEP-002: SignalR sticky-session affinity for multi-replica
+    #     realtime. A SignalR connection's negotiate + (SSE/long-polling) follow-up
+    #     requests must all reach the replica that issued its connectionId, and the hub
+    #     keeps the full transport set (RealtimeEndpoints does not force WebSockets-only),
+    #     so a multi-replica API needs each client pinned to one replica at the ingress.
+    #     Two invariants make that explicit, leaving the single-replica default unaffected:
+    #     (a) values.yaml ships an ingress.sessionAffinity block whose annotations carry a
+    #         cookie session-affinity annotation by default; and
+    if ($Files.ContainsKey('values.yaml')) {
+        $valuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $Files['values.yaml']
+        if ($valuesNoComments -notmatch 'sessionAffinity' -or $valuesNoComments -notmatch 'affinity:\s*"?cookie"?') {
+            $findings.Add('AFFINITY: values.yaml must ship an ingress.sessionAffinity block defaulting to cookie session affinity for multi-replica SignalR (CORE-DEP-013/CORE-DEP-002)')
+        }
+    }
+    # (b) the Ingress template renders those affinity annotations gated on a multi-replica
+    #     API (it references both ingress.sessionAffinity and api.replicaCount), so the
+    #     single-replica default install carries no affinity annotation.
+    if ($Files.ContainsKey('templates/ingress.yaml')) {
+        $ingressTpl = Get-LiveCoreHelmContentWithoutComments -Content $Files['templates/ingress.yaml']
+        $tiesAffinityToReplicas = ($ingressTpl -match 'sessionAffinity') -and ($ingressTpl -match 'replicaCount')
+        if (-not $tiesAffinityToReplicas) {
+            $findings.Add('AFFINITY: templates/ingress.yaml must render the sticky-session affinity annotations gated on api.replicaCount > 1 (CORE-DEP-013/CORE-DEP-002), leaving the single-replica default unaffected')
+        }
+    }
+
     return [pscustomobject]@{
         IsValid  = ($findings.Count -eq 0)
         Findings = $findings.ToArray()

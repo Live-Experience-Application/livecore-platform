@@ -213,9 +213,26 @@ worker:
 ingress:
   enabled: false
   className: ""
-  # For a multi-replica API, enable SignalR sticky sessions at the ingress
-  # (CORE-DEP-002), e.g. nginx.ingress.kubernetes.io/affinity: "cookie".
+  # Operator-supplied annotations, merged onto the rendered Ingress verbatim. These win
+  # over the sticky-session affinity defaults below on a key conflict.
   annotations: {}
+  # SignalR sticky-session affinity for a multi-replica API (CORE-DEP-002 / CORE-DEP-013).
+  # A SignalR connection starts with a negotiate request that issues a connectionId; the
+  # non-WebSocket fallbacks (SSE, long polling) then make follow-up requests that MUST all
+  # reach the replica that issued it. The hub keeps the full transport set (it does not
+  # force WebSockets-only), so a multi-replica API needs each client pinned to one replica.
+  # When `enabled` is true (the default) AND api.replicaCount > 1, the chart renders the
+  # `annotations` below onto the Ingress automatically; at the default single replica it
+  # renders nothing, so the single-replica path is unaffected. The defaults are nginx-ingress
+  # cookie affinity in persistent mode (so a scale event does not silently re-balance an open
+  # SignalR connection). Override `annotations` for a different ingress controller, or set
+  # `enabled: false` to opt out (e.g. a client that forces a WebSockets-only transport).
+  sessionAffinity:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/affinity: "cookie"
+      nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+      nginx.ingress.kubernetes.io/session-cookie-name: "livecore-affinity"
   hosts:
     - host: livecore.local
       paths:

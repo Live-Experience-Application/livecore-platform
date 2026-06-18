@@ -354,15 +354,28 @@ CORE-DEP-002) therefore renders without warning, while a default install never
 silently ships a broken multi-replica realtime topology. The API additionally
 fail-fasts at startup in the same misconfiguration (CORE-RES-006) as defence in depth.
 
+**Sticky-session affinity wired automatically (CORE-DEP-013).** The other half of a
+correct multi-replica SignalR deployment — sticky sessions so each client's negotiate +
+transport handshake stays pinned to one replica (CORE-DEP-002) — is no longer left to
+operator discipline. When the `Ingress` is enabled and `api.replicaCount > 1`, the chart
+**renders the nginx cookie-affinity annotations onto the `Ingress` automatically**
+(`ingress.sessionAffinity`, on by default); the single-replica default renders none, and
+the auto affinity is opt-out (`ingress.sessionAffinity.enabled: false`) for a
+WebSockets-only client transport. See "Multi-instance SignalR requires sticky sessions /
+ARR affinity" above for the full rationale and the override/opt-out knobs.
+
 **Tested.** `scripts/test-helm-chart.ps1` statically validates that the chart wires
 the pre-install/pre-upgrade migrate `Job`, the documented probes, the
-`ConfigMap`/`Secret` externalization, bakes no secret and **defaults to a single API
-replica with the multi-replica backplane guard** (no helm/kubeconform needed), and the
-`helm-chart` CI job (`.github/workflows/ci.yml`) runs `helm lint`, renders the chart
-with `helm template`, **schema-validates** every rendered manifest with `kubeconform`,
-and asserts the pre-install migrate `Job`, the probes, that no secret is hardcoded and
-that a multi-replica render **fails without a backplane and succeeds with one**
-(CORE-DEP-009). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
+`ConfigMap`/`Secret` externalization, bakes no secret, **defaults to a single API
+replica with the multi-replica backplane guard** and **gates the sticky-session affinity
+annotations on a multi-replica API** (no helm/kubeconform needed), and the `helm-chart`
+CI job (`.github/workflows/ci.yml`) runs `helm lint`, renders the chart with
+`helm template`, **schema-validates** every rendered manifest with `kubeconform`, and
+asserts the pre-install migrate `Job`, the probes, that no secret is hardcoded, that a
+multi-replica render **fails without a backplane and succeeds with one** (CORE-DEP-009)
+and that **a multi-replica render with the `Ingress` enabled carries the cookie
+session-affinity annotations while the single-replica default carries none**
+(CORE-DEP-013). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
 
 ## Operational requirements
 
@@ -1307,6 +1320,31 @@ event out to the connections held by **every** instance. Affinity is a deploymen
 setting), not a Core host setting; the only way to avoid it entirely is to force WebSockets-only transport and
 disable the fallbacks, which is brittle across corporate proxies and is not the default. See
 `docs/11_REALTIME_SYNC.md` ("Scale-out").
+
+#### The in-repo Helm chart wires this affinity automatically (CORE-DEP-013)
+
+So the requirement is not left to operator discipline, the in-repo Helm chart's `Ingress`
+([`deploy/helm/livecore/templates/ingress.yaml`](../deploy/helm/livecore/templates/ingress.yaml)) **renders the
+nginx cookie-affinity annotations automatically** when the `Ingress` is enabled **and** `api.replicaCount > 1` —
+the same multi-replica condition that requires the backplane (CORE-DEP-009). The annotations default to
+cookie affinity in `persistent` mode (`ingress.sessionAffinity.annotations` in `values.yaml`) so a scale event
+does not silently re-balance an open SignalR connection:
+
+```yaml
+nginx.ingress.kubernetes.io/affinity: "cookie"
+nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+nginx.ingress.kubernetes.io/session-cookie-name: "livecore-affinity"
+```
+
+- **The single-replica default is unaffected.** At `api.replicaCount: 1` (the default) the `Ingress` renders no
+  affinity annotation, so a single-node install is unchanged.
+- **Override or opt out.** Operator-supplied `ingress.annotations` are merged onto the same `Ingress` and **win
+  on a key conflict**, so a non-nginx controller supplies its own equivalent affinity annotations there. Set
+  `ingress.sessionAffinity.enabled: false` to opt out entirely — for example when the client forces a
+  WebSockets-only transport (no negotiate fallback), the one topology that does not need affinity.
+- **External load balancers.** When the SignalR endpoint is fronted by a load balancer this chart does **not**
+  manage (an external LB, a non-ingress edge), enable the equivalent sticky sessions there yourself, per the
+  proxy table above.
 
 ## Store receipt verification adapter (CORE-MON-008)
 

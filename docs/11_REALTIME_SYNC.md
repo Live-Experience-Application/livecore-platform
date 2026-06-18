@@ -297,11 +297,21 @@ whether a connection string is present, never the connection string value (threa
 **Sticky-session affinity is also required at scale (CORE-DEP-002).** The backplane is necessary but not
 sufficient for multiple instances: a SignalR connection starts with a **negotiate** request that issues a
 `connectionId`, and the non-WebSocket fallbacks (Server-Sent Events, long polling) then make further HTTP
-requests that **must all reach the same instance** that issued it. A multi-instance deployment therefore also
-needs **sticky sessions / ARR affinity** at the reverse proxy for the `/hubs` endpoint, alongside the backplane;
-the affinity (negotiate/transport handshake) and the backplane (cross-instance fan-out) solve different
-problems. The proxy-specific configuration is documented in `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Graceful
-shutdown and SignalR sticky-session affinity").
+requests that **must all reach the same instance** that issued it. The hub keeps the **full transport set** —
+`MapRealtimeHubs` (`apps/api/Realtime/RealtimeEndpoints.cs`) maps the hub without forcing `SkipNegotiation` /
+WebSockets-only — so the negotiate + fallback handshake is the default, and across replicas it needs affinity.
+A multi-instance deployment therefore also needs **sticky sessions / ARR affinity** at the reverse proxy for
+the `/hubs` endpoint, alongside the backplane; the affinity (negotiate/transport handshake) and the backplane
+(cross-instance fan-out) solve different problems. The proxy-specific configuration is documented in
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Graceful shutdown and SignalR sticky-session affinity").
+
+**The in-repo Helm chart wires that affinity for you (CORE-DEP-013).** So the requirement is not left implicit,
+the chart's `Ingress` template (`deploy/helm/livecore/templates/ingress.yaml`) **automatically** renders the
+nginx cookie-affinity annotations when the `Ingress` is enabled **and** `api.replicaCount > 1` — the same
+condition that requires the backplane (CORE-DEP-009). The default single-replica install renders no affinity
+annotation, so that path is unaffected; an operator who instead forces a WebSockets-only client transport (no
+negotiate fallback) can opt out with `ingress.sessionAffinity.enabled=false`. The two controls (affinity +
+backplane) remain both required at scale.
 
 The backplane only ever forwards an already-authorized delivery — one recipient-safe payload to one
 server-managed group, computed by the per-recipient recipient resolver. It cannot widen the audience: the

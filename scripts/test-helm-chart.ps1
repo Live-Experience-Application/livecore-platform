@@ -59,7 +59,8 @@ function Get-FixtureHelmChart {
         [switch]$HardcodeSecret,
         [switch]$DefaultMultiReplica,
         [switch]$OmitBackplaneGuard,
-        [switch]$OmitResources
+        [switch]$OmitResources,
+        [switch]$OmitStickyAffinity
     )
 
     $migrateHook = if ($OmitMigrateHook) {
@@ -138,6 +139,43 @@ function Get-FixtureHelmChart {
               memory: 512Mi
 '@ }
 
+    # SignalR sticky-session affinity for a multi-replica API (CORE-DEP-013): the
+    # ingress.sessionAffinity block in values.yaml and the matching gated render in the
+    # Ingress template. Dropping it (the negative test) leaves the multi-replica affinity
+    # requirement implicit, which the validator must reject.
+    $ingressValues = if ($OmitStickyAffinity) {
+        @'
+ingress:
+  enabled: false
+'@
+    }
+    else {
+        @'
+ingress:
+  enabled: false
+  sessionAffinity:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/affinity: "cookie"
+'@
+    }
+    $ingressTemplate = if ($OmitStickyAffinity) {
+        "{{- if .Values.ingress.enabled }}`napiVersion: networking.k8s.io/v1`nkind: Ingress`n{{- end }}`n"
+    }
+    else {
+        @'
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+{{- if and .Values.ingress.sessionAffinity.enabled (gt (int .Values.api.replicaCount) 1) }}
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+{{- end }}
+{{- end }}
+'@
+    }
+
     return @{
         'Chart.yaml'                       = "apiVersion: v2`nname: livecore`nversion: 0.1.0`n"
         'values.yaml'                      = @"
@@ -158,6 +196,7 @@ $apiResources
 worker:
   replicaCount: 1
 $workerResources
+$ingressValues
 "@
         'templates/migrate-job.yaml'       = @"
 apiVersion: batch/v1
@@ -215,7 +254,7 @@ $resourcesTpl
 "@
         'templates/configmap.yaml'         = "apiVersion: v1`nkind: ConfigMap`n"
         'templates/secret.yaml'            = "apiVersion: v1`nkind: Secret`ntype: Opaque`nstringData:`n  {{- range `$k, `$v := omit .Values.secrets `"existingSecret`" }}`n  {{ `$k }}: {{ `$v | quote }}`n  {{- end }}`n"
-        'templates/ingress.yaml'           = "{{- if .Values.ingress.enabled }}`napiVersion: networking.k8s.io/v1`nkind: Ingress`n{{- end }}`n"
+        'templates/ingress.yaml'           = $ingressTemplate
     }
 }
 
@@ -258,6 +297,12 @@ $noResources = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitResource
 AssertTrue (-not $noResources.IsValid) 'a chart whose workloads ship no default resources.requests/limits ceiling is rejected'
 AssertTrue (($noResources.Findings -join "`n") -match 'RESOURCES') `
     'the rejection flags the missing resource requests/limits ceiling'
+
+# --- Negative: dropping the multi-replica sticky-session affinity wiring (CORE-DEP-013) is rejected. ---
+$noAffinity = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitStickyAffinity)
+AssertTrue (-not $noAffinity.IsValid) 'a chart that does not wire SignalR sticky-session affinity for a multi-replica API is rejected'
+AssertTrue (($noAffinity.Findings -join "`n") -match 'AFFINITY') `
+    'the rejection flags the missing multi-replica sticky-session affinity wiring'
 
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
@@ -310,6 +355,14 @@ foreach ($component in @('migrations', 'api', 'worker')) {
     AssertTrue ((@($hasAll | Where-Object { -not $_ }).Count) -eq 0) `
         "the real chart ships a non-empty resources.requests+limits (cpu+memory) default for $component (CORE-DEP-007/CORE-DEP-010)"
 }
+
+# Spot-check the multi-replica sticky-session affinity wiring on the real chart (CORE-DEP-013).
+$realIngress = $realFiles['templates/ingress.yaml']
+AssertTrue ($realIngress -match 'sessionAffinity' -and $realIngress -match 'replicaCount') `
+    'the real Ingress template gates the SignalR sticky-session affinity annotations on a multi-replica API (CORE-DEP-013/CORE-DEP-002)'
+$realValuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realFiles['values.yaml']
+AssertTrue ($realValuesNoComments -match 'sessionAffinity' -and $realValuesNoComments -match 'affinity:\s*"?cookie"?') `
+    'the real values.yaml ships an ingress.sessionAffinity block defaulting to cookie session affinity (CORE-DEP-013)'
 
 if ($failures.Count -gt 0) {
     Write-Host ''

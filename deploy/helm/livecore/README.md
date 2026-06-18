@@ -146,9 +146,9 @@ templates render whatever keys you supply.
   host(s)/origin(s).
 - The chart defaults to a **single API replica** (`api.replicaCount: 1`). For
   **more than one API replica**, configure the Redis/Valkey backplane
-  (`secrets.Realtime__Backplane__ConnectionString`, CORE-OPS-007) **and** enable
-  SignalR sticky sessions on the ingress (CORE-DEP-002), e.g.
-  `ingress.annotations."nginx.ingress.kubernetes.io/affinity"="cookie"`.
+  (`secrets.Realtime__Backplane__ConnectionString`, CORE-OPS-007). SignalR sticky
+  sessions (CORE-DEP-002) are then wired **automatically** on the ingress — see
+  "Multi-replica SignalR sticky-session affinity" below.
 
 ### Multi-replica realtime fail-safe (CORE-DEP-009)
 
@@ -175,6 +175,44 @@ prints a prominent reminder that the Secret must carry
 app additionally fails fast at startup when run multi-instance without a backplane
 (CORE-RES-006), as defence in depth.
 
+### Multi-replica SignalR sticky-session affinity (CORE-DEP-013)
+
+The backplane is necessary but **not sufficient** for multi-replica SignalR. A SignalR
+connection starts with a **negotiate** request that issues a `connectionId`; the
+non-WebSocket fallbacks (SSE, long polling) then make follow-up requests that **must all
+reach the replica that issued it**. The hub keeps the full transport set (it does not
+force WebSockets-only), so each client must be **pinned to one replica** at the ingress
+(CORE-DEP-002).
+
+So this is not left to operator discipline, the `Ingress` template renders the nginx
+cookie-affinity annotations **automatically** when the `Ingress` is enabled **and**
+`api.replicaCount > 1` (`ingress.sessionAffinity`, on by default), in `persistent` mode so
+a scale event does not silently re-balance an open connection:
+
+```yaml
+nginx.ingress.kubernetes.io/affinity: "cookie"
+nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+nginx.ingress.kubernetes.io/session-cookie-name: "livecore-affinity"
+```
+
+- **The single-replica default is unaffected** — at `api.replicaCount: 1` the `Ingress`
+  carries no affinity annotation.
+- **Operator `ingress.annotations` are merged and win on a key conflict.** For a non-nginx
+  controller, turn off the built-in nginx affinity (`ingress.sessionAffinity.enabled=false`)
+  and supply your controller's own affinity annotation through `ingress.annotations`:
+
+  ```bash
+  helm install livecore deploy/helm/livecore \
+    --set api.replicaCount=2 \
+    --set-string secrets.Realtime__Backplane__ConnectionString="valkey:6379" \
+    --set ingress.enabled=true \
+    --set ingress.sessionAffinity.enabled=false \
+    --set-string 'ingress.annotations.<your-controller-affinity-annotation>=...'
+  ```
+
+- **Opt out** with `--set ingress.sessionAffinity.enabled=false` when the client forces a
+  WebSockets-only transport (no negotiate fallback), the one topology that needs no affinity.
+
 ## Validation
 
 The chart is linted and schema-validated in CI (the `helm-chart` job), with a
@@ -183,7 +221,8 @@ no-tooling static gate runnable locally:
 ```bash
 # Static validation (no helm/kubeconform needed): asserts the pre-install migrate
 # Job hook, the probes, the resource requests/limits ceiling, the ConfigMap/Secret
-# split and that no secret is hardcoded.
+# split, that no secret is hardcoded and that the multi-replica sticky-session
+# affinity annotations are gated on api.replicaCount > 1 (CORE-DEP-013).
 pwsh -NoProfile -File scripts/test-helm-chart.ps1
 
 # Full render + schema validation (needs helm + kubeconform):

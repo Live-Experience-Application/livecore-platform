@@ -98,6 +98,15 @@
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "annotations": { "type": "object" },
+        "sessionAffinity": {
+          "type": "object",
+          "description": "SignalR sticky-session affinity (CORE-DEP-002/CORE-DEP-013). When enabled and api.replicaCount > 1, the annotations are merged onto the rendered Ingress.",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "annotations": { "type": "object" }
+          }
+        },
         "hosts": { "type": "array" },
         "tls": { "type": "array" }
       }

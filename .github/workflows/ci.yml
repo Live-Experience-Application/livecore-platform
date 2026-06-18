@@ -937,6 +937,11 @@ jobs:
     #      (the migrate Job, the API and the worker Deployment) carries a non-empty
     #      resources.requests AND resources.limits (cpu + memory) by default, mirroring
     #      the Compose ceiling, and a values override changes the rendered numbers.
+    #   5. STICKY-SESSION AFFINITY (CORE-DEP-013/CORE-DEP-002): with the Ingress enabled
+    #      and api.replicaCount > 1 the rendered Ingress carries the cookie session-affinity
+    #      annotations automatically (so SignalR's negotiate + transport handshake stays
+    #      pinned to one replica); the single-replica default carries none, and the auto
+    #      affinity is opt-out for a WebSockets-only transport.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -1087,6 +1092,45 @@ jobs:
             --set-string 'ingress.annotations.nginx\.ingress\.kubernetes\.io/affinity=cookie' > ha.yaml
           kubeconform -strict -summary -schema-location default ha.yaml
           echo "OK: the documented HA topology (replicas + backplane + sticky sessions) renders and schema-validates"
+
+      - name: Assert SignalR sticky-session affinity for multi-replica realtime (CORE-DEP-013)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+          backplane='secrets.Realtime__Backplane__ConnectionString=redis://valkey:6379'
+
+          # CORE-DEP-013/CORE-DEP-002: a multi-replica API serving SignalR needs each client's
+          # negotiate + transport handshake pinned to the replica that issued its connectionId
+          # (the hub keeps the full transport set; it does not force WebSockets-only). With the
+          # Ingress enabled and api.replicaCount > 1 the chart renders the cookie session-affinity
+          # annotations automatically; the single-replica default must carry none.
+
+          # The grep patterns anchor to the start of a rendered annotation line
+          # (^<spaces>nginx...), so the template's leading "# ... non-nginx ..." comment
+          # text can never be mistaken for a rendered annotation.
+
+          # (a) Single replica (default) + ingress: NO affinity annotation (default path unaffected).
+          helm template livecore "$chart" --set ingress.enabled=true --show-only templates/ingress.yaml > ingress-single.yaml
+          kubeconform -strict -summary -schema-location default ingress-single.yaml
+          if grep -Eq '^[[:space:]]*nginx\.ingress\.kubernetes\.io/affinity:' ingress-single.yaml; then
+            echo "UNEXPECTED: the single-replica Ingress carries a session-affinity annotation"; cat ingress-single.yaml; exit 1
+          fi
+          echo "OK: the default single-replica Ingress carries no session-affinity annotation"
+
+          # (b) Multi-replica (with backplane) + ingress: the cookie affinity annotation renders.
+          helm template livecore "$chart" --set api.replicaCount=2 --set-string "$backplane" --set ingress.enabled=true --show-only templates/ingress.yaml > ingress-multi.yaml
+          kubeconform -strict -summary -schema-location default ingress-multi.yaml
+          grep -Eq '^[[:space:]]*nginx\.ingress\.kubernetes\.io/affinity:[[:space:]]*"?cookie"?' ingress-multi.yaml \
+            || { echo "MISSING: the multi-replica Ingress does not carry the cookie session-affinity annotation"; cat ingress-multi.yaml; exit 1; }
+          echo "OK: the multi-replica Ingress carries the cookie session-affinity annotation"
+
+          # (c) The auto affinity is opt-out (a WebSockets-only client transport, or a non-nginx controller).
+          helm template livecore "$chart" --set api.replicaCount=2 --set-string "$backplane" --set ingress.enabled=true --set ingress.sessionAffinity.enabled=false --show-only templates/ingress.yaml > ingress-optout.yaml
+          kubeconform -strict -summary -schema-location default ingress-optout.yaml
+          if grep -Eq '^[[:space:]]*nginx\.ingress\.kubernetes\.io/affinity:' ingress-optout.yaml; then
+            echo "UNEXPECTED: ingress.sessionAffinity.enabled=false still rendered the affinity annotation"; cat ingress-optout.yaml; exit 1
+          fi
+          echo "OK: ingress.sessionAffinity.enabled=false opts out of the auto affinity annotation (the WebSockets-only path)"
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)
