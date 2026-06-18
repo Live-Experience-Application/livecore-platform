@@ -288,6 +288,27 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
     /// <summary>Creates an HttpClient with no token (no auth headers).</summary>
     public HttpClient CreateAnonymousClient() => CreateClient();
 
+    /// <summary>
+    /// The database connection string this factory configured the production persistence registration with,
+    /// INCLUDING the credentials. The PostgreSQL concurrency tests build a second, out-of-band connection from
+    /// it; reading the string back off a live (already-opened) connection drops the password (Npgsql's Persist
+    /// Security Info defaults off), which fails the out-of-band connect with "No password has been provided",
+    /// so the password-bearing configured string is exposed from source here. Touching <see cref="WebApplicationFactory{TEntryPoint}.Services"/>
+    /// first ensures the host has been built so the per-test PostgreSQL string is assigned.
+    /// </summary>
+    public string ConfiguredDatabaseConnectionString
+    {
+        get
+        {
+            _ = Services;
+            return _usePostgres
+                ? _postgresConnectionString
+                    ?? throw new InvalidOperationException(
+                        "The PostgreSQL connection string is not available until the host has been built.")
+                : _placeholderConnectionString;
+        }
+    }
+
     // Guards the one-time cleanup so it runs exactly once and — for the per-test
     // PostgreSQL database — only AFTER the host has been fully torn down, never
     // while a live application connection is still holding the database open.

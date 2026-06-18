@@ -44,6 +44,12 @@ public sealed class AuditLogPageIndexBackedReadTests
     // prefer the ordering index over a small-table sequential scan + sort.
     private const int _seededEntries = 1200;
 
+    // Other tenants whose interleaved logs make `WHERE organization_id = target` SELECTIVE. With a single
+    // tenant every row matches the filter, so PostgreSQL can serve `ORDER BY id` straight off the primary-key
+    // (id) index and the (organization_id, id) covering index never appears in the plan; seeding several other
+    // tenants makes the target a minority so the covering index is the planner's choice.
+    private const int _noiseOrganizations = 4;
+
     private static readonly DateTimeOffset _t0 = new(2026, 6, 12, 9, 0, 0, TimeSpan.Zero);
 
     [Fact]
@@ -220,7 +226,8 @@ public sealed class AuditLogPageIndexBackedReadTests
     // =====================================================================
 
     /// <summary>
-    /// Seeds one tenant with a LARGE append-only audit log. Each entry is sealed with a distinct, strictly
+    /// Seeds the TARGET tenant with a LARGE append-only audit log (plus several other tenants' logs as noise so
+    /// the target's read is selective - see <see cref="_noiseOrganizations"/>). Each entry is sealed with a distinct, strictly
     /// increasing append sequence (so the unique <c>audit_logs(organization_id, sequence)</c> index is
     /// satisfied) and a distinct, strictly increasing event time (so the time-ordered UUIDv7 surrogate ids
     /// order deterministically). The entries are inserted in one batch — the legitimate append (Added) write
@@ -254,6 +261,30 @@ public sealed class AuditLogPageIndexBackedReadTests
                 entry.Seal(i + 1, previousHash: null);
                 entries.Add(entry);
                 orderedIds.Add(entry.Id);
+            }
+
+            // NOISE from other tenants so `WHERE organization_id = target` is SELECTIVE (see _noiseOrganizations).
+            // It is deliberately NOT added to orderedIds, so the page assertions still compare against the target
+            // tenant's entries only; each other tenant gets its own per-tenant-unique sequence run.
+            for (var n = 0; n < _noiseOrganizations; n++)
+            {
+                var otherOrganization = await db.AddOrganizationAsync($"{_orgSlug}-other-{n}");
+                for (var i = 0; i < count; i++)
+                {
+                    var noise = AuditLogEntry.Create(
+                        otherOrganization.Id,
+                        workspaceId: Guid.CreateVersion7(),
+                        AuditAction.SessionStarted,
+                        actorUserProfileId: Guid.CreateVersion7(),
+                        resourceType: null,
+                        resourceId: null,
+                        targetParticipantId: null,
+                        previousState: null,
+                        newState: null,
+                        createdAt: _t0.AddMilliseconds(i));
+                    noise.Seal(i + 1, previousHash: null);
+                    entries.Add(noise);
+                }
             }
 
             db.AuditLogs.AddRange(entries);

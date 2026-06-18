@@ -651,13 +651,13 @@ public sealed class SceneReorderEndpointTests
         return response.StatusCode;
     }
 
-    /// <summary>Reads the per-test database connection string the production registration is bound to.</summary>
+    /// <summary>
+    /// The per-test database connection string the production registration is bound to, WITH credentials. Read
+    /// from the factory's configured source (not a live, already-opened connection, whose string Npgsql strips
+    /// the password from) so the out-of-band connection can authenticate.
+    /// </summary>
     private static string ConnectionStringFor(WorkspaceApiFactory factory)
-    {
-        using var scope = factory.Services.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
-        return context.Database.GetDbConnection().ConnectionString;
-    }
+        => factory.ConfiguredDatabaseConnectionString;
 
     /// <summary>
     /// Polls <c>pg_stat_activity</c> until at least one OTHER backend in this test's database is waiting on a

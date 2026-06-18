@@ -291,13 +291,13 @@ public sealed class SavepointRecoveryAndHttpConflictTests
     private static object Body(string? organizationSlug, string resourceType, Guid resourceId)
         => new { organizationSlug, resourceType, resourceId };
 
-    /// <summary>Reads the per-test database connection string the production registration is bound to.</summary>
+    /// <summary>
+    /// The per-test database connection string the production registration is bound to, WITH credentials. Read
+    /// from the factory's configured source (not a live, already-opened connection, whose string Npgsql strips
+    /// the password from) so the out-of-band connection can authenticate.
+    /// </summary>
     private static string ConnectionStringFor(WorkspaceApiFactory factory)
-    {
-        using var scope = factory.Services.CreateScope();
-        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
-        return context.Database.GetDbConnection().ConnectionString;
-    }
+        => factory.ConfiguredDatabaseConnectionString;
 
     private static async Task<int> RuleCountAsync(
         WorkspaceApiFactory factory,
