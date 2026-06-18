@@ -602,6 +602,74 @@ is intentionally not built; extracting one would trade the audited, per-route
 ordering above for a uniform check that could silently reorder or merge the
 status-code contract.
 
+## Architecture-doc / shipped-package reconciliation recorded as a decision (CORE-DOC-003)
+
+`docs/02_ARCHITECTURE.md`'s runtime-components block overstated two published
+package surfaces. CORE-DOC-003 reconciles the architecture doc with the **shipped
+package reality** and records the deliberate boundary as a dated decision, so a
+reader can tell an **intentional boundary from a gap** — the same register style
+CORE-SPEC-003 (above) used for the deliberately-absent capabilities, and the same
+spirit in which CORE-DOC-001/002 reconciled the route/table/event/epic specs.
+
+This note is **documentation only**: it changes **no Core source**, adds **no
+route, table, event or migration**, and touches only `docs/02` and this register —
+so all twelve spec-consistency checks and the boundary scan stay green (the
+doc/CSV-consistency acceptance for this story). It pairs with CORE-OAS-001/002 (the
+OpenAPI document and the generated contracts) and CORE-PUB-003 (the worked consumer
+example).
+
+### (a) `@livecore/ui-core` is a framework-agnostic prop/variant contract, not a React component library — deliberate (owner: vertical)
+
+`docs/02` described `packages/ui-core` as "generic React components and design
+primitives". That overstated the surface: `packages/ui-core/src/index.ts`,
+`props.ts`, `variants.ts` and `resolve.ts` ship **only** the typed prop shapes of
+the generic primitives, the variant vocabularies those props draw from and the pure
+`resolveVariant` default helper — `as const` tuples and compile-time types with
+**no React (or any UI-framework) dependency** (`packages/ui-core/package.json`
+declares none; CORE-SDK-004). It is **not** a React component library.
+
+**Decision (2026-06-18): the framework-agnostic prop/variant contract is the final
+ui-core boundary, and rendering is owned by the vertical.** Core owns the *contract*
+(prop shapes, variant vocabularies, resolution defaults); a vertical owns the
+*rendering* — it implements the actual components (typically React, but the contract
+is framework-agnostic) that accept these props and apply their
+`@livecore/design-tokens` theme. This is the **vertical-owns-rendering** boundary in
+`docs/04_PRODUCT_BOUNDARIES.md` (vertical-specific screens and UI wrappers are
+vertical extension mechanisms; Core defines no screen). Keeping ui-core types-first
+keeps Core product-neutral and locks no vertical to a single UI framework. The doc
+one-liner and an elaboration paragraph in `docs/02` now state this; `README.md`
+("TypeScript UI core package") and `docs/23_PACKAGE_VERSIONING.md` already did, as
+does the package's own `index.ts`/`props.ts` doc prose.
+
+### (b) Decision: a thin reference component kit is not in Core scope (owner: vertical)
+
+The open question the story raised — whether Core ever ships a **thin reference
+component kit** (actual rendered components, however minimal) — is settled here, not
+left implicit. **Decision (2026-06-18): a rendered component kit is NOT in Core
+scope; it belongs to a vertical (or a vertical's shared library).** Rendering is a
+vertical extension mechanism (`docs/04`), and adding a React (or any framework)
+renderer to a published Core package would (i) put a UI-framework runtime dependency
+into an otherwise types-first, product-neutral package, and (ii) pick a framework on
+every vertical's behalf — both reversals of the boundary in (a). The **reference
+integration** a vertical copies is the worked consumer example
+(`examples/minimal-consumer`, CORE-PUB-003), which is private and never published;
+there is deliberately **no** reference *web app* and no Core-shipped component kit.
+Owner: **vertical**. This decision is **final** (not deferred): the absence of a
+Core component kit is intentional, not a missing deliverable.
+
+### (c) The `@livecore/contracts` "OpenAPI-derived" claim is now true (CORE-OAS-001/002)
+
+`docs/02`'s runtime-components block also lists `packages/contracts` as
+"OpenAPI-derived TypeScript types". That was aspirational when the story was filed
+(the contracts were hand-maintained), but it is **now accurate** and needs no
+correction: CORE-OAS-001 emits and checks in the OpenAPI 3 document
+(`openapi/livecore-v1.json`) and CORE-OAS-002 generates
+`packages/contracts/src/openapi.ts` from it with `openapi-typescript` behind a CI
+drift gate (see "OpenAPI document as a derived, drift-gated route view" above and
+the `docs/02` contracts paragraph). It is recorded here as **reconciled** — the
+claim is now backed by the implementation — the companion to the ui-core correction
+in (a).
+
 ## Checking consistency
 
 ```bash

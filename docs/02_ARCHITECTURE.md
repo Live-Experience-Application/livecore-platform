@@ -75,7 +75,8 @@ packages/sdk-ts
   typed TypeScript client for vertical apps
 
 packages/ui-core
-  generic React components and design primitives
+  generic, framework-agnostic UI primitive contracts (typed prop shapes and
+  variant vocabularies); the vertical renders the components
 
 packages/design-tokens
   generic tokens and theme contracts
@@ -107,6 +108,22 @@ silently diverge. The curated DTOs remain the primary documented surface because
 the generator marks every required reference-type field `nullable` (an ASP.NET
 minimal-API quirk); a generated change is still a SemVer event in the changelog
 (`docs/23_PACKAGE_VERSIONING.md`).
+
+The `packages/ui-core` surface is a **framework-agnostic prop/variant contract**,
+**not** a React component library (CORE-SDK-004). It ships only the typed prop shapes
+of the generic primitives (`Surface`, `Stack`, `Text`, `Button`, `Field`, …), the
+variant vocabularies those props are drawn from (`tone`, `size`, `emphasis`, surface
+level, layout) and the pure `resolveVariant` default helper — `as const` tuples and
+compile-time types with **no React (or any UI-framework) dependency**
+(`packages/ui-core/package.json` declares none). **The vertical owns rendering**: it
+implements the actual components (typically React, but the contract is
+framework-agnostic) that accept these props and apply their `@livecore/design-tokens`
+theme — exactly the vertical-owns-rendering boundary in
+`docs/04_PRODUCT_BOUNDARIES.md`, where vertical-specific screens and UI wrappers are a
+vertical extension mechanism and Core defines no screen. Whether Core ever ships a thin
+reference component kit is settled as a dated decision in `docs/24_SPEC_CONSISTENCY.md`
+(CORE-DOC-003: it is **not** in Core scope), so this boundary reads as intentional,
+not as a gap.
 
 ## Backend module boundaries
 
