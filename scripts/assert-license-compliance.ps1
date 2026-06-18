@@ -19,10 +19,11 @@
     AGPL-compatible licenses common in the .NET/Debian closure.
 
     Pass -ReportOnly to print the same verdict without ever failing. The license
-    gate starts in this report-only posture (like the coverage gate, docs/17) so a
-    first real SBOM documents any license the allow-list does not yet cover without
-    blocking development; drop -ReportOnly to make it blocking once the allow-list
-    is validated against the published closure.
+    gate starts in this report-only posture (the same staged posture the coverage
+    gate used before it turned blocking, docs/17) so a first real SBOM documents
+    any license the allow-list does not yet cover without blocking development;
+    drop -ReportOnly to make it blocking once the allow-list is validated against
+    the published closure.
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 

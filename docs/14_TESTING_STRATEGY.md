@@ -132,10 +132,11 @@ Each test project writes a `coverage.cobertura.xml` under `TestResults/`.
 ### Reporting and the threshold gate
 
 `scripts/assert-coverage.ps1` merges those Cobertura reports into a single
-production line-coverage number and checks it against a minimum:
+production line-coverage number and checks it against a minimum. The CI
+`coverage` job runs it **blocking** at the enforced floor:
 
 ```bash
-pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 80 -ReportOnly
+pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 90
 ```
 
 The number is **production-focused** and **de-duplicated** (the gate logic lives
@@ -153,19 +154,36 @@ in `scripts/LiveCoreCoverage.psm1`):
 The gate is **fail-closed**: no reports found, or a missing/malformed report,
 blocks rather than passing silently.
 
-### Staged enforcement: non-blocking, then blocking
+### Staged enforcement: report-only, now blocking at the floor (CORE-TST-009)
 
-The gate **starts non-blocking**. The CI `coverage` job runs it with
-`-ReportOnly`, so it reports coverage and warns on a regression below the minimum
-without failing the build. It is flipped to **blocking** by dropping
-`-ReportOnly`, and `-MinimumLineCoverage` is ratcheted toward the current
-production coverage over time. This mirrors the supply-chain dry-run's
-report-only posture (`scripts/assert-image-scan.ps1`).
+The gate followed the same staged posture as the supply-chain image scan: it
+**started non-blocking** (`-ReportOnly`, reporting coverage and warning on a
+regression without failing the build), then was flipped to **blocking** by
+dropping `-ReportOnly` once coverage was strong enough to defend a floor.
+
+It is now **blocking**. The CI `coverage` job runs `assert-coverage.ps1`
+**without** `-ReportOnly`, so a production line-coverage regression below the
+floor **fails the build** — a new untested production handler that drags the
+number under the floor cannot merge.
+
+The enforced floor is **`-MinimumLineCoverage 90`**. It was set just below the
+**92.79%** production line coverage measured when the gate was made blocking
+(the production-focused number: test assemblies and generated EF migrations
+excluded), leaving a small margin for the run-to-run variance of the
+concurrency/retry integration tests (the money-path race tests above
+deliberately exercise timing-dependent branches). **Ratchet the floor up** toward
+the current coverage as it rises — never lower it; this is the documented value
+to raise over time.
 
 The gate logic is itself tested (`scripts/test-coverage-gate.ps1`, run first in
 the CI `coverage` job): a deliberately-untested new handler trips the threshold
 once blocking is enabled, coverage from several reports merges without double
-counting, and test/generated code is excluded.
+counting, and test/generated code is excluded. The same test also **asserts the
+enforced floor and the blocking posture** — coverage exactly at the floor passes
+and a hair below fails, and the CI `coverage` job invokes `assert-coverage.ps1`
+with no `-ReportOnly` and pins `-MinimumLineCoverage` to the documented `90` — so
+re-adding `-ReportOnly`, or moving the floor in `ci.yml` without updating the
+test and these docs, fails CI.
 
 ## Static analysis (SAST) and the CI gate (CORE-SEC-006)
 

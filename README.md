@@ -254,7 +254,7 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, code-coverage report + gate, format/lint, boundary scan, dependency vulnerability audit, image builds + a PR-blocking image CVE scan; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
+.github/workflows/ci.yml CI pipeline (build, tests, blocking code-coverage gate, format/lint, boundary scan, dependency vulnerability audit, image builds + a PR-blocking image CVE scan; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
@@ -271,8 +271,8 @@ scripts/LiveCoreDependencyAudit.psm1 source dependency-audit gate logic: parses 
 scripts/assert-dependency-audit.ps1  CLI the dependency-audit job runs to fail closed on a high/critical known-vulnerable .NET or pnpm dependency (CORE-DEP-005)
 scripts/test-dependency-audit.ps1    tests for the dependency-audit gate (a seeded high/critical vulnerable package fails closed across both ecosystems, CORE-DEP-005)
 scripts/LiveCoreCoverage.psm1  code-coverage gate logic: merges the Cobertura reports into one de-duplicated, production-focused line-coverage number and the threshold pass/fail decision (CORE-TST-001)
-scripts/assert-coverage.ps1    CLI the CI coverage job runs to report coverage and fail below the minimum (fail-closed; report-only while the gate is non-blocking, CORE-TST-001)
-scripts/test-coverage-gate.ps1 tests for the coverage gate (a deliberately-untested new handler trips the threshold once blocking is enabled, CORE-TST-001)
+scripts/assert-coverage.ps1    CLI the CI coverage job runs to report coverage and fail below the floor (fail-closed; blocking at -MinimumLineCoverage 90, CORE-TST-001/CORE-TST-009)
+scripts/test-coverage-gate.ps1 tests for the coverage gate (a deliberately-untested new handler trips the threshold; asserts the enforced 90 floor and the blocking CI posture, CORE-TST-001/CORE-TST-009)
 .dockerignore            build-context exclusions for the container image builds
 eslint.config.mjs        ESLint flat config for the TypeScript packages
 .prettierrc.json         Prettier configuration (with .prettierignore)
@@ -366,20 +366,23 @@ errors, so `dotnet build` doubles as the .NET lint gate.
 ### Code coverage and the coverage gate
 
 Collect coverage with the referenced `coverlet.collector` and run the threshold
-gate (CORE-TST-001). The CI `coverage` job runs the same commands:
+gate (CORE-TST-001, CORE-TST-009). The CI `coverage` job runs the same commands:
 
 ```bash
 dotnet test LiveCore.slnx --collect:"XPlat Code Coverage" --results-directory ./TestResults
-pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 80 -ReportOnly
+pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 90
 ```
 
 `assert-coverage.ps1` merges the per-project Cobertura reports into one
 de-duplicated, production-focused line-coverage number (test assemblies and
-generated EF migrations excluded) and checks it against the minimum. The gate is
-**non-blocking** for now (`-ReportOnly` reports and warns without failing); drop
-`-ReportOnly` to make a regression below the minimum fail the build. The gate
-logic is tested by `scripts/test-coverage-gate.ps1`. See
-`docs/14_TESTING_STRATEGY.md` ("Coverage measurement and the CI gate") and
+generated EF migrations excluded) and checks it against the floor. The gate is
+**blocking** (CORE-TST-009): it runs **without** `-ReportOnly`, so a production
+line-coverage regression below the floor fails the build. The enforced floor is
+**`-MinimumLineCoverage 90`**, set just below the **92.79%** production coverage
+measured when the gate was made blocking; ratchet it up toward the current
+coverage over time, never down. The gate logic — and that the CI job runs it
+blocking at the documented floor — is tested by `scripts/test-coverage-gate.ps1`.
+See `docs/14_TESTING_STRATEGY.md` ("Coverage measurement and the CI gate") and
 `docs/17_DEFINITION_OF_DONE.md`.
 
 ### TypeScript packages
@@ -4919,8 +4922,9 @@ legally complete and license-checked:
   the dependency closure recorded in the image's CycloneDX SBOM (reusing the
   CORE-DEP-003 SBOM) and is **fail-closed**: a deny-listed license blocks, and any
   license not on the allow-list — including an absent or unknown license — blocks.
-  It starts report-only over the real SBOM (the coverage-gate posture) and is flipped
-  to blocking by dropping `-ReportOnly`; the gate logic is proven by
+  It starts report-only over the real SBOM (the same staged posture the coverage
+  gate used before it turned blocking) and is flipped to blocking by dropping
+  `-ReportOnly`; the gate logic is proven by
   `scripts/test-license-compliance.ps1` (a seeded disallowed license fails) on every
   push and pull request.
 

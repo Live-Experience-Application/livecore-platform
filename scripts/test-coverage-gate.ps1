@@ -2,10 +2,11 @@
 
 <#
 .SYNOPSIS
-    Tests the code-coverage gate (CORE-TST-001): a deliberately-untested new
-    handler trips the threshold once blocking is enabled, coverage from several
-    reports is merged without double counting, and test/generated code is
-    excluded from the production number.
+    Tests the code-coverage gate (CORE-TST-001, CORE-TST-009): a
+    deliberately-untested new handler trips the threshold once blocking is
+    enabled, coverage from several reports is merged without double counting,
+    test/generated code is excluded from the production number, and the CI
+    coverage job runs the gate BLOCKING at the documented line-coverage floor.
 
 .DESCRIPTION
     Pure-PowerShell assertions over LiveCoreCoverage.psm1 and assert-coverage.ps1
@@ -16,8 +17,14 @@
     This is the test for the CORE-TST-001 required case: "a deliberately-untested
     new handler trips the threshold once blocking is enabled" is proved against
     seeded Cobertura reports here and through the assert-coverage.ps1 CLI (which
-    blocks in the default mode and only warns under -ReportOnly, the initial
-    non-blocking posture).
+    blocks in the default mode and only warns under -ReportOnly).
+
+    CORE-TST-009 made the gate BLOCKING. This test now also asserts the enforced
+    floor as a value (coverage exactly at the floor passes, a hair below fails)
+    and that the CI coverage job (.github/workflows/ci.yml) invokes
+    assert-coverage.ps1 with no -ReportOnly and pins -MinimumLineCoverage to the
+    documented floor - so re-adding -ReportOnly, or moving the floor without
+    updating this test and the docs, fails CI.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/test-coverage-gate.ps1
@@ -279,6 +286,45 @@ finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- The enforced floor: blocking posture and the documented value (CORE-TST-009).
+# The gate was flipped from report-only to BLOCKING and the floor was set just
+# below the production coverage measured at that time (92.79%). This is the
+# single documented floor value; docs/14, docs/17 and the README quote the same
+# number. Asserting it here means re-adding -ReportOnly, or moving the floor in
+# ci.yml without updating this test (and the docs), fails CI.
+$EnforcedFloorPercent = 90
+
+# The floor is enforced as a VALUE: a model exactly at the floor passes, and one a
+# hair below it fails. (Test-LiveCoreCoverageGate reads LinesValid and
+# LineCoveragePercent off the model.)
+$atFloorModel = [pscustomobject]@{ LinesValid = 10000; LinesCovered = 9000; LineCoveragePercent = $EnforcedFloorPercent }
+$belowFloorModel = [pscustomobject]@{ LinesValid = 10000; LinesCovered = 8999; LineCoveragePercent = ([double]$EnforcedFloorPercent - 0.01) }
+$atFloorGate = Test-LiveCoreCoverageGate -Model $atFloorModel -MinimumLineCoveragePercent $EnforcedFloorPercent
+$belowFloorGate = Test-LiveCoreCoverageGate -Model $belowFloorModel -MinimumLineCoveragePercent $EnforcedFloorPercent
+AssertTrue ($atFloorGate.Passed) "coverage exactly at the enforced $EnforcedFloorPercent% floor passes the gate"
+AssertTrue (-not $belowFloorGate.Passed) "coverage a hair below the enforced $EnforcedFloorPercent% floor fails the gate (the floor is enforced as a value)"
+
+# The CI coverage job runs the gate BLOCKING at the documented floor. Read the
+# real workflow and assert the one assert-coverage.ps1 invocation drops -ReportOnly
+# and pins -MinimumLineCoverage to the documented floor.
+$repoRoot = Split-Path -Parent $scriptDir
+$ciWorkflowPath = Join-Path $repoRoot '.github/workflows/ci.yml'
+AssertTrue (Test-Path -LiteralPath $ciWorkflowPath) 'the CI workflow file exists'
+if (Test-Path -LiteralPath $ciWorkflowPath) {
+    $ciLines = Get-Content -LiteralPath $ciWorkflowPath
+    # Only the `run:` step that invokes assert-coverage.ps1 is the gate invocation;
+    # comment lines that merely mention the script are not matched.
+    $gateInvocations = @($ciLines | Where-Object { $_ -match '^\s*run:\s*.*assert-coverage\.ps1' })
+    AssertEqual 1 $gateInvocations.Count 'the CI coverage job invokes assert-coverage.ps1 exactly once'
+    if ($gateInvocations.Count -eq 1) {
+        $gateLine = $gateInvocations[0]
+        AssertTrue (-not ($gateLine -match '-ReportOnly')) 'the CI coverage gate runs BLOCKING (no -ReportOnly): a report below the floor fails the build'
+        $ciFloor = $null
+        if ($gateLine -match '-MinimumLineCoverage\s+(\d+(?:\.\d+)?)') { $ciFloor = [double]$Matches[1] }
+        AssertEqual $EnforcedFloorPercent $ciFloor "the CI coverage gate enforces the documented $EnforcedFloorPercent% floor"
+    }
+}
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Coverage gate tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -287,5 +333,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, and test/generated code is excluded.' -ForegroundColor Green
+Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, test/generated code is excluded, and the CI gate is blocking at the documented floor.' -ForegroundColor Green
 exit 0

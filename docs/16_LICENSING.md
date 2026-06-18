@@ -252,9 +252,10 @@ on every push and pull request, fail-closed:
   rejected, and that a signed-off commit and a headered file pass (the CORE-LIC-004
   acceptance test). All logic lives in `scripts/LiveCoreContributorPolicy.psm1`.
 
-Unlike the report-only supply-chain and coverage gates (`docs/17`), this gate is
-**blocking from the start**: provenance and headers are binary, low-risk checks
-with no transitive-dependency surprises to ramp in.
+Unlike the supply-chain and coverage gates, which ramped in report-only before
+turning blocking (`docs/17`), this gate is **blocking from the start**: provenance
+and headers are binary, low-risk checks with no transitive-dependency surprises to
+ramp in.
 
 ## AGPL section 13 source offer (CORE-CMP-001)
 

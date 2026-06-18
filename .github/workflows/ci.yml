@@ -2,7 +2,7 @@
 #
 # Runs the commands documented in README.md verbatim. Independent jobs:
 #   dotnet               - locked-mode restore verification, build, the whole test suite on SQLite, format/code-style verification
-#   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
+#   coverage             - collect code coverage, report it, run the threshold gate (BLOCKING below the line-coverage floor, CORE-TST-001/CORE-TST-009)
 #   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   codeql               - CodeQL SAST over the first-party C# and TypeScript sources; fails the build on a high/critical security finding, gate-logic tested (CORE-SEC-006)
@@ -100,10 +100,15 @@ jobs:
     #   4. runs the threshold gate over the merged, de-duplicated,
     #      production-focused number (test assemblies and generated EF migrations
     #      excluded; see scripts/LiveCoreCoverage.psm1).
-    # The gate STARTS NON-BLOCKING (assert-coverage.ps1 -ReportOnly): it reports
-    # coverage and warns on a regression below the minimum without failing the
-    # build. It is flipped to BLOCKING by dropping -ReportOnly once the team is
-    # ready, exactly like the supply-chain dry-run's report-only posture.
+    # The gate is now BLOCKING (CORE-TST-009): a production line-coverage
+    # regression below the floor fails the build. It ran NON-BLOCKING first
+    # (assert-coverage.ps1 -ReportOnly) to report coverage without failing; then
+    # -ReportOnly was dropped and the floor (-MinimumLineCoverage 90) was set just
+    # below the production coverage measured when the gate was made blocking
+    # (92.79%), with a small margin for the run-to-run variance of the
+    # concurrency/retry integration tests. Ratchet the floor up toward the current
+    # coverage over time, never down - this is the same staged report-only ->
+    # blocking posture the supply-chain image scan followed (CORE-DEP-005).
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -126,11 +131,17 @@ jobs:
           path: "TestResults/**/coverage.cobertura.xml"
           if-no-files-found: error
 
-      - name: Report coverage and run the threshold gate (non-blocking for now)
-        # Drop -ReportOnly to make a coverage regression below the minimum fail
-        # the build (the blocking posture). Raise -MinimumLineCoverage toward the
-        # current production coverage as the team ratchets the floor up.
-        run: pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 80 -ReportOnly
+      - name: Report coverage and run the threshold gate (blocking, CORE-TST-009)
+        # BLOCKING: a production line-coverage regression below the 90% floor fails
+        # the build - the -ReportOnly flag is gone. The floor sits just below the
+        # 92.79% production coverage measured when the gate was made blocking, so a
+        # new untested handler that drags coverage under the floor fails CI. Ratchet
+        # -MinimumLineCoverage up toward the current coverage over time; never lower
+        # it. test-coverage-gate.ps1 asserts this floor and the blocking posture (no
+        # -ReportOnly here), so re-adding -ReportOnly or moving the floor without
+        # updating the test fails CI. See docs/14 ("Coverage measurement and the CI
+        # gate") and docs/17 (Definition of Done).
+        run: pwsh -NoProfile -File scripts/assert-coverage.ps1 -ReportDirectory ./TestResults -MinimumLineCoverage 90
 
   typescript:
     name: TypeScript lint, format and build
@@ -1334,7 +1345,8 @@ jobs:
       - name: Scan the SBOMs for disallowed/unknown licenses (CORE-LIC-003)
         # CORE-LIC-003: reuse the CycloneDX SBOM produced above and run the
         # fail-closed license gate over the published dependency closure. It starts
-        # report-only - the coverage-gate posture (docs/17): the seeded gate-logic
+        # report-only - the staged report-only posture the coverage gate used
+        # before it turned blocking (docs/17): the seeded gate-logic
         # test in the license-compliance job already proves it fails on a disallowed
         # or unknown license, and this records any not-yet-allow-listed license from
         # the first real published SBOM without blocking the initial releases. Drop

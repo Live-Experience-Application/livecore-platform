@@ -18,9 +18,12 @@
     rather than passing silently.
 
     Pass -ReportOnly to print the same verdict without ever failing. The CI
-    coverage job uses this so the gate starts NON-BLOCKING (it reports and warns
-    on a regression) and is flipped to BLOCKING later by dropping -ReportOnly -
-    the same staged posture as the supply-chain dry-run (assert-image-scan.ps1).
+    coverage job ran this way first so the gate started NON-BLOCKING (reporting
+    and warning on a regression); it is now BLOCKING (CORE-TST-009) - the CI job
+    dropped -ReportOnly and pins -MinimumLineCoverage to the enforced floor, so a
+    regression below it fails the build. -ReportOnly remains for a local
+    report-only run. This followed the same staged report-only -> blocking posture
+    as the supply-chain dry-run (assert-image-scan.ps1).
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
