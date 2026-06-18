@@ -92,9 +92,11 @@ services:
     environment:
       # Development by default so the bundled stack (no OIDC/storage configured)
       # comes up green and BOTH /health/live and /health/ready report Healthy.
-      # For a real deployment set ASPNETCORE_ENVIRONMENT=Production and fill the
+      # For a real deployment merge the production overlay so this cannot stay
+      # Development (docker-compose.prod.yml, CORE-OPS-011) and fill the
       # [prod-required] OIDC/storage/CORS values (see deploy/compose/README.md),
-      # after which the production readiness gate enforces them (CORE-OPS-005).
+      # after which the production readiness gate enforces them (CORE-OPS-005). A
+      # Development host bound to a non-loopback interface logs a loud startup warning.
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_HTTP_PORTS: "8080"
       # Production connection guidance (CORE-RES-004): the connection string sizes the
@@ -137,6 +139,8 @@ services:
       dockerfile: apps/worker/Dockerfile
     image: livecore-worker:local
     environment:
+      # Development by default (see the api note above). Merge docker-compose.prod.yml
+      # to force Production on a real deployment (CORE-OPS-011).
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       # Production connection guidance (CORE-RES-004): a smaller pool than the API —
       # the worker runs a handful of background loops, not request fan-out — kept within

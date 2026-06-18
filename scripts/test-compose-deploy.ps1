@@ -292,6 +292,93 @@ AssertTrue ($realFullModel.Services['api'].DependsOn['valkey'] -eq 'service_heal
 AssertTrue ($realFullModel.Services['worker'].Environment['Assets__Storage__Endpoint'] -match 'minio') `
     'the real overlay worker references the object-storage endpoint'
 
+# =============================================================================
+# Production overlay (docker-compose.prod.yml, CORE-OPS-011)
+# =============================================================================
+# The base manifest defaults ASPNETCORE_ENVIRONMENT to Development so the bundled
+# stack comes up green with no identity provider — but in Development the production
+# readiness gate is inert and the OIDC audience guard does not trip, so copying the
+# defaults to a server yields a green but unauthenticated API. The opt-in production
+# overlay forces the Production posture on the api and worker so a production
+# deployment cannot accidentally run in Development. Test-LiveCoreComposeProdOverlay
+# statically validates that both services set ASPNETCORE_ENVIRONMENT to the literal
+# "Production".
+
+# A minimal, well-formed production-overlay fixture; each switch perturbs exactly
+# one invariant (a service left in/defaulted to Development, or omitted).
+function Get-FixtureProdOverlay {
+    param(
+        [switch]$ApiDefaultsDevelopment,
+        [switch]$OmitWorker
+    )
+
+    $apiEnv = if ($ApiDefaultsDevelopment) {
+        'ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}'
+    }
+    else {
+        'ASPNETCORE_ENVIRONMENT: Production'
+    }
+
+    $worker = if ($OmitWorker) { '' } else { @'
+  worker:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+'@ }
+
+    return @"
+name: livecore
+services:
+  api:
+    environment:
+      $apiEnv
+$worker
+"@
+}
+
+# --- Parser + validator: the well-formed overlay fixture is valid. ---
+$prodModel = Get-LiveCoreComposeModel -Content (Get-FixtureProdOverlay)
+AssertTrue ($prodModel.Services['api'].Environment['ASPNETCORE_ENVIRONMENT'] -eq 'Production') `
+    'the parser reads the api ASPNETCORE_ENVIRONMENT value from the production overlay'
+AssertTrue ((Test-LiveCoreComposeProdOverlay -Model $prodModel).IsValid) `
+    'a well-formed production overlay passes validation (api + worker forced to Production)'
+
+# --- Negative: an api left on the interpolated Development default is rejected. ---
+$prodApiDev = Get-LiveCoreComposeModel -Content (Get-FixtureProdOverlay -ApiDefaultsDevelopment)
+$prodApiDevResult = Test-LiveCoreComposeProdOverlay -Model $prodApiDev
+AssertTrue (-not $prodApiDevResult.IsValid) `
+    'a production overlay whose api does not set the literal Production posture is rejected'
+AssertTrue (($prodApiDevResult.Findings -join "`n") -match 'api.*Production') `
+    'the rejection names the api service that is not forced to Production'
+
+# --- Negative: an overlay missing the worker is rejected. ---
+$prodNoWorker = Get-LiveCoreComposeModel -Content (Get-FixtureProdOverlay -OmitWorker)
+$prodNoWorkerResult = Test-LiveCoreComposeProdOverlay -Model $prodNoWorker
+AssertTrue (-not $prodNoWorkerResult.IsValid) 'a production overlay missing the worker service is rejected'
+AssertTrue (($prodNoWorkerResult.Findings -join "`n") -match "worker") `
+    'the rejection names the missing worker service'
+
+# --- Guard the real checked-in overlay. ---
+$prodComposePath = Join-Path $repoRoot 'deploy/compose/docker-compose.prod.yml'
+AssertTrue (Test-Path -LiteralPath $prodComposePath) 'the deploy/compose/docker-compose.prod.yml overlay exists'
+$realProdModel = Get-LiveCoreComposeModel -Path $prodComposePath
+$realProdResult = Test-LiveCoreComposeProdOverlay -Model $realProdModel
+
+if (-not $realProdResult.IsValid) {
+    foreach ($finding in $realProdResult.Findings) {
+        $failures.Add("FAIL (real prod overlay): $finding")
+    }
+}
+else {
+    Write-Host 'PASS: the real deploy/compose/docker-compose.prod.yml forces ASPNETCORE_ENVIRONMENT=Production on the api and worker'
+}
+
+# Spot-check the exact posture on the real overlay (the acceptance criterion: the
+# overlay sets Production for both runtime services).
+AssertTrue ($realProdModel.Services['api'].Environment['ASPNETCORE_ENVIRONMENT'] -eq 'Production') `
+    'the real production overlay sets the api to ASPNETCORE_ENVIRONMENT=Production'
+AssertTrue ($realProdModel.Services['worker'].Environment['ASPNETCORE_ENVIRONMENT'] -eq 'Production') `
+    'the real production overlay sets the worker to ASPNETCORE_ENVIRONMENT=Production'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Compose deployment manifest tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -302,5 +389,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck and the documented probes, and the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them.' -ForegroundColor Green
+Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck and the documented probes, the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them, and the production overlay forces ASPNETCORE_ENVIRONMENT=Production on the api and worker.' -ForegroundColor Green
 exit 0

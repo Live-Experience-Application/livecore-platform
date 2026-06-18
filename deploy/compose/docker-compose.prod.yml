@@ -1,0 +1,52 @@
+# LiveCore PRODUCTION overlay — Docker Compose (CORE-OPS-011).
+#
+# The base manifest (docker-compose.yml) defaults ASPNETCORE_ENVIRONMENT to
+# Development so the BUNDLED stack comes up green with no identity provider or
+# object storage — the right default for a throwaway local machine. But in a
+# Development environment the production readiness gate is INERT (CORE-OPS-005) and
+# the OIDC audience guard does NOT trip (CORE-OPS-004): copying those defaults onto
+# a real server yields a GREEN BUT UNAUTHENTICATED API. That is the footgun this
+# overlay closes.
+#
+# This OVERLAY flips the api and worker to the PRODUCTION posture so a production
+# deployment cannot ACCIDENTALLY run in Development. It sets ASPNETCORE_ENVIRONMENT
+# to the LITERAL "Production" (not an interpolated ${...:-Development} default), so
+# the value cannot be silently overridden back to Development from a stray `.env` —
+# the whole point is that production can never run the Development posture. Merge it
+# ON TOP of the base manifest:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# A plain `docker compose up` (base file only) is unchanged and stays in the
+# Development posture, so local development is NOT weakened. Combine with the full
+# local stack overlay if you want the bundled OIDC/storage/backplane too:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.full.yml -f docker-compose.prod.yml up -d --build
+#
+# ONCE PRODUCTION IS ACTIVE the [prod-required] values are enforced (this is the
+# intended fail-closed behavior, not a regression):
+#   - the readiness gate reports NOT-READY (/health/ready -> 503) until both
+#     persistence (ConnectionStrings__Database) and OIDC (Authentication__Oidc__Authority)
+#     are configured (CORE-OPS-005), and
+#   - a configured Authority with a BLANK Audience makes the api REFUSE TO START
+#     (CORE-OPS-004) — a blank Audience would disable audience scoping.
+# So fill the [prod-required] OIDC/persistence/edge values in `.env` (see
+# deploy/compose/.env.example and the README "Hardening for production") before or
+# alongside enabling this overlay. The bundled postgres login (livecore/livecore)
+# and any full-stack credentials remain LOCAL defaults — point at a managed database
+# and a real identity provider for a genuine production deployment.
+name: livecore
+
+services:
+  api:
+    environment:
+      # Force the Production posture: the production readiness gate and OIDC audience
+      # guard are now active (CORE-OPS-004/005), so the api can no longer come up
+      # green-but-unauthenticated. Literal value — never the Development default.
+      ASPNETCORE_ENVIRONMENT: Production
+
+  worker:
+    environment:
+      # The worker shares the Production posture so its environment-derived behavior
+      # (e.g. the purchase-environment policy, CORE-MON-008) matches the api's.
+      ASPNETCORE_ENVIRONMENT: Production

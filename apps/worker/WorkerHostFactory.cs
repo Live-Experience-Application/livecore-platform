@@ -220,6 +220,17 @@ public static class WorkerHostFactory
         app.MapLiveCoreMetricsEndpoint();
         app.MapWorkerHealthEndpoints();
 
+        // Development-default exposure footgun (CORE-OPS-011), the same loud startup warning the API host emits,
+        // reusing the shared DevelopmentExposureWarning helper. The worker binds its metrics/health surface to a
+        // non-loopback interface by default (Worker:Metrics:Url, http://0.0.0.0:9464), so a Development worker
+        // reachable beyond localhost gets the same warning — the deploy/compose/docker-compose.prod.yml overlay
+        // forces Production on the worker too. Emitted from ApplicationStarted because the bound addresses are
+        // only resolved once the listener has started; it logs only bind addresses (threat T7) and never changes
+        // how the worker runs.
+        app.Lifetime.ApplicationStarted.Register(() =>
+            DevelopmentExposureWarning.WarnIfExposedDevelopmentBind(
+                app.Logger, app.Environment.IsDevelopment(), app.Urls));
+
         return app;
     }
 }

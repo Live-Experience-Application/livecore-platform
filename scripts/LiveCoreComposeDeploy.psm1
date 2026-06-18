@@ -408,10 +408,65 @@ function Test-LiveCoreComposeFullStack {
     }
 }
 
+function Test-LiveCoreComposeProdOverlay {
+    <#
+    .SYNOPSIS
+        Asserts the production overlay forces the Production posture on the api and
+        worker (CORE-OPS-011).
+    .DESCRIPTION
+        The base manifest defaults ASPNETCORE_ENVIRONMENT to Development so the
+        bundled stack comes up green with no identity provider — but in Development
+        the production readiness gate is inert (CORE-OPS-005) and the OIDC audience
+        guard does not trip (CORE-OPS-004), so copying the defaults to a real server
+        yields a green but unauthenticated API. The opt-in production overlay
+        (deploy/compose/docker-compose.prod.yml) closes that footgun by setting
+        ASPNETCORE_ENVIRONMENT to the LITERAL "Production" (not an interpolated
+        ${...:-Development} default that a stray .env could override back to
+        Development) on BOTH the api and worker, so a production deployment cannot
+        accidentally run the Development posture. This statically validates exactly
+        that. It is the production-posture sibling of Test-LiveCoreComposeDeployment
+        (minimal stack) and Test-LiveCoreComposeFullStack (full local stack).
+    .OUTPUTS
+        A PSCustomObject with IsValid (bool) and Findings (string[]). Findings is
+        empty exactly when every invariant holds.
+    #>
+    [CmdletBinding()]
+    [OutputType([psobject])]
+    param([Parameter(Mandatory = $true)][psobject]$Model)
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $services = $Model.Services
+
+    foreach ($name in @('api', 'worker')) {
+        if (-not $services.ContainsKey($name)) {
+            $findings.Add("PROD OVERLAY: the production overlay must extend the '$name' service to set ASPNETCORE_ENVIRONMENT=Production")
+            continue
+        }
+
+        $value = $null
+        if ($services[$name].Environment -and $services[$name].Environment.ContainsKey('ASPNETCORE_ENVIRONMENT')) {
+            $value = $services[$name].Environment['ASPNETCORE_ENVIRONMENT']
+        }
+
+        # The value must be the LITERAL "Production" — an interpolated default
+        # (${ASPNETCORE_ENVIRONMENT:-...}) could be overridden back to Development,
+        # which is the very footgun the overlay exists to remove.
+        if ($value -ne 'Production') {
+            $findings.Add("PROD OVERLAY: the '$name' service must set ASPNETCORE_ENVIRONMENT to the literal 'Production' (found '$value')")
+        }
+    }
+
+    return [pscustomobject]@{
+        IsValid  = ($findings.Count -eq 0)
+        Findings = $findings.ToArray()
+    }
+}
+
 Export-ModuleMember -Function `
     Get-LiveCoreComposeModel, `
     Get-LiveCoreComposeServiceModel, `
     Get-LiveCoreComposeDependsOn, `
     Test-LiveCoreComposeDeployment, `
     Test-LiveCoreComposeFullStack, `
+    Test-LiveCoreComposeProdOverlay, `
     Get-LiveCoreComposeIndent

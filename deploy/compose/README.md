@@ -101,6 +101,49 @@ wires the OIDC/storage/backplane services and that the api/worker reference them
 (no Docker needed), and the `compose-full-smoke` CI job brings the merged stack up
 and asserts the documented probes answer `200`.
 
+## Production overlay (CORE-OPS-011)
+
+The bundled stack defaults to `ASPNETCORE_ENVIRONMENT=Development` (above) so it
+comes up green with no identity provider. That is the right local default, but in a
+Development environment **the production readiness gate is inert** (CORE-OPS-005)
+and **the OIDC audience guard does not trip** (CORE-OPS-004) — so copying these
+defaults onto a real server yields a **green but unauthenticated** API. To stop a
+production deployment from accidentally running in the Development posture, the
+optional overlay [`docker-compose.prod.yml`](docker-compose.prod.yml) forces the
+**Production** posture on the api and worker:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+It sets `ASPNETCORE_ENVIRONMENT` to the **literal** `Production` (not an
+interpolated `${...:-Development}` default a stray `.env` could override back), so
+once merged the environment **cannot** be Development. A plain `docker compose up`
+(base file only) is unchanged and stays in Development, so local development is not
+weakened. Combine it with the full local stack overlay when you want the bundled
+OIDC/storage/backplane too:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full.yml -f docker-compose.prod.yml up -d --build
+```
+
+Once Production is active the [prod-required] values are **enforced** (the intended
+fail-closed behavior): `/health/ready` reports not-ready (`503`) until persistence
+and OIDC are configured (CORE-OPS-005), and a configured Authority with a blank
+Audience makes the api **refuse to start** (CORE-OPS-004). Fill the [prod-required]
+OIDC/persistence/edge values in `.env` (see "Hardening for production" below) before
+or alongside enabling the overlay.
+
+**Defense in depth.** Even without the overlay, if the api or worker runs in
+Development while bound to a **non-loopback** interface (reachable beyond localhost),
+both hosts emit a **loud startup warning** naming the exposed bind address — so the
+green-but-unauthenticated default cannot ship silently. A Development host bound only
+to loopback (the normal dev posture) warns about nothing.
+
+**Tested.** `scripts/test-compose-deploy.ps1` statically validates that the overlay
+forces `ASPNETCORE_ENVIRONMENT=Production` on both the api and worker (no Docker
+needed).
+
 ## The migrate-before-API gate
 
 The API host **never** applies migrations implicitly on startup — that is unsafe
@@ -155,10 +198,13 @@ stack runs with no `.env` at all.
 ## Hardening for production
 
 The bundled stack defaults to `ASPNETCORE_ENVIRONMENT=Development` so it comes up
-green with no identity provider or object storage. For a real deployment, in
+green with no identity provider or object storage. For a real deployment, add the
+production overlay (above) so the Production posture cannot be accidentally skipped —
+`docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d` — and in
 `.env`:
 
-- set `ASPNETCORE_ENVIRONMENT=Production`;
+- set `ASPNETCORE_ENVIRONMENT=Production` (the production overlay already forces
+  this; set it here too for a `.env`-only deployment that does not merge the overlay);
 - set the OIDC `Authentication__Oidc__Authority` and `Authentication__Oidc__Audience`
   (a configured Authority with a blank Audience refuses to start, CORE-OPS-004; the
   readiness gate reports not-ready until both are set, CORE-OPS-005);

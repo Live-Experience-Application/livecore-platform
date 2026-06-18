@@ -1311,6 +1311,21 @@ if (missingRequiredSettings.Count > 0)
         string.Join(", ", missingRequiredSettings));
 }
 
+// Development-default exposure footgun (CORE-OPS-011, the "Deployment and Operations Completeness" epic). The
+// bundled stack defaults to ASPNETCORE_ENVIRONMENT=Development so it comes up green with no identity provider —
+// but in Development the production readiness gate is inert (CORE-OPS-005) and the OIDC audience guard does not
+// trip (CORE-OPS-004), so copying those defaults onto a server reachable beyond localhost yields a GREEN BUT
+// UNAUTHENTICATED API. The primary fix is the opt-in deploy/compose/docker-compose.prod.yml overlay that forces
+// Production; this is the second line of defense — a loud startup warning when the host is STILL in Development
+// yet bound to a NON-LOOPBACK interface, so the unauthenticated default cannot ship silently. The bound
+// addresses are only resolved once the server has started, so the warning fires from ApplicationStarted over the
+// resolved app.Urls. It logs only bind addresses (never a secret/tenant identifier; threat T7) and does NOT
+// weaken the legitimate local-development default — a Development host bound only to loopback warns about
+// nothing. The same DevelopmentExposureWarning helper is reused identically in the worker host.
+app.Lifetime.ApplicationStarted.Register(() =>
+    DevelopmentExposureWarning.WarnIfExposedDevelopmentBind(
+        app.Logger, app.Environment.IsDevelopment(), app.Urls));
+
 // Forwarded headers run FIRST, before any middleware that reads the request
 // scheme/host/IP (CORS, authentication, URL generation), so the rest of the
 // pipeline sees the real client's scheme/host as restored from a TRUSTED proxy's
