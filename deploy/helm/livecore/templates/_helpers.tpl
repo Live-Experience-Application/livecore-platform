@@ -100,3 +100,24 @@ The migrations runner, the API and the worker all read the SAME keys
 - secretRef:
     name: {{ include "livecore.secretName" . }}
 {{- end -}}
+
+{{/*
+Fail the render when the API is scaled past a single replica without a realtime
+backplane (CORE-DEP-009). Running more than one API pod on the in-process backplane
+silently drops cross-pod realtime delivery (CORE-OPS-007): a reveal computed on one
+pod never reaches clients connected to another. A multi-replica install MUST set
+secrets.Realtime__Backplane__ConnectionString (or project it through
+secrets.existingSecret). When an existingSecret is used the chart cannot inspect its
+contents, so the guard defers to it. Invoked from the API Deployment so it runs on
+every render (helm template / helm install / helm lint), failing fast instead of
+silently shipping a broken multi-replica realtime topology.
+*/}}
+{{- define "livecore.validateRealtimeBackplane" -}}
+{{- if gt (int .Values.api.replicaCount) 1 -}}
+{{- if not .Values.secrets.existingSecret -}}
+{{- if not .Values.secrets.Realtime__Backplane__ConnectionString -}}
+{{- fail (printf "\n\nERROR (CORE-DEP-009): api.replicaCount is %d but no realtime backplane is configured.\nRunning more than one API replica on the in-process backplane silently drops cross-pod\nrealtime delivery: a reveal computed on one pod never reaches clients on another (CORE-OPS-007).\n\nTo run multiple API replicas, configure the Redis/Valkey backplane:\n  --set-string secrets.Realtime__Backplane__ConnectionString=<redis-connection-string>\nand enable SignalR sticky sessions at the ingress (CORE-DEP-002), or supply the\nbackplane through secrets.existingSecret. To run a single instance, set api.replicaCount=1." (int .Values.api.replicaCount)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

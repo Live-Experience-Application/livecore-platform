@@ -907,6 +907,11 @@ jobs:
     #      confirm the rendered output carries the pre-install/pre-upgrade migrate Job,
     #      the /health/live + /health/ready probes, and that every Secret value renders
     #      empty (no hardcoded secret).
+    #   3. MULTI-REPLICA FAIL-SAFE (CORE-DEP-009): the default install renders a single
+    #      API replica; a replicaCount > 1 render FAILS when no realtime backplane is
+    #      configured (citing the guard) and SUCCEEDS (kubeconform-valid, no warning)
+    #      once the backplane is set, and the documented HA topology (replicas +
+    #      backplane + sticky sessions) renders cleanly.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -982,6 +987,54 @@ jobs:
             fi
           done
           echo "Helm chart: migrate-before-API gate, probes and no-baked-secret all asserted on the rendered manifests."
+
+      - name: Assert the multi-replica realtime-backplane fail-safe (CORE-DEP-009)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+          backplane='secrets.Realtime__Backplane__ConnectionString=redis://valkey:6379'
+
+          # The DEFAULT install runs a single API replica (no silent multi-replica on
+          # the in-process backplane).
+          [ "$(helm template livecore "$chart" --show-only templates/api-deployment.yaml | grep -E '^[[:space:]]*replicas:' | grep -Eo '[0-9]+')" = "1" ] \
+            || { echo "MISSING: the default api Deployment must request a single replica"; exit 1; }
+          echo "OK: the default install runs a single API replica"
+
+          # replicaCount=1 renders cleanly and schema-validates.
+          helm template livecore "$chart" --set api.replicaCount=1 > rc1.yaml
+          kubeconform -strict -summary -schema-location default rc1.yaml
+          echo "OK: replicaCount=1 renders and schema-validates"
+
+          # replicaCount>1 with an EMPTY backplane MUST FAIL the render (fail-safe), and
+          # the failure must cite the CORE-DEP-009 guard.
+          if helm template livecore "$chart" --set api.replicaCount=2 > multi-empty.yaml 2> multi-empty.err; then
+            echo "EXPECTED FAILURE: replicaCount=2 with no backplane rendered successfully"
+            cat multi-empty.yaml
+            exit 1
+          fi
+          grep -q 'CORE-DEP-009' multi-empty.err \
+            || { echo "MISSING: the render failure does not cite the CORE-DEP-009 backplane guard"; cat multi-empty.err; exit 1; }
+          echo "OK: replicaCount=2 with no backplane fails the render and cites the guard"
+
+          # replicaCount>1 WITH a configured backplane renders, schema-validates and
+          # emits no warning in the manifests.
+          helm template livecore "$chart" --set api.replicaCount=2 --set-string "$backplane" > multi-backplane.yaml
+          kubeconform -strict -summary -schema-location default multi-backplane.yaml
+          if grep -qi 'WARNING' multi-backplane.yaml; then
+            echo "UNEXPECTED: a configured multi-replica backplane render emitted a warning"
+            grep -i 'WARNING' multi-backplane.yaml
+            exit 1
+          fi
+          echo "OK: replicaCount=2 with a configured backplane renders, schema-validates and warns nothing"
+
+          # The documented HA topology (replicas + backplane + sticky sessions) renders cleanly.
+          helm template livecore "$chart" \
+            --set api.replicaCount=3 \
+            --set-string "$backplane" \
+            --set ingress.enabled=true \
+            --set-string 'ingress.annotations.nginx\.ingress\.kubernetes\.io/affinity=cookie' > ha.yaml
+          kubeconform -strict -summary -schema-location default ha.yaml
+          echo "OK: the documented HA topology (replicas + backplane + sticky sessions) renders and schema-validates"
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)

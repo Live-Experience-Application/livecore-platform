@@ -311,13 +311,31 @@ or via `secrets.existingSecret` (a `Secret` managed by your secret store). A
 terminate TLS itself (CORE-OPS-003), so terminate it at the ingress and forward the
 scheme/host/IP.
 
+**Fail-safe for multi-replica realtime (CORE-DEP-009).** The chart defaults to a
+**single API replica** (`api.replicaCount: 1`). Running more than one API replica on
+the in-process backplane silently drops cross-pod realtime delivery — SignalR tracks
+hub-group membership per process, so a reveal computed on one pod never reaches
+clients on another (CORE-OPS-007, "When to add API replicas and the realtime
+backplane" above). So the chart **refuses to render** (`helm template`/`helm install`
+fail with a clear CORE-DEP-009 error) when `api.replicaCount > 1` and
+`Realtime__Backplane__ConnectionString` is empty and no `existingSecret` is supplied;
+it renders cleanly once the backplane is configured. When an `existingSecret` projects
+the configuration the chart cannot inspect its contents, so the guard defers and
+`NOTES.txt` prints a prominent reminder to provide the backplane and sticky sessions.
+The documented HA topology (multiple replicas + backplane + sticky-session affinity,
+CORE-DEP-002) therefore renders without warning, while a default install never
+silently ships a broken multi-replica realtime topology. The API additionally
+fail-fasts at startup in the same misconfiguration (CORE-RES-006) as defence in depth.
+
 **Tested.** `scripts/test-helm-chart.ps1` statically validates that the chart wires
-the pre-install/pre-upgrade migrate `Job`, the documented probes and the
-`ConfigMap`/`Secret` externalization and bakes no secret (no helm/kubeconform
-needed), and the `helm-chart` CI job (`.github/workflows/ci.yml`) runs `helm lint`,
-renders the chart with `helm template`, **schema-validates** every rendered manifest
-with `kubeconform`, and asserts the pre-install migrate `Job`, the probes and that
-no secret is hardcoded. See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
+the pre-install/pre-upgrade migrate `Job`, the documented probes, the
+`ConfigMap`/`Secret` externalization, bakes no secret and **defaults to a single API
+replica with the multi-replica backplane guard** (no helm/kubeconform needed), and the
+`helm-chart` CI job (`.github/workflows/ci.yml`) runs `helm lint`, renders the chart
+with `helm template`, **schema-validates** every rendered manifest with `kubeconform`,
+and asserts the pre-install migrate `Job`, the probes, that no secret is hardcoded and
+that a multi-replica render **fails without a backplane and succeeds with one**
+(CORE-DEP-009). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
 
 ## Operational requirements
 

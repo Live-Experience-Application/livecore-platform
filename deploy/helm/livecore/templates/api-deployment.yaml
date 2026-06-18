@@ -1,6 +1,10 @@
+{{- include "livecore.validateRealtimeBackplane" . }}
 # The API host Deployment. Rolled out only AFTER the pre-install/pre-upgrade
 # migrate Job succeeds (see migrate-job.yaml). Wires the documented unauthenticated
 # liveness (/health/live) and readiness (/health/ready) probes (docs/13).
+#
+# Fails the render when api.replicaCount > 1 without a realtime backplane (CORE-DEP-009,
+# templates/_helpers.tpl "livecore.validateRealtimeBackplane").
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -56,7 +56,9 @@ function Get-FixtureHelmChart {
     param(
         [switch]$OmitMigrateHook,
         [switch]$OmitApiReadinessProbe,
-        [switch]$HardcodeSecret
+        [switch]$HardcodeSecret,
+        [switch]$DefaultMultiReplica,
+        [switch]$OmitBackplaneGuard
     )
 
     $migrateHook = if ($OmitMigrateHook) {
@@ -83,6 +85,17 @@ function Get-FixtureHelmChart {
         '  ConnectionStrings__Database: ""'
     }
 
+    # The default install must not silently run multiple API replicas on the
+    # in-process backplane (CORE-DEP-009).
+    $apiReplicaCount = if ($DefaultMultiReplica) { 2 } else { 1 }
+
+    # The render-time guard that ties api.replicaCount > 1 to the realtime backplane.
+    $backplaneGuard = if ($OmitBackplaneGuard) { '' } else { @'
+{{- if and (gt (int .Values.api.replicaCount) 1) (not .Values.secrets.Realtime__Backplane__ConnectionString) }}
+{{- fail "api.replicaCount > 1 requires Realtime__Backplane__ConnectionString" }}
+{{- end }}
+'@ }
+
     return @{
         'Chart.yaml'                       = "apiVersion: v2`nname: livecore`nversion: 0.1.0`n"
         'values.yaml'                      = @"
@@ -93,6 +106,9 @@ secrets:
   existingSecret: ""
 $secretConnString
   Assets__Storage__AccessKeyId: ""
+  Realtime__Backplane__ConnectionString: ""
+api:
+  replicaCount: $apiReplicaCount
 "@
         'templates/migrate-job.yaml'       = @"
 apiVersion: batch/v1
@@ -111,6 +127,7 @@ spec:
                 name: livecore-secret
 "@
         'templates/api-deployment.yaml'    = @"
+$backplaneGuard
 apiVersion: apps/v1
 kind: Deployment
 spec:
@@ -172,6 +189,18 @@ AssertTrue (-not $baked.IsValid) 'a chart with a non-empty default secret value 
 AssertTrue (($baked.Findings -join "`n") -match 'HARDCODED SECRET') `
     'the rejection flags the hardcoded secret'
 
+# --- Negative: defaulting to multiple API replicas (CORE-DEP-009) is rejected. ---
+$multiReplica = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -DefaultMultiReplica)
+AssertTrue (-not $multiReplica.IsValid) 'a chart defaulting api.replicaCount above 1 (silent multi-replica on the in-process backplane) is rejected'
+AssertTrue (($multiReplica.Findings -join "`n") -match 'REPLICAS') `
+    'the rejection names the unsafe default api.replicaCount'
+
+# --- Negative: dropping the multi-replica realtime-backplane guard is rejected. ---
+$noGuard = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitBackplaneGuard)
+AssertTrue (-not $noGuard.IsValid) 'a chart with no multi-replica realtime-backplane fail guard is rejected'
+AssertTrue (($noGuard.Findings -join "`n") -match 'BACKPLANE GUARD') `
+    'the rejection flags the missing backplane fail-safe guard'
+
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
 $incomplete.Remove('templates/worker-deployment.yaml')
@@ -204,6 +233,16 @@ AssertTrue ($realMigrate -match 'pre-install' -and $realMigrate -match 'pre-upgr
 $realSecretValues = Get-LiveCoreHelmValuesSecretValue -ValuesContent $realFiles['values.yaml']
 $realBaked = @($realSecretValues.Keys | Where-Object { -not [string]::IsNullOrEmpty($realSecretValues[$_]) })
 AssertTrue ($realBaked.Count -eq 0) 'the real values.yaml bakes no secret (every secrets.* default is empty)'
+
+# Spot-check the fail-safe multi-replica default and guard on the real chart (CORE-DEP-009).
+$realReplicas = Get-LiveCoreHelmApiReplicaCount -ValuesContent $realFiles['values.yaml']
+AssertTrue ($realReplicas -eq 1) 'the real chart defaults api.replicaCount to 1 (no silent multi-replica on the in-process backplane)'
+$realApiDeployment = $realFiles['templates/api-deployment.yaml']
+AssertTrue ($realApiDeployment -match 'livecore\.validateRealtimeBackplane') `
+    'the real API Deployment invokes the realtime-backplane validation guard'
+$realHelpers = $realFiles['templates/_helpers.tpl']
+AssertTrue ($realHelpers -match 'fail' -and $realHelpers -match 'Realtime__Backplane__ConnectionString' -and $realHelpers -match 'replicaCount') `
+    'the real chart helper fails the render for multi-replica without a backplane'
 
 if ($failures.Count -gt 0) {
     Write-Host ''

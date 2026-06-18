@@ -127,6 +127,44 @@ function Get-LiveCoreHelmValuesSecretValue {
     return $result
 }
 
+function Get-LiveCoreHelmApiReplicaCount {
+    <#
+    .SYNOPSIS
+        Reads the default `api.replicaCount` scalar from a values.yaml document, so
+        the "no silent multi-replica on the in-process backplane" rule (CORE-DEP-009)
+        can be asserted over the default install.
+    .OUTPUTS
+        The integer default, or $null when the key is absent or unparseable.
+    #>
+    [CmdletBinding()]
+    [OutputType([object])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ValuesContent)
+
+    $lines = $ValuesContent -split "`r?`n"
+
+    $inApi = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreHelmIndent -Line $line
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        if (-not $inApi) {
+            if ($indent -eq 0 -and $trimmed -match '^api:\s*$') { $inApi = $true }
+            continue
+        }
+
+        # The api mapping ends at the next top-level (indent 0) key.
+        if ($indent -eq 0) { break }
+
+        if ($trimmed -match '^replicaCount:\s*([0-9]+)\s*(#.*)?$') {
+            return [int]$Matches[1]
+        }
+    }
+    return $null
+}
+
 function Test-LiveCoreHelmChart {
     <#
     .SYNOPSIS
@@ -248,6 +286,32 @@ function Test-LiveCoreHelmChart {
                 $findings.Add("CONTRACT: values.yaml should reuse the documented configuration key '$configKey'")
             }
         }
+
+        # 9. CORE-DEP-009: the chart fails safe when multiple API replicas run without
+        #    a realtime backplane. SignalR tracks hub-group membership per-process, so
+        #    multiple API pods on the in-process backplane silently drop cross-pod
+        #    realtime delivery (CORE-OPS-007). Two invariants together prevent that:
+        #    (a) the DEFAULT api.replicaCount must not exceed 1, so a default install
+        #        never silently runs multiple pods on the in-process backplane; and
+        $apiReplicas = Get-LiveCoreHelmApiReplicaCount -ValuesContent $Files['values.yaml']
+        if ($null -eq $apiReplicas) {
+            $findings.Add('REPLICAS: values.yaml must set a default api.replicaCount')
+        }
+        elseif ($apiReplicas -gt 1) {
+            $findings.Add("REPLICAS: the default api.replicaCount is $apiReplicas; a default install must not run multiple API replicas on the in-process backplane - default it to 1 and require a backplane to scale up (CORE-DEP-009)")
+        }
+    }
+
+    # (b) a render-time guard must tie api.replicaCount > 1 to the realtime backplane
+    #     connection string - a `fail` referencing both - so scaling up without a
+    #     backplane is rejected instead of silently shipping broken realtime. The guard
+    #     can live in any template (a helper invoked from a Deployment, or inline), so
+    #     search the whole template corpus.
+    $templateCorpus = ($Files.GetEnumerator() | Where-Object { $_.Key -like 'templates/*' } | ForEach-Object { $_.Value }) -join "`n"
+    $hasFailGuard = $templateCorpus -match 'fail\s*[("]'
+    $tiesReplicasToBackplane = ($templateCorpus -match 'replicaCount') -and ($templateCorpus -match 'Realtime__Backplane__ConnectionString')
+    if (-not ($hasFailGuard -and $tiesReplicasToBackplane)) {
+        $findings.Add('BACKPLANE GUARD: the chart must fail the render when api.replicaCount > 1 without a realtime backplane - a guard tying api.replicaCount to Realtime__Backplane__ConnectionString via `fail` (CORE-DEP-009)')
     }
 
     return [pscustomobject]@{
@@ -261,4 +325,5 @@ Export-ModuleMember -Function `
     Get-LiveCoreHelmChartFiles, `
     Get-LiveCoreHelmContentWithoutComments, `
     Get-LiveCoreHelmValuesSecretValue, `
+    Get-LiveCoreHelmApiReplicaCount, `
     Test-LiveCoreHelmChart

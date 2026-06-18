@@ -113,10 +113,36 @@ templates render whatever keys you supply.
   network (CIDR) so the API trusts the `X-Forwarded-*` headers.
 - Set `config.AllowedHosts` and `config.Cors__AllowedOrigins__0` to your real
   host(s)/origin(s).
-- For **more than one API replica**, configure the Redis/Valkey backplane
+- The chart defaults to a **single API replica** (`api.replicaCount: 1`). For
+  **more than one API replica**, configure the Redis/Valkey backplane
   (`secrets.Realtime__Backplane__ConnectionString`, CORE-OPS-007) **and** enable
   SignalR sticky sessions on the ingress (CORE-DEP-002), e.g.
   `ingress.annotations."nginx.ingress.kubernetes.io/affinity"="cookie"`.
+
+### Multi-replica realtime fail-safe (CORE-DEP-009)
+
+SignalR tracks hub-group membership **per process**, so running more than one API
+replica on the in-process backplane silently drops cross-pod realtime delivery: a
+reveal computed on one pod never reaches clients connected to another (CORE-OPS-007).
+To stop a default install shipping that broken topology, the chart **fails to render**
+when `api.replicaCount` is greater than `1` and no realtime backplane is configured:
+
+```bash
+# Fails fast (no backplane configured):
+helm template livecore deploy/helm/livecore --set api.replicaCount=2
+#   Error: ... ERROR (CORE-DEP-009): api.replicaCount is 2 but no realtime backplane is configured. ...
+
+# Renders cleanly once the backplane is set:
+helm template livecore deploy/helm/livecore --set api.replicaCount=2 \
+  --set-string secrets.Realtime__Backplane__ConnectionString="valkey:6379"
+```
+
+When the configuration is projected from an `existingSecret` the chart cannot inspect
+its contents, so the guard **defers** to it (the render succeeds) and `NOTES.txt`
+prints a prominent reminder that the Secret must carry
+`Realtime__Backplane__ConnectionString` and that sticky sessions must be enabled. The
+app additionally fails fast at startup when run multi-instance without a backplane
+(CORE-RES-006), as defence in depth.
 
 ## Validation
 

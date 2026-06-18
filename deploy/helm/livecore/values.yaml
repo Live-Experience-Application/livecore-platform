@@ -107,7 +107,17 @@ migrations:
   resources: {}
 
 api:
-  replicaCount: 2
+  # Default to a SINGLE API replica (CORE-DEP-009). Running more than one API replica
+  # REQUIRES the realtime backplane (secrets.Realtime__Backplane__ConnectionString,
+  # CORE-OPS-007) AND sticky sessions at the ingress (CORE-DEP-002): SignalR tracks
+  # hub-group membership per process, so a reveal computed on one pod is silently
+  # dropped for clients connected to the others when no shared backplane is configured.
+  # To stop a default install silently running multiple pods on the in-process
+  # backplane, the chart FAILS TO RENDER when replicaCount > 1 and no backplane is
+  # configured (templates/_helpers.tpl "livecore.validateRealtimeBackplane"). Raise this
+  # only together with secrets.Realtime__Backplane__ConnectionString (or an existingSecret
+  # that carries it) and ingress sticky sessions.
+  replicaCount: 1
   image:
     repository: live-experience-application/livecore-api
     tag: ""

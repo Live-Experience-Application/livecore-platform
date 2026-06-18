@@ -25,6 +25,24 @@ reports not-ready until it is set. Supply it at install time or via an existing 
 never commit a real secret (docs/13, CORE-OPS-008).
 {{- end }}
 {{- end }}
+{{- if gt (int .Values.api.replicaCount) 1 }}
+{{- if .Values.secrets.existingSecret }}
+
+WARNING: api.replicaCount is {{ .Values.api.replicaCount }} and the configuration is projected
+from an existing Secret ("{{ .Values.secrets.existingSecret }}"), so the chart could NOT verify a
+realtime backplane is configured. Running more than one API replica REQUIRES a Redis/Valkey
+backplane (Realtime__Backplane__ConnectionString, CORE-OPS-007) — without it a reveal computed on
+one pod is silently dropped for clients connected to the others (CORE-DEP-009). Confirm that
+Secret carries Realtime__Backplane__ConnectionString AND enable SignalR sticky sessions at the
+ingress (CORE-DEP-002).
+{{- else }}
+
+Realtime HA: api.replicaCount is {{ .Values.api.replicaCount }} with the Redis/Valkey backplane
+configured (CORE-OPS-007). Also enable SignalR sticky sessions at the ingress so each client's
+negotiate + transport handshake stays pinned to one replica (CORE-DEP-002), e.g.
+nginx.ingress.kubernetes.io/affinity: "cookie".
+{{- end }}
+{{- end }}
 {{- if .Values.ingress.enabled }}
 
 Ingress is enabled for:
