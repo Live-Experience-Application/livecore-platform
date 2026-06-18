@@ -165,6 +165,77 @@ function Get-LiveCoreHelmApiReplicaCount {
     return $null
 }
 
+function Get-LiveCoreHelmComponentResources {
+    <#
+    .SYNOPSIS
+        Extracts the resources.requests/limits cpu/memory scalars of a top-level
+        component (migrations/api/worker) from a values.yaml document, so the
+        "every workload ships a request AND a limit ceiling" rule (CORE-DEP-007 /
+        CORE-DEP-010) can be asserted over the default install.
+    .OUTPUTS
+        A hashtable keyed 'requests.cpu','requests.memory','limits.cpu',
+        'limits.memory' -> raw scalar value (unquoted, trimmed). Keys absent from the
+        document are absent from the hashtable.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ValuesContent,
+        [Parameter(Mandatory = $true)][string]$Component
+    )
+
+    $result = @{}
+    $lines = $ValuesContent -split "`r?`n"
+
+    $inComponent = $false
+    $resourcesIndent = -1
+    $section = ''
+    $sectionIndent = -1
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreHelmIndent -Line $line
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        if (-not $inComponent) {
+            if ($indent -eq 0 -and $trimmed -match "^$([regex]::Escape($Component)):\s*$") { $inComponent = $true }
+            continue
+        }
+
+        # The component mapping ends at the next top-level (indent 0) key.
+        if ($indent -eq 0) { break }
+
+        # Walk forward (skipping the component's other keys and their nested blocks)
+        # until the `resources:` mapping opens.
+        if ($resourcesIndent -lt 0) {
+            if ($trimmed -match '^resources:\s*(.*)$' -and ($indent -gt 0)) { $resourcesIndent = $indent }
+            continue
+        }
+
+        # The resources block ends when we dedent back to (or above) its own indent.
+        if ($indent -le $resourcesIndent) { break }
+
+        # A requests:/limits: subsection header.
+        if ($trimmed -match '^(requests|limits):\s*$') {
+            $section = $Matches[1]
+            $sectionIndent = $indent
+            continue
+        }
+
+        # A cpu:/memory: leaf inside the current subsection.
+        if ($section -and $indent -gt $sectionIndent -and $trimmed -match '^(cpu|memory):\s*(.*)$') {
+            $field = $Matches[1]
+            $value = $Matches[2]
+            if ($value -match '^(.*?)\s+#.*$') { $value = $Matches[1] }
+            $value = $value.Trim().Trim('"', "'")
+            $result["$section.$field"] = $value
+        }
+    }
+    return $result
+}
+
 function Test-LiveCoreHelmChart {
     <#
     .SYNOPSIS
@@ -302,6 +373,40 @@ function Test-LiveCoreHelmChart {
         }
     }
 
+    # 10. CORE-DEP-007 / CORE-DEP-010: every workload ships a non-empty resource
+    #     ceiling by default, so the resource-ceiling guarantee holds on the
+    #     Kubernetes path and a runaway pod cannot starve the node (the exact failure
+    #     CORE-DEP-007 prevents on Compose). Two invariants together prove it:
+    #     (a) values.yaml sets a non-empty resources.requests AND resources.limits
+    #         (cpu + memory) default for the migrate Job, the API and the worker; and
+    if ($Files.ContainsKey('values.yaml')) {
+        foreach ($component in @('migrations', 'api', 'worker')) {
+            $res = Get-LiveCoreHelmComponentResources -ValuesContent $Files['values.yaml'] -Component $component
+            foreach ($field in @('requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory')) {
+                if (-not $res.ContainsKey($field) -or [string]::IsNullOrEmpty($res[$field])) {
+                    $kind = $field.Split('.')[0]
+                    $findings.Add("RESOURCES: values.yaml $component.resources.$field must ship a non-empty default so the rendered $component Pod carries a resource $kind ceiling (CORE-DEP-007/CORE-DEP-010)")
+                }
+            }
+        }
+    }
+
+    # (b) the consuming templates must render the ceiling from .Values, so the default
+    #     value actually reaches the rendered Pod spec.
+    $resourceTemplates = @(
+        'templates/migrate-job.yaml',
+        'templates/api-deployment.yaml',
+        'templates/worker-deployment.yaml'
+    )
+    foreach ($tplName in $resourceTemplates) {
+        if ($Files.ContainsKey($tplName)) {
+            $tpl = Get-LiveCoreHelmContentWithoutComments -Content $Files[$tplName]
+            if ($tpl -notmatch '(?m)^\s*resources:' -and $tpl -notmatch '\.resources') {
+                $findings.Add("RESOURCES: $tplName must render the resource requests/limits ceiling from .Values (CORE-DEP-010)")
+            }
+        }
+    }
+
     # (b) a render-time guard must tie api.replicaCount > 1 to the realtime backplane
     #     connection string - a `fail` referencing both - so scaling up without a
     #     backplane is rejected instead of silently shipping broken realtime. The guard
@@ -326,4 +431,5 @@ Export-ModuleMember -Function `
     Get-LiveCoreHelmContentWithoutComments, `
     Get-LiveCoreHelmValuesSecretValue, `
     Get-LiveCoreHelmApiReplicaCount, `
+    Get-LiveCoreHelmComponentResources, `
     Test-LiveCoreHelmChart

@@ -198,9 +198,15 @@ or a memory-hungry query can take the whole box down. So the bundled Compose sta
 ceiling on every service** (`postgres`, `migrate`, `api`, `worker`). The limits are
 **caps, not reservations**, so they never block scheduling on a small host, and
 **`docker compose up` honors them** (Compose v2 maps `deploy.resources.limits.cpus`
-/ `.memory` to the container `--cpus` / `--memory`). The Kubernetes path sizes the
-same ceilings as `resources.requests`/`limits` through the Helm chart
-(`deploy/helm/livecore`, CORE-DEP-004), independently of these Compose values.
+/ `.memory` to the container `--cpus` / `--memory`). The Kubernetes path enforces the
+**same ceiling** through the Helm chart (`deploy/helm/livecore`, CORE-DEP-004 /
+CORE-DEP-010), independently of these Compose values: every rendered workload — the
+migrate `Job`, the API `Deployment` and the worker `Deployment` — ships a non-empty
+`resources.requests` **and** `resources.limits` (cpu + memory) **by default**, so a
+runaway pod cannot starve the node exactly as the Compose limits prevent on a single
+VPS. The chart reserves the **minimum** column below as `resources.requests` (the
+scheduler guarantee) and caps at the **recommended** column as `resources.limits` (the
+ceiling).
 
 **Every limit is overridable via env**, so an operator tunes the ceiling to the host
 without editing the manifest — set the variable in `deploy/compose/.env`
@@ -229,6 +235,16 @@ suffixes (`512M`, `1024M`, `1g`). Two sizing notes:
   in `ConnectionStrings__Database` so all API and worker replicas together stay within
   the database's `max_connections` (see "Database connection tuning"). Container CPU/
   memory limits and the connection-pool cap are complementary controls.
+- **Kubernetes (Helm) overrides (CORE-DEP-010).** On the Helm path the same numbers
+  ship as `resources` on every workload: the **minimum** column is
+  `resources.requests` (reserved for scheduling) and the **recommended** column is
+  `resources.limits` (the cap). The override is per component in chart values
+  (`migrations`, `api`, `worker`), not an env var — tune a field with `--set` or `-f`,
+  e.g. `--set api.resources.limits.memory=2048Mi` or
+  `--set worker.resources.requests.cpu=500m`; set `<component>.resources={}` to remove
+  the ceiling. PostgreSQL is **not** part of the chart (operators run a managed
+  database or their own StatefulSet), so only `migrate`/`api`/`worker` are sized here.
+  See `deploy/helm/livecore/README.md` ("Resource requests and limits").
 
 ### When to add API replicas and the realtime backplane (CORE-OPS-007)
 

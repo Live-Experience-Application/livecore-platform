@@ -58,7 +58,8 @@ function Get-FixtureHelmChart {
         [switch]$OmitApiReadinessProbe,
         [switch]$HardcodeSecret,
         [switch]$DefaultMultiReplica,
-        [switch]$OmitBackplaneGuard
+        [switch]$OmitBackplaneGuard,
+        [switch]$OmitResources
     )
 
     $migrateHook = if ($OmitMigrateHook) {
@@ -96,6 +97,47 @@ function Get-FixtureHelmChart {
 {{- end }}
 '@ }
 
+    # The default resource ceilings (CORE-DEP-007/CORE-DEP-010): a non-empty
+    # requests/limits cpu+memory block per component in values.yaml (indent 2, under
+    # the top-level component key) and the matching `resources:` render in each
+    # consuming template (indent 10, inside the container spec).
+    $migrationsResources = if ($OmitResources) { '' } else { @'
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+'@ }
+    $apiResources = if ($OmitResources) { '' } else { @'
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+'@ }
+    $workerResources = if ($OmitResources) { '' } else { @'
+  resources:
+    requests:
+      cpu: 250m
+      memory: 384Mi
+    limits:
+      cpu: 750m
+      memory: 768Mi
+'@ }
+    $resourcesTpl = if ($OmitResources) { '' } else { @'
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+'@ }
+
     return @{
         'Chart.yaml'                       = "apiVersion: v2`nname: livecore`nversion: 0.1.0`n"
         'values.yaml'                      = @"
@@ -107,8 +149,15 @@ secrets:
 $secretConnString
   Assets__Storage__AccessKeyId: ""
   Realtime__Backplane__ConnectionString: ""
+migrations:
+  enabled: true
+$migrationsResources
 api:
   replicaCount: $apiReplicaCount
+$apiResources
+worker:
+  replicaCount: 1
+$workerResources
 "@
         'templates/migrate-job.yaml'       = @"
 apiVersion: batch/v1
@@ -125,6 +174,7 @@ spec:
           envFrom:
             - secretRef:
                 name: livecore-secret
+$resourcesTpl
 "@
         'templates/api-deployment.yaml'    = @"
 $backplaneGuard
@@ -143,6 +193,7 @@ spec:
               path: /health/live
               port: http
 $apiReadiness
+$resourcesTpl
 "@
         'templates/api-service.yaml'       = "apiVersion: v1`nkind: Service`n"
         'templates/worker-deployment.yaml' = @"
@@ -160,6 +211,7 @@ spec:
             httpGet:
               path: /health/live
               port: metrics
+$resourcesTpl
 "@
         'templates/configmap.yaml'         = "apiVersion: v1`nkind: ConfigMap`n"
         'templates/secret.yaml'            = "apiVersion: v1`nkind: Secret`ntype: Opaque`nstringData:`n  {{- range `$k, `$v := omit .Values.secrets `"existingSecret`" }}`n  {{ `$k }}: {{ `$v | quote }}`n  {{- end }}`n"
@@ -200,6 +252,12 @@ $noGuard = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitBackplaneGua
 AssertTrue (-not $noGuard.IsValid) 'a chart with no multi-replica realtime-backplane fail guard is rejected'
 AssertTrue (($noGuard.Findings -join "`n") -match 'BACKPLANE GUARD') `
     'the rejection flags the missing backplane fail-safe guard'
+
+# --- Negative: dropping the default resource requests/limits (CORE-DEP-010) is rejected. ---
+$noResources = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitResources)
+AssertTrue (-not $noResources.IsValid) 'a chart whose workloads ship no default resources.requests/limits ceiling is rejected'
+AssertTrue (($noResources.Findings -join "`n") -match 'RESOURCES') `
+    'the rejection flags the missing resource requests/limits ceiling'
 
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
@@ -243,6 +301,15 @@ AssertTrue ($realApiDeployment -match 'livecore\.validateRealtimeBackplane') `
 $realHelpers = $realFiles['templates/_helpers.tpl']
 AssertTrue ($realHelpers -match 'fail' -and $realHelpers -match 'Realtime__Backplane__ConnectionString' -and $realHelpers -match 'replicaCount') `
     'the real chart helper fails the render for multi-replica without a backplane'
+
+# Spot-check the default resource requests/limits ceiling on the real chart (CORE-DEP-007/CORE-DEP-010).
+foreach ($component in @('migrations', 'api', 'worker')) {
+    $realResources = Get-LiveCoreHelmComponentResources -ValuesContent $realFiles['values.yaml'] -Component $component
+    $hasAll = @('requests.cpu', 'requests.memory', 'limits.cpu', 'limits.memory') |
+        ForEach-Object { $realResources.ContainsKey($_) -and -not [string]::IsNullOrEmpty($realResources[$_]) }
+    AssertTrue ((@($hasAll | Where-Object { -not $_ }).Count) -eq 0) `
+        "the real chart ships a non-empty resources.requests+limits (cpu+memory) default for $component (CORE-DEP-007/CORE-DEP-010)"
+}
 
 if ($failures.Count -gt 0) {
     Write-Host ''

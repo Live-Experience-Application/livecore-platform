@@ -49,6 +49,7 @@
         "backoffLimit": { "type": "integer", "minimum": 0 },
         "hookWeight": { "type": "integer" },
         "restartPolicy": { "type": "string", "enum": ["Never", "OnFailure"] },
+        "resources": { "type": "object" },
         "image": {
           "type": "object",
           "additionalProperties": true,
@@ -67,6 +68,7 @@
         "containerPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "livenessProbe": { "type": "object" },
         "readinessProbe": { "type": "object" },
+        "resources": { "type": "object" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
         "service": {
           "type": "object",
@@ -85,6 +87,7 @@
         "replicaCount": { "type": "integer", "minimum": 0 },
         "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "livenessProbe": { "type": "object" },
+        "resources": { "type": "object" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
       }
     },

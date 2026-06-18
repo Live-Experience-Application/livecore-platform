@@ -104,7 +104,19 @@ migrations:
   restartPolicy: Never
   annotations: {}
   podAnnotations: {}
-  resources: {}
+  # Resource requests and limits (CORE-DEP-007 / CORE-DEP-010). The Kubernetes path
+  # enforces the SAME ceiling as the Compose stack so a runaway pod cannot starve the
+  # node. `requests` reserve the docs/13 "minimum" sizing for scheduling; `limits`
+  # cap at the docs/13 "recommended" ceiling (the shipped Compose default). The
+  # migrate Job is a short-lived, one-shot schema runner, so it gets the smallest
+  # ceiling. Override any field with -f/--set; set resources to {} to remove it.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 api:
   # Default to a SINGLE API replica (CORE-DEP-009). Running more than one API replica
@@ -142,7 +154,18 @@ api:
     periodSeconds: 10
     timeoutSeconds: 3
     failureThreshold: 3
-  resources: {}
+  # Resource requests and limits (CORE-DEP-007 / CORE-DEP-010), mirroring the Compose
+  # api ceiling (deploy/compose/docker-compose.yml: 1.0 vCPU / 1024 MB). `requests`
+  # reserve the docs/13 minimum (0.5 vCPU / 512 MB) for scheduling; `limits` cap at
+  # the recommended ceiling so a runaway API pod cannot starve the node — the exact
+  # failure CORE-DEP-007 prevents on Compose. Overridable per field with -f/--set.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
   podAnnotations: {}
   nodeSelector: {}
   tolerations: []
@@ -170,7 +193,17 @@ worker:
     periodSeconds: 30
     timeoutSeconds: 3
     failureThreshold: 3
-  resources: {}
+  # Resource requests and limits (CORE-DEP-007 / CORE-DEP-010), mirroring the Compose
+  # worker ceiling (0.75 vCPU / 768 MB). The worker runs a handful of background
+  # loops, so it reserves/caps smaller than the API: `requests` = the docs/13 minimum
+  # (0.25 vCPU / 384 MB), `limits` = the recommended ceiling. Overridable.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 384Mi
+    limits:
+      cpu: 750m
+      memory: 768Mi
   podAnnotations: {}
   nodeSelector: {}
   tolerations: []

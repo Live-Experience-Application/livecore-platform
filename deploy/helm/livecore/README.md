@@ -81,6 +81,37 @@ The worker's `metrics` port (`9464`) also serves `GET /metrics` for Prometheus. 
 runtime images ship no in-container HTTP client and define no `HEALTHCHECK`;
 Kubernetes probes them over HTTP, exactly as the image design intends.
 
+## Resource requests and limits
+
+Every workload ships a **non-empty `resources.requests` and `resources.limits`** by
+default (CORE-DEP-007 / CORE-DEP-010), so the resource-ceiling guarantee holds on
+Kubernetes exactly as the Compose `deploy.resources.limits` enforce it on a single
+VPS — a runaway pod cannot starve the node. The numbers **mirror the Compose
+baseline** (`deploy/compose/docker-compose.yml`): `requests` reserve the `docs/13`
+"minimum (small/idle)" sizing for scheduling, and `limits` cap at the "recommended"
+ceiling (the shipped Compose default).
+
+| Component (chart key) | `requests` (cpu / memory) | `limits` (cpu / memory) |
+| --------------------- | ------------------------- | ----------------------- |
+| migrate (`migrations`) | `250m` / `256Mi`         | `500m` / `512Mi`        |
+| API (`api`)            | `500m` / `512Mi`         | `1000m` / `1024Mi`      |
+| worker (`worker`)      | `250m` / `384Mi`         | `750m` / `768Mi`        |
+
+PostgreSQL is sized by Compose only — the chart deploys no database (operators bring a
+managed database or their own StatefulSet), so just `migrate`/`api`/`worker` are sized
+here. The ceilings are **overridable per field** (set `<component>.resources` with
+`-f`/`--set`); set `<component>.resources={}` to remove a ceiling entirely:
+
+```bash
+# Raise the API memory limit and the worker CPU request:
+helm install livecore deploy/helm/livecore \
+  --set api.resources.limits.memory=2048Mi \
+  --set worker.resources.requests.cpu=500m
+```
+
+See `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Container resource limits and capacity
+sizing") for the full sizing baseline.
+
 ## Configuration — ConfigMap, Secret, no baked secrets
 
 Every setting is the documented configuration contract (CORE-OPS-008,
@@ -151,7 +182,8 @@ no-tooling static gate runnable locally:
 
 ```bash
 # Static validation (no helm/kubeconform needed): asserts the pre-install migrate
-# Job hook, the probes, the ConfigMap/Secret split and that no secret is hardcoded.
+# Job hook, the probes, the resource requests/limits ceiling, the ConfigMap/Secret
+# split and that no secret is hardcoded.
 pwsh -NoProfile -File scripts/test-helm-chart.ps1
 
 # Full render + schema validation (needs helm + kubeconform):

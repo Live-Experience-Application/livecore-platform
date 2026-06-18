@@ -19,7 +19,7 @@
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   compose-full-smoke   - full local stack overlay starts (Core + Keycloak OIDC + MinIO storage + Valkey backplane) and the documented probes answer 200 (CORE-DEP-006)
-#   helm-chart           - render/validate the Kubernetes Helm chart: static gate + helm lint + helm template + kubeconform schema validation, asserting the pre-install migrate Job, the probes and no hardcoded secret (CORE-DEP-004)
+#   helm-chart           - render/validate the Kubernetes Helm chart: static gate + helm lint + helm template + kubeconform schema validation, asserting the pre-install migrate Job, the probes, the resource requests/limits ceiling and no hardcoded secret (CORE-DEP-004/CORE-DEP-010)
 #   observability-assets - validate the example Prometheus rules/scrape config + SLO/dashboard assets (promtool check + consistency gate) (CORE-OBS-008)
 #   publish-dry-run      - verify image tags + image-scan gate test + cosign verification gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), and a cosign sign/attest/verify round-trip against the locally-built digest with a throwaway key, no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-SEC-008, CORE-CMP-003)
 #   publish-packages-dry-run - package-publish gate-logic test + dry-run npm publish (pnpm publish --dry-run) packing all four @livecore packages on every push/PR, no registry push (CORE-PUB-002)
@@ -912,6 +912,10 @@ jobs:
     #      configured (citing the guard) and SUCCEEDS (kubeconform-valid, no warning)
     #      once the backplane is set, and the documented HA topology (replicas +
     #      backplane + sticky sessions) renders cleanly.
+    #   4. RESOURCE CEILINGS (CORE-DEP-007/CORE-DEP-010): every rendered Pod template
+    #      (the migrate Job, the API and the worker Deployment) carries a non-empty
+    #      resources.requests AND resources.limits (cpu + memory) by default, mirroring
+    #      the Compose ceiling, and a values override changes the rendered numbers.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -987,6 +991,33 @@ jobs:
             fi
           done
           echo "Helm chart: migrate-before-API gate, probes and no-baked-secret all asserted on the rendered manifests."
+
+      - name: Assert resource requests/limits on every Pod template, and overridability (CORE-DEP-010)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+          # CORE-DEP-007/CORE-DEP-010: the migrate Job, the API Deployment and the
+          # worker Deployment must each render a non-empty resources.requests AND
+          # resources.limits (cpu + memory) by default, so the resource-ceiling
+          # guarantee holds on Kubernetes, not only on Compose. Each rendered template
+          # has exactly one container, so its single resources block carries the two
+          # cpu and two memory quantities (one each under requests and limits).
+          for tpl in migrate-job api-deployment worker-deployment; do
+            manifest="$(helm template livecore "$chart" --show-only "templates/${tpl}.yaml")"
+            echo "$manifest" | grep -Eq '^[[:space:]]*resources:'  || { echo "MISSING: $tpl has no resources block";   exit 1; }
+            echo "$manifest" | grep -Eq '^[[:space:]]*requests:'    || { echo "MISSING: $tpl resources.requests";       exit 1; }
+            echo "$manifest" | grep -Eq '^[[:space:]]*limits:'      || { echo "MISSING: $tpl resources.limits";         exit 1; }
+            [ "$(echo "$manifest" | grep -Ec '^[[:space:]]*cpu:[[:space:]]*[^[:space:]]')"    -ge 2 ] || { echo "MISSING: $tpl requests+limits cpu";    exit 1; }
+            [ "$(echo "$manifest" | grep -Ec '^[[:space:]]*memory:[[:space:]]*[^[:space:]]')" -ge 2 ] || { echo "MISSING: $tpl requests+limits memory"; exit 1; }
+            echo "OK: $tpl carries resources.requests + resources.limits (cpu + memory)"
+          done
+
+          # The ceilings are OVERRIDABLE: a values override changes the rendered number.
+          default_cpu="$(helm template livecore "$chart" --show-only templates/api-deployment.yaml | grep -E '^[[:space:]]*cpu:' | tail -n1 | awk '{print $2}')"
+          override_cpu="$(helm template livecore "$chart" --set api.resources.limits.cpu=2500m --show-only templates/api-deployment.yaml | grep -E '^[[:space:]]*cpu:' | tail -n1 | awk '{print $2}')"
+          [ "$override_cpu" = "2500m" ] || { echo "OVERRIDE: api.resources.limits.cpu override did not render (got '$override_cpu')"; exit 1; }
+          [ "$default_cpu" != "$override_cpu" ] || { echo "OVERRIDE: the override did not change the rendered cpu limit (both '$default_cpu')"; exit 1; }
+          echo "OK: api.resources.limits.cpu is overridable (default '$default_cpu' -> override '$override_cpu')"
 
       - name: Assert the multi-replica realtime-backplane fail-safe (CORE-DEP-009)
         run: |
