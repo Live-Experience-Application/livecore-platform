@@ -701,6 +701,41 @@ the OIDC audience guard grants (CORE-OPS-004). The readiness response stays
 endpoint (threat T7). (Audience is separately mandatory in production — a
 configured `Authority` with a blank `Audience` refuses to start, see above.)
 
+### Deep dependency reachability (CORE-OBS-009)
+
+The database readiness check is a **live** probe, but the gate above is only a
+startup-captured boolean of config **presence**: a host with a valid database but
+an OIDC provider, object-storage backend or realtime backplane that is **configured
+yet dead** still reported **READY** and took traffic it could not fully serve. The
+deep readiness checks close that gap. For each **configured** critical dependency,
+`/health/ready` now makes a **live, short-bounded reachability probe** every time it
+is evaluated:
+
+| Probe                | Reaches                                                              | Configured by                          |
+| -------------------- | ------------------------------------------------------------------- | -------------------------------------- |
+| `oidc-discovery`     | `GET {Authority}/.well-known/openid-configuration` answers          | `Authentication:Oidc:Authority`        |
+| `object-storage`     | the S3-compatible backend answers an account-level call             | `Assets:Storage:*` (endpoint + creds)  |
+| `realtime-backplane` | the Redis/Valkey backplane answers a `PING`                         | `Realtime:Backplane:ConnectionString`  |
+
+So a host whose dependency is configured but unreachable reports **not-ready**
+(`503`) and **leaves the rotation** instead of advertising a readiness it does not
+have. A dependency that is **not** configured is not probed — the in-process
+single-instance backplane and the fail-closed unconfigured storage have nothing
+live to reach — so with none configured the deep gate is inert (`Healthy`),
+preserving the same local-development latitude. The probes care about
+**reachability**, not authorization: a backend that answers with a client error (a
+permissions-scoped storage credential, for example) is still reachable and stays
+ready; only a transport failure (connection refused, DNS, timeout) is not-ready.
+
+Each probe is bounded by a short, configurable timeout
+(`HealthChecks:Readiness:ProbeTimeout` / `HealthChecks__Readiness__ProbeTimeout`,
+default `2s`; CORE-RES-005) and **fails closed** — a probe that errors or exceeds
+the timeout is counted as not-ready, never as a false Ready, and a slow/hung
+dependency can never stall the readiness response. `/health/live` is **unaffected**
+(it remains shallow and runs no probes, so a dead dependency never restarts an
+otherwise-live process), and the readiness response stays **status-only**, so which
+dependency is unreachable never leaks to the unauthenticated endpoint (threat T7).
+
 ### Worker metrics and per-loop liveness (CORE-DR-003)
 
 The worker is the host doing **irreversible** work, so it must not be a monitoring
@@ -1039,6 +1074,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Realtime:Backplane:ConnectionString` | `Realtime__Backplane__ConnectionString` | yes | for multi-instance   | API         | In-process backplane (single instance only, CORE-OPS-007) |
 | `Tracing:Otlp:Endpoint`             | `Tracing__Otlp__Endpoint`          |   no   | for trace export        | API         | Spans produced but not exported (no collector, CORE-OBS-003) |
+| `HealthChecks:Readiness:ProbeTimeout` | `HealthChecks__Readiness__ProbeTimeout` | no | no (tunable)         | API         | `00:00:02` per-probe bound for the live `/health/ready` dependency reachability probes; fail-closed (CORE-OBS-009) |
 | `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat` (per-loop base path, CORE-DR-003) |
 | `Worker:Heartbeat:StaleAfter`       | `Worker__Heartbeat__StaleAfter`    |   no   | no                      | worker      | `02:00:00`; a loop idle longer reads as hung -> worker not-live (CORE-DR-003) |
 | `Worker:Metrics:Url`                | `Worker__Metrics__Url`             |   no   | no                      | worker      | `http://0.0.0.0:9464` (worker `/metrics` + `/health/live`, CORE-DR-003) |

@@ -1240,6 +1240,20 @@ builder.Services.AddRequiredDependencyReadinessCheck(
     persistenceConfigured: !string.IsNullOrWhiteSpace(databaseConnectionString),
     oidcConfigured: oidcConfigured);
 
+// Deep dependency reachability readiness gate (CORE-OBS-009). The database check above is a live probe and the
+// required-dependency gate just above is a startup-captured boolean of config PRESENCE — but OIDC, object storage
+// and the realtime backplane were never probed for actual reachability, so a host with a healthy database but a
+// DEAD critical dependency reported Ready and kept taking traffic. This adds one LIVE, short-bounded probe per
+// CONFIGURED critical dependency (the OIDC discovery endpoint, the object-storage backend, the realtime
+// backplane), tagged ready, so a host whose dependency is configured but unreachable reports NOT-READY and leaves
+// the rotation. The probes are bounded by a short timeout and fail closed (a timeout/error is not-ready, never a
+// false Ready; CORE-RES-005), liveness stays shallow/separate (a dead dependency never restarts a live process),
+// and the readiness response stays status-only so which dependency is unreachable never leaks (threat T7). An
+// unconfigured dependency is not probed; with none configured the gate is inert (Ready), preserving the existing
+// local-development latitude. Registered unconditionally (outside the persistence conditional) so it runs even
+// when persistence is absent.
+builder.Services.AddDeepDependencyReadinessChecks(builder.Configuration);
+
 var app = builder.Build();
 
 if (string.IsNullOrWhiteSpace(databaseConnectionString))

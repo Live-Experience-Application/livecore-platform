@@ -852,10 +852,10 @@ source-offer endpoint, worker metrics, structured logging and distributed tracin
 
 The API host exposes two unauthenticated health endpoints:
 
-| Endpoint        | Purpose                                                                                                                                                                 |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                                                     |
-| `/health/ready` | Readiness: runs the health checks tagged `ready` (the `database` connectivity check, registered only when a connection string is configured, plus the production gate). |
+| Endpoint        | Purpose                                                                                                                                                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                                                                                                              |
+| `/health/ready` | Readiness: runs the health checks tagged `ready` — the `database` connectivity check (registered only when a connection string is configured), the production config-presence gate, and the live dependency reachability probes. |
 
 Both return `200 OK` with the minimal JSON body `{"status":"Healthy"}`;
 readiness returns `503` with `{"status":"Unhealthy"}` once a registered
@@ -863,6 +863,18 @@ readiness check fails. Because the endpoints are reachable without
 authentication, the response carries only the overall status: no version
 numbers, configuration values, host names or individual check details (see
 `docs/07_SECURITY_THREAT_MODEL.md`).
+
+Readiness also makes a **live, short-bounded reachability probe** of each
+**configured** critical dependency (CORE-OBS-009): the OIDC discovery endpoint
+(`Authentication:Oidc:Authority`), the object-storage backend (`Assets:Storage:*`)
+and the realtime backplane (`Realtime:Backplane:ConnectionString`). So a host with
+a healthy database but a configured-yet-dead critical dependency reports not-ready
+and leaves the rotation instead of taking traffic it cannot serve. A dependency
+that is not configured is not probed. Each probe is bounded by a short, configurable
+timeout (`HealthChecks:Readiness:ProbeTimeout`, default `2s`; CORE-RES-005) and
+fails closed — a probe that errors or times out is counted as not-ready, never as a
+false Ready — while `/health/live` stays shallow and unaffected
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
 In a **Production** environment readiness additionally fails when a required
 dependency is unconfigured (CORE-OPS-005): persistence (`ConnectionStrings:Database`)

@@ -443,4 +443,30 @@ Required:
 /health/ready
 ```
 
-Readiness checks database and critical dependencies.
+`/health/live` is **shallow**: it confirms the process is up and serving HTTP and
+runs **no** dependency checks, so a failing dependency never restarts an otherwise
+live process. `/health/ready` runs the checks tagged `ready` and gates whether the
+host takes traffic.
+
+Readiness checks the database **and the other critical dependencies** for actual
+reachability (CORE-OBS-009). Beyond the database connectivity check and the
+startup config-presence gate (CORE-OPS-005, which only records whether a dependency
+is *configured*), readiness makes a **live, short-bounded probe** of each
+**configured** critical dependency each time it is evaluated:
+
+| Probe                | What it checks                                                        |
+| -------------------- | -------------------------------------------------------------------- |
+| `oidc-discovery`     | a GET of the OIDC provider's `.well-known/openid-configuration` answers |
+| `object-storage`     | the S3-compatible backend answers (an account-level call round-trips) |
+| `realtime-backplane` | the Redis/Valkey backplane answers a `PING`                          |
+
+So a host with a healthy database but a **dead** critical dependency reports
+not-ready (`503`) and leaves the rotation instead of taking traffic it cannot
+serve. A dependency that is **not configured** is not probed (the in-process
+single-instance backplane and the fail-closed unconfigured storage have nothing
+live to reach), so with none configured the gate is inert. Each probe is bounded
+by a short, configurable timeout (`HealthChecks:Readiness:ProbeTimeout`, default
+`2s`; CORE-RES-005) and **fails closed** — a probe that errors or times out is
+counted as not-ready, never as a false Ready. The unauthenticated readiness
+response stays **status-only**, so which dependency is unreachable never leaks
+(threat T7).
