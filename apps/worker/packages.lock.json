@@ -4,15 +4,15 @@
     "net10.0": {
       "AWSSDK.Core": {
         "type": "Transitive",
-        "resolved": "3.7.302.6",
-        "contentHash": "eOPMHT3YSLQg5wXm+UL8Qoka17byK5l/4qxfuE/S32IoQ34gkTDQ1yI9pQPk8LEpeV/W0BE2np+XuhdDQ3wE8g=="
+        "resolved": "4.0.9.4",
+        "contentHash": "bpxzv4e0WjOVmKiYkjkNWeKvwyzoIVFS+u5zYnsryM2qTyhkfeLGQ4LPqDo+m/7OIJlGWr6V9zkc3V9bb0QmYg=="
       },
       "AWSSDK.S3": {
         "type": "Transitive",
-        "resolved": "3.7.305.22",
-        "contentHash": "KSqGLLSX28j/SaeSuvOWzaGBVNLDeiog5DIuJKO52GRKI4XO89jaJgeElWiLvUFsOh9FaXNkmOHpStET6IvHUQ==",
+        "resolved": "4.0.25.1",
+        "contentHash": "LTX/vZcX/Up5/fiQAnEP0SE2aAR6WDZpvZvRoy0F3Ll/iI1W+yLZJkPF4G/C+97lgAEuZ0xUwbZuQlDuEGBeNg==",
         "dependencies": {
-          "AWSSDK.Core": "[3.7.302.6, 4.0.0)"
+          "AWSSDK.Core": "[4.0.9.4, 5.0.0)"
         }
       },
       "MessagePack": {
@@ -254,7 +254,7 @@
       "livecore.api": {
         "type": "Project",
         "dependencies": {
-          "AWSSDK.S3": "[3.7.305.22, )",
+          "AWSSDK.S3": "[4.0.25.1, )",
           "Microsoft.AspNetCore.Authentication.JwtBearer": "[10.0.9, )",
           "Microsoft.AspNetCore.OpenApi": "[10.0.9, )",
           "Microsoft.AspNetCore.SignalR.StackExchangeRedis": "[10.0.9, )",

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
-using Amazon;
 using Amazon.Runtime;
 using Amazon.S3;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -83,12 +82,9 @@ public static class AssetStorageServiceCollectionExtensions
     private static IAmazonS3 CreateClient(S3AssetStorageOptions options)
     {
         // Modern S3-compatible backends (RustFS/MinIO and current AWS S3) require AWS Signature Version 4 for
-        // pre-signed URLs; legacy SigV2 is rejected by them, and the SDK otherwise falls back to SigV2 for a
-        // custom ServiceURL. This is the documented AWS knob for S3 pre-signing; it is process-global, which is
-        // correct here because S3 is the only AWS service this process uses, and it is set deterministically at
-        // wiring time (before any request).
-        AWSConfigsS3.UseSignatureVersion4 = true;
-
+        // pre-signed URLs; legacy SigV2 is rejected by them. The AWS SDK v4 always signs S3 requests with SigV4
+        // (SigV2 was removed entirely), so pre-signing against a custom ServiceURL is SigV4 with no process-global
+        // knob to set — the v3 AWSConfigsS3.UseSignatureVersion4 toggle no longer exists.
         var config = new AmazonS3Config
         {
             ServiceURL = options.Endpoint,

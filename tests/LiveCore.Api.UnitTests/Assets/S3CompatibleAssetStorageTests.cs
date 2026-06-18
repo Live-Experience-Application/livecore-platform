@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
-using Amazon;
 using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
@@ -38,14 +37,9 @@ public class S3CompatibleAssetStorageTests
     private const string _bucket = "livecore-private-assets";
     private static readonly DateTimeOffset _now = new(2026, 6, 13, 9, 0, 0, TimeSpan.Zero);
 
-    static S3CompatibleAssetStorageTests()
-    {
-        // Mirror the production wiring: the adapter forces AWS Signature Version 4 for S3 pre-signing (the
-        // format modern S3-compatible backends require). The test builds the SDK client directly, so the
-        // global is set here too so the signed URL is a genuine SigV4 pre-signed URL.
-        AWSConfigsS3.UseSignatureVersion4 = true;
-    }
-
+    // The AWS SDK v4 always signs S3 requests with Signature Version 4 (SigV2 was removed), so the SDK client
+    // this test builds directly mints a genuine SigV4 pre-signed URL with no process-global toggle to set — the
+    // v3 AWSConfigsS3.UseSignatureVersion4 = true wiring this test used to mirror no longer exists.
     private static readonly S3AssetStorageOptions _options = S3AssetStorageOptions.FromConfiguration(
         new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
