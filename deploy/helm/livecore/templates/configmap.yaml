@@ -1,0 +1,13 @@
+# Non-secret configuration (CORE-OPS-008). Projected into the migrations runner,
+# the API and the worker via envFrom, so all three read the same documented keys.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "livecore.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

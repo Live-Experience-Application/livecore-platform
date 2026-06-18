@@ -1,0 +1,67 @@
+{{- if .Values.migrations.enabled }}
+# THE MIGRATE-BEFORE-API GATE (CORE-DEP-004), the Helm form of the Compose
+# `depends_on: { migrate: { condition: service_completed_successfully } }` gate.
+#
+# This one-shot Job runs the EF Core migrations runner image
+# (apps/api/Migrations.Dockerfile) as a pre-install/pre-upgrade hook. Helm runs the
+# hook to completion and ABORTS the release if it fails, applying the API and
+# worker Deployments only AFTER the Job succeeds — so the API never rolls out
+# against an unmigrated schema. The API host itself never migrates on startup
+# (docs/13_SELF_HOSTING_REQUIREMENTS.md, "Database migrations"). The runner is
+# idempotent: on an up-to-date database it applies nothing and exits 0.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "livecore.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": {{ .Values.migrations.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    {{- with .Values.migrations.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "livecore.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+      {{- with .Values.migrations.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: {{ .Values.migrations.restartPolicy }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "livecore.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "livecore.componentImage" (dict "root" $ "component" .Values.migrations) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # The runner reads the SAME ConnectionStrings__Database the API/worker do,
+          # from the Secret — no credential is baked into the image or the chart.
+          envFrom:
+            {{- include "livecore.envFrom" . | nindent 12 }}
+          {{- with .Values.migrations.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,19 @@
+# The API Service. The Ingress (ingress.yaml) and any in-cluster client route to
+# this; readiness gates membership so traffic only reaches ready API pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "livecore.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "livecore.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 4 }}

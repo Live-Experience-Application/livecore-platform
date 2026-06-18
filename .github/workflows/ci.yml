@@ -18,6 +18,7 @@
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
+#   helm-chart           - render/validate the Kubernetes Helm chart: static gate + helm lint + helm template + kubeconform schema validation, asserting the pre-install migrate Job, the probes and no hardcoded secret (CORE-DEP-004)
 #   observability-assets - validate the example Prometheus rules/scrape config + SLO/dashboard assets (promtool check + consistency gate) (CORE-OBS-008)
 #   publish-dry-run      - verify image tags + image-scan gate test + cosign verification gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), and a cosign sign/attest/verify round-trip against the locally-built digest with a throwaway key, no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-SEC-008, CORE-CMP-003)
 #   publish-packages-dry-run - package-publish gate-logic test + dry-run npm publish (pnpm publish --dry-run) packing all four @livecore packages on every push/PR, no registry push (CORE-PUB-002)
@@ -809,6 +810,99 @@ jobs:
         if: always()
         working-directory: deploy/compose
         run: docker compose down -v --remove-orphans || true
+
+  helm-chart:
+    name: Helm chart render and schema validation (CORE-DEP-004)
+    runs-on: ubuntu-latest
+    # CORE-DEP-004: the Core ships a Kubernetes Helm chart at deploy/helm/livecore
+    # (the third production option in docs/13) that MIRRORS the migrate-before-API
+    # contract the Compose stack enforces (CORE-DEP-001). The two easy-to-get-wrong
+    # pieces - the migrate-before-API gate (a pre-install/pre-upgrade hook Job that
+    # must succeed before the API/worker roll out) and the documented liveness/
+    # readiness probes - plus the no-baked-secret rule are proven two ways:
+    #   1. RENDERS/VALIDATES (no tooling): scripts/test-helm-chart.ps1 proves the
+    #      validation logic over fixtures (a chart that drops the pre-install hook, a
+    #      probe, or that hardcodes a secret is rejected) and guards the real chart.
+    #   2. LINT + RENDER + SCHEMA: helm lint, then helm template renders the chart and
+    #      kubeconform schema-validates every rendered manifest; shell assertions then
+    #      confirm the rendered output carries the pre-install/pre-upgrade migrate Job,
+    #      the /health/live + /health/ready probes, and that every Secret value renders
+    #      empty (no hardcoded secret).
+    # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
+    # Kubernetes-schema validator) are installed from PINNED release binaries via curl
+    # - the same "pin the tool, add no extra GitHub Action to the supply chain"
+    # pattern the promtool/Trivy/cosign installs already use - so no new repository
+    # dependency or workflow action enters the build.
+    env:
+      HELM_VERSION: v3.16.4
+      KUBECONFORM_VERSION: v0.6.7
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Validate the chart logic and guard the real chart (no tooling)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-helm-chart.ps1
+
+      - name: Install Helm (pinned release binary)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          tar -xzf helm.tar.gz
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf helm.tar.gz linux-amd64
+          helm version
+
+      - name: Install kubeconform (pinned release binary)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          rm -f kubeconform.tar.gz kubeconform
+          kubeconform -v
+
+      - name: helm lint
+        run: helm lint deploy/helm/livecore
+
+      - name: helm template (render) and kubeconform (schema-validate)
+        run: |
+          set -euo pipefail
+          helm template livecore deploy/helm/livecore > rendered.yaml
+          # Also render with the (default-off) Ingress enabled so its schema is
+          # validated too; the assertions below run over the default render.
+          helm template livecore deploy/helm/livecore --set ingress.enabled=true > rendered-ingress.yaml
+          echo "Rendered manifests:"
+          grep -E '^(kind|# Source):' rendered.yaml || true
+          # Schema-validate every rendered manifest against the Kubernetes schemas.
+          kubeconform -strict -summary -schema-location default rendered.yaml
+          kubeconform -strict -summary -schema-location default rendered-ingress.yaml
+
+      - name: Assert the migrate-before-API gate, the probes and no hardcoded secret
+        run: |
+          set -euo pipefail
+          rendered="$(cat rendered.yaml)"
+          # 1. The migrations runner is a pre-install/pre-upgrade hook Job (the gate).
+          echo "$rendered" | grep -Eq 'helm\.sh/hook:[[:space:]]*pre-install,pre-upgrade' \
+            || { echo "MISSING: pre-install/pre-upgrade migrate Job hook"; exit 1; }
+          echo "$rendered" | grep -Eq '^[[:space:]]*kind:[[:space:]]*Job[[:space:]]*$' \
+            || { echo "MISSING: migrate Job"; exit 1; }
+          # 2. The documented liveness/readiness probes are wired.
+          echo "$rendered" | grep -Eq 'path:[[:space:]]*/health/live' \
+            || { echo "MISSING: /health/live liveness probe"; exit 1; }
+          echo "$rendered" | grep -Eq 'path:[[:space:]]*/health/ready' \
+            || { echo "MISSING: /health/ready readiness probe"; exit 1; }
+          # 3. No hardcoded secret: every Secret value renders empty by default.
+          for key in ConnectionStrings__Database Assets__Storage__AccessKeyId Assets__Storage__SecretAccessKey Realtime__Backplane__ConnectionString; do
+            if echo "$rendered" | grep -Eq "^[[:space:]]*${key}:[[:space:]]*\"\"[[:space:]]*$"; then
+              echo "OK: secret $key renders empty (not baked into the chart)"
+            else
+              echo "HARDCODED SECRET (or missing key): $key does not render as an empty value"
+              exit 1
+            fi
+          done
+          echo "Helm chart: migrate-before-API gate, probes and no-baked-secret all asserted on the rendered manifests."
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)

@@ -67,6 +67,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [OpenAPI document](#openapi-document-core-oas-001)
 - [Run the hosts locally](#run-the-hosts-locally)
     - [Deploy the whole stack with Docker Compose](#deploy-the-whole-stack-with-docker-compose)
+    - [Deploy to Kubernetes with Helm](#deploy-to-kubernetes-with-helm)
 - [Operations and observability](#operations-and-observability)
     - [Health endpoints](#health-endpoints)
     - [Metrics endpoint](#metrics-endpoint)
@@ -313,9 +314,12 @@ scripts/lint-log-redaction.ps1  CI lint that fails the build on a content-bearin
 scripts/test-log-redaction.ps1  tests for the log-redaction guardrail (a seeded content-bearing/interpolated template is flagged; the real ID-only logs pass — CORE-OBS-006)
 scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001)
 scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001)
+scripts/LiveCoreHelmChart.psm1  Helm chart validation (pre-install/pre-upgrade migrate Job hook, documented probes, ConfigMap/Secret externalization, no baked secret; CORE-DEP-004)
+scripts/test-helm-chart.ps1  tests the Helm chart validation and guards deploy/helm/livecore (CORE-DEP-004)
 scripts/LiveCoreObservabilityAssets.psm1  observability-assets validation logic: every livecore_* series the example rules/dashboard reference is documented in docs/15 or a defined recording rule; lints the dashboard JSON and alert severity/annotation (CORE-OBS-008)
 scripts/test-observability-assets.ps1  tests the observability-assets validation and guards deploy/observability/ (an undocumented series, a severity-less alert, a malformed dashboard JSON are rejected; the real assets pass — CORE-OBS-008)
 deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001)
+deploy/helm              in-repo Kubernetes Helm chart: API + worker + a pre-install/pre-upgrade migrations Job (the migrate-before-API gate), externalized ConfigMap/Secret config with no baked secret, documented probes, Service/Ingress (CORE-DEP-004)
 deploy/observability     example Prometheus scrape config + recording/alert rules, documented SLO targets and a starter Grafana dashboard over the livecore_* metrics (CORE-OBS-008)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
@@ -856,6 +860,33 @@ production hardening in [`deploy/compose/README.md`](deploy/compose/README.md). 
 migrate gate and the documented health/readiness/liveness probes are tested by
 `scripts/test-compose-deploy.ps1` and the `compose-smoke` CI job. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo deployment manifest").
+
+### Deploy to Kubernetes with Helm
+
+For Kubernetes (the third production option), the repository ships a Helm chart at
+[`deploy/helm/livecore`](deploy/helm/livecore/README.md) (CORE-DEP-004) that deploys
+the **API + the worker + the migrations runner** and **mirrors the migrate-before-API
+contract** the Compose stack enforces. Supply the database/OIDC settings at install
+time (never commit a secret):
+
+```bash
+helm install livecore deploy/helm/livecore \
+  --namespace livecore --create-namespace \
+  --set image.tag=<version> \
+  --set-string secrets.ConnectionStrings__Database="Host=db;Port=5432;Database=livecore;Username=livecore;Password=<password>;Maximum Pool Size=40"
+```
+
+The migrations runner runs as a **pre-install/pre-upgrade `Job`** that Helm runs to
+completion (and aborts the release if it fails) **before** the API/worker
+`Deployment`s roll out — the Helm form of the Compose
+`depends_on: service_completed_successfully` gate. All configuration is externalized
+into a `ConfigMap`/`Secret` (**no secret is baked into the chart**), the documented
+`/health/live`/`/health/ready` probes are wired as `httpGet` blocks, and a
+`Service`/optional `Ingress` are included. The chart is linted, rendered and
+schema-validated in CI (`scripts/test-helm-chart.ps1` plus the `helm-chart` job:
+`helm lint` + `helm template` + `kubeconform`). See
+[`deploy/helm/livecore/README.md`](deploy/helm/livecore/README.md) and
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo Kubernetes Helm chart").
 
 ## Operations and observability
 

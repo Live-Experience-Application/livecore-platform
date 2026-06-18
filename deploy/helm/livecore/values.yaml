@@ -1,0 +1,181 @@
+# Default values for the LiveCore chart (CORE-DEP-004).
+#
+# Every setting below is overridable with `-f my-values.yaml` or `--set`. The
+# documented configuration contract (CORE-OPS-008, docs/13) is split into a
+# non-secret `config` map (rendered into a ConfigMap) and a `secrets` map
+# (rendered into a Secret). NO SECRET IS BAKED INTO THE CHART: every secret value
+# below is empty — supply real values at install time, or point `secrets.existingSecret`
+# at a Secret you manage out of band (e.g. from an external secret store / sealed
+# secret). See deploy/helm/livecore/README.md.
+
+# -- Override the chart name / fully-qualified name.
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # -- Container registry the component images are pulled from. Set to "" to use
+  # bare repository references (a local image, or a registry baked into the repo).
+  registry: ghcr.io
+  # -- Shared image tag. Empty falls back to the chart appVersion. Pin this to the
+  # released container version you deploy (CORE-OPS-009).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- References to Secrets holding registry credentials, e.g. [{ name: regcred }].
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount for the workloads.
+  create: true
+  # -- Name to use; generated from the release name when empty.
+  name: ""
+  annotations: {}
+
+# -- Pod-level security context (a hardened, non-root baseline matching the images,
+# which run as the non-root APP_UID — apps/api/Dockerfile).
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. readOnlyRootFilesystem is paired with a
+# writable /tmp emptyDir mounted into each container below.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Non-secret configuration -> ConfigMap, projected into every container via
+# envFrom. Add any other documented key (.env.example / docs/13) here.
+config:
+  # The bundled chart targets a real production deployment, so it defaults to
+  # Production. In Production the API fails closed and reports not-ready until the
+  # database and OIDC values are supplied (CORE-OPS-004 / CORE-OPS-005).
+  ASPNETCORE_ENVIRONMENT: "Production"
+  # [prod-required] OIDC issuer/audience the API validates access tokens against.
+  Authentication__Oidc__Authority: ""
+  Authentication__Oidc__Audience: ""
+  # Public host(s) the API answers to (semicolon-separated). Set to your ingress host.
+  AllowedHosts: ""
+  # Browser/PWA origin(s) allowed to call the API and the SignalR hub (indexed list).
+  Cors__AllowedOrigins__0: ""
+  # The ingress controller's pod network (CIDR) is the trusted forwarding proxy in
+  # Kubernetes, so the X-Forwarded-* scheme/host/IP are restored (CORE-OPS-003).
+  ForwardedHeaders__KnownNetworks__0: ""
+  # S3-compatible object storage endpoint for asset binaries (credentials are secrets).
+  Assets__Storage__Endpoint: ""
+  # The worker's metrics/health listen URL (GET /metrics + GET /health/live, CORE-DR-003).
+  Worker__Metrics__Url: "http://0.0.0.0:9464"
+
+# Secret configuration -> Secret (type Opaque, stringData), projected via envFrom.
+# EMPTY BY DEFAULT — no secret is committed in the chart. Supply at install time or
+# set existingSecret to project a Secret you manage out of band.
+secrets:
+  # -- Name of an existing Secret to project instead of rendering one from the keys
+  # below. When set, the chart renders NO Secret of its own.
+  existingSecret: ""
+  # [secret][prod-required] PostgreSQL connection string (carries the DB password).
+  # The migrations runner, the API and the worker all read this same key. Size the
+  # pool with "Maximum Pool Size=<N>" across replicas (CORE-RES-004).
+  ConnectionStrings__Database: ""
+  # [secret] S3-compatible object-storage credentials (asset binaries).
+  Assets__Storage__AccessKeyId: ""
+  Assets__Storage__SecretAccessKey: ""
+  # [secret] Redis/Valkey backplane connection string — required only when running
+  # more than one API replica (CORE-OPS-007).
+  Realtime__Backplane__ConnectionString: ""
+
+# The migrations runner — a one-shot Job run as a pre-install/pre-upgrade hook that
+# must succeed BEFORE the API and worker roll out. This is the Helm form of the
+# Compose migrate-before-API gate (docs/13, "Gating the API rollout").
+migrations:
+  enabled: true
+  image:
+    # The migrations runner image (apps/api/Migrations.Dockerfile). Build and push
+    # it to a registry your cluster can pull (docs/13 shows the build command).
+    repository: live-experience-application/livecore-migrations
+    tag: ""
+  # Helm hook weight; the migrate Job runs before the rest of the release.
+  hookWeight: -5
+  # Bounded retries; the runner is idempotent (re-running applies nothing, exits 0).
+  backoffLimit: 3
+  restartPolicy: Never
+  annotations: {}
+  podAnnotations: {}
+  resources: {}
+
+api:
+  replicaCount: 2
+  image:
+    repository: live-experience-application/livecore-api
+    tag: ""
+  # Kestrel listens on the unprivileged container port 8080 (apps/api/Dockerfile).
+  containerPort: 8080
+  # Liveness — restart on failure (the documented unauthenticated probe, docs/13).
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  # Readiness — route traffic only while passing (CORE-OPS-005). Fails closed until
+  # the database and OIDC are configured and reachable (CORE-OBS-009).
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Keep at or above the host graceful-shutdown drain window (CORE-DEP-002).
+  terminationGracePeriodSeconds: 30
+  service:
+    type: ClusterIP
+    port: 80
+
+worker:
+  replicaCount: 1
+  image:
+    repository: live-experience-application/livecore-worker
+    tag: ""
+  # The worker's metrics/health HTTP port (CORE-DR-003); it serves no app traffic.
+  metricsPort: 9464
+  # Per-loop heartbeat liveness — restart when a job loop hangs (CORE-DR-003). The
+  # worker takes no inbound traffic, so it has no readiness probe.
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: metrics
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 3
+    failureThreshold: 3
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 30
+
+ingress:
+  enabled: false
+  className: ""
+  # For a multi-replica API, enable SignalR sticky sessions at the ingress
+  # (CORE-DEP-002), e.g. nginx.ingress.kubernetes.io/affinity: "cookie".
+  annotations: {}
+  hosts:
+    - host: livecore.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

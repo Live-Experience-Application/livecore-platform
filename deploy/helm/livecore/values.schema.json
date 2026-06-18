@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "LiveCore chart values",
+  "description": "Schema for the LiveCore Helm chart values (CORE-DEP-004). Helm validates values against this on template/install.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "registry": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "type": "array" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "podSecurityContext": { "type": "object" },
+    "securityContext": { "type": "object" },
+    "config": {
+      "type": "object",
+      "description": "Non-secret configuration keys rendered into a ConfigMap.",
+      "additionalProperties": { "type": ["string", "number", "boolean"] }
+    },
+    "secrets": {
+      "type": "object",
+      "description": "Secret configuration keys rendered into a Secret. Empty by default; no secret is committed.",
+      "properties": {
+        "existingSecret": { "type": "string" }
+      },
+      "additionalProperties": { "type": ["string", "number", "boolean"] }
+    },
+    "migrations": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "backoffLimit": { "type": "integer", "minimum": 0 },
+        "hookWeight": { "type": "integer" },
+        "restartPolicy": { "type": "string", "enum": ["Never", "OnFailure"] },
+        "image": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" }
+          }
+        }
+      }
+    },
+    "api": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "containerPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "livenessProbe": { "type": "object" },
+        "readinessProbe": { "type": "object" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "service": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "type": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "livenessProbe": { "type": "object" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "hosts": { "type": "array" },
+        "tls": { "type": "array" }
+      }
+    }
+  }
+}

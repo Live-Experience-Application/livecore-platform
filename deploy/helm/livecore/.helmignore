@@ -1,0 +1,10 @@
+# Patterns to ignore when packaging the chart (helm package).
+.DS_Store
+.git/
+.gitignore
+*.tmp
+*.bak
+*.orig
+*~
+# CI/test scaffolding is never part of a packaged chart.
+ci/

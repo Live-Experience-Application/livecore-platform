@@ -1,0 +1,34 @@
+LiveCore "{{ .Release.Name }}" has been deployed to namespace "{{ .Release.Namespace }}".
+
+The migrations runner ran as a pre-install/pre-upgrade Job and must have succeeded
+before the API and worker rolled out — the migrate-before-API contract (docs/13).
+
+Components:
+  - API Deployment:    {{ include "livecore.fullname" . }}-api ({{ .Values.api.replicaCount }} replica(s))
+  - Worker Deployment: {{ include "livecore.fullname" . }}-worker ({{ .Values.worker.replicaCount }} replica(s))
+  - API Service:       {{ include "livecore.fullname" . }}-api ({{ .Values.api.service.type }}, port {{ .Values.api.service.port }})
+
+Check the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "livecore.fullname" . }}-api
+
+Probe the API from inside the cluster:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "livecore.fullname" . }}-api {{ .Values.api.service.port }}:{{ .Values.api.service.port }}
+  curl -fsS http://localhost:{{ .Values.api.service.port }}/health/live    # liveness
+  curl -fsS http://localhost:{{ .Values.api.service.port }}/health/ready    # readiness
+
+{{- if not .Values.secrets.existingSecret }}
+{{- if not .Values.secrets.ConnectionStrings__Database }}
+
+WARNING: no database connection string is configured (secrets.ConnectionStrings__Database
+is empty and secrets.existingSecret is unset). In Production the API fails closed and
+reports not-ready until it is set. Supply it at install time or via an existing Secret —
+never commit a real secret (docs/13, CORE-OPS-008).
+{{- end }}
+{{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress is enabled for:
+{{- range .Values.ingress.hosts }}
+  - http(s)://{{ .host }}
+{{- end }}
+{{- end }}

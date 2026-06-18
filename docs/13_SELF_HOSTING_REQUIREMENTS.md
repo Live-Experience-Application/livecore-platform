@@ -88,9 +88,63 @@ completes, and every probe endpoint answers `200`.
 
 ## Production options
 
-- single VPS with Docker Compose
+- single VPS with Docker Compose — the in-repo stack at
+  [`deploy/compose/docker-compose.yml`](../deploy/compose/docker-compose.yml) (CORE-DEP-001,
+  see "In-repo deployment manifest" above)
 - Railway multi-service deployment
-- Kubernetes with Helm
+- Kubernetes with Helm — the in-repo chart at
+  [`deploy/helm/livecore`](../deploy/helm/livecore/README.md) (CORE-DEP-004, see
+  "In-repo Kubernetes Helm chart" below)
+
+### In-repo Kubernetes Helm chart (CORE-DEP-004)
+
+[`deploy/helm/livecore`](../deploy/helm/livecore/README.md) is a Helm chart that
+deploys the same three Core runtime components to Kubernetes — **the API host + the
+worker + the one-shot migrations runner** — as the "Kubernetes with Helm for larger
+production" option above. It **mirrors the migrate-before-API contract the Compose
+stack enforces** (CORE-DEP-001), expressed with the platform's native primitives:
+
+**The migrate-before-API gate.** The migrations runner runs as a
+**pre-install/pre-upgrade `Job`** ([`templates/migrate-job.yaml`](../deploy/helm/livecore/templates/migrate-job.yaml)):
+
+```yaml
+annotations:
+  "helm.sh/hook": pre-install,pre-upgrade
+  "helm.sh/hook-weight": "-5"
+  "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+```
+
+Helm runs a pre-install/pre-upgrade hook **to completion before** it applies the
+release's other manifests, and **aborts the release if the hook fails**, so the API
+and worker `Deployment`s roll out **only after** the migrations `Job` exits `0` —
+the Kubernetes equivalent of the Compose `depends_on:
+{ migrate: { condition: service_completed_successfully } }` gate. The runner reads
+the **same** `ConnectionStrings__Database` key and is idempotent. The API's own
+schema-version readiness check (CORE-OBS-010) is the second line of defence.
+
+**The documented probes.** The API `Deployment` wires the unauthenticated
+`/health/live` (liveness — restart) and `/health/ready` (readiness — route traffic,
+CORE-OPS-005) probes as `httpGet` blocks; the worker wires `/health/live` (per-loop
+heartbeat liveness, CORE-DR-003) and exposes its `/metrics` port. Same endpoints as
+the Compose stack and this document's probe table above.
+
+**Externalized configuration, no baked secret.** Every setting is the documented
+configuration contract (CORE-OPS-008): non-secret keys (`config:`) render into a
+`ConfigMap`, the `[secret]` keys (`secrets:`) into a `Secret` (`type: Opaque`),
+projected into all three workloads with `envFrom`. **No secret is committed in the
+chart** — every `secrets.*` value defaults to empty and is supplied at install time
+or via `secrets.existingSecret` (a `Secret` managed by your secret store). A
+`Service` (for the API) and an optional `Ingress` are included; Core does not
+terminate TLS itself (CORE-OPS-003), so terminate it at the ingress and forward the
+scheme/host/IP.
+
+**Tested.** `scripts/test-helm-chart.ps1` statically validates that the chart wires
+the pre-install/pre-upgrade migrate `Job`, the documented probes and the
+`ConfigMap`/`Secret` externalization and bakes no secret (no helm/kubeconform
+needed), and the `helm-chart` CI job (`.github/workflows/ci.yml`) runs `helm lint`,
+renders the chart with `helm template`, **schema-validates** every rendered manifest
+with `kubeconform`, and asserts the pre-install migrate `Job`, the probes and that
+no secret is hardcoded. See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
 
 ## Operational requirements
 
@@ -148,7 +202,8 @@ mechanism for a one-shot, run-before primitive:
 
 - **Kubernetes / Helm** — run the migrations image as a pre-install/pre-upgrade
   `Job` (or an init container) and roll the API Deployment only after it
-  succeeds.
+  succeeds. The shipped chart [`deploy/helm/livecore`](../deploy/helm/livecore/README.md)
+  does exactly this (CORE-DEP-004; see "In-repo Kubernetes Helm chart" above).
 - **Docker Compose** — add a `migrate` service that runs the migrations image to
   completion and make `api` depend on it with
   `depends_on: { migrate: { condition: service_completed_successfully } }`. The
@@ -1158,6 +1213,10 @@ secret store, and with no adapter configured store verification and notification
 
 - **Kubernetes / Helm** — put `[secret]` values in a `Secret` and the rest in a `ConfigMap`, and project both
   into the container's environment (`envFrom`). The migrations runner reads the same `ConnectionStrings__Database`.
+  The shipped chart ([`deploy/helm/livecore`](../deploy/helm/livecore/README.md), CORE-DEP-004) does this:
+  its `config:`/`secrets:` values render into a `ConfigMap`/`Secret` projected into all three workloads, with
+  every secret empty by default (supply at install time, or set `secrets.existingSecret` to a `Secret` from your
+  secret store).
 - **Railway** — set each name as a service variable (Railway stores them encrypted); reference shared secrets
   across the API, worker and migrations services.
 - **Docker Compose** — keep secrets in an `.env` file (git-ignored) or Docker secrets, and pass them to the

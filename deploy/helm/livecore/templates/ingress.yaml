@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled }}
+# Optional Ingress to the API Service. Core does not terminate TLS itself
+# (CORE-OPS-003): terminate it at the ingress and forward the original
+# scheme/host/IP (set config.ForwardedHeaders__KnownNetworks__0 to the ingress pod
+# network). For a multi-replica API, enable SignalR sticky sessions here (CORE-DEP-002).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "livecore.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- $fullName := include "livecore.fullname" . }}
+    {{- $svcPort := .Values.api.service.port }}
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ $fullName }}-api
+                port:
+                  number: {{ $svcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

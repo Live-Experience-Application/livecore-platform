@@ -1,0 +1,29 @@
+# LiveCore Core runtime — Helm chart (CORE-DEP-004).
+#
+# Deploys the three Core runtime components to Kubernetes — the API host, the
+# background worker and the one-shot migrations runner — as the "Kubernetes with
+# Helm for larger production" option in docs/02_ARCHITECTURE.md and
+# docs/13_SELF_HOSTING_REQUIREMENTS.md. It mirrors the migrate-before-API contract
+# the in-repo Docker Compose stack (deploy/compose/docker-compose.yml, CORE-DEP-001)
+# already enforces: the migrations runner runs as a pre-install/pre-upgrade Job that
+# must succeed before the API and worker roll out.
+#
+# The chart version is independent of the application/image version: bump `version`
+# when the chart's templates change, and pin the image tag (`image.tag`, default
+# `appVersion`) to the released container version you deploy.
+apiVersion: v2
+name: livecore
+description: The LiveCore Core runtime (API, worker and a pre-install migrations Job) for Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Live-Experience-Application/livecore-platform
+sources:
+  - https://github.com/Live-Experience-Application/livecore-platform
+keywords:
+  - livecore
+  - api
+  - worker
+  - migrations
+maintainers:
+  - name: The LiveCore Platform contributors

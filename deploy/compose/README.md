@@ -108,6 +108,8 @@ To run the **published** release images (CORE-OPS-009) instead of building from
 source, replace each service's `build:`/`image:` with the versioned reference, e.g.
 `image: ghcr.io/<owner>/livecore-api:<version>`.
 
-A Kubernetes **Helm** chart (the third production option in `docs/13`) is a
-documented follow-up; the migrate gate maps to a pre-install/pre-upgrade `Job` and
-the probes to `livenessProbe`/`readinessProbe` `httpGet` blocks.
+For Kubernetes (the third production option in `docs/13`), the repository ships a
+**Helm** chart at [`../helm/livecore`](../helm/livecore/README.md) (CORE-DEP-004)
+that mirrors this stack's contract: the migrate gate becomes a pre-install/pre-upgrade
+`Job`, the probes become `livenessProbe`/`readinessProbe` `httpGet` blocks, and the
+env contract becomes a `ConfigMap`/`Secret` projected with `envFrom`.
