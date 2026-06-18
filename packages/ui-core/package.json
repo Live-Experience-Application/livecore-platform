@@ -39,6 +39,6 @@
     "test": "tsc -p tsconfig.json && tsc -p tsconfig.test.json && node --test tests/ui-core.build.test.mjs tests/ui-core.pack.test.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   }
 }
