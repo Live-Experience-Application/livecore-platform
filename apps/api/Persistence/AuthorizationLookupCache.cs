@@ -42,11 +42,26 @@ namespace LiveCore.Api.Persistence;
 /// is still denied per request. The cache holds only surrogate identifiers and authorization metadata, never
 /// free-form content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
 /// </para>
+///
+/// <para>
+/// CROSS-INSTANCE INVALIDATION (CORE-RES-007, the "Multi-Instance Runtime Correctness" epic). The cache is a
+/// PER-PROCESS <c>IMemoryCache</c>, so on its own an <see cref="InvalidateSubject"/> / <see cref="InvalidateOrganization"/>
+/// only evicts the instance that handled the revocation; the other API replicas keep serving the cached grant until
+/// their entry expires (the <see cref="AuthorizationCacheOptions.Ttl"/> backstop). To take the revocation across all
+/// replicas within a bounded window, each invalidation also PUBLISHES the affected group over the configured
+/// <see cref="IAuthorizationCacheInvalidationBackplane"/> (the deployment's Valkey/Redis backplane), and every
+/// replica's <see cref="AuthorizationCacheInvalidationListener"/> feeds received groups into
+/// <see cref="ApplyRemoteInvalidation"/>. The local eviction happens FIRST and unconditionally, so a dropped
+/// broadcast only falls back to the TTL backstop — never a stale serve forever, and never a request error (the
+/// broadcast is best-effort; no new fail-open path). With no backplane configured the
+/// <see cref="NullAuthorizationCacheInvalidationBackplane"/> no-op keeps single-instance behaviour unchanged.
+/// </para>
 /// </summary>
 internal sealed class AuthorizationLookupCache : IDisposable
 {
     private readonly IMemoryCache _cache;
     private readonly AuthorizationCacheOptions _options;
+    private readonly IAuthorizationCacheInvalidationBackplane _backplane;
 
     // One cancellation source per invalidation GROUP (a subject or an organization). Every cache entry links a
     // change token from each group it concerns, so cancelling a group's source evicts every entry that named it.
@@ -54,12 +69,17 @@ internal sealed class AuthorizationLookupCache : IDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _groupTokens =
         new(StringComparer.Ordinal);
 
-    public AuthorizationLookupCache(IMemoryCache cache, AuthorizationCacheOptions options)
+    public AuthorizationLookupCache(
+        IMemoryCache cache,
+        AuthorizationCacheOptions options,
+        IAuthorizationCacheInvalidationBackplane? backplane = null)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(options);
         _cache = cache;
         _options = options;
+        // No backplane configured (single instance / tests) => the no-op: local eviction plus the TTL backstop only.
+        _backplane = backplane ?? NullAuthorizationCacheInvalidationBackplane.Instance;
     }
 
     /// <summary>Whether caching is enabled; when off, every lookup goes straight to the loader and nothing is stored.</summary>
@@ -130,21 +150,56 @@ internal sealed class AuthorizationLookupCache : IDisposable
     /// <summary>
     /// Invalidates every cached lookup that concerns the given subject (their profile, organization memberships and
     /// workspace memberships/roles). Called on any change to the subject's standing — an organization or workspace
-    /// membership removal, or a data-subject erasure whose database cascade revoked their memberships.
+    /// membership removal, or a data-subject erasure whose database cascade revoked their memberships. The eviction
+    /// is also BROADCAST cross-instance (CORE-RES-007), so the revocation takes effect on every API replica, not only
+    /// this one.
     /// </summary>
-    public void InvalidateSubject(Guid userProfileId) => CancelGroup(SubjectGroup(userProfileId));
+    public void InvalidateSubject(Guid userProfileId) => InvalidateGroup(SubjectGroup(userProfileId));
 
     /// <summary>
     /// Invalidates every cached lookup that concerns the given organization (its by-slug lookup and all of its
     /// memberships/roles). Called when the tenant is deleted, whose database cascade removed every membership in it.
+    /// The eviction is also BROADCAST cross-instance (CORE-RES-007), so the deletion takes effect on every API replica.
     /// </summary>
-    public void InvalidateOrganization(Guid organizationId) => CancelGroup(OrganizationGroup(organizationId));
+    public void InvalidateOrganization(Guid organizationId) => InvalidateGroup(OrganizationGroup(organizationId));
+
+    /// <summary>
+    /// Applies an invalidation a PEER replica broadcast (CORE-RES-007): evicts the group from THIS instance's cache
+    /// only. It deliberately does NOT re-broadcast (that would echo forever across the backplane), and it ignores a
+    /// malformed or unrecognized token defensively, so a stray message can never evict an unintended group. Called by
+    /// the <see cref="AuthorizationCacheInvalidationListener"/> on every message received from the backplane.
+    /// </summary>
+    public void ApplyRemoteInvalidation(string invalidationGroup)
+    {
+        if (IsInvalidationGroup(invalidationGroup))
+        {
+            // Local-only: do NOT publish, or a received invalidation would echo back across the backplane forever.
+            CancelGroup(invalidationGroup);
+        }
+    }
 
     /// <summary>The invalidation-group name for a subject's cached lookups.</summary>
     internal static string SubjectGroup(Guid userProfileId) => string.Concat("s:", userProfileId.ToString("N"));
 
     /// <summary>The invalidation-group name for an organization's cached lookups.</summary>
     internal static string OrganizationGroup(Guid organizationId) => string.Concat("o:", organizationId.ToString("N"));
+
+    // "s:"/"o:" prefix + a 32-char "N"-format Guid = 34 chars. Validating the shape defends ApplyRemoteInvalidation
+    // against a malformed or unexpected message on the shared backplane channel (it must never evict an unintended
+    // group), and keeps the wire format identical to the local group names so a peer's token feeds straight in.
+    internal static bool IsInvalidationGroup(string? group)
+        => group is { Length: 34 }
+            && (group[0] is 's' or 'o')
+            && group[1] == ':'
+            && Guid.TryParseExact(group.AsSpan(2), "N", out _);
+
+    // Evict the group locally FIRST (this instance is correct immediately), then broadcast best-effort so the other
+    // replicas evict it too (CORE-RES-007). A failed broadcast falls back to the TTL backstop — never a stale serve.
+    private void InvalidateGroup(string group)
+    {
+        CancelGroup(group);
+        _backplane.Publish(group);
+    }
 
     private CancellationTokenSource GroupTokenSource(string group)
         => _groupTokens.GetOrAdd(group, static _ => new CancellationTokenSource());

@@ -435,6 +435,32 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // cached, and every membership change invalidates the affected subject/organization group — so removal revokes
     // cached access on the next request, fail-closed (docs/07_SECURITY_THREAT_MODEL.md threats T1/T5). It holds only
     // surrogate identifiers and authorization metadata, never content (threat T7).
+    //
+    // Cross-instance invalidation (CORE-RES-007, the "Multi-Instance Runtime Correctness" epic). The cache is a
+    // PER-PROCESS IMemoryCache, so a revocation evicts only the instance that handled it; the other replicas keep
+    // serving the cached grant until their entry expires (the AuthorizationCache:Ttl backstop, ~10s). When a
+    // Valkey/Redis backplane is configured (the SAME Realtime:Backplane:* connection the realtime scale-out uses)
+    // the host PUBLISHES each invalidation over a dedicated pub/sub channel and an AuthorizationCacheInvalidationListener
+    // on every replica applies it to its own cache, so a revocation takes effect across all replicas within a bounded
+    // window instead of lingering until the TTL. It only ever causes MORE eviction (never less), the broadcast is
+    // best-effort (a failure falls back to the TTL backstop — no new fail-open path), and the message carries only an
+    // opaque invalidation-group token, never content (threat T7). With no backplane configured the no-op backplane is
+    // wired and single-instance behaviour is unchanged (local eviction plus the TTL backstop).
+    var authorizationCacheInvalidation = AuthorizationCacheInvalidationOptions.FromConfiguration(builder.Configuration);
+    if (authorizationCacheInvalidation.IsActive)
+    {
+        builder.Services.AddSingleton(authorizationCacheInvalidation);
+        builder.Services.AddSingleton<RedisAuthorizationCacheInvalidationBackplane>();
+        builder.Services.AddSingleton<IAuthorizationCacheInvalidationBackplane>(serviceProvider =>
+            serviceProvider.GetRequiredService<RedisAuthorizationCacheInvalidationBackplane>());
+        builder.Services.AddHostedService<AuthorizationCacheInvalidationListener>();
+    }
+    else
+    {
+        builder.Services.AddSingleton<IAuthorizationCacheInvalidationBackplane>(
+            NullAuthorizationCacheInvalidationBackplane.Instance);
+    }
+
     builder.Services.AddMemoryCache();
     builder.Services.AddSingleton(AuthorizationCacheOptions.FromConfiguration(builder.Configuration));
     builder.Services.AddSingleton<AuthorizationLookupCache>();

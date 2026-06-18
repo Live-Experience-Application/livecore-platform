@@ -192,6 +192,25 @@ single authorization decision:
   (`AuthorizationCache:Enabled` / `AuthorizationCache:Ttl`, docs/13_SELF_HOSTING_REQUIREMENTS.md) and can be
   disabled to force every lookup straight to the database — a change to throughput only, never to a decision.
 
+  **Cross-instance invalidation (CORE-RES-007, the "Multi-Instance Runtime Correctness" epic).** Because the cache
+  is a PER-PROCESS `IMemoryCache`, the "invalidated on every membership change" rule above evicts only the instance
+  that handled the revocation; on the other API replicas the cached grant lingers until its entry expires — up to
+  the `AuthorizationCache:Ttl` backstop (~10s by default). To take a revocation across **all** replicas within a
+  bounded window, each `InvalidateSubject` / `InvalidateOrganization` also PUBLISHES the affected invalidation group
+  over the deployment's configured Valkey/Redis backplane (the SAME `Realtime:Backplane:*` connection the realtime
+  scale-out uses; docs/02 names a Valkey/Redis-compatible backplane for realtime scale-out **and** cache), and every
+  replica's `AuthorizationCacheInvalidationListener` applies received groups to its OWN cache through
+  `ApplyRemoteInvalidation`. The property that keeps it fail-closed: the local eviction happens FIRST and
+  unconditionally and the broadcast can only ever cause MORE eviction, so a dropped broadcast merely falls back to
+  the TTL backstop (a smaller window, never a stale serve forever) and a broadcast failure never turns a successful
+  revocation into a request error (it is best-effort fire-and-forget — **no new fail-open path**). A received
+  invalidation is applied LOCALLY ONLY and never re-published, so it cannot echo across the backplane, and the
+  message carries only an opaque invalidation-group token (a surrogate subject/organization id), never content
+  (threat T7). With no backplane configured (a single-instance deployment) the no-op backplane is wired and
+  behaviour is exactly as before — local eviction plus the TTL backstop, the documented eventual-consistency window
+  (docs/06_AUTHORIZATION_MATRIX.md, docs/13_SELF_HOSTING_REQUIREMENTS.md). It is the cache counterpart of the
+  realtime backplane (CORE-OPS-007) and pairs with the realtime topology guard (CORE-RES-006).
+
 ### Response-path bandwidth: JSON response compression (CORE-PERF-006)
 
 The list, feed and reconnect-replay endpoints return JSON ARRAYS that can be large for a busy session, and a

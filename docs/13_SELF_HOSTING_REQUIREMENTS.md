@@ -802,7 +802,31 @@ set `AuthorizationCache:Enabled=false` to send every authorization lookup straig
 | `Persistence:MaxPoolSize`       | `Persistence__MaxPoolSize`      | `20`       | API, worker | Bounded connection-pool maximum applied when the connection string sets none (CORE-DEP-014); keep `(replicas × pool size) ≤ max_connections`. |
 | `Maximum Pool Size` (in `ConnectionStrings:Database`) | within `ConnectionStrings__Database` | overrides `Persistence:MaxPoolSize` | API, worker | Explicit per-process connection-pool cap; **wins** over `Persistence:MaxPoolSize` (the compose api/worker split). |
 | `AuthorizationCache:Enabled`    | `AuthorizationCache__Enabled`   | `true`     | API         | Per-request authorization-lookup cache toggle (CORE-PERF-003); `false` forces every lookup to the database. |
-| `AuthorizationCache:Ttl`        | `AuthorizationCache__Ttl`       | `00:00:10` | API         | Absolute TTL of a cached authorization lookup; invalidation on membership change is the primary correctness mechanism. |
+| `AuthorizationCache:Ttl`        | `AuthorizationCache__Ttl`       | `00:00:10` | API         | Absolute TTL of a cached authorization lookup; the documented eventual-consistency window for a revocation that a replica did not handle (CORE-RES-007). |
+| `AuthorizationCache:CrossInstanceInvalidation` | `AuthorizationCache__CrossInstanceInvalidation` | `true` | API | Opt-out toggle for broadcasting cache invalidations across replicas over the configured backplane (CORE-RES-007); `false` reverts to the TTL-only window. |
+
+#### Cross-instance authorization-cache invalidation (CORE-RES-007)
+
+The authorization-lookup cache above is a **per-process** `IMemoryCache`, so on a multi-replica deployment a
+membership/role revocation handled on one API replica is reflected there immediately but, on its own, lingers on the
+**other** replicas until their cached entry expires — up to the `AuthorizationCache:Ttl` backstop (10s by default).
+That residual window is the documented **eventual-consistency caveat**: with no backplane, a revocation is guaranteed
+to take effect on every replica within the TTL, and you can shrink that bound by lowering `AuthorizationCache:Ttl`
+(at the cost of more database lookups) or widen it by raising it.
+
+When a realtime backplane is configured (`Realtime:Backplane:ConnectionString`, the "Realtime scale-out backplane"
+above), the API also **broadcasts each cache invalidation across the replicas** over that same Valkey/Redis server,
+on a dedicated pub/sub channel (namespaced by `Realtime:Backplane:ChannelPrefix` like the SignalR channels, and
+separate from them). Every replica's listener applies a received invalidation to its own cache, so a revocation
+takes effect across **all** replicas within a near-immediate window instead of lingering until the TTL. This needs
+**no extra configuration** — it reuses the realtime backplane connection — and is on by default; set
+`AuthorizationCache:CrossInstanceInvalidation=false` to disable it and fall back to the TTL-only window. The
+broadcast is **best-effort**: it never blocks or fails the request that revoked access, the local replica is always
+evicted first, and a dropped message simply falls back to the TTL backstop — it can only ever evict more, never
+serve stale access (the cache stays positive-only and fail-closed; **no new fail-open path**). The message carries
+only an opaque invalidation-group token (a surrogate id), never a tenant name, principal detail or content (threat
+T7). A single-instance deployment configures no backplane and relies on local eviction plus the TTL backstop, exactly
+as before.
 
 ## Edge posture: CORS, forwarded headers and HTTPS (CORE-OPS-003)
 
@@ -1558,7 +1582,8 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Persistence:StatementTimeout`      | `Persistence__StatementTimeout`    |   no   | no (tunable)            | API, worker | `00:00:30` server-side `statement_timeout`; `00:00:00` disables it (CORE-RES-004) |
 | `Persistence:MaxPoolSize`           | `Persistence__MaxPoolSize`         |   no   | re-check when scaling   | API, worker | `20` bounded connection pool per process; keep `(replicas × pool) ≤ max_connections` (CORE-DEP-014) |
 | `AuthorizationCache:Enabled`        | `AuthorizationCache__Enabled`      |   no   | no (tunable)            | API         | `true`; per-request authz-lookup cache on, invalidated on membership change (CORE-PERF-003) |
-| `AuthorizationCache:Ttl`            | `AuthorizationCache__Ttl`          |   no   | no (tunable)            | API         | `00:00:10` absolute TTL of a cached authz lookup (CORE-PERF-003) |
+| `AuthorizationCache:Ttl`            | `AuthorizationCache__Ttl`          |   no   | no (tunable)            | API         | `00:00:10` absolute TTL of a cached authz lookup; the documented cross-replica revocation window (CORE-PERF-003 / CORE-RES-007) |
+| `AuthorizationCache:CrossInstanceInvalidation` | `AuthorizationCache__CrossInstanceInvalidation` | no | no (tunable) | API | `true`; broadcast cache invalidations across replicas over the configured backplane (CORE-RES-007); `false` reverts to the TTL-only window |
 | `Authentication:Oidc:Authority`     | `Authentication__Oidc__Authority`  |   no   | production              | API         | Auth disabled; authenticated routes `401`; not-ready    |
 | `Authentication:Oidc:Audience`      | `Authentication__Oidc__Audience`   |   no   | production              | API         | Refuses to start once Authority is set (CORE-OPS-004)   |
 | `Authentication:Oidc:RequireHttpsMetadata` | `Authentication__Oidc__RequireHttpsMetadata` | no | no (dev only)    | API         | `true` (HTTPS metadata required)                        |
