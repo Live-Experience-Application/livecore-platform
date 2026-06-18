@@ -151,6 +151,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Publishing release images (CORE-OPS-009)](#publishing-release-images-core-ops-009)
     - [Publishing release packages (CORE-PUB-002)](#publishing-release-packages-core-pub-002)
     - [Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)](#supply-chain-pinned-base-images-sbom-and-cve-scan-core-dep-003)
+    - [Dependency vulnerability audit (CORE-DEP-005)](#dependency-vulnerability-audit-core-dep-005)
     - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
 - [License](#license)
@@ -253,7 +254,7 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, code-coverage report + gate, format/lint, boundary scan, image builds; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
+.github/workflows/ci.yml CI pipeline (build, tests, code-coverage report + gate, format/lint, boundary scan, dependency vulnerability audit, image builds + a PR-blocking image CVE scan; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
@@ -264,8 +265,11 @@ scripts/LiveCorePackagePublish.psm1 release-gated npm publish logic: builds the 
 scripts/publish-packages.ps1   CLI the publish pipeline runs: dry-run packs all four packages on every push/PR; on a release tag it publishes them at the shared version with npm build provenance (--provenance) and refuses to republish an existing version (CORE-PUB-002, CORE-PUB-004)
 scripts/test-package-publish.ps1    tests for the package-publish gate (a matching tag yields the four-package plan in dependency order; a mismatching tag, a non-release ref, packages out of lockstep, and a republish all fail closed; the real publish requests --provenance and the dry-run does not, CORE-PUB-002/004)
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
-scripts/assert-image-scan.ps1  CLI the publish job runs to fail the publish on a critical vulnerability or a missing/empty SBOM (fail-closed; report-only in the dry-run)
+scripts/assert-image-scan.ps1  CLI the publish + publish-dry-run jobs run to fail on a critical vulnerability or a missing/empty SBOM (fail-closed; now blocking on PRs too, CORE-DEP-005)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
+scripts/LiveCoreDependencyAudit.psm1 source dependency-audit gate logic: parses `dotnet list --vulnerable` + `pnpm audit` reports and the high/critical pass/fail decision (CORE-DEP-005)
+scripts/assert-dependency-audit.ps1  CLI the dependency-audit job runs to fail closed on a high/critical known-vulnerable .NET or pnpm dependency (CORE-DEP-005)
+scripts/test-dependency-audit.ps1    tests for the dependency-audit gate (a seeded high/critical vulnerable package fails closed across both ecosystems, CORE-DEP-005)
 scripts/LiveCoreCoverage.psm1  code-coverage gate logic: merges the Cobertura reports into one de-duplicated, production-focused line-coverage number and the threshold pass/fail decision (CORE-TST-001)
 scripts/assert-coverage.ps1    CLI the CI coverage job runs to report coverage and fail below the minimum (fail-closed; report-only while the gate is non-blocking, CORE-TST-001)
 scripts/test-coverage-gate.ps1 tests for the coverage gate (a deliberately-untested new handler trips the threshold once blocking is enabled, CORE-TST-001)
@@ -4851,11 +4855,46 @@ The gate decision and the SBOM check are pure logic
 (`scripts/LiveCoreImageScan.psm1`) tested from seeded fixtures by
 `scripts/test-image-scan.ps1`, so "a seeded critical CVE fails the gate" is proven
 deterministically on every push/pull request; the `publish-dry-run` job additionally
-produces a real SBOM and scan report (running the gate in report-only mode so a
-transient base-image CVE never blocks ordinary development). Cryptographic build
-provenance/attestation (e.g. cosign) is a documented follow-up. See
-`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base images, SBOM and vulnerability
-scan").
+produces a real SBOM and scan report and — since CORE-DEP-005 — runs the gate
+**blocking on critical on pull requests too** (see "Dependency vulnerability audit"
+below). Cryptographic build provenance/attestation (e.g. cosign) is a documented
+follow-up. See `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base images, SBOM and
+vulnerability scan").
+
+### Dependency vulnerability audit (CORE-DEP-005)
+
+The image CVE scan above (CORE-DEP-003) and the pinned lock files (CORE-CMP-002)
+fix what the **images** contain, but the project's own **declared dependency
+graph** — its NuGet and npm packages, direct and transitive — had no automated
+audit for known-vulnerable packages. The `dependency-audit` CI job adds one and
+**fails closed on a high/critical advisory** on every push and pull request, over
+both ecosystems:
+
+- **.NET.** After a locked-mode restore (CORE-CMP-002), it runs
+  `dotnet list LiveCore.slnx package --vulnerable --include-transitive --format json`,
+  so a vulnerable **transitive** package is caught as well as a direct one.
+- **TypeScript workspace.** After `pnpm install --frozen-lockfile`, it runs
+  `pnpm audit --json` over the workspace. `pnpm audit` exits non-zero on _any_
+  advisory, so its exit code is ignored and the gate decides by severity.
+
+The agreed blocking bar is **HIGH and CRITICAL**: a high/critical advisory on a
+first-party direct or transitive dependency fails the build, while a
+moderate/low/info advisory is reported but does not block (the bar is configurable
+with `scripts/assert-dependency-audit.ps1 -FailOnSeverity`). The gate decision and
+the two report parsers are pure logic (`scripts/LiveCoreDependencyAudit.psm1`)
+tested from seeded fixtures by `scripts/test-dependency-audit.ps1`, so "a seeded
+vulnerable-package fixture fails closed" is proven deterministically and a
+missing/malformed report (or none at all) blocks rather than passing silently.
+
+The same story **promotes the PR-time image CVE scan from report-only to blocking
+on critical**: the `publish-dry-run` job now runs `scripts/assert-image-scan.ps1`
+**without** `-ReportOnly`, so a critical base-image CVE fails a pull request at the
+same critical-only bar the release `publish` job enforces (clear it by bumping the
+pinned base-image digest in the Dockerfiles). Both publish jobs `needs:` the
+`dependency-audit` gate, so a high/critical dependency advisory also blocks any
+release. Dependabot / GitHub Actions pinning and an update-PR policy are a separate
+follow-up (CORE-DEP-008). See `docs/14_TESTING_STRATEGY.md` ("Dependency
+vulnerability audit (SCA) and the CI gate").
 
 ### Third-party attribution and license compliance (CORE-LIC-003)
 
@@ -4943,25 +4982,26 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                        | What it runs                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                 |
-| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                |
-| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                           |
-| `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006) |
-| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)        |
-| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                              |
-| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                           |
-| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                        |
-| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                        |
-| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                      |
-| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)   |
-| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                       |
-| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002)  |
-| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                    |
-| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                     |
-| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                              |
-| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)              |
+| Job                        | What it runs                                                                                                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                                |
+| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                               |
+| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                                          |
+| `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006)                |
+| `dependency-audit`         | `dotnet list --vulnerable` (transitive included) + `pnpm audit`; **fails closed on a high/critical dependency advisory** (gate-logic tested, CORE-DEP-005)           |
+| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)                       |
+| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                                             |
+| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                                          |
+| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                                       |
+| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                                       |
+| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                                     |
+| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)                  |
+| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag); the image CVE scan now **blocks the PR on critical** (CORE-DEP-005) |
+| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002)                 |
+| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                                   |
+| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                                    |
+| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                                             |
+| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)                             |
 
 The `publish` and `publish-packages` jobs run **only on a release tag** and **only
 after every other job passes**; pull requests and branch pushes never reach them, so
@@ -4969,7 +5009,10 @@ neither a registry image push nor an npm publish happens off a release (CORE-OPS
 CORE-PUB-002). Because both publish jobs `needs:` every gate, the `codeql` static-analysis
 job is part of that same required-checks set (CORE-SEC-006): a high/critical security
 finding in the first-party C# or TypeScript fails the build and, transitively, blocks any
-release. Line endings are normalized to LF in the repository via `.gitattributes`, so
+release. The `dependency-audit` job is wired in the same way (CORE-DEP-005): a high/critical
+advisory on a first-party direct or transitive dependency — from `dotnet list --vulnerable`
+or `pnpm audit` — likewise fails the build and blocks any release. Line endings are
+normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
 

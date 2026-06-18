@@ -6,6 +6,7 @@
 #   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   codeql               - CodeQL SAST over the first-party C# and TypeScript sources; fails the build on a high/critical security finding, gate-logic tested (CORE-SEC-006)
+#   dependency-audit     - audit the project's OWN dependency graph for known-vulnerable packages: dotnet list --vulnerable (transitive included) + pnpm audit, fail closed on high/critical, gate-logic tested (CORE-DEP-005)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
@@ -17,7 +18,7 @@
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   observability-assets - validate the example Prometheus rules/scrape config + SLO/dashboard assets (promtool check + consistency gate) (CORE-OBS-008)
-#   publish-dry-run      - verify image tags + image-scan gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan, no push (CORE-OPS-009, CORE-DEP-003, CORE-CMP-003)
+#   publish-dry-run      - verify image tags + image-scan gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-CMP-003)
 #   publish-packages-dry-run - package-publish gate-logic test + dry-run npm publish (pnpm publish --dry-run) packing all four @livecore packages on every push/PR, no registry push (CORE-PUB-002)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
@@ -292,6 +293,88 @@ jobs:
         with:
           name: codeql-sarif-${{ matrix.language }}
           path: codeql-results/*.sarif
+          if-no-files-found: error
+
+  dependency-audit:
+    name: Dependency vulnerability audit (CORE-DEP-005)
+    runs-on: ubuntu-latest
+    # CORE-DEP-005: the first audit of the project's OWN declared dependency graph
+    # for known-vulnerable packages. CI already scanned the published images for
+    # CVEs (Trivy, CORE-DEP-003), pinned the lock files (CORE-CMP-002) and
+    # statically analyzed the first-party sources (CodeQL, CORE-SEC-006) - but it
+    # never failed on a known-vulnerable first-party DEPENDENCY. This job audits
+    # both ecosystems on every push and pull request and FAILS CLOSED on a
+    # high/critical advisory:
+    #   1. it unit-tests the gate logic first (a seeded high/critical vulnerable
+    #      package in a `dotnet list --vulnerable` and a `pnpm audit` report fails
+    #      closed; a clean or moderate-only report passes; a malformed report is
+    #      rejected) - the required "a seeded vulnerable-package fixture proves it
+    #      fails closed" test;
+    #   2. it restores the solution in locked mode (CORE-CMP-002) and runs
+    #      `dotnet list LiveCore.slnx package --vulnerable --include-transitive
+    #      --format json` over the .NET projects (transitive included);
+    #   3. it installs the workspace with the frozen lockfile and runs
+    #      `pnpm audit --json` over the TypeScript workspace (`pnpm audit` exits
+    #      non-zero on any advisory, so its own exit code is ignored and the gate
+    #      decides severity); and
+    #   4. it runs the fail-closed gate (scripts/assert-dependency-audit.ps1) at
+    #      the agreed bar - HIGH and CRITICAL block, moderate/low are reported -
+    #      so a high/critical advisory on a first-party direct or transitive
+    #      dependency fails the build. The two reports are uploaded as an artifact.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Test the dependency-audit gate logic (a seeded vulnerable package fails closed)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-dependency-audit.ps1
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore the solution (locked mode)
+        # Reuse the CORE-CMP-002 locked restore so the graph audited is exactly the
+        # committed dependency closure the build and the release images restore.
+        run: dotnet restore LiveCore.slnx --locked-mode
+
+      - name: Audit the .NET dependency graph (vulnerable, transitive included)
+        # `dotnet list package --vulnerable` is report-only by nature (it exits 0
+        # even when it finds vulnerabilities), so the JSON is captured here and the
+        # gate below makes the pass/fail decision.
+        run: dotnet list LiveCore.slnx package --vulnerable --include-transitive --format json > dotnet-vulnerable.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (pinned pnpm)
+        run: corepack enable pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit the pnpm workspace
+        # `pnpm audit` exits non-zero on any advisory (including moderate/low), so
+        # its exit code is ignored here and the gate below decides severity. A
+        # failure to even produce a report leaves an empty file, which the
+        # fail-closed gate then rejects.
+        run: pnpm audit --json > pnpm-audit.json || true
+
+      - name: Gate on high/critical source dependency vulnerabilities (fail closed)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/assert-dependency-audit.ps1 -DotnetReportPath dotnet-vulnerable.json -PnpmReportPath pnpm-audit.json
+
+      - name: Upload the dependency-audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: |
+            dotnet-vulnerable.json
+            pnpm-audit.json
           if-no-files-found: error
 
   spec-consistency:
@@ -809,11 +892,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      - name: Produce an SBOM and a CVE scan report for the dry-run images
+      - name: Produce an SBOM and a CVE scan, and fail the PR on a critical vulnerability (CORE-DEP-005)
         # CORE-DEP-003 required test: the publish dry-run produces an SBOM and a
-        # scan report. The gate runs report-only here, so a transient base-image
-        # CVE documents itself on a pull request without blocking development -
-        # the release publish job runs the same gate for real.
+        # scan report. CORE-DEP-005 promotes this PR-time image CVE scan from
+        # report-only to BLOCKING on critical: the gate now runs without
+        # -ReportOnly, so a CRITICAL vulnerability (for example a known-CVE base
+        # image) or a missing/empty SBOM fails the pull request here, the same
+        # critical-only bar the release publish job enforces. Bump the pinned base
+        # image digest (apps/*/Dockerfile) to clear a flagged base-image CVE.
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
@@ -826,7 +912,7 @@ jobs:
             trivy image --format cyclonedx --output "$name.sbom.cdx.json" "$reference"
             trivy image --format json --output "$name.scan.json" "$reference"
             pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
-              -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json" -ReportOnly
+              -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json"
           done
 
       - name: Scan the dry-run SBOMs for disallowed/unknown licenses (report-only, CORE-LIC-003)
@@ -1149,6 +1235,7 @@ jobs:
       - typescript
       - boundary-scan
       - codeql
+      - dependency-audit
       - spec-consistency
       - license-compliance
       - contributor-policy
@@ -1323,6 +1410,7 @@ jobs:
       - typescript
       - boundary-scan
       - codeql
+      - dependency-audit
       - spec-consistency
       - license-compliance
       - contributor-policy

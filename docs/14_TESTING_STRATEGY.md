@@ -243,3 +243,94 @@ on: both `publish` and `publish-packages` `needs:` every gate including `codeql`
 so a high/critical finding fails the build and, transitively, blocks any release
 (no image push, no npm publish). See the README "Continuous integration" section
 and `docs/07_SECURITY_THREAT_MODEL.md` ("Static analysis of first-party code").
+
+## Dependency vulnerability audit (SCA) and the CI gate (CORE-DEP-005)
+
+SAST proves the first-party code is not dangerous; the dependency audit proves
+the code the project _depends on_ carries no known-vulnerable package. CI already
+scanned the published container images for CVEs (Trivy, CORE-DEP-003), pinned the
+dependency closure with lock files (CORE-CMP-002) and statically analyzed the
+sources (CodeQL, CORE-SEC-006) — but it never audited the project's **own
+declared dependency graph**, so a first-party direct or transitive dependency
+with a published advisory had no automated tripwire.
+
+The CI `dependency-audit` job closes that gap. It audits **both** ecosystems on
+every push and pull request and **fails closed on a high/critical advisory**:
+
+- **.NET** — after a locked-mode restore (CORE-CMP-002), it runs
+  `dotnet list LiveCore.slnx package --vulnerable --include-transitive --format json`
+  over every project, so a vulnerable **transitive** package is caught as well as
+  a direct one;
+- **TypeScript workspace** — after `pnpm install --frozen-lockfile`, it runs
+  `pnpm audit --json` over the workspace. `pnpm audit` exits non-zero on _any_
+  advisory (including moderate/low), so its own exit code is ignored and the gate
+  decides the verdict by severity.
+
+### The agreed severity and how it fails closed
+
+The agreed blocking bar is **HIGH and CRITICAL**: a high/critical advisory on a
+first-party direct or transitive dependency fails the build, while a
+**moderate/low/info** advisory is reported but does not block. Both ecosystems
+report severities from the same vocabulary (`low` / `moderate` / `high` /
+`critical`; npm/pnpm adds `info`), normalized to upper case so one gate spans
+both. The bar is configurable (`scripts/assert-dependency-audit.ps1
+-FailOnSeverity`).
+
+The gate is **self-contained and fail-closed**, the same posture as the
+supply-chain image-scan, coverage and CodeQL gates:
+
+- the pass/fail decision and the two report parsers live in
+  `scripts/LiveCoreDependencyAudit.psm1` as pure functions, so the verdict is
+  deterministically testable from seeded fixtures without a network, a registry
+  or a real restore;
+- a missing or malformed audit report, or no report supplied at all, **blocks**
+  the build (an audit that produced no readable output is not a clean audit);
+- `scripts/assert-dependency-audit.ps1` is the CLI the job runs; it accepts a
+  `-ReportOnly` switch for symmetry with the other gates, but the job runs it
+  **blocking**, because the story requires CI to fail on a known-vulnerable
+  dependency.
+
+### Proving the gate fails closed
+
+Committing a real vulnerable dependency to "prove the gate fails" would itself be
+the finding, so the required "a seeded vulnerable-package fixture proves it fails
+closed" test is the gate-logic test `scripts/test-dependency-audit.ps1`, run
+**first** in the `dependency-audit` job (before the real audit) exactly like
+`test-codeql-gate.ps1` and `test-image-scan.ps1`. It feeds the gate seeded
+`dotnet list --vulnerable` and `pnpm audit` reports and asserts:
+
+- a report carrying a **critical** top-level and a **high** transitive package
+  fails the gate (and, end to end, the `assert-dependency-audit.ps1` CLI exits
+  non-zero), while the **moderate** package in the same report does not block;
+- a **clean** report, and a **moderate-only** report, pass the default
+  high/critical bar;
+- widening the failing set to `MODERATE` then blocks the moderate-only report
+  (the bar is configurable);
+- a malformed or empty report, and supplying no report at all, all **fail
+  closed**.
+
+Run it locally with `pwsh -NoProfile -File scripts/test-dependency-audit.ps1`.
+
+### The PR image CVE scan is now blocking on critical (CORE-DEP-005)
+
+The same story promotes the **PR-time image CVE scan** from report-only to
+**blocking on critical**. The image scan (Trivy, CORE-DEP-003) blocked only on
+the release `publish` job; on a pull request the `publish-dry-run` job ran the
+gate with `-ReportOnly`, so a critical base-image CVE documented itself without
+failing the PR. That step now runs the gate **without** `-ReportOnly`, so a
+**critical** vulnerability (or a missing/empty SBOM) fails the pull request at the
+same critical-only bar the release publish enforces. Clear a flagged base-image
+CVE by bumping the pinned base-image digest in `apps/api/Dockerfile`,
+`apps/worker/Dockerfile` and `apps/api/Migrations.Dockerfile`. The image-scan
+gate-logic test (`scripts/test-image-scan.ps1`) is unchanged and still proves a
+seeded critical CVE fails the gate.
+
+### Wired into the required-checks set
+
+The `dependency-audit` job is part of the same required-checks set the release
+jobs depend on: both `publish` and `publish-packages` `needs:` it, so a
+high/critical dependency advisory fails the build and, transitively, blocks any
+release (no image push, no npm publish). This audits the project's source
+dependency graph; **Dependabot / action pinning and an update-PR policy are a
+separate story (CORE-DEP-008)**. See the README "Continuous integration" and
+"Supply chain" sections.
