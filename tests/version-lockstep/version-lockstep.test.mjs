@@ -31,8 +31,10 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const REPO_ROOT = new URL("../../", import.meta.url);
 
 function changelogDocumentsVersion(changelog, version) {
-  const heading = new RegExp(`^## \\[${version.replace(/\./g, "\\.")}\\]`, "m");
-  return heading.test(changelog);
+  // Plain line-prefix match (no RegExp built from the version) to avoid the
+  // incomplete-sanitization shape of escaping only "." in a dynamic pattern.
+  const headingLine = `## [${version}]`;
+  return changelog.split(/\r?\n/).some((line) => line.startsWith(headingLine));
 }
 
 /**

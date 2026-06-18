@@ -137,7 +137,7 @@ public static class DevelopmentExposureWarning
 
         logger.LogWarning(
             "SECURITY: this host is running in the Development environment but is bound to a non-loopback " +
-            "interface ({BoundAddresses}). In Development the production readiness gate is inert (CORE-OPS-005) " +
+            "interface ({BoundEndpoints}). In Development the production readiness gate is inert (CORE-OPS-005) " +
             "and the OIDC audience guard does not trip (CORE-OPS-004), so the host can come up green while " +
             "authenticated routes are open — the green-but-unauthenticated default. Set " +
             "ASPNETCORE_ENVIRONMENT=Production for any deployment reachable beyond localhost (the " +

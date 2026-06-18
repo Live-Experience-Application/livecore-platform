@@ -465,7 +465,7 @@ function Test-LiveCoreComposeProdOverlay {
         worker (CORE-OPS-011).
     .DESCRIPTION
         The base manifest defaults ASPNETCORE_ENVIRONMENT to Development so the
-        bundled stack comes up green with no identity provider — but in Development
+        bundled stack comes up green with no identity provider - but in Development
         the production readiness gate is inert (CORE-OPS-005) and the OIDC audience
         guard does not trip (CORE-OPS-004), so copying the defaults to a real server
         yields a green but unauthenticated API. The opt-in production overlay
@@ -498,7 +498,7 @@ function Test-LiveCoreComposeProdOverlay {
             $value = $services[$name].Environment['ASPNETCORE_ENVIRONMENT']
         }
 
-        # The value must be the LITERAL "Production" — an interpolated default
+        # The value must be the LITERAL "Production" - an interpolated default
         # (${ASPNETCORE_ENVIRONMENT:-...}) could be overridden back to Development,
         # which is the very footgun the overlay exists to remove.
         if ($value -ne 'Production') {

@@ -139,8 +139,11 @@ test("the exported VERSION matches the package manifest version", () => {
 });
 
 test("the CHANGELOG documents the current version and ships with the package", () => {
-  const heading = new RegExp(`^## \\[${VERSION.replace(/\./g, "\\.")}\\]`, "m");
-  assert.match(changelog, heading);
+  const headingLine = `## [${VERSION}]`;
+  assert.ok(
+    changelog.split(/\r?\n/).some((line) => line.startsWith(headingLine)),
+    `CHANGELOG must document version ${VERSION} under a "## [${VERSION}]" heading`,
+  );
   assert.ok(
     manifest.files.includes("CHANGELOG.md"),
     "package.json files must include CHANGELOG.md so it ships to consumers",

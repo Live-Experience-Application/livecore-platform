@@ -963,7 +963,7 @@ jobs:
           set -euo pipefail
           rendered="$(cat rendered.yaml)"
           # 1. The migrations runner is a pre-install/pre-upgrade hook Job (the gate).
-          echo "$rendered" | grep -Eq 'helm\.sh/hook:[[:space:]]*pre-install,pre-upgrade' \
+          echo "$rendered" | grep -Eq '"?helm\.sh/hook"?:[[:space:]]*pre-install,pre-upgrade' \
             || { echo "MISSING: pre-install/pre-upgrade migrate Job hook"; exit 1; }
           echo "$rendered" | grep -Eq '^[[:space:]]*kind:[[:space:]]*Job[[:space:]]*$' \
             || { echo "MISSING: migrate Job"; exit 1; }

@@ -346,7 +346,7 @@ AssertTrue ($realFullModel.Services['worker'].Environment['Assets__Storage__Endp
 # Production overlay (docker-compose.prod.yml, CORE-OPS-011)
 # =============================================================================
 # The base manifest defaults ASPNETCORE_ENVIRONMENT to Development so the bundled
-# stack comes up green with no identity provider — but in Development the production
+# stack comes up green with no identity provider - but in Development the production
 # readiness gate is inert and the OIDC audience guard does not trip, so copying the
 # defaults to a server yields a green but unauthenticated API. The opt-in production
 # overlay forces the Production posture on the api and worker so a production

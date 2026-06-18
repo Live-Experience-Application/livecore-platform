@@ -110,6 +110,27 @@ Upstream source: https://github.com/Live-Experience-Application/livecore-platfor
 - Source: https://github.com/open-telemetry/opentelemetry-dotnet
 - Notes: OpenTelemetry SDK + host integration for metrics/tracing (CORE-OBS-001/003).
 
+### OpenTelemetry.Instrumentation.AspNetCore 1.15.2
+
+- License: Apache-2.0
+- Copyright: The OpenTelemetry Authors
+- Source: https://github.com/open-telemetry/opentelemetry-dotnet
+- Notes: ASP.NET Core request auto-instrumentation spans (CORE-OBS-005).
+
+### OpenTelemetry.Instrumentation.EntityFrameworkCore 1.15.1-beta.1
+
+- License: Apache-2.0
+- Copyright: The OpenTelemetry Authors
+- Source: https://github.com/open-telemetry/opentelemetry-dotnet
+- Notes: EF Core database-query auto-instrumentation spans (CORE-OBS-005).
+
+### OpenTelemetry.Instrumentation.Http 1.15.1
+
+- License: Apache-2.0
+- Copyright: The OpenTelemetry Authors
+- Source: https://github.com/open-telemetry/opentelemetry-dotnet
+- Notes: Outbound HttpClient auto-instrumentation spans (CORE-OBS-005).
+
 ### StackExchange.Redis 2.x
 
 - License: MIT

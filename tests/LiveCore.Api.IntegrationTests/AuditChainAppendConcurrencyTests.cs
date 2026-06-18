@@ -3,7 +3,6 @@
 
 using LiveCore.Api.Audit;
 using LiveCore.Api.Persistence;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace LiveCore.Api.IntegrationTests;

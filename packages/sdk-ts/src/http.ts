@@ -155,7 +155,13 @@ export class HttpClient {
         "LiveCoreClient requires a getAccessToken provider.",
       );
     }
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    // Trim trailing slashes without a regex: `/\/+$/` is a polynomial-backtracking
+    // (ReDoS) shape on an unanchored `.replace` scan, so strip them linearly instead.
+    let normalizedBaseUrl = options.baseUrl;
+    while (normalizedBaseUrl.endsWith("/")) {
+      normalizedBaseUrl = normalizedBaseUrl.slice(0, -1);
+    }
+    this.baseUrl = normalizedBaseUrl;
     this.getAccessToken = options.getAccessToken;
     this.fetchImpl = options.fetch ?? resolveGlobalFetch();
     this.generateRequestId = options.generateRequestId;

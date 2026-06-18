@@ -7,7 +7,6 @@ using System.Text.Json;
 using LiveCore.Api.Exports;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
-using Microsoft.EntityFrameworkCore;
 
 namespace LiveCore.Api.IntegrationTests;
 
