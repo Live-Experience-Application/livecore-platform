@@ -63,6 +63,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Package versioning and changelog](#package-versioning-and-changelog)
     - [Boundary scan](#boundary-scan)
     - [Spec consistency check](#spec-consistency-check)
+    - [Log-redaction guardrail (CORE-OBS-006)](#log-redaction-guardrail-core-obs-006)
     - [OpenAPI document](#openapi-document-core-oas-001)
 - [Run the hosts locally](#run-the-hosts-locally)
     - [Deploy the whole stack with Docker Compose](#deploy-the-whole-stack-with-docker-compose)
@@ -295,6 +296,9 @@ scripts/test-backup-restore-postgres.ps1  real backup/restore round-trip against
 scripts/LiveCoreMigrationLint.psm1  destructive migration Down() detection + acknowledgement-baseline reconciliation (CORE-DR-004)
 scripts/lint-migration-downs.ps1  CI lint that flags a Down() dropping a table/column for review (roll-forward-only policy, CORE-DR-004)
 scripts/test-migration-down-lint.ps1  tests for the destructive-Down lint logic (CORE-DR-004)
+scripts/LiveCoreLogRedaction.psm1  C#-aware ID-only-logging analysis: flags an ILogger template that is interpolated, concatenates a value, or names a content/PII/secret structured property (CORE-OBS-006, threat T7)
+scripts/lint-log-redaction.ps1  CI lint that fails the build on a content-bearing/interpolated log template in apps/ source (CORE-OBS-006)
+scripts/test-log-redaction.ps1  tests for the log-redaction guardrail (a seeded content-bearing/interpolated template is flagged; the real ID-only logs pass — CORE-OBS-006)
 scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001)
 scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001)
 deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001)
@@ -727,6 +731,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/spec-consistency.ps1
 ```bash
 # Linux/macOS (PowerShell 7+)
 pwsh -NoProfile -File scripts/spec-consistency.ps1
+```
+
+### Log-redaction guardrail (CORE-OBS-006)
+
+Run the log-redaction lint. It enforces ID-only structured logging (threat T7) as a
+build guardrail rather than a convention: it scans the tracked first-party `apps/`
+C# source (the generated EF migrations excluded) for an `ILogger` call whose message
+template would put a value into the log text — an interpolated template
+(`$"...{x}..."`), a value concatenated into a template (`"user " + name + " ..."`),
+or a content/PII/secret structured placeholder (`{Email}`, `{DisplayName}`,
+`{AccessToken}`, `{ContentBody}`, ...) — and fails with a non-zero exit code on one,
+so a future content-bearing log statement cannot ship. Existing ID-only templates are
+unaffected: identifier/metadata placeholders (`{ExportJobId}`, `{ItemCount}`,
+`{ResourceType}`, `{OrganizationSlug}`) and coarse non-PII names (`{Provider}`,
+`{JobName}`, `{RequestRoute}`) pass. CI runs it as the `log-redaction` job (which
+first runs `scripts/test-log-redaction.ps1`, the gate-logic tests over
+`scripts/LiveCoreLogRedaction.psm1`).
+
+```powershell
+# Windows (Windows PowerShell 5.1 or pwsh)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lint-log-redaction.ps1
+```
+
+```bash
+# Linux/macOS (PowerShell 7+)
+pwsh -NoProfile -File scripts/lint-log-redaction.ps1
 ```
 
 ### OpenAPI document (CORE-OAS-001)

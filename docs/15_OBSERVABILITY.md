@@ -52,6 +52,35 @@ principal's subject — never the access token, the display name, the email or a
 surface cannot leak sensitive content (threat T7 in `docs/07_SECURITY_THREAT_MODEL.md`). No external logging
 dependency is added; this is the built-in JSON console formatter plus scope enrichment.
 
+### Enforcing ID-only logging as a guardrail (CORE-OBS-006)
+
+"Log IDs and event types, not sensitive content bodies" was a convention the current logs follow but nothing
+mechanically enforced — a future content-bearing log statement could ship and only a reviewer would catch it.
+CORE-OBS-006 turns the convention into a **build guardrail**, enforced like the boundary scan and the
+destructive-migration lint (a PowerShell analysis module + a CI lint + a gate-logic test), so it needs no new
+runtime dependency and no `Microsoft.Extensions.Compliance.Redaction`/`[LogProperties]` layer.
+
+The `log-redaction` CI job runs `scripts/test-log-redaction.ps1` (the gate-logic test) and then
+`scripts/lint-log-redaction.ps1` (`scripts/LiveCoreLogRedaction.psm1` is the analysis) over the tracked
+first-party `apps/` C# source. The lint **fails the build** on an `ILogger` call whose message template would
+put a value into the log text rather than a structured identifier:
+
+- an **interpolated** template (`$"...{x}..."`), which embeds the value in the message text and cannot be
+  redacted (the CA2254 anti-pattern);
+- a template that **concatenates a non-literal** expression into the message (`"user " + name + " ..."`); a
+  constant `"a" + "b"` literal join is a normal multi-line template and is allowed;
+- a constant template naming a **content/PII/secret** structured property (`{Email}`, `{DisplayName}`,
+  `{AccessToken}`, `{ContentBody}`, ...).
+
+Identifier/metadata placeholders (`{ExportJobId}`, `{ItemCount}`, `{ResourceType}`, `{OrganizationSlug}`,
+`{ContentBlockId}`) and coarse non-PII names (`{Provider}`, `{JobName}`, `{RequestRoute}`, `{Reason}`) are
+unaffected, so every existing ID-only log keeps passing while a new content-bearing one cannot ship. The
+analysis is C#-aware (it masks comments and string content before locating calls, so a logger call in a comment
+or a string is never mistaken for one and a multi-line template is handled). See the threat model
+(`docs/07_SECURITY_THREAT_MODEL.md`, "Log redaction enforced as a guardrail (CORE-OBS-006)") and the README
+("Log-redaction guardrail"). This complements the request log context (CORE-OBS-002 above), which already
+carries identifiers only.
+
 ## Metrics
 
 Track:

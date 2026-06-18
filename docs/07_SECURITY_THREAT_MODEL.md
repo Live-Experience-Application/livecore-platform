@@ -134,6 +134,46 @@ Controls:
   via `Access-Control-Expose-Headers` so a cross-origin browser consumer can read them without widening any
   server-side authorization
 
+## Log redaction enforced as a guardrail (CORE-OBS-006)
+
+T7's control is "structured logs with IDs, not sensitive body content". Until this story that was
+**reviewer discipline only**: the Core uses no `Microsoft.Extensions.Compliance.Redaction`, no
+`[DataClassification]`/`[LogProperties]` and no scrub layer (grep zero), and the existing logs are correctly
+ID-only (for example `StoreNotificationReconciliationService`, `ExportProcessingService`,
+`DataRetentionSweepService` — provider/job/resource **ids** and counts, never a transaction id, an email, a
+display name or any content). Nothing mechanically stopped a future content-bearing log statement from
+shipping, so the T7 logging promise rested on a human noticing it in review.
+
+This story makes ID-only structured logging a **build guardrail**, enforced exactly like the boundary scan and
+the destructive-migration lint (a PowerShell analysis module + a CI lint + a gate-logic test). The analysis
+(`scripts/LiveCoreLogRedaction.psm1`) is C#-aware: it masks comments and string CONTENT before locating calls
+and balancing parentheses, so a logger call in a comment or a string is never mistaken for one and a template
+spanning several lines is handled. The `log-redaction` CI job runs the gate-logic test
+(`scripts/test-log-redaction.ps1`) and then the lint (`scripts/lint-log-redaction.ps1`) over the tracked
+first-party `apps/` C# source (the generated EF migrations excluded). The lint **fails the build** on an
+`ILogger` call (`LogTrace`/`LogDebug`/`LogInformation`/`LogWarning`/`LogError`/`LogCritical`, the generic
+`Log`, and `BeginScope`) whose message TEMPLATE would put a value into the log text rather than a structured
+identifier:
+
+- **InterpolatedTemplate** — the call uses an interpolated string (`$"...{x}..."`), which embeds the runtime
+  value directly in the message text and cannot be redacted (the CA2254 anti-pattern). Flagged anywhere in a
+  log call's arguments.
+- **ConcatenatedValue** — the template concatenates a non-literal expression into the message
+  (`"user " + name + " ..."`). A constant concatenation of string literals (`"a" + "b"`, the existing
+  multi-line `LogCritical` startup template) is a normal template and is allowed.
+- **ForbiddenPlaceholder** — the constant template names a structured property for content/PII/a secret
+  (`{Email}`, `{DisplayName}`, `{AccessToken}`, `{InviteToken}`, `{ContentBody}`, `{Password}`, ...), so the
+  value WOULD be captured as a log property.
+
+Existing ID-only logs are **unaffected**: a placeholder whose last word is an identifier/metadata suffix
+(`Id`, `Count`, `Type`, `Status`, `Code`, `Version`, `Slug`, `Length`, ...) is always allowed — so
+`{ExportJobId}`, `{ItemCount}`, `{ResourceType}`, `{ContentBlockId}` and `{OrganizationSlug}` pass — and coarse
+names that are not content/PII/secret vocabulary (`{Provider}`, `{JobName}`, `{HeartbeatFile}`,
+`{RequestRoute}`, `{MissingSettings}`, `{Window}`, `{Reason}`) pass too. The required test proves both
+directions: a seeded content-bearing/interpolated template is flagged, and every one of the tracked source's
+existing ILogger calls passes. This complements the request-scope log context (CORE-OBS-002), which already
+carries only identifiers and the principal subject, never content. See `docs/15_OBSERVABILITY.md`.
+
 ## Audit log integrity (CORE-SEC-003)
 
 The audit log is the security record of who did what; if it can be altered silently it cannot be trusted. The

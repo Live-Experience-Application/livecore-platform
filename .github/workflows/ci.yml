@@ -9,6 +9,7 @@
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
+#   log-redaction        - enforce ID-only structured logging: fail the build on a content/PII/secret or interpolated log template (CORE-OBS-006, threat T7)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
 #   powershell-lint      - PSScriptAnalyzer over scripts/*.ps1
@@ -341,6 +342,29 @@ jobs:
 
       - name: Flag any unreviewed destructive migration Down()
         run: pwsh -NoProfile -File scripts/lint-migration-downs.ps1
+
+  log-redaction:
+    name: Log redaction guardrail (CORE-OBS-006)
+    runs-on: ubuntu-latest
+    # CORE-OBS-006: ID-only structured logging (threat T7) is enforced mechanically,
+    # not by reviewer discipline. The lint scans the tracked first-party apps/ C#
+    # source for an ILogger call whose message template would put a value into the
+    # log text - an interpolated template, a value concatenated into a template, or a
+    # content/PII/secret structured placeholder ({Email}, {DisplayName}, {AccessToken},
+    # {ContentBody}, ...) - so a future content-bearing log statement fails the build,
+    # while the existing ID-only logs pass. The test step proves the logic over
+    # fixtures (a seeded content-bearing/interpolated template is flagged; the existing
+    # ID-only templates and an object BeginScope are not) and then guards the real
+    # tree, then the scan itself guards the tree. Pure source check, no build needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Test the log-redaction guardrail logic
+        run: pwsh -NoProfile -File scripts/test-log-redaction.ps1
+
+      - name: Run log-redaction lint
+        run: pwsh -NoProfile -File scripts/lint-log-redaction.ps1
 
   backup-restore-drill:
     name: Backup/restore drill (CORE-OPS-010)
@@ -999,6 +1023,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - log-redaction
       - backup-restore-drill
       - backup-restore-postgres
       - powershell-lint
@@ -1170,6 +1195,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - log-redaction
       - backup-restore-drill
       - backup-restore-postgres
       - powershell-lint
