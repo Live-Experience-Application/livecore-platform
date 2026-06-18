@@ -161,14 +161,63 @@ The shipped defaults — `(1 + 1) × 20 = 40` — sit well under `100`. **When y
 - Core does **not** terminate TLS (CORE-OPS-003): terminate it at the `Ingress`
   and forward the original scheme/host/IP. Set
   `config.ForwardedHeaders__KnownNetworks__0` to the ingress controller's pod
-  network (CIDR) so the API trusts the `X-Forwarded-*` headers.
+  network (CIDR) so the API trusts the `X-Forwarded-*` headers — **required behind a
+  load balancer** (CORE-SEC-010, see below).
 - Set `config.AllowedHosts` and `config.Cors__AllowedOrigins__0` to your real
-  host(s)/origin(s).
+  host(s)/origin(s). The host filter is **on by default** (CORE-SEC-010, see below).
 - The chart defaults to a **single API replica** (`api.replicaCount: 1`). For
   **more than one API replica**, configure the Redis/Valkey backplane
   (`secrets.Realtime__Backplane__ConnectionString`, CORE-OPS-007). SignalR sticky
   sessions (CORE-DEP-002) are then wired **automatically** on the ingress — see
   "Multi-replica SignalR sticky-session affinity" below.
+
+### Secure-by-default host filter and forwarded headers (CORE-SEC-010)
+
+The chart is **secure by default** on two edge settings that an operator behind a
+load balancer must otherwise get right by hand.
+
+**Host-header allow-list (`config.AllowedHosts`).** ASP.NET Core treats an **empty**
+`AllowedHosts` as **allow-all** (`*` — host-header validation off). So the `ConfigMap`
+**never** renders it empty: it is rendered through the `livecore.allowedHosts` helper
+(`templates/_helpers.tpl`) as the host(s) you set in `config.AllowedHosts` **joined with
+the loopback hosts** `localhost;127.0.0.1`:
+
+- **Left unset** it renders just `localhost;127.0.0.1` — **non-empty**, so host filtering
+  is **on by default** and a default install already rejects an unexpected `Host` header.
+- **Set your ingress host(s)** for production traffic (semicolon-separated):
+
+  ```bash
+  helm install livecore deploy/helm/livecore \
+    --set-string config.AllowedHosts="app.example.com;www.example.com"
+  # rendered: AllowedHosts: "app.example.com;www.example.com;localhost;127.0.0.1"
+  ```
+
+- The loopback hosts stay in the allow-list because the **kubelet liveness/readiness
+  probes hit the dynamic pod IP** — which no static allow-list could name — so the API
+  and worker probes send a `Host: localhost` header (`httpGet.httpHeaders` in
+  `values.yaml`). Keeping `localhost` allowed means a restrictive, real-host allow-list
+  **never rejects the probes**. (`localhost` is also the loopback set the framework
+  already excludes from HSTS; admitting it widens nothing — every endpoint still enforces
+  the OIDC/tenant authorization.)
+- An explicit `config.AllowedHosts="*"` is **refused** (it falls back to the loopback
+  hosts), so the chart cannot be coaxed into rendering an allow-all host filter.
+
+**Forwarded headers behind a load balancer (`config.ForwardedHeaders__KnownNetworks__0` /
+`__KnownProxies__0`).** `UseForwardedHeaders` restores the **real client IP** from the
+proxy's `X-Forwarded-For` only when the immediate peer is a **trusted** proxy. Behind a
+load balancer / ingress you **must** name it — the proxy's pod network as a CIDR
+(`config.ForwardedHeaders__KnownNetworks__0=10.0.0.0/8`, the usual Kubernetes choice
+because the ingress pod IP is not fixed) and/or a fixed proxy IP
+(`config.ForwardedHeaders__KnownProxies__0=10.0.0.7`). **Without it the API sees the
+proxy's IP as every client's**, so the anonymous **per-IP rate-limit partition collapses
+to a single bucket** (`RateLimitingConfiguration`): every anonymous caller shares one
+limit, so one client's flood throttles all of them and no caller is isolated (threat T9,
+`docs/07_SECURITY_THREAT_MODEL.md`).
+
+Both defaults are **overridable**, and **single-node Compose is unchanged** — the Compose
+stack ships its own restrictive `AllowedHosts=localhost;127.0.0.1` default
+(`deploy/compose/.env.example`) and this story only closes the Kubernetes/Helm path. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Constrained host header" and "Forwarded headers").
 
 ### Multi-replica realtime fail-safe (CORE-DEP-009)
 

@@ -127,6 +127,54 @@ function Get-LiveCoreHelmValuesSecretValue {
     return $result
 }
 
+function Get-LiveCoreHelmConfigValues {
+    <#
+    .SYNOPSIS
+        Extracts the scalar values nested under the top-level `config:` mapping of a values.yaml
+        document, so the secure-by-default host-filter rule (CORE-SEC-010) can read the default
+        config.AllowedHosts.
+    .OUTPUTS
+        A hashtable of config key -> raw scalar value (unquoted, trimmed). Empty when the block is
+        absent.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ValuesContent)
+
+    $result = @{}
+    $lines = $ValuesContent -split "`r?`n"
+
+    $inBlock = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreHelmIndent -Line $line
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        if (-not $inBlock) {
+            if ($indent -eq 0 -and $trimmed -match '^config:\s*$') { $inBlock = $true }
+            continue
+        }
+
+        # The config mapping ends at the next top-level (indent 0) key.
+        if ($indent -eq 0) { break }
+
+        # Only the config block's own (indent 2) keys, never a nested leaf, so a "key: value"
+        # under some future nested map cannot be mistaken for a top-level config key.
+        if ($indent -ne 2) { continue }
+
+        if ($trimmed -match '^([A-Za-z0-9_.:-]+):\s*(.*)$') {
+            $key = $Matches[1]
+            $value = $Matches[2]
+            if ($value -match '^(.*?)\s+#.*$') { $value = $Matches[1] }
+            $value = $value.Trim().Trim('"', "'")
+            $result[$key] = $value
+        }
+    }
+    return $result
+}
+
 function Get-LiveCoreHelmAutoscalingValues {
     <#
     .SYNOPSIS
@@ -578,6 +626,57 @@ function Test-LiveCoreHelmChart {
         }
     }
 
+    # 14. CORE-SEC-010: the chart must NOT render an empty allow-all AllowedHosts host filter by
+    #     default. ASP.NET Core treats an empty (or "*") AllowedHosts as allow-all — host-header
+    #     validation OFF — so the rendered ConfigMap must carry a NON-EMPTY host allow-list. Two
+    #     invariants prove it (leaving the value overridable, and keeping the in-pod probes working):
+    #     (a) the ConfigMap must not render AllowedHosts as a literal empty/"*" value; and
+    if ($Files.ContainsKey('templates/configmap.yaml')) {
+        $configmapNoComments = Get-LiveCoreHelmContentWithoutComments -Content $Files['templates/configmap.yaml']
+        if ($configmapNoComments -match '(?m)^\s*AllowedHosts:\s*""\s*$' -or
+            $configmapNoComments -match "(?m)^\s*AllowedHosts:\s*''\s*$" -or
+            $configmapNoComments -match '(?m)^\s*AllowedHosts:\s*"?\*"?\s*$') {
+            $findings.Add('ALLOWEDHOSTS: templates/configmap.yaml renders an empty/allow-all AllowedHosts; ASP.NET treats empty/"*" as allow-all (host-header validation off) — render a non-empty host allow-list (CORE-SEC-010)')
+        }
+    }
+    # (b) a POSITIVE guarantee of a non-empty host filter: either a non-empty config.AllowedHosts
+    #     default, or the ConfigMap renders AllowedHosts through the livecore.allowedHosts helper,
+    #     which injects a non-empty loopback fallback so the value can never render empty. The
+    #     ConfigMap must also actually render an AllowedHosts key so the host filter is set
+    #     explicitly (an unset key would let the image default — or allow-all — leak through).
+    if ($Files.ContainsKey('values.yaml')) {
+        $configValues = Get-LiveCoreHelmConfigValues -ValuesContent $Files['values.yaml']
+        $allowedHostsDefault = if ($configValues.ContainsKey('AllowedHosts')) { $configValues['AllowedHosts'] } else { $null }
+        $configmapRaw = if ($Files.ContainsKey('templates/configmap.yaml')) { $Files['templates/configmap.yaml'] } else { '' }
+        $helpersRaw = if ($Files.ContainsKey('templates/_helpers.tpl')) { $Files['templates/_helpers.tpl'] } else { '' }
+        $viaHelper = ($configmapRaw -match 'livecore\.allowedHosts') -and ($helpersRaw -match 'allowedHosts') -and ($helpersRaw -match 'localhost|127\.0\.0\.1')
+        $nonEmptyDefault = (-not [string]::IsNullOrEmpty($allowedHostsDefault)) -and ($allowedHostsDefault -ne '*')
+        if (-not ($viaHelper -or $nonEmptyDefault)) {
+            $findings.Add('ALLOWEDHOSTS: the chart must guarantee a non-empty AllowedHosts host filter by default — a non-empty config.AllowedHosts default, or a ConfigMap that renders AllowedHosts through the livecore.allowedHosts helper (which injects a loopback fallback) (CORE-SEC-010)')
+        }
+        if ($Files.ContainsKey('templates/configmap.yaml') -and $configmapRaw -notmatch 'AllowedHosts') {
+            $findings.Add('ALLOWEDHOSTS: templates/configmap.yaml must render an AllowedHosts key so the host filter is set explicitly, not left to the image default (CORE-SEC-010)')
+        }
+    }
+
+    # 15. CORE-SEC-010: the chart must document the ForwardedHeaders KnownProxies/KnownNetworks
+    #     requirement behind a load balancer, AND that without it the anonymous per-IP rate-limit
+    #     partition collapses to a SINGLE bucket (the API sees the proxy IP as every client's, so
+    #     one bucket covers all anonymous callers — one flood throttles everyone). The operator
+    #     guidance lives in the chart values.yaml comments and the chart README.
+    $docCorpus = ''
+    if ($Files.ContainsKey('values.yaml')) { $docCorpus += $Files['values.yaml'] + "`n" }
+    if ($Files.ContainsKey('README.md')) { $docCorpus += $Files['README.md'] + "`n" }
+    $mentionsForwarded = ($docCorpus -match 'ForwardedHeaders') -and ($docCorpus -match 'KnownNetworks' -or $docCorpus -match 'KnownProxies')
+    $mentionsRateLimitCollapse = ($docCorpus -match '(?i)rate.?limit') -and
+        ($docCorpus -match '(?i)single bucket' -or $docCorpus -match '(?i)one bucket' -or $docCorpus -match '(?i)partition')
+    if (-not $mentionsForwarded) {
+        $findings.Add('FORWARDED-HEADERS: the chart (values.yaml/README) must document the ForwardedHeaders KnownProxies/KnownNetworks requirement behind a load balancer (CORE-SEC-010)')
+    }
+    if (-not $mentionsRateLimitCollapse) {
+        $findings.Add('FORWARDED-HEADERS: the chart must document that without trusted ForwardedHeaders the anonymous per-IP rate-limit partition collapses to a single bucket (CORE-SEC-010)')
+    }
+
     return [pscustomobject]@{
         IsValid  = ($findings.Count -eq 0)
         Findings = $findings.ToArray()
@@ -589,6 +688,7 @@ Export-ModuleMember -Function `
     Get-LiveCoreHelmChartFiles, `
     Get-LiveCoreHelmContentWithoutComments, `
     Get-LiveCoreHelmValuesSecretValue, `
+    Get-LiveCoreHelmConfigValues, `
     Get-LiveCoreHelmApiReplicaCount, `
     Get-LiveCoreHelmAutoscalingValues, `
     Get-LiveCoreHelmComponentResources, `

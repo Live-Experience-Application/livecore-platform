@@ -102,6 +102,29 @@ The migrations runner, the API and the worker all read the SAME keys
 {{- end -}}
 
 {{/*
+The host-header allow-list rendered into the ConfigMap (CORE-SEC-010). ASP.NET Core treats an
+EMPTY AllowedHosts as allow-all ("*" — host-header validation off), so the chart never renders it
+empty: this is the operator's configured public host(s) (config.AllowedHosts) JOINED with the
+loopback hosts the in-pod kubelet liveness/readiness probes send their Host header as (the api/worker
+probes set "Host: localhost"). Keeping the loopback hosts in the allow-list means a restrictive,
+real-host allow-list still admits the probes (the kubelet hits the dynamic pod IP, which no static
+allow-list could name). With nothing configured it is just the loopback hosts — non-empty, so host
+filtering is ON by default and a default install already rejects an unexpected Host header. A
+configured "*" (an explicit allow-all) is refused and falls back to the loopback hosts, so the chart
+cannot be coaxed into rendering an allow-all host filter. Override config.AllowedHosts with your
+ingress host(s) (semicolon-separated) for production traffic; the loopback probe hosts stay appended.
+*/}}
+{{- define "livecore.allowedHosts" -}}
+{{- $loopback := "localhost;127.0.0.1" -}}
+{{- $configured := .Values.config.AllowedHosts | toString | trim -}}
+{{- if and $configured (ne $configured "*") -}}
+{{- printf "%s;%s" $configured $loopback -}}
+{{- else -}}
+{{- $loopback -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Fail the render when the API can run past a single replica without a realtime backplane
 (CORE-DEP-009). Running more than one API pod on the in-process backplane silently drops
 cross-pod realtime delivery (CORE-OPS-007): a reveal computed on one pod never reaches

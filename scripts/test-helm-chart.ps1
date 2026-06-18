@@ -62,8 +62,24 @@ function Get-FixtureHelmChart {
         [switch]$OmitResources,
         [switch]$OmitStickyAffinity,
         [switch]$OmitHpa,
-        [switch]$OmitPdb
+        [switch]$OmitPdb,
+        [switch]$EmptyAllowedHosts,
+        [switch]$OmitForwardedHeadersDoc
     )
+
+    # CORE-SEC-010: a non-empty host-header allow-list by default (ASP.NET treats an empty
+    # AllowedHosts as allow-all). The negative test renders it empty in BOTH values.yaml and the
+    # ConfigMap so the validator's "no empty allow-all" rule trips.
+    $allowedHostsValue = if ($EmptyAllowedHosts) { '""' } else { '"app.example.com"' }
+    $configmapAllowedHosts = if ($EmptyAllowedHosts) { '  AllowedHosts: ""' } else { '  AllowedHosts: "app.example.com"' }
+
+    # CORE-SEC-010: the ForwardedHeaders KnownProxies/KnownNetworks guidance and the rate-limit
+    # single-bucket consequence behind a load balancer. The negative test drops the documentation.
+    $forwardedHeadersDoc = if ($OmitForwardedHeadersDoc) { '' } else { @'
+  # ForwardedHeaders KnownNetworks/KnownProxies behind a load balancer (CORE-SEC-010): without a
+  # trusted proxy the anonymous per-IP rate-limit partition collapses to a single bucket.
+  ForwardedHeaders__KnownNetworks__0: ""
+'@ }
 
     $migrateHook = if ($OmitMigrateHook) {
         '    "helm.sh/hook-weight": "-5"'
@@ -238,6 +254,8 @@ metadata:
 config:
   Authentication__Oidc__Authority: ""
   Cors__AllowedOrigins__0: ""
+  AllowedHosts: $allowedHostsValue
+$forwardedHeadersDoc
 secrets:
   existingSecret: ""
 $secretConnString
@@ -320,7 +338,7 @@ spec:
               port: metrics
 $resourcesTpl
 "@
-        'templates/configmap.yaml'         = "apiVersion: v1`nkind: ConfigMap`n"
+        'templates/configmap.yaml'         = "apiVersion: v1`nkind: ConfigMap`ndata:`n$configmapAllowedHosts`n"
         'templates/secret.yaml'            = "apiVersion: v1`nkind: Secret`ntype: Opaque`nstringData:`n  {{- range `$k, `$v := omit .Values.secrets `"existingSecret`" }}`n  {{ `$k }}: {{ `$v | quote }}`n  {{- end }}`n"
         'templates/ingress.yaml'           = $ingressTemplate
     }
@@ -383,6 +401,18 @@ $noPdb = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitPdb)
 AssertTrue (-not $noPdb.IsValid) 'a chart whose api-pdb.yaml does not define a PodDisruptionBudget is rejected'
 AssertTrue (($noPdb.Findings -join "`n") -match 'PDB') `
     'the rejection flags the missing API PodDisruptionBudget'
+
+# --- Negative: an empty allow-all AllowedHosts host filter (CORE-SEC-010) is rejected. ---
+$emptyAllowedHosts = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -EmptyAllowedHosts)
+AssertTrue (-not $emptyAllowedHosts.IsValid) 'a chart rendering an empty allow-all AllowedHosts host filter by default is rejected'
+AssertTrue (($emptyAllowedHosts.Findings -join "`n") -match 'ALLOWEDHOSTS') `
+    'the rejection flags the empty allow-all AllowedHosts host filter'
+
+# --- Negative: dropping the forwarded-headers / rate-limit guidance (CORE-SEC-010) is rejected. ---
+$noForwardedDoc = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitForwardedHeadersDoc)
+AssertTrue (-not $noForwardedDoc.IsValid) 'a chart that does not document the ForwardedHeaders KnownProxies/KnownNetworks requirement is rejected'
+AssertTrue (($noForwardedDoc.Findings -join "`n") -match 'FORWARDED-HEADERS') `
+    'the rejection flags the missing forwarded-headers / rate-limit-partition documentation'
 
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
@@ -481,6 +511,31 @@ AssertTrue ($realValuesNoComments -match 'Persistence__MaxPoolSize') `
 $realValuesRaw = $realFiles['values.yaml']
 AssertTrue ($realValuesRaw -match 'max_connections' -and $realValuesRaw -match 'replicaCount') `
     'the real values.yaml documents the (replicas x pool-size) <= max_connections connection budget so scaling cannot silently exhaust PostgreSQL connections (CORE-DEP-014)'
+
+# Spot-check the secure-by-default host filter on the real chart (CORE-SEC-010). The ConfigMap must
+# render AllowedHosts through the helper so it can never render empty (ASP.NET treats empty as
+# allow-all), and the helper must inject a non-empty loopback fallback so host filtering is on by default.
+$realConfigmap = $realFiles['templates/configmap.yaml']
+AssertTrue ($realConfigmap -match 'livecore\.allowedHosts') `
+    'the real ConfigMap renders AllowedHosts through the livecore.allowedHosts helper so it can never render empty/allow-all (CORE-SEC-010)'
+AssertTrue ($realHelpers -match 'allowedHosts' -and $realHelpers -match 'localhost') `
+    'the real chart helper guarantees a non-empty AllowedHosts (loopback fallback) so host filtering is on by default (CORE-SEC-010)'
+$realConfigmapNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realConfigmap
+AssertTrue ($realConfigmapNoComments -notmatch '(?m)^\s*AllowedHosts:\s*""\s*$') `
+    'the real ConfigMap does not render an empty allow-all AllowedHosts (CORE-SEC-010)'
+
+# The in-pod liveness/readiness probes must send a loopback Host header so the secure-by-default host
+# filter admits the kubelet probes (they hit the dynamic pod IP, which no static allow-list could name).
+AssertTrue ((([regex]::Matches($realValuesNoComments, 'name:\s*Host')).Count) -ge 3) `
+    'the real API liveness/readiness and worker liveness probes each send a loopback Host header so the host filter admits them (CORE-SEC-010)'
+
+# Spot-check the forwarded-headers KnownProxies/KnownNetworks + rate-limit-collapse documentation (CORE-SEC-010).
+$realReadme = if ($realFiles.ContainsKey('README.md')) { $realFiles['README.md'] } else { '' }
+$realDocCorpus = $realValuesRaw + "`n" + $realReadme
+AssertTrue ($realDocCorpus -match 'ForwardedHeaders' -and ($realDocCorpus -match 'KnownNetworks' -or $realDocCorpus -match 'KnownProxies')) `
+    'the real chart documents the ForwardedHeaders KnownProxies/KnownNetworks requirement behind a load balancer (CORE-SEC-010)'
+AssertTrue ($realDocCorpus -match '(?i)rate.?limit' -and ($realDocCorpus -match '(?i)single bucket' -or $realDocCorpus -match '(?i)partition')) `
+    'the real chart documents the rate-limit single-bucket consequence of unconfigured forwarded headers (CORE-SEC-010)'
 
 if ($failures.Count -gt 0) {
     Write-Host ''

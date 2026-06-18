@@ -924,6 +924,19 @@ an insecure request was secure (threat T7).
 - With nothing configured, only loopback is trusted, so an arbitrary internet
   client can never spoof the scheme or host.
 
+**Required behind a load balancer for correct rate limiting (CORE-SEC-010).** When the
+proxy is **not** named here, `UseForwardedHeaders` does not restore the real client IP, so
+the API sees the **proxy's** IP as every request's client. The anonymous **per-IP**
+rate-limit partition (`RateLimitingConfiguration`, CORE-SEC-007) then collapses to a
+**single bucket** — every anonymous caller shares one limit, so one client's flood
+throttles all of them and no caller is isolated (threat T9). So behind a load balancer /
+ingress, always set `ForwardedHeaders__KnownNetworks__0` (the proxy's pod network as a
+CIDR — the usual Kubernetes choice, the ingress pod IP is not fixed) and/or
+`ForwardedHeaders__KnownProxies__0` (a fixed proxy IP). The in-repo **Helm chart** surfaces
+this as `config.ForwardedHeaders__KnownNetworks__0` / `__KnownProxies__0` and documents the
+requirement (`deploy/helm/livecore/README.md`, "Secure-by-default host filter and forwarded
+headers"); single-node Compose already trusts the Compose network the same way.
+
 ### App-level HSTS and HTTPS redirection (`HttpsSecurity:*`) (CORE-SEC-005)
 
 In the **default** TLS-terminating reverse-proxy posture the proxy owns the public
@@ -1041,7 +1054,23 @@ OIDC/tenant authorization every endpoint already enforces; it never widens autho
 `localhost;127.0.0.1`. A deployment **must** set it to its real public host(s),
 for example `AllowedHosts=app.example.com` (semicolon-separated for several), so
 the host-filtering middleware rejects requests carrying an unexpected `Host`
-header.
+header. ASP.NET Core treats an **empty** `AllowedHosts` as **allow-all** (`*` —
+host-header validation off), so it must never render empty.
+
+**Kubernetes / Helm — secure by default (CORE-SEC-010).** The tracked
+`appsettings.json` and the Compose stack (`deploy/compose/.env.example`) already ship
+the restrictive `localhost;127.0.0.1` default, but the Helm chart previously rendered
+`AllowedHosts` **empty** in its `ConfigMap`, which (as an env var) overrode the image's
+safe default with allow-all. The chart now renders `AllowedHosts` through the
+`livecore.allowedHosts` helper so it is **never empty**: the operator's
+`config.AllowedHosts` joined with the loopback hosts the in-pod kubelet
+liveness/readiness probes use. Left unset it is just `localhost;127.0.0.1` (host
+filtering on by default); set your ingress host(s) for production traffic, and the
+loopback hosts stay in the allow-list so a restrictive real-host allow-list never rejects
+the probes (the probes hit the dynamic pod IP and send a `Host: localhost` header). The
+default is **overridable**, an explicit `*` is refused, and **single-node Compose is
+unchanged**. See `deploy/helm/livecore/README.md` ("Secure-by-default host filter and
+forwarded headers").
 
 ### Request rate limiting (`RateLimiting:*`) (CORE-SEC-001, CORE-SEC-007)
 

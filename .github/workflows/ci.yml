@@ -952,6 +952,12 @@ jobs:
     #      (or an enabled HPA) renders a schema-valid PDB that selects the API pods and keeps
     #      at least one available (maxUnavailable: 1), the budget is overridable to a
     #      minAvailable floor and opt-out, and the worker gets a symmetric PDB.
+    #   8. SECURE-BY-DEFAULT HOST FILTER + FORWARDED HEADERS (CORE-SEC-010): the default render
+    #      does NOT carry an empty allow-all AllowedHosts (ASP.NET treats empty/"*" as allow-all);
+    #      the ConfigMap renders a non-empty host allow-list, an operator override is honored and
+    #      keeps the loopback hosts the in-pod probes use, the probes send a loopback Host header,
+    #      and the ForwardedHeaders KnownProxies/KnownNetworks requirement (and its rate-limit
+    #      single-bucket consequence) is documented.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -1262,6 +1268,53 @@ jobs:
           grep -Eq '^[[:space:]]*app\.kubernetes\.io/component:[[:space:]]*worker[[:space:]]*$' pdb-worker.yaml \
             || { echo "MISSING: the worker PDB does not select the worker pods (component: worker)"; cat pdb-worker.yaml; exit 1; }
           echo "OK: a multi-replica worker renders a PDB selecting the worker pods"
+
+      - name: Assert the secure-by-default host filter and forwarded-headers guidance (CORE-SEC-010)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+
+          # CORE-SEC-010: the chart must not render an empty allow-all AllowedHosts host filter by
+          # default - ASP.NET Core treats an empty (or "*") AllowedHosts as allow-all, turning
+          # host-header validation OFF. The ConfigMap renders a non-empty allow-list through the
+          # livecore.allowedHosts helper so host filtering is ON by default; the value is overridable
+          # and always keeps the loopback hosts the in-pod liveness/readiness probes use, so a
+          # restrictive real-host allow-list never rejects the kubelet probes.
+
+          # (a) The DEFAULT render carries a NON-EMPTY (non-allow-all) AllowedHosts.
+          ah="$(helm template livecore "$chart" --show-only templates/configmap.yaml | grep -E '^[[:space:]]*AllowedHosts:' | head -n1 | sed -E 's/^[[:space:]]*AllowedHosts:[[:space:]]*//')"
+          [ -n "$ah" ] || { echo "MISSING: AllowedHosts not rendered into the ConfigMap"; exit 1; }
+          case "$ah" in
+            '""'|"''"|'"*"'|'*') echo "INSECURE: AllowedHosts renders allow-all ($ah)"; exit 1 ;;
+          esac
+          echo "OK: the default ConfigMap renders a non-empty (non-allow-all) AllowedHosts: $ah"
+
+          # (b) An operator AllowedHosts override is honored AND the loopback probe hosts stay in the
+          #     allow-list (so a restrictive real-host allow-list never rejects the kubelet probes,
+          #     which send a localhost Host header - see the probe templates).
+          ah_override="$(helm template livecore "$chart" --set-string config.AllowedHosts=app.example.com --show-only templates/configmap.yaml | grep -E '^[[:space:]]*AllowedHosts:' | head -n1)"
+          echo "$ah_override" | grep -q 'app.example.com' || { echo "OVERRIDE: operator AllowedHosts not honored"; echo "$ah_override"; exit 1; }
+          echo "$ah_override" | grep -q 'localhost'       || { echo "PROBE: loopback host dropped from AllowedHosts (would break the kubelet probes)"; echo "$ah_override"; exit 1; }
+          echo "OK: an operator AllowedHosts override is honored and keeps the loopback probe host"
+
+          # (c) The in-pod probes send a loopback Host header so the secure-by-default host filter
+          #     admits them (the kubelet probes the dynamic pod IP, which no static allow-list names).
+          for tpl in api-deployment worker-deployment; do
+            helm template livecore "$chart" --show-only "templates/${tpl}.yaml" | grep -Eq '^[[:space:]]*-[[:space:]]*name:[[:space:]]*Host[[:space:]]*$' \
+              || { echo "MISSING: $tpl probe does not send a Host header for the host filter"; exit 1; }
+          done
+          echo "OK: the API and worker probes send a loopback Host header for the host filter"
+
+          # (d) The forwarded-headers KnownProxies/KnownNetworks requirement - and that without it the
+          #     anonymous per-IP rate-limit partition collapses to a single bucket - is documented in
+          #     the chart values.yaml and README.
+          grep -Eq 'ForwardedHeaders__Known(Networks|Proxies)' deploy/helm/livecore/values.yaml \
+            || { echo "MISSING: ForwardedHeaders KnownProxies/KnownNetworks not documented in values.yaml"; exit 1; }
+          grep -Eiq 'rate.?limit' deploy/helm/livecore/README.md \
+            || { echo "MISSING: README does not mention the rate-limit consequence of forwarded headers"; exit 1; }
+          grep -Eiq 'single bucket|partition' deploy/helm/livecore/README.md \
+            || { echo "MISSING: README does not document the rate-limit-partition collapse"; exit 1; }
+          echo "OK: the forwarded-headers KnownProxies/KnownNetworks requirement and rate-limit-partition consequence are documented"
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)

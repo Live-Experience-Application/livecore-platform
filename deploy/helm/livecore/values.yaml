@@ -57,12 +57,25 @@ config:
   # [prod-required] OIDC issuer/audience the API validates access tokens against.
   Authentication__Oidc__Authority: ""
   Authentication__Oidc__Audience: ""
-  # Public host(s) the API answers to (semicolon-separated). Set to your ingress host.
+  # Public host(s) the API answers to, as the host-header allow-list (semicolon-separated).
+  # Secure by default (CORE-SEC-010): the ConfigMap NEVER renders this empty — ASP.NET Core
+  # treats an empty AllowedHosts as allow-all ("*" — host-header validation OFF). The rendered
+  # value is the host(s) you set here JOINED with the loopback hosts (localhost;127.0.0.1) the
+  # in-pod liveness/readiness probes send their Host header as, so a restrictive allow-list still
+  # admits the kubelet probes (templates/_helpers.tpl "livecore.allowedHosts"). Left empty it
+  # renders just the loopback hosts, so host filtering is ON by default and an unexpected Host is
+  # rejected; set your real ingress host(s) (e.g. "app.example.com") for production traffic.
   AllowedHosts: ""
   # Browser/PWA origin(s) allowed to call the API and the SignalR hub (indexed list).
   Cors__AllowedOrigins__0: ""
-  # The ingress controller's pod network (CIDR) is the trusted forwarding proxy in
-  # Kubernetes, so the X-Forwarded-* scheme/host/IP are restored (CORE-OPS-003).
+  # The trusted forwarding proxy in front of the API (CORE-OPS-003). Behind a load balancer /
+  # ingress set the proxy's pod network (CIDR) here — and/or ForwardedHeaders__KnownProxies__0 for
+  # a fixed proxy IP — so UseForwardedHeaders restores the real client scheme/host/IP from the
+  # X-Forwarded-* headers. REQUIRED behind a load balancer (CORE-SEC-010): without a trusted
+  # proxy/network the API sees the PROXY's IP as the client, so the anonymous per-IP rate-limit
+  # partition (RateLimitingConfiguration) collapses to a SINGLE bucket — every anonymous client
+  # shares one limit, so one flood throttles all of them and no caller is isolated. In Kubernetes
+  # the ingress pod IP is not fixed, so a CIDR network is the usual choice.
   ForwardedHeaders__KnownNetworks__0: ""
   # S3-compatible object storage endpoint for asset binaries (credentials are secrets).
   Assets__Storage__Endpoint: ""
@@ -158,6 +171,14 @@ api:
     httpGet:
       path: /health/live
       port: http
+      # The kubelet probes the pod IP, but the API enforces the AllowedHosts host filter
+      # (CORE-SEC-010), which never matches the dynamic pod IP. Send a loopback Host header —
+      # localhost is always in the rendered AllowedHosts — so the probe is admitted under the
+      # secure-by-default host filter. (Set in httpHeaders, not httpGet.host, so the kubelet
+      # still connects to the pod IP and only the Host header is overridden.)
+      httpHeaders:
+        - name: Host
+          value: localhost
     initialDelaySeconds: 10
     periodSeconds: 10
     timeoutSeconds: 3
@@ -168,6 +189,10 @@ api:
     httpGet:
       path: /health/ready
       port: http
+      # Loopback Host header for the host filter (CORE-SEC-010); see livenessProbe above.
+      httpHeaders:
+        - name: Host
+          value: localhost
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 3
@@ -253,6 +278,12 @@ worker:
     httpGet:
       path: /health/live
       port: metrics
+      # The worker's metrics/health host shares the ConfigMap AllowedHosts (envFrom), so it
+      # enforces the same host filter (CORE-SEC-010). Send a loopback Host header so the probe
+      # is admitted; see api.livenessProbe above.
+      httpHeaders:
+        - name: Host
+          value: localhost
     initialDelaySeconds: 15
     periodSeconds: 30
     timeoutSeconds: 3

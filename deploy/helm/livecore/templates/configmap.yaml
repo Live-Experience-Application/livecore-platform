@@ -9,5 +9,12 @@ metadata:
     {{- include "livecore.labels" . | nindent 4 }}
 data:
   {{- range $key, $value := .Values.config }}
+  {{- if ne $key "AllowedHosts" }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
+  {{- end }}
+  # Host-header allow-list (CORE-SEC-010). Rendered through livecore.allowedHosts so it is NEVER
+  # empty — ASP.NET Core treats an empty AllowedHosts as allow-all, which would turn host-header
+  # validation off. It is the operator's config.AllowedHosts joined with the loopback hosts the
+  # in-pod liveness/readiness probes use, so the secure-by-default host filter still admits them.
+  AllowedHosts: {{ include "livecore.allowedHosts" . | quote }}
