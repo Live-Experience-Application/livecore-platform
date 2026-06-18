@@ -3,6 +3,9 @@
 
 using LiveCore.Api.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 
 namespace LiveCore.Api.IntegrationTests;
@@ -104,6 +107,50 @@ internal static class PostgresTestDatabase
         var name = NewDatabaseName();
         Execute($"CREATE DATABASE \"{name}\";");
         return ConnectionStringFor(name);
+    }
+
+    /// <summary>
+    /// Creates a fresh database whose schema is applied by the real, checked-in
+    /// migrations up to but <b>excluding the last</b> one, and returns its connection
+    /// string. The database is therefore exactly one migration behind the build — the
+    /// state a deploy whose migrate step was skipped/failed (or an API image rolled
+    /// forward ahead of its schema) is in. Used by the schema-readiness gate test
+    /// (CORE-OBS-010) to prove readiness is not-ready until the last migration is
+    /// applied. Not built from the template: the template carries every migration.
+    /// </summary>
+    public static string CreateDatabaseMigratedToAllButLast()
+    {
+        var name = NewDatabaseName();
+        Execute($"CREATE DATABASE \"{name}\";");
+        var connectionString = ConnectionStringFor(name);
+
+        var options = new DbContextOptionsBuilder<LiveCoreDbContext>()
+            .UseNpgsql(connectionString)
+            .Options;
+
+        using (var context = new LiveCoreDbContext(options))
+        {
+            // GetMigrations() returns every migration the build defines, in apply order; migrating to the
+            // second-to-last leaves exactly the last one pending, so GetPendingMigrationsAsync reports the
+            // schema as behind the build.
+            var migrations = context.Database.GetMigrations().ToArray();
+            if (migrations.Length < 2)
+            {
+                throw new InvalidOperationException(
+                    "At least two migrations are required to apply all but the last.");
+            }
+
+            context.GetInfrastructure().GetRequiredService<IMigrator>().Migrate(migrations[^2]);
+        }
+
+        // Release this database's provisioning connections so the test host opens its own (matching the
+        // targeted clear DropDatabase performs); other per-test databases are untouched.
+        using (var pooled = new NpgsqlConnection(connectionString))
+        {
+            NpgsqlConnection.ClearPool(pooled);
+        }
+
+        return connectionString;
     }
 
     /// <summary>

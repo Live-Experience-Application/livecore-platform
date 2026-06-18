@@ -1224,6 +1224,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // connection details to the unauthenticated readiness endpoint.
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<LiveCoreDbContext>("database", tags: [HealthEndpoints.ReadinessTag]);
+
+    // Gate readiness on the database SCHEMA being up to date (CORE-OBS-010). The check above proves the
+    // database ANSWERS; this proves it carries the schema this build expects. The schema is applied by a
+    // separate run-to-completion migration step BEFORE the API rolls out (CORE-OPS-001) — the host never
+    // migrates implicitly — so if that step is skipped/failed, or the API image is rolled forward ahead of its
+    // schema, GetPendingMigrationsAsync reports a missing migration and readiness returns NOT-READY (503,
+    // tagged ready), leaving the rotation instead of advertising Ready and then 500-ing on the first domain
+    // query; once the schema is current readiness flips back to ready. The check is bounded by the configured
+    // database command timeout (CORE-RES-004) and the short readiness wall-clock bound (CORE-RES-005) and fails
+    // closed, liveness stays shallow/separate (a stale schema never restarts a live process), and the readiness
+    // response stays status-only so which migrations are missing never leaks (threat T7). Registered inside the
+    // persistence conditional: there is no schema to gate on without a configured database.
+    builder.Services.AddSchemaReadinessCheck();
 }
 
 // Production required-dependency readiness gate (CORE-OPS-005). Before this story /health/ready reported

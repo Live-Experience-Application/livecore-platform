@@ -470,3 +470,22 @@ by a short, configurable timeout (`HealthChecks:Readiness:ProbeTimeout`, default
 counted as not-ready, never as a false Ready. The unauthenticated readiness
 response stays **status-only**, so which dependency is unreachable never leaks
 (threat T7).
+
+Readiness also gates on the database **schema being up to date** (CORE-OBS-010).
+The schema ships as checked-in EF Core migrations applied by a separate,
+run-to-completion deployment step **before** the API rolls out — the host never
+migrates implicitly (CORE-OPS-001). So that a host whose migrate step was
+skipped/failed, or that was rolled forward **ahead of its schema**, does not
+advertise Ready and then `500` on the first domain query, the `database-schema`
+readiness check asks EF Core for the migrations the build expects that the
+database lacks (`GetPendingMigrationsAsync`): if any are missing the host reports
+not-ready (`503`) and **leaves the rotation** until the schema is brought current,
+at which point readiness flips back to ready. This is distinct from the
+reachability probes above — connectivity proves the database *answers*, this
+proves it carries the schema this build was compiled against. The read is bounded
+both by the configured database command timeout (CORE-RES-004) and the same short
+readiness wall-clock bound (`HealthChecks:Readiness:ProbeTimeout`; CORE-RES-005),
+and **fails closed** — a read that errors or times out is counted not-ready. The
+response stays **status-only**, so which migrations are missing never leaks
+(threat T7), and `/health/live` stays shallow and unaffected (a stale schema never
+restarts a live process).

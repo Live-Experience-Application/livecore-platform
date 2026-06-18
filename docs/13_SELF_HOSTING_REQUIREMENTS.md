@@ -157,6 +157,26 @@ mechanism for a one-shot, run-before primitive:
 - **Railway** — run the migrations image as the service's pre-deploy command so a
   new release applies migrations before the new API instances accept traffic.
 
+### Readiness gates on the schema version (CORE-OBS-010)
+
+The migrate-before-API ordering above is the primary safeguard; the API host also
+**defends itself** against an ordering that is skipped, fails, or rolls the API
+image forward ahead of its schema. When persistence is configured, `/health/ready`
+runs a `database-schema` readiness check that asks EF Core for the migrations the
+running build expects that the database lacks
+(`GetPendingMigrationsAsync`). If any are missing, the API reports **not-ready**
+(`503`) and an orchestrator **leaves it out of rotation** rather than routing
+traffic at a host that would `500` on its first domain query; readiness flips back
+to ready automatically once the migrations runner has brought the schema up to
+date. The check complements — it does not replace — the connectivity check
+(connectivity proves the database *answers*; this proves it carries the expected
+schema) and the live dependency-reachability probes (CORE-OBS-009). It is bounded
+by the database command timeout (CORE-RES-004) and the short readiness timeout
+(`HealthChecks:Readiness:ProbeTimeout`; CORE-RES-005) and **fails closed**, while
+`/health/live` stays shallow so a stale schema never triggers a restart loop. The
+unauthenticated readiness response stays status-only, so which migrations are
+missing never leaks (threat T7, `docs/07_SECURITY_THREAT_MODEL.md`).
+
 ### Running the migrations without the image
 
 The same path runs without Docker for local development and CI, because both use

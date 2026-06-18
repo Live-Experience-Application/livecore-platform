@@ -852,10 +852,10 @@ source-offer endpoint, worker metrics, structured logging and distributed tracin
 
 The API host exposes two unauthenticated health endpoints:
 
-| Endpoint        | Purpose                                                                                                                                                                                                                          |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                                                                                                              |
-| `/health/ready` | Readiness: runs the health checks tagged `ready` — the `database` connectivity check (registered only when a connection string is configured), the production config-presence gate, and the live dependency reachability probes. |
+| Endpoint        | Purpose                                                                                                                                                                                                                                                                       |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/health/live`  | Liveness: the process is up and serving HTTP. Runs no dependency checks on purpose.                                                                                                                                                                                           |
+| `/health/ready` | Readiness: runs the health checks tagged `ready` — the `database` connectivity check, the `database-schema` up-to-date check (both registered only when a connection string is configured), the production config-presence gate, and the live dependency reachability probes. |
 
 Both return `200 OK` with the minimal JSON body `{"status":"Healthy"}`;
 readiness returns `503` with `{"status":"Unhealthy"}` once a registered
@@ -875,6 +875,20 @@ timeout (`HealthChecks:Readiness:ProbeTimeout`, default `2s`; CORE-RES-005) and
 fails closed — a probe that errors or times out is counted as not-ready, never as a
 false Ready — while `/health/live` stays shallow and unaffected
 (`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+Readiness also gates on the database **schema being up to date** (CORE-OBS-010).
+The schema is applied by a separate, run-to-completion migration step **before**
+the API rolls out — the host never migrates implicitly (CORE-OPS-001). The
+`database-schema` check asks EF Core for the migrations the build expects that the
+database lacks (`GetPendingMigrationsAsync`): if the migrate step was
+skipped/failed or the API image was rolled forward ahead of its schema, the host
+reports not-ready (`503`) and leaves the rotation instead of advertising `Healthy`
+and then `500`-ing on the first domain query, flipping back to ready once the
+schema is current. Connectivity proves the database _answers_; this proves it
+carries the schema this build expects. The read is bounded by the database command
+timeout (CORE-RES-004) and the short readiness timeout (CORE-RES-005) and fails
+closed, the response stays status-only so which migrations are missing never leaks,
+and `/health/live` stays shallow (a stale schema never restarts a live process).
 
 In a **Production** environment readiness additionally fails when a required
 dependency is unconfigured (CORE-OPS-005): persistence (`ConnectionStrings:Database`)
