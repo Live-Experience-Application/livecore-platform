@@ -388,21 +388,38 @@ no backplane configured — the same guard `api.replicaCount > 1` trips — and 
 sticky sessions (CORE-DEP-002) apply. Enable it only with the backplane and sticky sessions
 in place.
 
+**API and worker disruption budgets (CORE-DEP-012).** A **voluntary disruption** — a node
+drain (cordon + drain for a kernel patch) or a rolling node-pool upgrade — evicts pods through
+the **Eviction API**, which honours `PodDisruptionBudget`s. Without one, draining a node can
+evict **every** API replica at once; at `api.replicaCount: 2` that is a full API outage. The
+chart ships a `PodDisruptionBudget` for the API
+([`templates/api-pdb.yaml`](../deploy/helm/livecore/templates/api-pdb.yaml)) — and a symmetric
+one for the worker — capping how many pods a voluntary disruption may take down at once
+(default `maxUnavailable: 1`, overridable to a `minAvailable` floor). It is rendered **only
+when the component can actually run more than one pod** (`api.replicaCount > 1` **or**
+`autoscaling.enabled`; `worker.replicaCount > 1`): the **single-replica default renders none**,
+because a PDB over a lone pod would block its node from ever draining — the chart's "safe at
+`replicaCount: 1`" behaviour. Disable a component's PDB with `<component>.podDisruptionBudget.enabled: false`.
+
 **Tested.** `scripts/test-helm-chart.ps1` statically validates that the chart wires
 the pre-install/pre-upgrade migrate `Job`, the documented probes, the
 `ConfigMap`/`Secret` externalization, bakes no secret, **defaults to a single API
 replica with the multi-replica backplane guard**, **gates the sticky-session affinity
-annotations on a multi-replica API** and **ships an opt-in API HPA that targets the API
-`Deployment` and implies the backplane** (no helm/kubeconform needed), and the `helm-chart`
+annotations on a multi-replica API**, **ships an opt-in API HPA that targets the API
+`Deployment` and implies the backplane** and **ships an API `PodDisruptionBudget` gated on a
+multi-replica API** (no helm/kubeconform needed), and the `helm-chart`
 CI job (`.github/workflows/ci.yml`) runs `helm lint`, renders the chart with
 `helm template`, **schema-validates** every rendered manifest with `kubeconform`, and
 asserts the pre-install migrate `Job`, the probes, that no secret is hardcoded, that a
 multi-replica render **fails without a backplane and succeeds with one** (CORE-DEP-009),
 that **a multi-replica render with the `Ingress` enabled carries the cookie
 session-affinity annotations while the single-replica default carries none**
-(CORE-DEP-013), and that **the default render carries no HPA while enabling autoscaling
+(CORE-DEP-013), that **the default render carries no HPA while enabling autoscaling
 renders a schema-valid HPA targeting the API `Deployment` and trips the backplane guard
-without one** (CORE-DEP-011). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
+without one** (CORE-DEP-011), and that **the single-replica default renders no
+`PodDisruptionBudget` while a multi-replica API (or an enabled HPA) renders a schema-valid PDB
+that selects the API pods and keeps at least one available, overridable to a `minAvailable`
+floor** (CORE-DEP-012). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
 
 ## Operational requirements
 

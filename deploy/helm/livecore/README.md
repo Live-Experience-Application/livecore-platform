@@ -256,6 +256,49 @@ helm template livecore deploy/helm/livecore \
 Utilization targets need the API's `resources.requests` (shipped by default, see above) so the
 HPA has a denominator to scale against.
 
+### Voluntary-disruption budget (PodDisruptionBudget, CORE-DEP-012)
+
+A **voluntary disruption** — a node drain (cordon + drain for a kernel patch) or a rolling
+node-pool upgrade — evicts pods through the **Eviction API**, which honours
+`PodDisruptionBudget`s. Without one, draining a node can evict **every** API replica at once;
+at `api.replicaCount: 2` that is a full API outage. The chart ships a `PodDisruptionBudget`
+for the API ([`templates/api-pdb.yaml`](templates/api-pdb.yaml)) — and a **symmetric one for
+the worker** ([`templates/worker-pdb.yaml`](templates/worker-pdb.yaml)) — that caps how many
+pods a voluntary disruption may take down at once, so at least one keeps serving.
+
+It is rendered **only when the component can actually run more than one pod** — for the API
+`api.replicaCount > 1` **or** `autoscaling.enabled` (the HPA can scale it past one pod); for
+the worker `worker.replicaCount > 1`:
+
+- **The single-replica default renders no PDB.** A PDB over a lone pod would block its node
+  from ever draining (a stuck upgrade), so the single-replica path is deliberately left
+  without one — the chart is **safe at `replicaCount: 1`**.
+- **The default budget is `maxUnavailable: 1`** — a voluntary disruption takes at most one
+  pod at a time, so at least `replicaCount - 1` (`>= 1`) stay available.
+- **Overridable.** Set an absolute floor with `minAvailable` (a PDB carries exactly one of the
+  two, and `minAvailable` wins when both are set), or disable a component's PDB entirely.
+
+| Value                                       | Default | Meaning                                                              |
+| ------------------------------------------- | ------- | -------------------------------------------------------------------- |
+| `api.podDisruptionBudget.enabled`           | `true`  | Render the API PDB (only when the multi-pod condition holds).        |
+| `api.podDisruptionBudget.maxUnavailable`    | `1`     | Max API pods a voluntary disruption may take down at once.           |
+| `api.podDisruptionBudget.minAvailable`      | `null`  | Absolute floor; wins over `maxUnavailable` when set.                 |
+| `worker.podDisruptionBudget.*`              | as API  | Symmetric worker PDB, rendered when `worker.replicaCount > 1`.       |
+
+```bash
+# A two-replica API (the PDB renders automatically); keep at least two pods up instead:
+helm install livecore deploy/helm/livecore \
+  --set api.replicaCount=3 \
+  --set-string secrets.Realtime__Backplane__ConnectionString="valkey:6379" \
+  --set api.podDisruptionBudget.minAvailable=2
+
+# Opt out of the API PDB (e.g. an external controller manages disruptions):
+helm install livecore deploy/helm/livecore \
+  --set api.replicaCount=2 \
+  --set-string secrets.Realtime__Backplane__ConnectionString="valkey:6379" \
+  --set api.podDisruptionBudget.enabled=false
+```
+
 ## Validation
 
 The chart is linted and schema-validated in CI (the `helm-chart` job), with a
@@ -265,8 +308,10 @@ no-tooling static gate runnable locally:
 # Static validation (no helm/kubeconform needed): asserts the pre-install migrate
 # Job hook, the probes, the resource requests/limits ceiling, the ConfigMap/Secret
 # split, that no secret is hardcoded, that the multi-replica sticky-session affinity
-# annotations are gated on api.replicaCount > 1 (CORE-DEP-013), and that the optional
-# API HPA is opt-in, targets the API Deployment and implies the backplane (CORE-DEP-011).
+# annotations are gated on api.replicaCount > 1 (CORE-DEP-013), that the optional
+# API HPA is opt-in, targets the API Deployment and implies the backplane (CORE-DEP-011),
+# and that the API PodDisruptionBudget selects the API pods and is gated on a multi-replica
+# API so the single-replica default ships none (CORE-DEP-012).
 pwsh -NoProfile -File scripts/test-helm-chart.ps1
 
 # Full render + schema validation (needs helm + kubeconform):

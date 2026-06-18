@@ -64,6 +64,12 @@ utilization targets. Because it can run more than one API pod, the realtime back
 is REQUIRED — the chart enforced it at render time — and SignalR sticky sessions must be in place at the ingress
 (CORE-DEP-002 / CORE-DEP-013) so each client's negotiate + transport handshake stays pinned to one replica.
 {{- end }}
+{{- if and .Values.api.podDisruptionBudget.enabled (or (gt (int .Values.api.replicaCount) 1) .Values.autoscaling.enabled) }}
+
+Disruption budget (CORE-DEP-012): a PodDisruptionBudget protects the API from a voluntary disruption (node drain
+or upgrade) evicting every replica at once — at least one API pod keeps serving. The worker gets a symmetric PDB
+when worker.replicaCount is above 1. Tune or disable per component with <component>.podDisruptionBudget.
+{{- end }}
 {{- if .Values.ingress.enabled }}
 
 Ingress is enabled for:

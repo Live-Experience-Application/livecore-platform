@@ -302,6 +302,7 @@ function Test-LiveCoreHelmChart {
         'templates/migrate-job.yaml',
         'templates/api-deployment.yaml',
         'templates/api-hpa.yaml',
+        'templates/api-pdb.yaml',
         'templates/api-service.yaml',
         'templates/worker-deployment.yaml',
         'templates/configmap.yaml',
@@ -534,6 +535,46 @@ function Test-LiveCoreHelmChart {
         }
         if ($hpa -notmatch 'scaleTargetRef' -or $hpa -notmatch 'Deployment') {
             $findings.Add('AUTOSCALING: templates/api-hpa.yaml must target the API Deployment via scaleTargetRef (CORE-DEP-011)')
+        }
+    }
+
+    # 13. CORE-DEP-012: a PodDisruptionBudget for the API so a voluntary disruption (a
+    #     node drain or a cluster/node-pool upgrade) cannot evict every API replica at
+    #     once - at replicaCount 2 with no PDB a drain can take both pods down, a full
+    #     outage. Three invariants keep it correct and safe at the single-replica default:
+    #     (a) templates/api-pdb.yaml defines a PodDisruptionBudget that selects the API
+    #         pods and expresses a budget (maxUnavailable/minAvailable) keeping at least
+    #         one pod available; and
+    if ($Files.ContainsKey('templates/api-pdb.yaml')) {
+        $pdb = Get-LiveCoreHelmContentWithoutComments -Content $Files['templates/api-pdb.yaml']
+        if ($pdb -notmatch '(?m)^\s*kind:\s*PodDisruptionBudget\s*$') {
+            $findings.Add('PDB: templates/api-pdb.yaml must define a PodDisruptionBudget (CORE-DEP-012)')
+        }
+        if ($pdb -notmatch 'maxUnavailable' -and $pdb -notmatch 'minAvailable') {
+            $findings.Add('PDB: templates/api-pdb.yaml must express a disruption budget (maxUnavailable or minAvailable) so at least one API pod stays available (CORE-DEP-012)')
+        }
+        if ($pdb -notmatch 'selector') {
+            $findings.Add('PDB: templates/api-pdb.yaml must carry a selector that selects the API pods (CORE-DEP-012)')
+        }
+        if ($pdb -notmatch 'componentSelectorLabels' -and $pdb -notmatch 'app\.kubernetes\.io/component:\s*api') {
+            $findings.Add('PDB: templates/api-pdb.yaml must select the API pods (component "api") (CORE-DEP-012)')
+        }
+        # (b) it is gated on a multi-replica API (api.replicaCount > 1, and the autoscaler
+        #     which can also scale past one pod), so the single-replica default renders
+        #     none - a PDB over a lone pod blocks its node from draining ("safe at 1").
+        if ($pdb -notmatch 'replicaCount') {
+            $findings.Add('PDB: templates/api-pdb.yaml must gate the PodDisruptionBudget on a multi-replica API (api.replicaCount > 1 or autoscaling.enabled) so the single-replica default renders none and is safe at replicaCount 1 (CORE-DEP-012)')
+        }
+    }
+    # (c) values.yaml ships an api.podDisruptionBudget block (enabled, defaulting on, with
+    #     a maxUnavailable/minAvailable budget) so the PDB is configurable and overridable.
+    if ($Files.ContainsKey('values.yaml')) {
+        $valuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $Files['values.yaml']
+        if ($valuesNoComments -notmatch 'podDisruptionBudget') {
+            $findings.Add('PDB: values.yaml must ship an api.podDisruptionBudget block so the PodDisruptionBudget is configurable (CORE-DEP-012)')
+        }
+        if ($valuesNoComments -notmatch 'maxUnavailable' -and $valuesNoComments -notmatch 'minAvailable') {
+            $findings.Add('PDB: values.yaml podDisruptionBudget must default a maxUnavailable/minAvailable budget (CORE-DEP-012)')
         }
     }
 

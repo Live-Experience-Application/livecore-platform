@@ -61,7 +61,8 @@ function Get-FixtureHelmChart {
         [switch]$OmitBackplaneGuard,
         [switch]$OmitResources,
         [switch]$OmitStickyAffinity,
-        [switch]$OmitHpa
+        [switch]$OmitHpa,
+        [switch]$OmitPdb
     )
 
     $migrateHook = if ($OmitMigrateHook) {
@@ -121,6 +122,34 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: livecore-api
+{{- end }}
+'@
+    }
+
+    # The API PodDisruptionBudget (CORE-DEP-012): gated on a multi-replica API and selecting
+    # the API pods. The negative test (-OmitPdb) leaves the file present but defines the wrong
+    # kind, so the validator's "must define a PodDisruptionBudget" rule trips.
+    $pdbTemplate = if ($OmitPdb) {
+        @'
+{{- if or (gt (int .Values.api.replicaCount) 1) .Values.autoscaling.enabled }}
+apiVersion: v1
+kind: ConfigMap
+{{- end }}
+'@
+    }
+    else {
+        @'
+{{- if and .Values.api.podDisruptionBudget.enabled (or (gt (int .Values.api.replicaCount) 1) .Values.autoscaling.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: api
 {{- end }}
 '@
     }
@@ -220,6 +249,10 @@ $migrationsResources
 api:
   replicaCount: $apiReplicaCount
 $apiResources
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+    minAvailable: null
 autoscaling:
   enabled: false
   minReplicas: 2
@@ -268,6 +301,7 @@ $apiReadiness
 $resourcesTpl
 "@
         'templates/api-hpa.yaml'           = $hpaTemplate
+        'templates/api-pdb.yaml'           = $pdbTemplate
         'templates/api-service.yaml'       = "apiVersion: v1`nkind: Service`n"
         'templates/worker-deployment.yaml' = @"
 apiVersion: apps/v1
@@ -344,6 +378,12 @@ AssertTrue (-not $noHpa.IsValid) 'a chart whose api-hpa.yaml does not define a H
 AssertTrue (($noHpa.Findings -join "`n") -match 'AUTOSCALING') `
     'the rejection flags the missing optional API HorizontalPodAutoscaler'
 
+# --- Negative: dropping the API PodDisruptionBudget (CORE-DEP-012) is rejected. ---
+$noPdb = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitPdb)
+AssertTrue (-not $noPdb.IsValid) 'a chart whose api-pdb.yaml does not define a PodDisruptionBudget is rejected'
+AssertTrue (($noPdb.Findings -join "`n") -match 'PDB') `
+    'the rejection flags the missing API PodDisruptionBudget'
+
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
 $incomplete.Remove('templates/worker-deployment.yaml')
@@ -417,6 +457,20 @@ AssertTrue ($realHpa -match 'kind:\s*HorizontalPodAutoscaler' -and $realHpa -mat
     'the real chart ships an opt-in HorizontalPodAutoscaler targeting the API Deployment (CORE-DEP-011)'
 AssertTrue ($realHelpers -match 'autoscaling\.enabled') `
     'the real backplane guard ties autoscaling.enabled to the realtime backplane (CORE-DEP-009 implication, CORE-DEP-011)'
+
+# Spot-check the API PodDisruptionBudget on the real chart (CORE-DEP-012).
+$realPdb = $realFiles['templates/api-pdb.yaml']
+AssertTrue ($realPdb -match 'kind:\s*PodDisruptionBudget') `
+    'the real chart ships a PodDisruptionBudget for the API (CORE-DEP-012)'
+AssertTrue ($realPdb -match 'maxUnavailable' -or $realPdb -match 'minAvailable') `
+    'the real API PDB expresses a disruption budget keeping at least one API pod available (CORE-DEP-012)'
+AssertTrue ($realPdb -match 'replicaCount') `
+    'the real API PDB is gated on a multi-replica API so the single-replica default ships none (safe at replicaCount 1, CORE-DEP-012)'
+AssertTrue ($realPdb -match 'componentSelectorLabels' -or $realPdb -match 'app\.kubernetes\.io/component:\s*api') `
+    'the real API PDB selects the API pods (CORE-DEP-012)'
+$realValuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realFiles['values.yaml']
+AssertTrue ($realValuesNoComments -match 'podDisruptionBudget' -and ($realValuesNoComments -match 'maxUnavailable' -or $realValuesNoComments -match 'minAvailable')) `
+    'the real values.yaml ships an overridable podDisruptionBudget block defaulting a maxUnavailable/minAvailable budget (CORE-DEP-012)'
 
 if ($failures.Count -gt 0) {
     Write-Host ''

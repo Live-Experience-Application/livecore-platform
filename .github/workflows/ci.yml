@@ -947,6 +947,11 @@ jobs:
     #      the API Deployment (and the Deployment yields its static replicas to the HPA); and
     #      enabling autoscaling without a backplane trips the CORE-DEP-009 guard, since an HPA
     #      can scale the API past one pod.
+    #   7. DISRUPTION BUDGETS (CORE-DEP-012): the single-replica default renders no
+    #      PodDisruptionBudget (so a lone pod's node can still drain); a multi-replica API
+    #      (or an enabled HPA) renders a schema-valid PDB that selects the API pods and keeps
+    #      at least one available (maxUnavailable: 1), the budget is overridable to a
+    #      minAvailable floor and opt-out, and the worker gets a symmetric PDB.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -1187,6 +1192,76 @@ jobs:
             echo "UNEXPECTED: the API Deployment still sets a static replicas while autoscaling is enabled"; exit 1
           fi
           echo "OK: the autoscaling render schema-validates and the API Deployment yields replica control to the HPA"
+
+      - name: Assert the PodDisruptionBudget for the API and worker (CORE-DEP-012)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+          backplane='secrets.Realtime__Backplane__ConnectionString=redis://valkey:6379'
+
+          # CORE-DEP-012: a voluntary disruption (a node drain / cluster upgrade) must not be
+          # able to evict ALL API replicas at once - with replicaCount 2 and no PDB a drain can
+          # take both pods down, a full outage. The chart ships a PodDisruptionBudget for the API
+          # (and a symmetric one for the worker), rendered only when the component can actually run
+          # more than one pod, so the single-replica default is never blocked from draining
+          # ("safe at replicaCount 1"). The grep patterns anchor to the start of a rendered line so
+          # the templates' leading comment text can never be mistaken for rendered content.
+
+          # (a) The DEFAULT install (single API + single worker) renders NO PodDisruptionBudget -
+          #     a PDB over a lone pod would block its node from ever draining.
+          helm template livecore "$chart" > pdb-default.yaml
+          if grep -Eq '^[[:space:]]*kind:[[:space:]]*PodDisruptionBudget[[:space:]]*$' pdb-default.yaml; then
+            echo "UNEXPECTED: the single-replica default render contains a PodDisruptionBudget"; cat pdb-default.yaml; exit 1
+          fi
+          echo "OK: the single-replica default renders no PDB (safe at replicaCount 1)"
+
+          # (b) A multi-replica API (with the backplane) renders a schema-valid PDB that SELECTS
+          #     the API pods and KEEPS AT LEAST ONE AVAILABLE (the default maxUnavailable: 1, so
+          #     >= 1 of 2 stays up under a voluntary disruption).
+          helm template livecore "$chart" --set api.replicaCount=2 --set-string "$backplane" --show-only templates/api-pdb.yaml > pdb-api.yaml
+          kubeconform -strict -summary -schema-location default pdb-api.yaml
+          grep -Eq '^[[:space:]]*kind:[[:space:]]*PodDisruptionBudget[[:space:]]*$' pdb-api.yaml \
+            || { echo "MISSING: the multi-replica API render contains no PodDisruptionBudget"; cat pdb-api.yaml; exit 1; }
+          grep -Eq '^[[:space:]]*app\.kubernetes\.io/component:[[:space:]]*api[[:space:]]*$' pdb-api.yaml \
+            || { echo "MISSING: the API PDB does not select the API pods (component: api)"; cat pdb-api.yaml; exit 1; }
+          grep -Eq '^[[:space:]]*maxUnavailable:[[:space:]]*1[[:space:]]*$' pdb-api.yaml \
+            || { echo "MISSING: the API PDB does not keep at least one pod available (maxUnavailable: 1)"; cat pdb-api.yaml; exit 1; }
+          echo "OK: the multi-replica API PDB selects the API pods and keeps at least one available"
+
+          # (c) Enabling autoscaling (an HPA can scale the API past one pod) also renders the API PDB.
+          helm template livecore "$chart" --set autoscaling.enabled=true --set-string "$backplane" --show-only templates/api-pdb.yaml > pdb-hpa.yaml
+          kubeconform -strict -summary -schema-location default pdb-hpa.yaml
+          grep -Eq '^[[:space:]]*kind:[[:space:]]*PodDisruptionBudget[[:space:]]*$' pdb-hpa.yaml \
+            || { echo "MISSING: enabling autoscaling did not render the API PDB"; cat pdb-hpa.yaml; exit 1; }
+          echo "OK: enabling autoscaling renders the API PDB"
+
+          # (d) The budget is OVERRIDABLE: setting minAvailable renders it INSTEAD of maxUnavailable
+          #     (a PDB carries exactly one of the two).
+          helm template livecore "$chart" --set api.replicaCount=3 --set-string "$backplane" --set api.podDisruptionBudget.minAvailable=2 --show-only templates/api-pdb.yaml > pdb-override.yaml
+          kubeconform -strict -summary -schema-location default pdb-override.yaml
+          grep -Eq '^[[:space:]]*minAvailable:[[:space:]]*2[[:space:]]*$' pdb-override.yaml \
+            || { echo "OVERRIDE: api.podDisruptionBudget.minAvailable override did not render"; cat pdb-override.yaml; exit 1; }
+          if grep -Eq '^[[:space:]]*maxUnavailable:' pdb-override.yaml; then
+            echo "OVERRIDE: minAvailable was set but maxUnavailable still rendered (a PDB allows only one)"; cat pdb-override.yaml; exit 1
+          fi
+          echo "OK: the API PDB budget is overridable (minAvailable wins over the maxUnavailable default)"
+
+          # (e) The PDB is opt-out: enabled=false renders none even when multi-replica.
+          helm template livecore "$chart" --set api.replicaCount=2 --set-string "$backplane" --set api.podDisruptionBudget.enabled=false > pdb-optout.yaml
+          if grep -Eq '^[[:space:]]*kind:[[:space:]]*PodDisruptionBudget[[:space:]]*$' pdb-optout.yaml; then
+            echo "UNEXPECTED: api.podDisruptionBudget.enabled=false still rendered a PDB"; cat pdb-optout.yaml; exit 1
+          fi
+          echo "OK: api.podDisruptionBudget.enabled=false opts out of the API PDB"
+
+          # (f) The worker PDB is symmetric: a multi-replica worker renders a schema-valid PDB that
+          #     selects the worker pods; the single-worker default (asserted in (a)) renders none.
+          helm template livecore "$chart" --set worker.replicaCount=2 --show-only templates/worker-pdb.yaml > pdb-worker.yaml
+          kubeconform -strict -summary -schema-location default pdb-worker.yaml
+          grep -Eq '^[[:space:]]*kind:[[:space:]]*PodDisruptionBudget[[:space:]]*$' pdb-worker.yaml \
+            || { echo "MISSING: the multi-replica worker render contains no PodDisruptionBudget"; cat pdb-worker.yaml; exit 1; }
+          grep -Eq '^[[:space:]]*app\.kubernetes\.io/component:[[:space:]]*worker[[:space:]]*$' pdb-worker.yaml \
+            || { echo "MISSING: the worker PDB does not select the worker pods (component: worker)"; cat pdb-worker.yaml; exit 1; }
+          echo "OK: a multi-replica worker renders a PDB selecting the worker pods"
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)

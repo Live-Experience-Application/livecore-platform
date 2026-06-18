@@ -1,0 +1,40 @@
+{{- /*
+PodDisruptionBudget for the API Deployment (CORE-DEP-012). A voluntary disruption — a
+node drain (cordon + drain for a kernel patch) or a rolling node-pool upgrade — evicts
+pods through the Eviction API, which honours PodDisruptionBudgets. WITHOUT one, draining
+a node can evict EVERY API replica at once; at api.replicaCount 2 that is a full API
+outage (the SRE finding behind this story). This PDB caps how many API pods a voluntary
+disruption may take down at the same time, so at least one keeps serving.
+
+Rendered ONLY when the API can actually run more than one pod — api.replicaCount > 1 OR
+autoscaling.enabled (the HorizontalPodAutoscaler, CORE-DEP-011, can scale the Deployment
+past one pod). At the single-replica default it renders NOTHING: a PDB over a lone pod
+would block its node from ever draining (a stuck upgrade), so the single-replica path is
+deliberately left without one — the chart's "safe at replicaCount 1" guarantee. The
+budget defaults to maxUnavailable: 1 and is overridable (api.podDisruptionBudget); set
+api.podDisruptionBudget.enabled=false to ship none even when multi-replica.
+*/ -}}
+{{- if .Values.api.podDisruptionBudget.enabled }}
+{{- if or (gt (int .Values.api.replicaCount) 1) .Values.autoscaling.enabled }}
+{{- $pdb := .Values.api.podDisruptionBudget }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "livecore.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  # A PDB carries EXACTLY ONE of minAvailable / maxUnavailable. minAvailable wins when set
+  # (an absolute floor, e.g. minAvailable: 2); otherwise the maxUnavailable budget renders.
+  {{- if $pdb.minAvailable }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "livecore.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+{{- end }}
+{{- end }}

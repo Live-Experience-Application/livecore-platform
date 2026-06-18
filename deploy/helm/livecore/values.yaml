@@ -172,6 +172,24 @@ api:
   affinity: {}
   # Keep at or above the host graceful-shutdown drain window (CORE-DEP-002).
   terminationGracePeriodSeconds: 30
+  # PodDisruptionBudget for the API (CORE-DEP-012). A voluntary disruption — a node drain
+  # (cordon/drain for a kernel patch) or a rolling node-pool upgrade — evicts pods through
+  # the Eviction API, which honours PodDisruptionBudgets. Without one, draining a node can
+  # evict EVERY API replica at once; at replicaCount 2 that is a full API outage. The PDB
+  # caps how many API pods a voluntary disruption may take down at once so at least one
+  # keeps serving. It is rendered ONLY when the API can run more than one pod
+  # (api.replicaCount > 1 OR autoscaling.enabled, CORE-DEP-011): at the single-replica
+  # default it renders NOTHING, because a PDB over a lone pod would block its node from
+  # ever draining — the chart's "safe at replicaCount 1" behaviour (templates/api-pdb.yaml).
+  podDisruptionBudget:
+    # Render the PDB (when the multi-pod condition above holds). Set to false to ship none.
+    enabled: true
+    # The budget. The default maxUnavailable: 1 lets a voluntary disruption take at most
+    # one API pod at a time, so at least replicaCount-1 (>= 1) stay available. Set
+    # minAvailable instead for an absolute floor (e.g. minAvailable: 2); a PDB carries
+    # exactly one of the two, and minAvailable wins when both are set.
+    maxUnavailable: 1
+    minAvailable: null
   service:
     type: ClusterIP
     port: 80
@@ -237,6 +255,15 @@ worker:
   tolerations: []
   affinity: {}
   terminationGracePeriodSeconds: 30
+  # PodDisruptionBudget for the worker (CORE-DEP-012), symmetric with the API's. Rendered
+  # ONLY when worker.replicaCount > 1 (the worker has no autoscaler); the single-worker
+  # default renders nothing, so a node drain of the lone worker is never blocked. A
+  # voluntary disruption then takes at most maxUnavailable worker pods down at once. Set
+  # minAvailable for an absolute floor, or enabled: false to ship none.
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+    minAvailable: null
 
 ingress:
   enabled: false

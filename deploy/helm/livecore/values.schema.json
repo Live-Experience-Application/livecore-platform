@@ -70,6 +70,16 @@
         "readinessProbe": { "type": "object" },
         "resources": { "type": "object" },
         "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "podDisruptionBudget": {
+          "type": "object",
+          "description": "PodDisruptionBudget for the API (CORE-DEP-012). Rendered only when the API can run more than one pod (replicaCount > 1 or autoscaling.enabled); safe at replicaCount 1.",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxUnavailable": { "type": ["integer", "string", "null"] },
+            "minAvailable": { "type": ["integer", "string", "null"] }
+          }
+        },
         "service": {
           "type": "object",
           "additionalProperties": true,
@@ -100,7 +110,17 @@
         "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "livenessProbe": { "type": "object" },
         "resources": { "type": "object" },
-        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 }
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "podDisruptionBudget": {
+          "type": "object",
+          "description": "PodDisruptionBudget for the worker (CORE-DEP-012). Rendered only when worker.replicaCount > 1; safe at replicaCount 1.",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxUnavailable": { "type": ["integer", "string", "null"] },
+            "minAvailable": { "type": ["integer", "string", "null"] }
+          }
+        }
       }
     },
     "ingress": {
