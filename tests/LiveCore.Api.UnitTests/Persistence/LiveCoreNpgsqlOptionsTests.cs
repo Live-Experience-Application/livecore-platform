@@ -19,7 +19,9 @@ namespace LiveCore.Api.UnitTests.Persistence;
 ///   not surface to the caller as an error;</item>
 ///   <item>the configured client-side <c>CommandTimeout</c> is applied (the default through <c>Configure</c>, an
 ///   explicit value through <see cref="LiveCoreNpgsqlOptions.UseLiveCoreNpgsql"/>), and the runtime registration
-///   wires the server-side <c>statement_timeout</c> interceptor when a positive statement timeout is configured.</item>
+///   wires the server-side <c>statement_timeout</c> interceptor when a positive statement timeout is configured;</item>
+///   <item>the bounded <c>Maximum Pool Size</c> is applied to the runtime connection when the connection string
+///   sets none, and an explicit operator-supplied pool cap is honored unchanged (CORE-DEP-014).</item>
 /// </list>
 ///
 /// All run fully offline — building the model and the execution strategy never opens a connection — so they
@@ -158,6 +160,49 @@ public class LiveCoreNpgsqlOptionsTests
         var options = BuildRuntimeOptions(tuning);
 
         Assert.DoesNotContain(RegisteredInterceptors(options), i => i is StatementTimeoutConnectionInterceptor);
+    }
+
+    [Fact]
+    public void WithBoundedMaxPoolSize_applies_the_bound_when_the_connection_string_omits_it()
+    {
+        // CORE-DEP-014: a connection string with no pool cap gets the bounded value applied, so the process can
+        // never silently open the Npgsql default of 100 connections.
+        var resolved = LiveCoreNpgsqlOptions.WithBoundedMaxPoolSize(
+            "Host=localhost;Database=livecore-pool-check", maxPoolSize: 25);
+
+        Assert.Equal(25, new NpgsqlConnectionStringBuilder(resolved).MaxPoolSize);
+    }
+
+    [Theory]
+    [InlineData("Host=localhost;Database=db;Maximum Pool Size=40")]
+    [InlineData("Host=localhost;Database=db;MaxPoolSize=40")]
+    public void WithBoundedMaxPoolSize_honors_an_explicit_pool_size_in_the_connection_string(string connectionString)
+    {
+        // The resolved pool size HONORS the configured Maximum Pool Size: an explicit operator-supplied cap (either
+        // recognised Npgsql synonym, the documented compose api/worker split) wins over the bounded default.
+        var resolved = LiveCoreNpgsqlOptions.WithBoundedMaxPoolSize(connectionString, maxPoolSize: 25);
+
+        Assert.Equal(40, new NpgsqlConnectionStringBuilder(resolved).MaxPoolSize);
+    }
+
+    [Fact]
+    public void WithBoundedMaxPoolSize_rejects_a_non_positive_bound()
+        => Assert.Throws<ArgumentOutOfRangeException>(
+            () => LiveCoreNpgsqlOptions.WithBoundedMaxPoolSize("Host=localhost;Database=db", maxPoolSize: 0));
+
+    [Fact]
+    public void UseLiveCoreNpgsql_applies_the_configured_max_pool_size_to_the_context_connection()
+    {
+        // End-to-end (offline): a runtime context built from a connection string with no pool cap carries the
+        // configured Maximum Pool Size, so the bound reaches every API and worker DbContext (CORE-DEP-014).
+        var tuning = new LiveCorePersistenceOptions(TimeSpan.FromSeconds(7), TimeSpan.FromSeconds(9), maxPoolSize: 17);
+        var builder = new DbContextOptionsBuilder<LiveCoreDbContext>();
+        builder.UseLiveCoreNpgsql("Host=localhost;Database=livecore-pool-check", tuning);
+
+        using var context = new LiveCoreDbContext(builder.Options);
+
+        var resolved = new NpgsqlConnectionStringBuilder(context.Database.GetConnectionString());
+        Assert.Equal(17, resolved.MaxPoolSize);
     }
 
     // The EF Core interceptors live on the (internal) core options extension; read them through the PUBLIC

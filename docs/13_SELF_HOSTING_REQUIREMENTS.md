@@ -232,11 +232,13 @@ suffixes (`512M`, `1024M`, `1g`). Two sizing notes:
   limits are caps, not reservations, so their sum may legitimately exceed the host's
   physical cores — the kernel time-shares — while each cap stops any single process
   from monopolizing the box.
-- **The DB limit pairs with the connection-pool sizing (CORE-RES-004).** PostgreSQL's
-  memory and `max_connections` must fit the container limit; size `Maximum Pool Size`
-  in `ConnectionStrings__Database` so all API and worker replicas together stay within
-  the database's `max_connections` (see "Database connection tuning"). Container CPU/
-  memory limits and the connection-pool cap are complementary controls.
+- **The DB limit pairs with the connection-pool sizing (CORE-RES-004 / CORE-DEP-014).**
+  PostgreSQL's memory and `max_connections` must fit the container limit; the per-process
+  pool is bounded by `Persistence:MaxPoolSize` (default `20`, or an explicit `Maximum Pool
+  Size` in `ConnectionStrings__Database`) so all API and worker replicas together stay
+  within the database's `max_connections` (see "Database connection tuning" and "The
+  connection budget across replicas"). Container CPU/memory limits and the connection-pool
+  cap are complementary controls.
 - **Kubernetes (Helm) overrides (CORE-DEP-010).** On the Helm path the same numbers
   ship as `resources` on every workload: the **minimum** column is
   `resources.requests` (reserved for scheduling) and the **recommended** column is
@@ -280,8 +282,10 @@ moment you run **more than one API instance**, two additional controls become
   "Multi-instance SignalR requires sticky sessions / ARR affinity"). The backplane and
   affinity solve **different** problems and are both required at scale.
 
-Also re-check the **connection-pool sizing** (CORE-RES-004) when adding replicas: more
-API/worker instances multiply the pools that share the database's `max_connections`.
+Also re-check the **connection-pool sizing** (CORE-RES-004 / CORE-DEP-014) when adding
+replicas: more API/worker instances multiply the pools that share the database's
+`max_connections`, so keep `(replicas × Maximum Pool Size) ≤ max_connections` (see "The
+connection budget across replicas").
 The worker is a **singleton by default** (CORE-RES-003 covers multi-replica worker
 safety); scale the API for request/realtime load, not the worker, unless that story's
 guidance applies.
@@ -704,7 +708,7 @@ runtime application role, so the REVOKE on the application role does not interfe
 with a tenant-teardown cascade. Cryptographically **signing** or externally **anchoring** the chain (to defend
 against a fully privileged actor) is a documented follow-up beyond Core's scope.
 
-## Database connection tuning: command/statement timeouts and pool sizing (CORE-RES-004)
+## Database connection tuning: command/statement timeouts and pool sizing (CORE-RES-004, CORE-DEP-014)
 
 A single pathological query must have a **ceiling**. Before this, the shared Npgsql configuration
 (`Persistence/LiveCoreNpgsqlOptions.cs`) turned on the retrying execution strategy (CORE-CONC-003) but set **no**
@@ -725,13 +729,21 @@ all configurable with safe defaults, **without changing** the retry behaviour:
   `TimeSpan`); set it to `00:00:00` to disable the server-side ceiling (the client `CommandTimeout` still applies).
   It is applied **only to the runtime contexts**, deliberately **not** to the design-time/migrations context, so a
   long, controlled schema migration (a large index build) is not bounded by the runtime query ceiling.
-- **`Maximum Pool Size` (connection pool sizing)** — this is **production connection guidance** set in the
-  **connection string**, not a Core code default, because the right value depends on the database's
-  `max_connections` and how many API/worker replicas share it. Size it so **all** API and worker replicas together
-  stay within `max_connections` (PostgreSQL's default is `100`). Example:
-  `Host=…;Username=…;Password=…;Maximum Pool Size=40`. Connection pooling is on by default (`Pooling=true`); do not
-  disable it. The bundled compose manifest shows a tuned split (api `40`, worker `20`); a single-VPS deployment with
-  one API and one worker stays well under the default `max_connections`.
+- **`Maximum Pool Size` (connection pool sizing, bounded by default — CORE-DEP-014)** — the connection pool's
+  maximum size. Npgsql defaults an **unset** pool to **100 connections per process**, so without a cap `N` API/worker
+  replicas could together demand far more than `max_connections` (PostgreSQL's default is `100`) and exhaust it. This
+  was previously **doc-enforced only** (guidance to set `Maximum Pool Size` in the connection string). Core now
+  applies a **bounded default of `20`** to every runtime context (the API host and every worker job) so a process
+  can never silently open the Npgsql default. Resolution precedence (highest first):
+  1. an explicit **`Maximum Pool Size=<N>` in the connection string** always wins — the per-process tuning the
+     bundled compose manifest uses (a tuned split: api `40`, worker `20`), e.g.
+     `Host=…;Username=…;Password=…;Maximum Pool Size=40`;
+  2. otherwise the **`Persistence:MaxPoolSize`** config key (`Persistence__MaxPoolSize`, an integer) — the path the
+     Helm chart uses, surfaced as the chart value `config.Persistence__MaxPoolSize`;
+  3. otherwise the **bounded code default of `20`**.
+
+  Connection pooling stays on (`Pooling=true`); do not disable it. Whichever path supplies the value, **keep the
+  connection budget below** at or under `max_connections`.
 
 Together these mean a stuck query is bounded at the client **and** the server, retry can only ever amplify a
 **bounded** quantity (at most `MaxRetryCount` × the per-command ceiling, not an unbounded run), and the pool cannot
@@ -740,6 +752,35 @@ a transient failure is still retried, and a non-transient one (including a `stat
 fails immediately. The timeouts carry no secret (only timespans, threat T7); the only credential, the connection
 string, is supplied from configuration as before. This pairs with the DbContext pooling and authz-lookup caching
 of CORE-PERF-003.
+
+### The connection budget across replicas (CORE-DEP-014)
+
+The bound above protects a **single process**. Across a multi-replica deployment the **operator** owns the
+arithmetic: every API and worker replica opens its own pool, and **all of them share the database's
+`max_connections`**. The rule, which must hold:
+
+```text
+(api replicas + worker replicas) × Maximum Pool Size  ≤  max_connections
+```
+
+leaving headroom for PostgreSQL's `superuser_reserved_connections` (default `3`) and the **transient** migrations
+runner (a one-shot Job/Compose service that opens a connection only at deploy time).
+
+**Worked example (the shipped defaults).** With `Maximum Pool Size = 20`, one API replica and one worker replica:
+`(1 + 1) × 20 = 40` connections — well under the default `max_connections` of `100`, with ample headroom. Scaling
+the API to **four** replicas would need `(4 + 1) × 20 = 100` = `max_connections` with **no** headroom left for the
+reserved or migrate connections, so you must either **lower `Maximum Pool Size`** (e.g. `15` → `(4 + 1) × 15 = 75`)
+or **raise the database's `max_connections`** (and its memory; see CORE-DEP-007). The worker is a singleton by
+default (CORE-RES-003) and you scale the **API** for load (CORE-OPS-007), so the API replica count is the term that
+grows.
+
+**Scaling replicas cannot silently exhaust connections.** Raising `api.replicaCount` (or enabling the API
+autoscaler, CORE-DEP-011) **multiplies** the pools sharing `max_connections`. The Helm chart applies the bounded
+`Persistence__MaxPoolSize` to both the API and the worker through the shared `ConfigMap`, so a default install is
+bounded out of the box; but the chart **cannot** know your database's `max_connections`, so **whenever you scale
+the API you must re-check this budget** and lower `Persistence__MaxPoolSize` or raise `max_connections` accordingly.
+This is the same re-check the horizontal-scaling guidance calls out under "When to add API replicas and the
+realtime backplane" (CORE-OPS-007) and the container-sizing note (CORE-DEP-007).
 
 ### DbContext pooling and the authorization-lookup cache (CORE-PERF-003)
 
@@ -758,7 +799,8 @@ set `AuthorizationCache:Enabled=false` to send every authorization lookup straig
 | ------------------------------- | ------------------------------- | ---------- | ----------- | ----------------------------------------------------------------------- |
 | `Persistence:CommandTimeout`    | `Persistence__CommandTimeout`   | `00:00:30` | API, worker | Client-side per-command ceiling (EF Core/Npgsql `CommandTimeout`).      |
 | `Persistence:StatementTimeout`  | `Persistence__StatementTimeout` | `00:00:30` | API, worker | Server-side `statement_timeout`; `00:00:00` disables the server ceiling.|
-| `Maximum Pool Size` (in `ConnectionStrings:Database`) | within `ConnectionStrings__Database` | Npgsql default (`100`) | API, worker | Connection-pool cap; tune to the database `max_connections` across replicas. |
+| `Persistence:MaxPoolSize`       | `Persistence__MaxPoolSize`      | `20`       | API, worker | Bounded connection-pool maximum applied when the connection string sets none (CORE-DEP-014); keep `(replicas × pool size) ≤ max_connections`. |
+| `Maximum Pool Size` (in `ConnectionStrings:Database`) | within `ConnectionStrings__Database` | overrides `Persistence:MaxPoolSize` | API, worker | Explicit per-process connection-pool cap; **wins** over `Persistence:MaxPoolSize` (the compose api/worker split). |
 | `AuthorizationCache:Enabled`    | `AuthorizationCache__Enabled`   | `true`     | API         | Per-request authorization-lookup cache toggle (CORE-PERF-003); `false` forces every lookup to the database. |
 | `AuthorizationCache:Ttl`        | `AuthorizationCache__Ttl`       | `00:00:10` | API         | Absolute TTL of a cached authorization lookup; invalidation on membership change is the primary correctness mechanism. |
 
@@ -1482,9 +1524,10 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 
 | Setting (config key)                | Env var                            | Secret | Required                | Consumer    | Fail-closed default when unset                          |
 | ----------------------------------- | ---------------------------------- | :----: | ----------------------- | ----------- | ------------------------------------------------------- |
-| `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod (set a tuned `Maximum Pool Size`, CORE-RES-004) |
+| `ConnectionStrings:Database`        | `ConnectionStrings__Database`      |  yes   | production              | API, worker | No persistence; domain routes `503`; not-ready in prod (pool bounded by `Persistence:MaxPoolSize`, or an explicit `Maximum Pool Size` here, CORE-DEP-014) |
 | `Persistence:CommandTimeout`        | `Persistence__CommandTimeout`      |   no   | no (tunable)            | API, worker | `00:00:30` client-side per-command ceiling (CORE-RES-004) |
 | `Persistence:StatementTimeout`      | `Persistence__StatementTimeout`    |   no   | no (tunable)            | API, worker | `00:00:30` server-side `statement_timeout`; `00:00:00` disables it (CORE-RES-004) |
+| `Persistence:MaxPoolSize`           | `Persistence__MaxPoolSize`         |   no   | re-check when scaling   | API, worker | `20` bounded connection pool per process; keep `(replicas × pool) ≤ max_connections` (CORE-DEP-014) |
 | `AuthorizationCache:Enabled`        | `AuthorizationCache__Enabled`      |   no   | no (tunable)            | API         | `true`; per-request authz-lookup cache on, invalidated on membership change (CORE-PERF-003) |
 | `AuthorizationCache:Ttl`            | `AuthorizationCache__Ttl`          |   no   | no (tunable)            | API         | `00:00:10` absolute TTL of a cached authz lookup (CORE-PERF-003) |
 | `Authentication:Oidc:Authority`     | `Authentication__Oidc__Authority`  |   no   | production              | API         | Auth disabled; authenticated routes `401`; not-ready    |

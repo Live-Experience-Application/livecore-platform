@@ -136,6 +136,26 @@ own and projects yours instead.
 Add any other documented key (`.env.example`) under `config:` / `secrets:`; the
 templates render whatever keys you supply.
 
+### Database connection pool budget (CORE-DEP-014)
+
+`config.Persistence__MaxPoolSize` (default `20`) bounds the Npgsql connection pool
+**per process**, projected to both the API and the worker via the ConfigMap. Npgsql
+otherwise defaults an unset pool to **100 connections per process**, so without this
+cap scaling `api.replicaCount` (or enabling `autoscaling`) could silently exhaust
+PostgreSQL's `max_connections` (default `100`). Keep the budget:
+
+```text
+(api.replicaCount + worker.replicaCount) × Persistence__MaxPoolSize  ≤  max_connections
+```
+
+with headroom for the transient migrate Job and PostgreSQL's reserved connections.
+The shipped defaults — `(1 + 1) × 20 = 40` — sit well under `100`. **When you raise
+`api.replicaCount`, re-check this budget**: lower `config.Persistence__MaxPoolSize`
+(e.g. `--set config.Persistence__MaxPoolSize=15`) or raise the database's
+`max_connections`. An explicit `Maximum Pool Size=<N>` inside
+`secrets.ConnectionStrings__Database` overrides this key. See `docs/13`
+("Database connection tuning" / "The connection budget across replicas").
+
 ## Edge: TLS, ingress and scale-out
 
 - Core does **not** terminate TLS (CORE-OPS-003): terminate it at the `Ingress`

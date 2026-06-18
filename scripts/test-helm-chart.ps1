@@ -472,6 +472,16 @@ $realValuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realFil
 AssertTrue ($realValuesNoComments -match 'podDisruptionBudget' -and ($realValuesNoComments -match 'maxUnavailable' -or $realValuesNoComments -match 'minAvailable')) `
     'the real values.yaml ships an overridable podDisruptionBudget block defaulting a maxUnavailable/minAvailable budget (CORE-DEP-012)'
 
+# Spot-check the bounded DB connection-pool sizing and the connection-budget relationship (CORE-DEP-014). A
+# bounded Maximum Pool Size must be surfaced as a chart value, and the (replicas x pool-size) <= max_connections
+# budget documented, so scaling api.replicaCount via the chart cannot silently exhaust PostgreSQL connections.
+$realValuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realFiles['values.yaml']
+AssertTrue ($realValuesNoComments -match 'Persistence__MaxPoolSize') `
+    'the real values.yaml surfaces a bounded Persistence__MaxPoolSize connection-pool value (CORE-DEP-014)'
+$realValuesRaw = $realFiles['values.yaml']
+AssertTrue ($realValuesRaw -match 'max_connections' -and $realValuesRaw -match 'replicaCount') `
+    'the real values.yaml documents the (replicas x pool-size) <= max_connections connection budget so scaling cannot silently exhaust PostgreSQL connections (CORE-DEP-014)'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Helm chart tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red

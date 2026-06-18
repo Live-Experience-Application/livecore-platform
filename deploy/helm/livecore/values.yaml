@@ -68,6 +68,23 @@ config:
   Assets__Storage__Endpoint: ""
   # The worker's metrics/health listen URL (GET /metrics + GET /health/live, CORE-DR-003).
   Worker__Metrics__Url: "http://0.0.0.0:9464"
+  # Bounded database connection pool per process (Npgsql Maximum Pool Size, CORE-DEP-014).
+  # Npgsql defaults an unset pool to 100 connections PER PROCESS, so without a cap scaling
+  # api.replicaCount (or enabling autoscaling) could silently exhaust PostgreSQL's
+  # max_connections (default 100). This value applies to BOTH the API and the worker (the
+  # shared ConfigMap), so keep the CONNECTION BUDGET below at or under max_connections:
+  #
+  #   (api.replicaCount + worker.replicaCount) * Persistence__MaxPoolSize  <=  max_connections
+  #
+  # Worked example (the shipped defaults): (1 api + 1 worker) * 20 = 40 connections, well
+  # under the default max_connections of 100. Scaling the API to 4 replicas would need
+  # (4 + 1) * 20 = 100 = max_connections with NO headroom for the transient migrate Job or
+  # PostgreSQL's reserved connections — so when you raise api.replicaCount, LOWER this value
+  # (e.g. 15) or raise the database's max_connections. An explicit "Maximum Pool Size=<N>"
+  # in ConnectionStrings__Database always wins over this key. See docs/13
+  # ("Database connection tuning"). Core also applies this bounded default in code, so the
+  # pool is bounded even if this key is removed.
+  Persistence__MaxPoolSize: "20"
 
 # Secret configuration -> Secret (type Opaque, stringData), projected via envFrom.
 # EMPTY BY DEFAULT — no secret is committed in the chart. Supply at install time or
@@ -77,8 +94,9 @@ secrets:
   # below. When set, the chart renders NO Secret of its own.
   existingSecret: ""
   # [secret][prod-required] PostgreSQL connection string (carries the DB password).
-  # The migrations runner, the API and the worker all read this same key. Size the
-  # pool with "Maximum Pool Size=<N>" across replicas (CORE-RES-004).
+  # The migrations runner, the API and the worker all read this same key. The connection
+  # pool is bounded by config.Persistence__MaxPoolSize across replicas (CORE-DEP-014); an
+  # explicit "Maximum Pool Size=<N>" here overrides it (CORE-RES-004).
   ConnectionStrings__Database: ""
   # [secret] S3-compatible object-storage credentials (asset binaries).
   Assets__Storage__AccessKeyId: ""

@@ -1465,8 +1465,10 @@ safe defaults and **without changing** the retry behaviour:
   **30 s**, tuned with `Persistence:StatementTimeout` (`00:00:00` disables it). It is applied to the
   runtime contexts only, **not** the design-time/migrations context, so a long controlled migration
   is not bounded by the runtime ceiling;
-- a tuned **`Maximum Pool Size`** in the connection string — production connection guidance (not a code
-  default), sized so all API and worker replicas stay within the database `max_connections`.
+- a bounded **`Maximum Pool Size`** (CORE-DEP-014) — Core applies a **code default of `20`** per process
+  (tunable with `Persistence:MaxPoolSize`, surfaced as a Helm value; an explicit `Maximum Pool Size` in the
+  connection string wins) so N replicas cannot silently exceed the database `max_connections`. Keep
+  `(replicas × Maximum Pool Size) ≤ max_connections`; see the worked connection-budget example in `docs/13`.
 
 So a stuck query is bounded at the client and the server, retry can only ever amplify a **bounded**
 quantity, and the existing retry-resilience behaviour is preserved (a non-transient `statement_timeout`

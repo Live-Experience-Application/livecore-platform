@@ -173,8 +173,9 @@ single authorization decision:
   REUSED across requests rather than allocating (and tearing down) one per request. The context is poolable
   as-is — a single `DbContextOptions` constructor, no per-request mutable state — and pooling changes only
   allocation/throughput, never query results or the resilience, timeout and audit-interceptor posture
-  (CORE-CONC-003 / CORE-RES-004 / CORE-SEC-004). The connection-pool MAXIMUM stays in the connection string
-  (`Maximum Pool Size`), supplied by the deployment (docs/13_SELF_HOSTING_REQUIREMENTS.md).
+  (CORE-CONC-003 / CORE-RES-004 / CORE-SEC-004). The connection-pool MAXIMUM is bounded by default
+  (`Persistence:MaxPoolSize`, or an explicit `Maximum Pool Size` in the connection string) so replicas cannot
+  exhaust PostgreSQL's `max_connections` (CORE-DEP-014, docs/13_SELF_HOSTING_REQUIREMENTS.md).
 - **A short-TTL authorization-lookup cache.** The tenant context resolver runs three stable lookups
   (organization-by-slug, user-profile-by-OIDC, organization-membership) before the endpoint, and many
   endpoints then re-query the caller's workspace membership/role; at a high request rate the SAME principal

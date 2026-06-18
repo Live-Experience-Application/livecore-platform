@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
+using System.Data.Common;
 using LiveCore.Api.Audit;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Infrastructure;
 
 namespace LiveCore.Api.Persistence;
@@ -21,7 +23,12 @@ namespace LiveCore.Api.Persistence;
 ///   (<see cref="StatementTimeoutConnectionInterceptor"/>) — so a single stuck query is bounded rather than
 ///   running to the Npgsql default. Because the whole operation is also the retry unit, a bounded per-command
 ///   ceiling is what stops retry from amplifying an UNBOUNDED quantity (CORE-RES-004,
-///   <see cref="LiveCorePersistenceOptions"/>).</item>
+///   <see cref="LiveCorePersistenceOptions"/>);</item>
+///   <item>bounds the connection POOL itself (CORE-DEP-014): for the runtime contexts wired through
+///   <see cref="UseLiveCoreNpgsql"/> it applies a bounded <c>Maximum Pool Size</c>
+///   (<see cref="WithBoundedMaxPoolSize"/>) when the connection string sets none, so a single process can never
+///   open the Npgsql default of 100 connections and N replicas cannot collectively exhaust PostgreSQL's
+///   <c>max_connections</c>. An explicit pool cap in the connection string always wins.</item>
 /// </list>
 ///
 /// <para>
@@ -66,6 +73,14 @@ internal static class LiveCoreNpgsqlOptions
     /// alongside <see cref="MaxRetryCount"/>.
     /// </summary>
     internal static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// The Npgsql connection-string keywords that set the maximum connection-pool size — the canonical
+    /// <c>Maximum Pool Size</c> and its property-name synonym <c>MaxPoolSize</c> (Npgsql does not recognise a
+    /// spaced <c>Max Pool Size</c>). Used by <see cref="WithBoundedMaxPoolSize"/> to detect an OPERATOR-supplied
+    /// pool cap so it is never overridden.
+    /// </summary>
+    private static readonly string[] _maxPoolSizeKeywords = ["Maximum Pool Size", "MaxPoolSize"];
 
     /// <summary>
     /// Configures the Npgsql provider for a <see cref="LiveCoreDbContext"/>: turns on the retrying execution
@@ -134,7 +149,12 @@ internal static class LiveCoreNpgsqlOptions
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentNullException.ThrowIfNull(tuning);
 
-        options.UseNpgsql(connectionString, npgsql => Configure(npgsql, tuning.CommandTimeout));
+        // Bound the connection POOL (CORE-DEP-014): apply the configured/default Maximum Pool Size when the
+        // connection string sets none, so a process can never open the Npgsql default of 100 connections and N
+        // replicas cannot silently exhaust PostgreSQL's max_connections. An explicit cap in the connection string
+        // (the documented compose api/worker split) always wins, so this only fills the gap.
+        var boundedConnectionString = WithBoundedMaxPoolSize(connectionString, tuning.MaxPoolSize);
+        options.UseNpgsql(boundedConnectionString, npgsql => Configure(npgsql, tuning.CommandTimeout));
 
         // Audit-log TAMPER-PROOFING (CORE-SEC-004): block any in-process SaveChanges that would UPDATE or DELETE
         // a persisted audit_logs row, fail-closed, on EVERY runtime context (the API host and every worker job).
@@ -152,6 +172,41 @@ internal static class LiveCoreNpgsqlOptions
         }
 
         return options;
+    }
+
+    /// <summary>
+    /// Returns <paramref name="connectionString"/> with a bounded <c>Maximum Pool Size</c> applied when it does not
+    /// already specify one (CORE-DEP-014). Npgsql defaults an UNSET pool to 100 connections PER PROCESS, so without
+    /// a cap N API/worker replicas can together exceed PostgreSQL's default <c>max_connections</c> of 100 and
+    /// exhaust it. Applying a bounded default closes that gap; an explicit operator-supplied cap in the connection
+    /// string (the documented compose api/worker split) always WINS and the string is returned unchanged.
+    /// </summary>
+    /// <param name="connectionString">The PostgreSQL connection string supplied from configuration.</param>
+    /// <param name="maxPoolSize">The bounded pool maximum to apply when the connection string sets none; must be positive.</param>
+    /// <returns>The connection string with a pool cap guaranteed to be present.</returns>
+    /// <exception cref="ArgumentException"><paramref name="connectionString"/> is null or blank.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxPoolSize"/> is not positive.</exception>
+    public static string WithBoundedMaxPoolSize(string connectionString, int maxPoolSize)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        if (maxPoolSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxPoolSize), maxPoolSize, "The maximum connection pool size must be positive.");
+        }
+
+        // Detect an explicit operator-supplied pool cap with the BASE DbConnectionStringBuilder, which holds only
+        // the keywords actually written in the string. (The strongly-typed NpgsqlConnectionStringBuilder reports
+        // its default of 100 for an unset MaxPoolSize, so it cannot distinguish "set to 100" from "unset".)
+        var supplied = new DbConnectionStringBuilder { ConnectionString = connectionString };
+        if (_maxPoolSizeKeywords.Any(supplied.ContainsKey))
+        {
+            return connectionString;
+        }
+
+        // No explicit cap: apply the bounded default so this process can never silently open the Npgsql default of
+        // 100 connections, and the replicas cannot collectively exhaust max_connections (CORE-DEP-014).
+        return new NpgsqlConnectionStringBuilder(connectionString) { MaxPoolSize = maxPoolSize }.ConnectionString;
     }
 
     /// <summary>
