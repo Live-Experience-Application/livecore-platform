@@ -18,12 +18,12 @@
 #   docker               - image builds and container smoke tests (no push)
 #   compose-smoke        - deployment manifest renders/starts + migrate gate (CORE-DEP-001)
 #   observability-assets - validate the example Prometheus rules/scrape config + SLO/dashboard assets (promtool check + consistency gate) (CORE-OBS-008)
-#   publish-dry-run      - verify image tags + image-scan gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-CMP-003)
+#   publish-dry-run      - verify image tags + image-scan gate test + cosign verification gate test + release-tag-vs-package-version gate test + dry-run build, SBOM and CVE scan (BLOCKING on critical on PRs, CORE-DEP-005), and a cosign sign/attest/verify round-trip against the locally-built digest with a throwaway key, no push (CORE-OPS-009, CORE-DEP-003, CORE-DEP-005, CORE-SEC-008, CORE-CMP-003)
 #   publish-packages-dry-run - package-publish gate-logic test + dry-run npm publish (pnpm publish --dry-run) packing all four @livecore packages on every push/PR, no registry push (CORE-PUB-002)
 #   migrations           - apply all migrations to an empty Postgres (CORE-OPS-001)
 #   integration-postgres - drift gate + integration suite on real Postgres (CORE-OPS-002); also runs the cross-instance Redis/Valkey backplane propagation test against a Redis service (CORE-TST-003)
 #   unit-smoke-postgres  - run the unit + smoke suites against real Postgres so provider-specific behavior is exercised (CORE-TST-004)
-#   publish              - assert release tag == package version (CORE-CMP-003), SBOM + CVE scan (fail on critical), then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003)
+#   publish              - assert release tag == package version (CORE-CMP-003), SBOM + CVE scan (fail on critical), then push immutable, versioned images on a release tag only (CORE-OPS-009, CORE-DEP-003); each pushed image is then signed (keyless OIDC cosign) and its CycloneDX SBOM attached as an attestation, with cosign verify / verify-attestation gating the digest fail-closed under a job-scoped id-token: write (CORE-SEC-008)
 #   publish-packages     - on a release tag only: publish the four @livecore packages to npm at the shared lockstep version, gated by the release-version + lockstep gate (assert-release-version.ps1) and refusing a republish of an existing version (immutability) (CORE-PUB-002); each version is published with npm build provenance under a job-scoped id-token: write (CORE-PUB-004)
 #
 # Every push and pull request runs the quality gates only. The publish and
@@ -858,6 +858,16 @@ jobs:
         shell: pwsh
         run: ./scripts/test-image-scan.ps1
 
+      - name: Test the cosign verification gate logic (a missing signature/attestation fails closed)
+        # CORE-SEC-008: proves deterministically, with no Docker/registry/cosign,
+        # that the publish path's `cosign verify` / `cosign verify-attestation`
+        # decision fails closed when the signature or the CycloneDX SBOM
+        # attestation is missing, empty, the wrong predicate type or malformed.
+        # This is the required fail-closed proof, run every push/PR; the real
+        # cosign round-trip runs below (dry-run) and in the publish job.
+        shell: pwsh
+        run: ./scripts/test-image-attestation.ps1
+
       - name: Test the release-tag-vs-package-version gate (a mismatching tag fails)
         # CORE-CMP-003: proves the publish gate logic with no registry I/O - a
         # release tag matching the four packages' shared version passes, and a
@@ -903,6 +913,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
+      - name: Install cosign (keyless image signing and SBOM attestation, CORE-SEC-008)
+        # CORE-SEC-008: install the cosign CLI from a pinned release binary - the
+        # same "pin the tool, add no extra GitHub Action to the supply chain"
+        # pattern the promtool and Trivy installs use. The dry-run signs with a
+        # throwaway local key (no OIDC, no push); the release publish signs keyless
+        # via the job's GitHub OIDC id-token.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          COSIGN_VERSION: v2.4.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          sudo install -m 0755 cosign /usr/local/bin/cosign
+          rm -f cosign
+          cosign version
+
       - name: Produce an SBOM and a CVE scan, and fail the PR on a critical vulnerability (CORE-DEP-005)
         # CORE-DEP-003 required test: the publish dry-run produces an SBOM and a
         # scan report. CORE-DEP-005 promotes this PR-time image CVE scan from
@@ -925,6 +951,65 @@ jobs:
             pwsh -NoProfile -File scripts/assert-image-scan.ps1 \
               -ReportPath "$name.scan.json" -SbomPath "$name.sbom.cdx.json"
           done
+
+      - name: Sign, attest and verify the dry-run images against a locally-built digest (no push)
+        # CORE-SEC-008 required test, mirrored in the dry-run: prove the publish
+        # signature + SBOM-attestation round-trip end to end against a LOCALLY-built
+        # digest with a throwaway key, never pushing to the real registry. A
+        # throwaway local registry holds the image and the cosign artifacts; the run
+        # signs each image, attaches its CycloneDX SBOM (reusing the SBOM produced
+        # above) as an attestation, then runs `cosign verify` / `cosign
+        # verify-attestation` and the fail-closed gate over their output. A final
+        # negative check proves an UNSIGNED image fails verification (fail-closed),
+        # the same posture the publish job enforces against the published digest.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          # A throwaway, password-less key generated for this run only; the release
+          # publish never uses a key (it signs keyless via OIDC).
+          COSIGN_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          # A throwaway local registry to hold the images and the cosign signatures
+          # and attestations - nothing is pushed to ghcr.io.
+          docker run -d --rm -p 5000:5000 --name dryrun-registry registry:2
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:5000/v2/ > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          # A throwaway key pair, generated for this run only (never committed and
+          # never used for a real publish).
+          cosign generate-key-pair
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+            name="${entry%%=*}"
+            reference="${entry#*=}"
+            local_ref="localhost:5000/livecore-$name:dryrun"
+            docker tag "$reference" "$local_ref"
+            docker push "$local_ref"
+            digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$local_ref" | cut -d@ -f2)"
+            pinned="localhost:5000/livecore-$name@$digest"
+            # Local key, no transparency log: keep the dry-run hermetic (the release
+            # publish signs keyless and DOES record a Rekor entry). --tlog-upload on
+            # sign/attest and --insecure-ignore-tlog on verify keep it offline.
+            cosign sign --yes --tlog-upload=false --key cosign.key "$pinned"
+            cosign attest --yes --tlog-upload=false --key cosign.key --predicate "$name.sbom.cdx.json" --type cyclonedx "$pinned"
+            cosign verify --key cosign.pub --insecure-ignore-tlog=true "$pinned" --output json > "$name.sig.json"
+            cosign verify-attestation --key cosign.pub --insecure-ignore-tlog=true --type cyclonedx "$pinned" --output json > "$name.att.json"
+            pwsh -NoProfile -File scripts/assert-image-attestation.ps1 \
+              -SignatureVerificationPath "$name.sig.json" -AttestationVerificationPath "$name.att.json" -PredicateType cyclonedx
+          done
+          # Fail-closed proof on the real path: an UNSIGNED image must NOT verify.
+          docker tag "$API_REFERENCE" localhost:5000/livecore-unsigned:dryrun
+          docker push localhost:5000/livecore-unsigned:dryrun
+          unsigned_digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' localhost:5000/livecore-unsigned:dryrun | cut -d@ -f2)"
+          if cosign verify --key cosign.pub --insecure-ignore-tlog=true "localhost:5000/livecore-unsigned@$unsigned_digest" > /dev/null 2>&1; then
+            echo "Expected cosign verify to FAIL closed on an unsigned image, but it passed."
+            exit 1
+          fi
+          echo "cosign verify failed closed on the unsigned image, as required."
+          docker rm -f dryrun-registry > /dev/null 2>&1 || true
+          rm -f cosign.key cosign.pub
 
       - name: Scan the dry-run SBOMs for disallowed/unknown licenses (report-only, CORE-LIC-003)
         # CORE-LIC-003: the license-compliance gate reuses the CycloneDX SBOM produced
@@ -1268,6 +1353,12 @@ jobs:
       # GitHub Container Registry namespace - no registry credential is stored.
       contents: read
       packages: write
+      # CORE-SEC-008: id-token: write is added to THIS publish job ONLY (the
+      # workflow default is contents: read), so cosign can mint the short-lived
+      # GitHub OIDC token for KEYLESS signing (Fulcio issues the certificate, Rekor
+      # logs the entry). No signing key is ever stored, and no other job can
+      # request an id-token.
+      id-token: write
     env:
       REGISTRY: ghcr.io
     steps:
@@ -1306,6 +1397,18 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/trivy.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y trivy
+
+      - name: Install cosign (keyless image signing and SBOM attestation, CORE-SEC-008)
+        # CORE-SEC-008: pinned release binary, the same "pin the tool, add no extra
+        # GitHub Action to the supply chain" pattern as the Trivy install above.
+        env:
+          COSIGN_VERSION: v2.4.3
+        run: |
+          set -euo pipefail
+          curl -fsSL -o cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          sudo install -m 0755 cosign /usr/local/bin/cosign
+          rm -f cosign
+          cosign version
 
       - name: Log in to the container registry
         env:
@@ -1378,19 +1481,79 @@ jobs:
           docker push "$API_REFERENCE"
           docker push "$WORKER_REFERENCE"
 
-      - name: Upload the published SBOMs and scan reports
+      - name: Sign each pushed image and attach its CycloneDX SBOM as an attestation (keyless OIDC)
+        # CORE-SEC-008: after the CVE gate passed and the images were pushed, sign
+        # each PUBLISHED image keyless (Fulcio/Rekor via the job's OIDC id-token)
+        # and attach its CycloneDX SBOM (produced above) as an in-toto attestation.
+        # cosign stores the signature and the attestation in the registry alongside
+        # the image's digest; no signing key is stored anywhere. The signature
+        # binds to the digest, so it must run after the push.
+        env:
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+            name="${entry%%=*}"
+            reference="${entry#*=}"
+            digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$reference" | cut -d@ -f2)"
+            pinned="${reference%:*}@$digest"
+            echo "$name published digest: $digest"
+            cosign sign --yes "$pinned"
+            cosign attest --yes --predicate "$name.sbom.cdx.json" --type cyclonedx "$pinned"
+          done
+
+      - name: Verify the signature and SBOM attestation against the published digest (fail closed)
+        # CORE-SEC-008: prove each published image is signed and SBOM-attested by
+        # running cosign verify / verify-attestation against the published DIGEST,
+        # asserting the GitHub Actions OIDC identity (this repo's release workflow)
+        # and issuer, then running the fail-closed gate over the verification output
+        # so an empty/unexpected result still blocks. This is the release-side of
+        # the round-trip the publish-dry-run mirrors against a local digest.
+        env:
+          REPO: ${{ github.repository }}
+          API_REFERENCE: ${{ steps.tags.outputs.api }}
+          WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+        run: |
+          set -euo pipefail
+          identity_regexp="^https://github.com/${REPO}/\.github/workflows/.+@refs/tags/v"
+          issuer="https://token.actions.githubusercontent.com"
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+            name="${entry%%=*}"
+            reference="${entry#*=}"
+            digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$reference" | cut -d@ -f2)"
+            pinned="${reference%:*}@$digest"
+            cosign verify \
+              --certificate-identity-regexp "$identity_regexp" \
+              --certificate-oidc-issuer "$issuer" \
+              "$pinned" --output json > "$name.sig.json"
+            cosign verify-attestation \
+              --type cyclonedx \
+              --certificate-identity-regexp "$identity_regexp" \
+              --certificate-oidc-issuer "$issuer" \
+              "$pinned" --output json > "$name.att.json"
+            pwsh -NoProfile -File scripts/assert-image-attestation.ps1 \
+              -SignatureVerificationPath "$name.sig.json" -AttestationVerificationPath "$name.att.json" -PredicateType cyclonedx
+          done
+
+      - name: Upload the published SBOMs, scan reports and attestation verifications
         uses: actions/upload-artifact@v4
         with:
           name: supply-chain-attestations
           path: |
             api.sbom.cdx.json
             api.scan.json
+            api.sig.json
+            api.att.json
             worker.sbom.cdx.json
             worker.scan.json
+            worker.sig.json
+            worker.att.json
           if-no-files-found: error
 
       - name: Summarize the published images
         env:
+          REPO: ${{ github.repository }}
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
         run: |
@@ -1401,8 +1564,25 @@ jobs:
             echo "- \`$WORKER_REFERENCE\`"
             echo ""
             echo "A CycloneDX SBOM and a CVE scan report were produced for each"
-            echo "image and the critical-vulnerability gate passed before push"
-            echo "(see the \`supply-chain-attestations\` build artifact)."
+            echo "image and the critical-vulnerability gate passed before push."
+            echo "Each pushed image is then **signed** (keyless cosign via the job's"
+            echo "OIDC id-token) and its CycloneDX SBOM is attached as an"
+            echo "**attestation**; \`cosign verify\` and \`cosign verify-attestation\`"
+            echo "against the published digest passed before this job finished."
+            echo ""
+            echo "Verify a pulled image yourself (resolve \`<digest>\` with"
+            echo "\`docker buildx imagetools inspect <image>:<tag>\`):"
+            echo ""
+            echo '```'
+            echo "cosign verify \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${REPO}/\\.github/workflows/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  <image>@<digest>"
+            echo "cosign verify-attestation --type cyclonedx \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${REPO}/\\.github/workflows/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  <image>@<digest>"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-packages:

@@ -352,3 +352,74 @@ release (no image push, no npm publish). This audits the project's source
 dependency graph; **Dependabot / action pinning and an update-PR policy are a
 separate story (CORE-DEP-008)**. See the README "Continuous integration" and
 "Supply chain" sections.
+
+## Image signing and SBOM attestation and the CI gate (CORE-SEC-008)
+
+The CVE scan proves a published image carries no known-critical vulnerability and
+the SBOM records what is inside it (CORE-DEP-003), but neither proves the image
+was **built by this pipeline**. The release `publish` job now signs each published
+image and attaches its CycloneDX SBOM as a verifiable attestation with
+[Sigstore cosign](https://docs.sigstore.dev/), so a self-hoster can prove a
+`ghcr.io` image's provenance — the container-image analogue of the npm build
+provenance the `@livecore/*` packages carry (CORE-PUB-004).
+
+The flow on a **release tag**, after the CVE gate passes and the images are
+pushed (the signature binds to the published digest, so it must run after push):
+
+- **Keyless `cosign sign`** against each published digest. cosign requests a
+  short-lived GitHub Actions OIDC token, Fulcio issues a throwaway certificate
+  bound to the workflow identity and Rekor logs the signature — **no private key**
+  exists. `id-token: write` is scoped to the **`publish` job only**.
+- **`cosign attest`** attaches the same CycloneDX SBOM produced for the CVE gate
+  as an in-toto attestation (`--type cyclonedx`) bound to the digest.
+- **`cosign verify` / `cosign verify-attestation`** against the published digest,
+  asserting the GitHub OIDC issuer and this repo's release-workflow identity, then
+  the fail-closed gate (`scripts/assert-image-attestation.ps1`) over the
+  verification output.
+
+### The gate and how it fails closed
+
+cosign performs the cryptography and its exit code is the first line of defence,
+but the **decision** that turns its verification output into a published-or-blocked
+verdict is pure logic (`scripts/LiveCoreImageAttestation.psm1`), the same
+self-contained, fail-closed posture as the image-scan, coverage, CodeQL and
+dependency-audit gates:
+
+- a signature is verified only when at least one signature claim is present, and
+  the SBOM attestation only when at least one in-toto statement of the requested
+  predicate type (CycloneDX) carries a non-empty predicate;
+- a **missing, empty, wrong-predicate or malformed** verification document
+  **blocks** — a cosign run that somehow exited zero with no usable output never
+  counts as verified.
+
+### Proving the gate fails closed
+
+Committing a real signing key to "prove the gate fails" would itself be the
+problem, so the required "fails closed if the signature or SBOM attestation is
+missing or invalid" proof is split two ways:
+
+- the gate-logic test `scripts/test-image-attestation.ps1`, run **first** in the
+  `publish-dry-run` job (before any cosign round-trip) exactly like
+  `test-image-scan.ps1`, feeds the gate seeded `cosign verify` /
+  `verify-attestation` fixtures and asserts a verified signature and CycloneDX
+  attestation pass while a missing/empty/wrong-type/malformed one fails closed —
+  deterministically, with no Docker, registry or cosign; and
+- a **real cosign round-trip** in `publish-dry-run`, mirrored against a
+  **locally-built digest** in a throwaway local registry with a throwaway key (no
+  OIDC, **no push**): it signs, attests, verifies and verify-attestations each
+  dry-run image and includes a negative check that an **unsigned** image fails
+  verification.
+
+Run the gate-logic test locally with
+`pwsh -NoProfile -File scripts/test-image-attestation.ps1`. cosign is installed
+from a pinned release binary, the same way Trivy and promtool are, so **no extra
+GitHub Action enters the supply chain**.
+
+### Wired into the required-checks set
+
+The signing/attestation step lives in the release `publish` job, which already
+`needs:` every gate, and the gate-logic test and the dry-run round-trip run in
+`publish-dry-run` (which `publish` `needs:`), so a regression in the verification
+fails the build and, transitively, blocks any release. See the README
+"Continuous integration" and "Supply chain" sections and
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Signed images and SBOM attestations").

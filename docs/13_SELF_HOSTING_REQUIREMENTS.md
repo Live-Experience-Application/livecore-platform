@@ -1264,8 +1264,56 @@ The gate decision and the SBOM check are pure logic (`scripts/LiveCoreImageScan.
 pull request. The `publish-dry-run` job additionally produces a real SBOM and scan report for the dry-run images on
 every push/pull request, running the gate in **report-only** mode there so a transient base-image CVE documents itself
 without blocking ordinary development — the release publish runs the same gate for real. Cryptographic build
-**provenance/attestation** (for example cosign signatures) is a natural next step and is left as a follow-up; it needs
-signing-key management that is out of scope here.
+**provenance/attestation** is no longer a follow-up: it is now implemented as keyless cosign signatures and SBOM
+attestations (see the next section).
+
+### Signed images and SBOM attestations (CORE-SEC-008)
+
+The SBOM and CVE scan above prove *what is inside* a published image and that it carries no known-critical
+vulnerability, but until this control they did not let a self-hoster prove *who built it*: the SBOMs were only an
+`actions/upload-artifact` build artifact, never a cryptographic signature or a verifiable attestation bound to the
+image in the registry. So a `ghcr.io` image could not be proven to have come from this pipeline. This control closes
+that gap with [Sigstore cosign](https://docs.sigstore.dev/), so a published image is **signed** and its SBOM is
+attached as a verifiable **attestation**:
+
+- **Keyless signing (no key to manage).** On a release tag, **after the CVE gate passes and the images are pushed**, the
+  `publish` job runs `cosign sign` against each published **digest**. Signing is **keyless**: cosign requests a
+  short-lived OpenID Connect (OIDC) token from GitHub Actions, Sigstore's **Fulcio** CA issues a throwaway signing
+  certificate bound to the workflow identity, and the signature is recorded in the **Rekor** transparency log. There is
+  **no private key** to store, rotate or leak. The OIDC token is the only added privilege: `id-token: write` is granted
+  to the **`publish` job only** (the workflow default is `contents: read`), so no other job can mint one.
+- **The CycloneDX SBOM as an attestation.** The job then runs `cosign attest` to attach the **same CycloneDX SBOM**
+  produced for the CVE gate as an in-toto **attestation** (`--type cyclonedx`) bound to the image digest, so the bill of
+  materials travels *with* the image in the registry, signed, rather than only as a CI artifact.
+- **Verification fails closed in CI.** Before the job finishes it runs `cosign verify` and `cosign verify-attestation`
+  against the published digest, asserting the GitHub Actions OIDC **issuer** and a **certificate-identity** matching this
+  repository's release workflow, then runs a fail-closed gate (`scripts/assert-image-attestation.ps1`) over the
+  verification output — so a missing, empty, wrong-predicate or otherwise unverifiable signature/attestation **fails the
+  release**. The `publish-dry-run` job mirrors the whole round-trip on every push/pull request against a **locally-built
+  digest** in a throwaway local registry with a throwaway key (no OIDC, **no push**), including a negative check that an
+  unsigned image fails verification.
+
+A self-hoster verifies a pulled image themselves (resolve `<digest>` with
+`docker buildx imagetools inspect <image>:<tag>`):
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <image>@<digest>
+
+cosign verify-attestation --type cyclonedx \
+  --certificate-identity-regexp '^https://github.com/<owner>/<repo>/\.github/workflows/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <image>@<digest>
+```
+
+The verification **decision** is pure logic (`scripts/LiveCoreImageAttestation.psm1`) tested from seeded fixtures by
+`scripts/test-image-attestation.ps1`, so "a missing or invalid signature / SBOM attestation fails closed" is proven
+deterministically on every push and pull request without a registry, a key or a network. cosign is installed from a
+pinned release binary, the same way Trivy and promtool are, so **no extra GitHub Action enters the supply chain**. This
+is the container-image analogue of the npm build provenance the `@livecore/*` packages carry (CORE-PUB-004,
+`docs/23_PACKAGE_VERSIONING.md`).
 
 ## Backup and restore (CORE-OPS-010)
 

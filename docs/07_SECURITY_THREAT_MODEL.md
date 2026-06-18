@@ -420,8 +420,40 @@ Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Pinned base images, SBOM and 
   (`scripts/assert-image-scan.ps1`) that **blocks the push on a critical vulnerability** or a missing SBOM; the
   gate decision is unit-tested from a seeded critical CVE (`scripts/test-image-scan.ps1`)
 - the existing immutable-tag guard is unchanged (a published version is never overwritten)
-- cryptographic build provenance/attestation (e.g. cosign) is a documented follow-up (it needs signing-key
-  management out of scope here)
+- cryptographic build provenance is now in place: each pushed image is **signed** and its CycloneDX SBOM attached
+  as a verifiable **attestation** with keyless cosign, gated fail-closed by `cosign verify` /
+  `cosign verify-attestation` against the published digest (CORE-SEC-008, below)
+
+## Signed images and SBOM attestations (CORE-SEC-008)
+
+CORE-DEP-003 fixes *what is inside* a published image and that it carries no known-critical vulnerability, but it
+left a gap a self-hoster cares about: the image could not be proven to have been **built by this pipeline**. The
+SBOMs were only an `actions/upload-artifact` build artifact (misleadingly named), never a signature or a
+verifiable attestation bound to the image in the registry. So a `ghcr.io` image's provenance was unprovable.
+
+Risk:
+
+- a tampered or look-alike image is passed off as an official release because nothing cryptographically binds a
+  published image to the workflow that built it, and the SBOM is a detached artifact a third party can fabricate
+
+Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Signed images and SBOM attestations"):
+
+- on a release tag, **after the CVE gate passes and the images are pushed**, the `publish` job runs **keyless**
+  `cosign sign` against each published **digest**: a short-lived GitHub Actions OIDC token has Sigstore **Fulcio**
+  issue a throwaway certificate bound to the workflow identity and **Rekor** log the signature, so there is **no
+  private key** to store or leak
+- `cosign attest` attaches the **same CycloneDX SBOM** produced for the CVE gate as an in-toto **attestation**
+  (`--type cyclonedx`) bound to the digest, so the bill of materials travels with the image, signed
+- the only added privilege is **`id-token: write`, scoped to the `publish` job only** (the workflow default is
+  `contents: read`), so no other job can mint an OIDC token
+- verification **fails closed**: `cosign verify` and `cosign verify-attestation` run against the published digest
+  (asserting the GitHub OIDC issuer and this repo's release-workflow identity), then a fail-closed gate
+  (`scripts/assert-image-attestation.ps1`) runs over the output, so a missing, empty, wrong-predicate or
+  unverifiable signature/attestation fails the release. The decision is pure logic
+  (`scripts/LiveCoreImageAttestation.psm1`) tested from seeded fixtures (`scripts/test-image-attestation.ps1`),
+  and the `publish-dry-run` job mirrors the whole round-trip against a locally-built digest with a throwaway key
+  (no OIDC, no push), including a negative check that an unsigned image fails verification
+- this is the container-image analogue of the npm build provenance the `@livecore/*` packages carry (CORE-PUB-004)
 
 ## Static analysis of first-party code (CORE-SEC-006)
 

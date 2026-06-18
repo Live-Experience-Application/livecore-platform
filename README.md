@@ -151,6 +151,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Publishing release images (CORE-OPS-009)](#publishing-release-images-core-ops-009)
     - [Publishing release packages (CORE-PUB-002)](#publishing-release-packages-core-pub-002)
     - [Supply chain: pinned base images, SBOM and CVE scan (CORE-DEP-003)](#supply-chain-pinned-base-images-sbom-and-cve-scan-core-dep-003)
+    - [Signed images and SBOM attestations (CORE-SEC-008)](#signed-images-and-sbom-attestations-core-sec-008)
     - [Dependency vulnerability audit (CORE-DEP-005)](#dependency-vulnerability-audit-core-dep-005)
     - [Backup and restore (CORE-OPS-010)](#backup-and-restore-core-ops-010)
 - [Continuous integration](#continuous-integration)
@@ -254,7 +255,7 @@ LiveCore.slnx            .NET solution (apps + tests)
 Directory.Build.props    repository-wide .NET build/lint enforcement
 .editorconfig            formatting and C# code-style baseline
 .gitattributes           line-ending normalization (LF in the repository)
-.github/workflows/ci.yml CI pipeline (build, tests, blocking code-coverage gate, format/lint, boundary scan, dependency vulnerability audit, image builds + a PR-blocking image CVE scan; on a release tag it produces an SBOM + CVE scan and pushes versioned images)
+.github/workflows/ci.yml CI pipeline (build, tests, blocking code-coverage gate, format/lint, boundary scan, dependency vulnerability audit, image builds + a PR-blocking image CVE scan; on a release tag it produces an SBOM + CVE scan, pushes versioned images, then signs them and attaches the SBOM as a cosign attestation)
 scripts/LiveCoreImageTags.psm1 release image tag derivation (immutable, versioned, fail-closed off a release tag)
 scripts/derive-image-tags.ps1  CLI the publish job uses to derive the API/worker image references
 scripts/test-image-tags.ps1    tests for the image tag derivation (immutable + versioned + fail-closed)
@@ -267,6 +268,9 @@ scripts/test-package-publish.ps1    tests for the package-publish gate (a matchi
 scripts/LiveCoreImageScan.psm1 supply-chain publish-gate logic: the CVE-scan pass/fail decision and the SBOM validity check (CORE-DEP-003)
 scripts/assert-image-scan.ps1  CLI the publish + publish-dry-run jobs run to fail on a critical vulnerability or a missing/empty SBOM (fail-closed; now blocking on PRs too, CORE-DEP-005)
 scripts/test-image-scan.ps1    tests for the scan gate + SBOM check (a seeded critical CVE fails the gate, CORE-DEP-003)
+scripts/LiveCoreImageAttestation.psm1 image signature + SBOM attestation gate logic: the cosign verify / verify-attestation pass/fail decision (CORE-SEC-008)
+scripts/assert-image-attestation.ps1 CLI the publish + publish-dry-run jobs run to fail on a missing/invalid cosign signature or CycloneDX SBOM attestation (fail-closed, CORE-SEC-008)
+scripts/test-image-attestation.ps1  tests for the attestation gate (a verified signature + CycloneDX attestation pass; a missing/empty/wrong-type/malformed verification fails closed, CORE-SEC-008)
 scripts/LiveCoreDependencyAudit.psm1 source dependency-audit gate logic: parses `dotnet list --vulnerable` + `pnpm audit` reports and the high/critical pass/fail decision (CORE-DEP-005)
 scripts/assert-dependency-audit.ps1  CLI the dependency-audit job runs to fail closed on a high/critical known-vulnerable .NET or pnpm dependency (CORE-DEP-005)
 scripts/test-dependency-audit.ps1    tests for the dependency-audit gate (a seeded high/critical vulnerable package fails closed across both ecosystems, CORE-DEP-005)
@@ -4860,9 +4864,44 @@ The gate decision and the SBOM check are pure logic
 deterministically on every push/pull request; the `publish-dry-run` job additionally
 produces a real SBOM and scan report and — since CORE-DEP-005 — runs the gate
 **blocking on critical on pull requests too** (see "Dependency vulnerability audit"
-below). Cryptographic build provenance/attestation (e.g. cosign) is a documented
-follow-up. See `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base images, SBOM and
-vulnerability scan").
+below). Cryptographic build provenance/attestation is no longer a follow-up — the
+published images are now signed and SBOM-attested with cosign (see "Signed images and
+SBOM attestations" below). See `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Pinned base
+images, SBOM and vulnerability scan").
+
+### Signed images and SBOM attestations (CORE-SEC-008)
+
+The SBOM + CVE scan prove _what is inside_ a published image; signing proves _who
+built it_. On a release tag, **after the CVE gate passes and the images are pushed**,
+the `publish` job signs each image and attaches its CycloneDX SBOM as a verifiable
+attestation with [Sigstore cosign](https://docs.sigstore.dev/) — the container-image
+analogue of the npm build provenance the `@livecore/*` packages carry (CORE-PUB-004):
+
+- **Keyless signing.** `cosign sign` runs against each published **digest** keyless:
+  cosign mints a short-lived GitHub Actions OIDC token, Fulcio issues a throwaway
+  certificate bound to the workflow identity and Rekor logs the signature, so there is
+  **no private key** to manage. `id-token: write` is scoped to the **`publish` job
+  only** (the workflow default is `contents: read`); no other job can request one.
+- **SBOM attestation.** `cosign attest` attaches the same CycloneDX SBOM produced for
+  the CVE gate as an in-toto attestation (`--type cyclonedx`) bound to the digest, so
+  the bill of materials travels with the image in the registry, signed.
+- **Verification fails closed.** Before the job finishes, `cosign verify` and
+  `cosign verify-attestation` run against the published digest (asserting the GitHub
+  OIDC issuer and this repo's release-workflow identity) and a fail-closed gate
+  (`scripts/assert-image-attestation.ps1`) runs over the output, so a missing, empty,
+  wrong-predicate or unverifiable signature/attestation fails the release.
+
+The verification **decision** is pure logic (`scripts/LiveCoreImageAttestation.psm1`)
+tested from seeded fixtures by `scripts/test-image-attestation.ps1`, so "a missing or
+invalid signature / SBOM attestation fails closed" is proven deterministically on
+every push/pull request; the `publish-dry-run` job additionally runs the whole cosign
+round-trip against a **locally-built digest** with a throwaway key (no OIDC, **no
+push**), including a negative check that an unsigned image fails verification. cosign
+is installed from a pinned release binary (no extra GitHub Action). Verify a pulled
+image yourself with `cosign verify` / `cosign verify-attestation` against its digest;
+the publish job's step summary prints the exact commands. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Signed images and SBOM attestations") and
+`docs/14_TESTING_STRATEGY.md` ("Image signing and SBOM attestation and the CI gate").
 
 ### Dependency vulnerability audit (CORE-DEP-005)
 
@@ -4986,26 +5025,26 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                        | What it runs                                                                                                                                                         |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                                |
-| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                               |
-| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                                          |
-| `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006)                |
-| `dependency-audit`         | `dotnet list --vulnerable` (transitive included) + `pnpm audit`; **fails closed on a high/critical dependency advisory** (gate-logic tested, CORE-DEP-005)           |
-| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)                       |
-| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                                             |
-| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                                          |
-| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                                       |
-| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                                       |
-| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                                     |
-| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)                  |
-| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag); the image CVE scan now **blocks the PR on critical** (CORE-DEP-005) |
-| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002)                 |
-| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                                   |
-| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                                    |
-| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                                             |
-| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)                             |
+| Job                        | What it runs                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                                                                                                                                                                              |
+| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                                                                                                                                                                             |
+| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                                                                                                                                                                                        |
+| `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006)                                                                                                                                                              |
+| `dependency-audit`         | `dotnet list --vulnerable` (transitive included) + `pnpm audit`; **fails closed on a high/critical dependency advisory** (gate-logic tested, CORE-DEP-005)                                                                                                                                                         |
+| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)                                                                                                                                                                     |
+| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                                                                                                                                                                                           |
+| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                                                                                                                                                                                        |
+| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                                                                                                                                                                                     |
+| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                                                                                                                                                                                     |
+| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                                                                                                                                                                                   |
+| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)                                                                                                                                                                |
+| `publish-dry-run`          | `scripts/test-image-tags.ps1` + the cosign verification gate test, then a no-push dry-run build of the publish path (off a non-tag); the image CVE scan now **blocks the PR on critical** (CORE-DEP-005), and a cosign sign/attest/verify round-trip runs against the locally-built digest, no push (CORE-SEC-008) |
+| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002)                                                                                                                                                               |
+| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                                                                                                                                                                                 |
+| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                                                                                                                                                                                  |
+| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass, then signs each (keyless cosign) and attaches its CycloneDX SBOM as an attestation, verifying both against the digest fail-closed (CORE-SEC-008)                                                         |
+| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)                                                                                                                                                                           |
 
 The `publish` and `publish-packages` jobs run **only on a release tag** and **only
 after every other job passes**; pull requests and branch pushes never reach them, so
