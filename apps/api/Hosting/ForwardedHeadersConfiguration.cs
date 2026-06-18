@@ -34,6 +34,18 @@ public static class ForwardedHeadersConfiguration
     public const string ConfigurationSection = "ForwardedHeaders";
 
     /// <summary>
+    /// Configuration key under <see cref="ConfigurationSection"/> holding the trusted proxy IP addresses
+    /// (<c>ForwardedHeaders:KnownProxies</c>).
+    /// </summary>
+    public const string KnownProxiesKey = "KnownProxies";
+
+    /// <summary>
+    /// Configuration key under <see cref="ConfigurationSection"/> holding the trusted proxy networks as CIDR
+    /// blocks (<c>ForwardedHeaders:KnownNetworks</c>).
+    /// </summary>
+    public const string KnownNetworksKey = "KnownNetworks";
+
+    /// <summary>
     /// Registers the <see cref="ForwardedHeadersOptions"/> the <c>UseForwardedHeaders</c> middleware reads,
     /// configured from <see cref="ConfigurationSection"/>.
     /// </summary>
@@ -68,7 +80,7 @@ public static class ForwardedHeadersConfiguration
 
         var section = configuration.GetSection(ConfigurationSection);
 
-        foreach (var proxy in section.GetSection("KnownProxies").Get<string[]>() ?? [])
+        foreach (var proxy in section.GetSection(KnownProxiesKey).Get<string[]>() ?? [])
         {
             if (string.IsNullOrWhiteSpace(proxy))
             {
@@ -85,7 +97,7 @@ public static class ForwardedHeadersConfiguration
             options.KnownProxies.Add(address);
         }
 
-        foreach (var network in section.GetSection("KnownNetworks").Get<string[]>() ?? [])
+        foreach (var network in section.GetSection(KnownNetworksKey).Get<string[]>() ?? [])
         {
             if (string.IsNullOrWhiteSpace(network))
             {

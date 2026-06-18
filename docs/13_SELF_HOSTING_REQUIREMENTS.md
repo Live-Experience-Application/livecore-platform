@@ -1438,6 +1438,26 @@ environment:
   an `Authority` is configured but the `Audience` is blank (audience validation silently disabled), which the
   audience guard refuses outright (CORE-OPS-004).
 
+### Startup validation: also reject a present-but-malformed value (CORE-OPS-013)
+
+The contract above checks that a required value is **present**; this checks that the critical values the host
+can validate **without any I/O** are **well-formed**, so a value that is set but garbled is caught at startup
+rather than at the first request (where it would surface as a `500` or silently misbehave). `FindMalformedCriticalSettings`
+on the same `ProductionConfigurationValidator` validates, locally and with no network call:
+
+- `ConnectionStrings:Database` — parses as a PostgreSQL connection string;
+- `Authentication:Oidc:Authority` — is an **absolute** `http(s)` URI (the issuer the OIDC handler appends
+  `/.well-known/openid-configuration` to);
+- each `Cors:AllowedOrigins` entry — is a scheme+host[+port] origin with **no** userinfo, path, query, fragment
+  or wildcard (the same shape the CORS allow-list documents above);
+- each `ForwardedHeaders:KnownNetworks` entry — is a parseable **CIDR** network.
+
+A present-but-malformed value emits the **same** loud, named `Critical` startup log and **not-ready** posture as
+a missing one — and, like the missing-value contract, names **only the key**, never the configured value (threat
+T7), and is **inert outside Production** (a `Development` run with a half-finished value still starts and fails
+closed). A value that is simply **absent** is the missing-value contract's concern above, not this one, so the
+two diagnostics never double-report the same key.
+
 ## Release container images (CORE-OPS-009)
 
 A deployment runs the published API and worker images rather than building them on the host. CI publishes them to

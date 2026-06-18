@@ -3348,6 +3348,14 @@ written to the log (threat T7) — and does not crash an otherwise-live process:
 hard fail-to-start case stays the OIDC audience foot-gun (CORE-OPS-004): a configured `Authority` with a blank
 `Audience` refuses to start because it would silently disable audience scoping.
 
+The same contract also rejects a **present-but-malformed** value (CORE-OPS-013): at startup the host validates
+the well-formedness of the critical values it can check **without any I/O** — the connection string parses, the
+`Authority` is an absolute `http(s)` URI, each `Cors:AllowedOrigins` entry is scheme+host[+port] with no
+path/wildcard, and each `ForwardedHeaders:KnownNetworks` entry is a parseable CIDR — so a garbled value is caught
+at startup rather than at the first request. A malformed value emits the **same** loud, named `Critical` log and
+**not-ready** posture as a missing one, names **only the key** (never the value; threat T7), and is inert outside
+`Production`.
+
 ### Asset metadata
 
 The Assets module owns generic asset metadata: the record of a stored file or

@@ -3,6 +3,7 @@
 
 using LiveCore.Api.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace LiveCore.Api.UnitTests.Hosting;
 
@@ -24,7 +25,9 @@ public class ProductionConfigurationValidatorTests
     private static IConfiguration BuildConfiguration(
         string? connectionString = null,
         string? authority = null,
-        string? audience = null)
+        string? audience = null,
+        string[]? corsOrigins = null,
+        string[]? knownNetworks = null)
     {
         var values = new Dictionary<string, string?>
         {
@@ -32,6 +35,16 @@ public class ProductionConfigurationValidatorTests
             [ProductionConfigurationValidator.OidcAuthorityKey] = authority,
             [ProductionConfigurationValidator.OidcAudienceKey] = audience,
         };
+
+        for (var i = 0; corsOrigins is not null && i < corsOrigins.Length; i++)
+        {
+            values[$"{ProductionConfigurationValidator.CorsAllowedOriginsKey}:{i}"] = corsOrigins[i];
+        }
+
+        for (var i = 0; knownNetworks is not null && i < knownNetworks.Length; i++)
+        {
+            values[$"{ProductionConfigurationValidator.ForwardedHeadersKnownNetworksKey}:{i}"] = knownNetworks[i];
+        }
 
         return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
@@ -126,5 +139,184 @@ public class ProductionConfigurationValidatorTests
                 "Authentication:Oidc:Audience",
             },
             ProductionConfigurationValidator.RequiredProductionSettings);
+    }
+
+    // ----- Well-formedness contract (CORE-OPS-013) -----
+
+    private const string _wellFormedOrigin = "https://app.example.com";
+
+    [Fact]
+    public void A_well_formed_production_configuration_reports_nothing_malformed()
+    {
+        // The well-formedness acceptance criterion: with every critical value present AND well-formed, the
+        // contract reports nothing malformed (a properly configured host is never blocked by an over-strict check).
+        var configuration = BuildConfiguration(
+            _connectionString,
+            _authority,
+            _audience,
+            corsOrigins: ["https://app.example.com", "https://admin.example.com:8443", "http://localhost:3000/"],
+            knownNetworks: ["10.0.0.0/8", "2001:db8::/32"]);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Empty(malformed);
+    }
+
+    [Theory]
+    [InlineData("Host=db;Port=not-a-number")] // a typed keyword (Port) that cannot be coerced
+    [InlineData("NotARealKeyword=value")] // an unknown connection-string keyword
+    public void A_malformed_connection_string_is_reported_by_name_only(string malformedConnectionString)
+    {
+        var configuration = BuildConfiguration(malformedConnectionString, _authority, _audience);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Equal(new[] { ProductionConfigurationValidator.DatabaseConnectionStringKey }, malformed);
+        // By name only: the offending VALUE is never part of the reported result (threat T7).
+        Assert.DoesNotContain(malformed, key => key.Contains(malformedConnectionString, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("issuer.example.com")] // host only: relative, not absolute
+    [InlineData("/realm/livecore")] // a relative path
+    [InlineData("not a uri")] // not a URI at all
+    [InlineData("ftp://issuer.example.com")] // absolute but not an http(s) issuer
+    public void A_non_absolute_or_non_http_authority_is_reported_by_name_only(string malformedAuthority)
+    {
+        var configuration = BuildConfiguration(_connectionString, malformedAuthority, _audience);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Equal(new[] { ProductionConfigurationValidator.OidcAuthorityKey }, malformed);
+        Assert.DoesNotContain(malformed, key => key.Contains(malformedAuthority, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("https://app.example.com/with/a/path")] // a path
+    [InlineData("https://*.example.com")] // a wildcard
+    [InlineData("app.example.com")] // no scheme
+    [InlineData("https://app.example.com?query=1")] // a query
+    [InlineData("https://user:pass@app.example.com")] // userinfo
+    [InlineData("ftp://app.example.com")] // a non-http scheme
+    public void A_malformed_cors_origin_is_reported_by_name_only(string malformedOrigin)
+    {
+        // One well-formed origin plus one malformed: the key is reported once, by name, never by value.
+        var configuration = BuildConfiguration(
+            _connectionString,
+            _authority,
+            _audience,
+            corsOrigins: [_wellFormedOrigin, malformedOrigin]);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Equal(new[] { ProductionConfigurationValidator.CorsAllowedOriginsKey }, malformed);
+        Assert.DoesNotContain(malformed, key => key.Contains(malformedOrigin, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/99")] // prefix length out of range
+    [InlineData("300.0.0.0/8")] // not a valid address
+    [InlineData("not-a-cidr")] // not a CIDR at all
+    public void A_malformed_known_network_cidr_is_reported_by_name_only(string malformedCidr)
+    {
+        var configuration = BuildConfiguration(
+            _connectionString,
+            _authority,
+            _audience,
+            knownNetworks: ["10.0.0.0/8", malformedCidr]);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Equal(new[] { ProductionConfigurationValidator.ForwardedHeadersKnownNetworksKey }, malformed);
+        Assert.DoesNotContain(malformed, key => key.Contains(malformedCidr, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Every_malformed_critical_value_is_reported_by_name_in_declared_order()
+    {
+        var configuration = BuildConfiguration(
+            "Host=db;Port=not-a-number",
+            "issuer.example.com",
+            _audience,
+            corsOrigins: ["https://app.example.com/path"],
+            knownNetworks: ["not-a-cidr"]);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Equal(
+            new[]
+            {
+                ProductionConfigurationValidator.DatabaseConnectionStringKey,
+                ProductionConfigurationValidator.OidcAuthorityKey,
+                ProductionConfigurationValidator.CorsAllowedOriginsKey,
+                ProductionConfigurationValidator.ForwardedHeadersKnownNetworksKey,
+            },
+            malformed);
+    }
+
+    [Fact]
+    public void A_missing_value_is_not_reported_as_malformed()
+    {
+        // A blank/absent value is the missing-value contract's concern, not the well-formedness check's: only a
+        // PRESENT-but-malformed value is reported here, so the two diagnostics never double-report the same key.
+        var configuration = BuildConfiguration(connectionString: null, authority: null, audience: null);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: true);
+
+        Assert.Empty(malformed);
+    }
+
+    [Fact]
+    public void Well_formedness_is_inert_outside_production_even_when_values_are_malformed()
+    {
+        // Local-development latitude: a Development run with garbled critical values still reports nothing
+        // malformed, so the host starts and fails closed rather than being blocked.
+        var configuration = BuildConfiguration(
+            "Host=db;Port=not-a-number",
+            "not a uri",
+            _audience,
+            corsOrigins: ["https://app.example.com/path"],
+            knownNetworks: ["not-a-cidr"]);
+
+        var malformed = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+            configuration, isProductionEnvironment: false);
+
+        Assert.Empty(malformed);
+    }
+
+    [Fact]
+    public void Well_formedness_keys_are_the_documented_critical_configuration_keys()
+    {
+        // The published contract (docs/13) names these keys; pin them so the docs and code stay in step.
+        Assert.Equal("Cors:AllowedOrigins", ProductionConfigurationValidator.CorsAllowedOriginsKey);
+        Assert.Equal(
+            "ForwardedHeaders:KnownNetworks", ProductionConfigurationValidator.ForwardedHeadersKnownNetworksKey);
+    }
+
+    [Fact]
+    public async Task Health_check_reports_unhealthy_when_a_critical_value_is_malformed()
+    {
+        var check = new MalformedConfigurationHealthCheck(hasMalformedConfiguration: true);
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Unhealthy, result.Status);
+    }
+
+    [Fact]
+    public async Task Health_check_reports_healthy_when_no_critical_value_is_malformed()
+    {
+        var check = new MalformedConfigurationHealthCheck(hasMalformedConfiguration: false);
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        Assert.Equal(HealthStatus.Healthy, result.Status);
     }
 }

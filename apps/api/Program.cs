@@ -1275,6 +1275,20 @@ builder.Services.AddRequiredDependencyReadinessCheck(
     persistenceConfigured: !string.IsNullOrWhiteSpace(databaseConnectionString),
     oidcConfigured: oidcConfigured);
 
+// Malformed critical configuration readiness gate (CORE-OPS-013, the "Deployment and Operations Completeness"
+// epic). The required-dependency gate above reports NOT-READY when a required value is MISSING, but a value that
+// is PRESENT yet malformed (an unparseable connection string, a non-absolute Authority, a CORS origin with a
+// path/wildcard, an unparseable KnownNetworks CIDR) passed the non-blank check and was discovered only at the
+// first request or silently misbehaved — inconsistent with the graceful-shutdown/worker options that reject a
+// malformed value loudly at startup. This captures the startup well-formedness verdict
+// (ProductionConfigurationValidator.FindMalformedCriticalSettings) and reports NOT-READY in Production when any
+// critical value is malformed, so a malformed value leaves the ready rotation exactly as a missing one does. It
+// reuses the same environment-aware, status-only posture (inert outside Production; which key is malformed never
+// leaks to the unauthenticated readiness response — threat T7) and is registered UNCONDITIONALLY so it runs even
+// when persistence is absent. The matching loud, named Critical startup log is emitted below once the host is
+// built (alongside the missing-value diagnostic).
+builder.Services.AddMalformedConfigurationReadinessCheck(builder.Configuration, builder.Environment);
+
 // Deep dependency reachability readiness gate (CORE-OBS-009). The database check above is a live probe and the
 // required-dependency gate just above is a startup-captured boolean of config PRESENCE — but OIDC, object storage
 // and the realtime backplane were never probed for actual reachability, so a host with a healthy database but a
@@ -1322,6 +1336,28 @@ if (missingRequiredSettings.Count > 0)
         "docs/13_SELF_HOSTING_REQUIREMENTS.md). The host stays up and fails closed (401/503) and reports " +
         "not-ready, but it cannot serve production traffic until they are set.",
         string.Join(", ", missingRequiredSettings));
+}
+
+// Malformed critical configuration (CORE-OPS-013). The contract above checks that the required values are
+// PRESENT; this checks that the critical values the host can verify WITHOUT I/O are WELL-FORMED (the connection
+// string parses, the Authority is an absolute http(s) URI, each Cors:AllowedOrigins entry is scheme+host[+port]
+// with no path/wildcard, each ForwardedHeaders:KnownNetworks entry is a parseable CIDR). A present-but-malformed
+// value emits the SAME loud, named Critical log and not-ready posture (the readiness gate registered above) as a
+// missing one, so it is caught at startup rather than at first request — only the KEY NAMES are logged, never the
+// configured values, so a secret is never written to the log (threat T7). Outside Production the check is inert
+// (local-development latitude).
+var malformedCriticalSettings = ProductionConfigurationValidator.FindMalformedCriticalSettings(
+    builder.Configuration, app.Environment.IsProduction());
+if (malformedCriticalSettings.Count > 0)
+{
+    app.Logger.LogCritical(
+        "Production configuration is malformed: the setting(s) {MalformedSettings} are present but not well-formed " +
+        "(the connection string must parse, the Authority must be an absolute http(s) URI, each CORS origin must " +
+        "be scheme+host[+port] with no path or wildcard, and each known network must be a valid CIDR). Correct " +
+        "them in your environment / secret store (see docs/13_SELF_HOSTING_REQUIREMENTS.md). The host stays up and " +
+        "fails closed (401/503) and reports not-ready, but it cannot serve production traffic until they are " +
+        "corrected.",
+        string.Join(", ", malformedCriticalSettings));
 }
 
 // Development-default exposure footgun (CORE-OPS-011, the "Deployment and Operations Completeness" epic). The
