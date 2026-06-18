@@ -14,12 +14,14 @@
 #                 auth"). Imports the bundled `livecore` realm (an API-audience
 #                 client, a public client with an audience mapper and a demo user),
 #                 so the api validates real bearer tokens — authenticated traffic.
-#   minio       — S3-compatible object storage (docs/02 "Storage: RustFS/MinIO").
-#                 Private buckets only; the api/worker mint short-lived signed URLs
-#                 against it — asset upload/download.
-#   minio-setup — a one-shot job (the mc client) that waits for MinIO, creates the
-#                 private `livecore-assets` bucket and exits 0. The api/worker gate
-#                 on its completion, so the bucket always exists before they start.
+#   rustfs      — S3-compatible object storage (docs/02 "Storage: RustFS"), the
+#                 Apache-2.0-licensed default object store. Private buckets only; the
+#                 api/worker mint short-lived signed URLs against it — asset
+#                 upload/download.
+#   rustfs-setup— a one-shot job (the AWS CLI, an S3-standard client) that waits for
+#                 RustFS, creates the private `livecore-assets` bucket and exits 0. The
+#                 api/worker gate on its completion, so the bucket always exists before
+#                 they start.
 #   valkey      — a Redis/Valkey realtime backplane (docs/02 "Valkey or Redis-
 #                 compatible backplane for realtime scale-out"). The api publishes
 #                 SignalR group sends through it, so a delivery reaches connections
@@ -70,44 +72,59 @@ services:
     restart: unless-stopped
 
   # --- S3-compatible object storage (asset upload/download) ---
-  minio:
-    image: ${MINIO_IMAGE:-minio/minio:latest}
-    command: ["server", "/data", "--console-address", ":9001"]
+  # RustFS is an Apache-2.0-licensed, S3-compatible object store — the default backend
+  # the api/worker S3CompatibleAssetStorage adapter signs against (ADR 0006 keeps the
+  # contract any-S3-compatible). Pinned by digest for supply-chain reproducibility
+  # (CORE-DEP-003). It runs as the non-root `rustfs` user (uid 10001) and the image
+  # owns /data, so the named volume below inherits that ownership and stays writable.
+  rustfs:
+    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3}
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # The root S3 login the api/worker reuse as Assets__Storage__AccessKeyId/Secret.
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      # Single-node volume + bind addresses for the S3 API and the web console.
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
-      - livecore-minio-data:/data
+      - livecore-rustfs-data:/data
     ports:
-      - "${LIVECORE_MINIO_PORT:-9000}:9000"
-      - "${LIVECORE_MINIO_CONSOLE_PORT:-9001}:9001"
+      - "${LIVECORE_RUSTFS_PORT:-9000}:9000"
+      - "${LIVECORE_RUSTFS_CONSOLE_PORT:-9001}:9001"
     restart: unless-stopped
 
-  # One-shot: wait for MinIO, create the PRIVATE assets bucket, exit 0. The
-  # api/worker depend on it with service_completed_successfully, so the bucket the
-  # signed-URL adapter writes to always exists before they start (mirrors the
-  # migrate gate's run-before-then-start pattern).
-  minio-setup:
-    image: ${MINIO_CLIENT_IMAGE:-minio/mc:latest}
+  # One-shot: wait for RustFS, create the PRIVATE assets bucket, exit 0. The api/worker
+  # depend on it with service_completed_successfully, so the bucket the signed-URL
+  # adapter writes to always exists before they start (mirrors the migrate gate's
+  # run-before-then-start pattern). It bootstraps with the AWS CLI (Apache-2.0, an
+  # S3-standard client) rather than a vendor-specific tool, so the whole storage stack
+  # stays off AGPL tooling — the point of the RustFS move. S3/RustFS buckets are PRIVATE
+  # by default (no public access without an explicit policy), so no anonymous-access
+  # toggle is needed; create-bucket is not idempotent, so a re-run falls back to
+  # head-bucket when the bucket already exists.
+  rustfs-setup:
+    image: ${RUSTFS_SETUP_IMAGE:-amazon/aws-cli:2.35.8@sha256:14b197d682f59240b51c3953a3a47b19288dbbb25c2e237fc6eb2d70e8fca227}
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # The AWS CLI reads these standard vars automatically; they are the RustFS login.
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      AWS_DEFAULT_REGION: ${Assets__Storage__Region:-us-east-1}
       LIVECORE_ASSET_BUCKET: ${Assets__Storage__Bucket:-livecore-assets}
     depends_on:
-      minio:
+      rustfs:
         condition: service_started
-    # $$ escapes Compose interpolation so the container shell expands these, not
-    # Compose. `mc anonymous set none` keeps the bucket private (no public access).
+    # $$ escapes Compose interpolation so the container shell expands the bucket name.
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -e
-        until mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+        until aws --endpoint-url "http://rustfs:9000" s3 ls >/dev/null 2>&1; do
           echo "waiting for object storage..."; sleep 2;
         done
-        mc mb --ignore-existing "local/$$LIVECORE_ASSET_BUCKET"
-        mc anonymous set none "local/$$LIVECORE_ASSET_BUCKET"
+        aws --endpoint-url "http://rustfs:9000" s3api create-bucket --bucket "$$LIVECORE_ASSET_BUCKET" || aws --endpoint-url "http://rustfs:9000" s3api head-bucket --bucket "$$LIVECORE_ASSET_BUCKET"
         echo "object storage ready: private bucket $$LIVECORE_ASSET_BUCKET"
     restart: "no"
 
@@ -137,11 +154,11 @@ services:
       Authentication__Oidc__Authority: ${Authentication__Oidc__Authority:-http://keycloak:8080/realms/livecore}
       Authentication__Oidc__Audience: ${Authentication__Oidc__Audience:-livecore-api}
       Authentication__Oidc__RequireHttpsMetadata: ${Authentication__Oidc__RequireHttpsMetadata:-false}
-      # Object storage wired to MinIO (path-style is required for S3-compatible
-      # self-hosted backends). The access key/secret reuse the MinIO root login.
-      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
-      Assets__Storage__AccessKeyId: ${MINIO_ROOT_USER:-minioadmin}
-      Assets__Storage__SecretAccessKey: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # Object storage wired to RustFS (path-style is required for S3-compatible
+      # self-hosted backends). The access key/secret reuse the RustFS root login.
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://rustfs:9000}
+      Assets__Storage__AccessKeyId: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      Assets__Storage__SecretAccessKey: ${RUSTFS_SECRET_KEY:-rustfsadmin}
       Assets__Storage__Region: ${Assets__Storage__Region:-us-east-1}
       Assets__Storage__ForcePathStyle: ${Assets__Storage__ForcePathStyle:-true}
       Assets__Storage__Bucket: ${Assets__Storage__Bucket:-livecore-assets}
@@ -153,7 +170,7 @@ services:
         condition: service_started
       valkey:
         condition: service_healthy
-      minio-setup:
+      rustfs-setup:
         condition: service_completed_successfully
 
   # --- Pre-wire the worker to object storage ---
@@ -161,17 +178,17 @@ services:
   # shares the same storage configuration as the api.
   worker:
     environment:
-      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
-      Assets__Storage__AccessKeyId: ${MINIO_ROOT_USER:-minioadmin}
-      Assets__Storage__SecretAccessKey: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://rustfs:9000}
+      Assets__Storage__AccessKeyId: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      Assets__Storage__SecretAccessKey: ${RUSTFS_SECRET_KEY:-rustfsadmin}
       Assets__Storage__Region: ${Assets__Storage__Region:-us-east-1}
       Assets__Storage__ForcePathStyle: ${Assets__Storage__ForcePathStyle:-true}
       Assets__Storage__Bucket: ${Assets__Storage__Bucket:-livecore-assets}
     depends_on:
-      minio-setup:
+      rustfs-setup:
         condition: service_completed_successfully
 
 volumes:
   # Named volume so the object store survives `docker compose down` (use
   # `docker compose down -v` to discard it alongside the database volume).
-  livecore-minio-data:
+  livecore-rustfs-data:

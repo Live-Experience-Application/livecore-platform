@@ -353,7 +353,7 @@ function Add-LiveCoreFullStackReferenceFinding {
     .DESCRIPTION
         A pure helper for Test-LiveCoreComposeFullStack: the api/worker must SET the
         OIDC/storage/backplane key AND its value must REFERENCE the supporting
-        service (so the wiring actually points at keycloak/minio/valkey rather than
+        service (so the wiring actually points at keycloak/rustfs/valkey rather than
         being declared empty). Appends a finding to $Findings when either is missing.
     #>
     [CmdletBinding()]
@@ -388,7 +388,7 @@ function Test-LiveCoreComposeFullStack {
     .DESCRIPTION
         The optional overlay (deploy/compose/docker-compose.full.yml) brings up the
         Core together with an OIDC provider (Keycloak), S3-compatible object storage
-        (MinIO/RustFS) and a Redis/Valkey backplane, pre-wired so the platform runs
+        (RustFS by default, or MinIO) and a Redis/Valkey backplane, pre-wired so the platform runs
         end-to-end locally (authenticated traffic, asset upload/download, multi-
         instance realtime). This statically validates the overlay defines those three
         supporting services and that the merged api/worker actually reference them, so
@@ -407,10 +407,11 @@ function Test-LiveCoreComposeFullStack {
     $services = $Model.Services
 
     # The supporting services the full local stack adds. docs/02_ARCHITECTURE.md names
-    # Keycloak for OIDC, RustFS/MinIO for S3-compatible storage and Valkey/Redis for the
-    # backplane, so each dependency accepts either documented option by service name.
+    # Keycloak for OIDC, RustFS (the Apache-2.0 default) or MinIO for S3-compatible
+    # storage and Valkey/Redis for the backplane, so each dependency accepts either
+    # documented option by service name. RustFS is listed first as the default backend.
     $oidcCandidates = @('keycloak')
-    $storageCandidates = @('minio', 'rustfs')
+    $storageCandidates = @('rustfs', 'minio')
     $backplaneCandidates = @('valkey', 'redis')
 
     $oidcService = $oidcCandidates | Where-Object { $services.ContainsKey($_) } | Select-Object -First 1
@@ -421,7 +422,7 @@ function Test-LiveCoreComposeFullStack {
         $findings.Add('MISSING OIDC SERVICE: the full-stack overlay must define an OIDC provider service (keycloak)')
     }
     if (-not $storageService) {
-        $findings.Add('MISSING STORAGE SERVICE: the full-stack overlay must define an S3-compatible object storage service (minio or rustfs)')
+        $findings.Add('MISSING STORAGE SERVICE: the full-stack overlay must define an S3-compatible object storage service (rustfs or minio)')
     }
     if (-not $backplaneService) {
         $findings.Add('MISSING BACKPLANE SERVICE: the full-stack overlay must define a Redis/Valkey backplane service (valkey or redis)')

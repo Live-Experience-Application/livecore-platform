@@ -251,7 +251,7 @@ function Get-FixtureFullStack {
 
     $workerStorage = if ($OmitWorkerStorage) { '' } else { @'
     environment:
-      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://minio:9000}
+      Assets__Storage__Endpoint: ${Assets__Storage__Endpoint:-http://rustfs:9000}
 '@ }
 
     return @"
@@ -260,30 +260,30 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.1
     command: ["start-dev", "--import-realm"]
-  minio:
-    image: minio/minio:latest
-  minio-setup:
-    image: minio/mc:latest
+  rustfs:
+    image: rustfs/rustfs:1.0.0-beta.8
+  rustfs-setup:
+    image: amazon/aws-cli:2.35.8
     depends_on:
-      minio:
+      rustfs:
         condition: service_started
 $backplane
   api:
     environment:
       $apiAuthority
-      Assets__Storage__Endpoint: `${Assets__Storage__Endpoint:-http://minio:9000}
+      Assets__Storage__Endpoint: `${Assets__Storage__Endpoint:-http://rustfs:9000}
       Realtime__Backplane__ConnectionString: `${Realtime__Backplane__ConnectionString:-valkey:6379}
     depends_on:
       keycloak:
         condition: service_started
       valkey:
         condition: service_healthy
-      minio-setup:
+      rustfs-setup:
         condition: service_completed_successfully
   worker:
 $workerStorage
 volumes:
-  livecore-minio-data:
+  livecore-rustfs-data:
 "@
 }
 
@@ -335,11 +335,11 @@ else {
 # are up before the api starts) and that the worker shares the object storage.
 AssertTrue ($realFullModel.Services['api'].DependsOn.ContainsKey('keycloak')) `
     'the real overlay api depends on the keycloak (OIDC) service'
-AssertTrue ($realFullModel.Services['api'].DependsOn['minio-setup'] -eq 'service_completed_successfully') `
+AssertTrue ($realFullModel.Services['api'].DependsOn['rustfs-setup'] -eq 'service_completed_successfully') `
     'the real overlay api gates on the object-storage bucket setup completing'
 AssertTrue ($realFullModel.Services['api'].DependsOn['valkey'] -eq 'service_healthy') `
     'the real overlay api waits for the backplane to be healthy'
-AssertTrue ($realFullModel.Services['worker'].Environment['Assets__Storage__Endpoint'] -match 'minio') `
+AssertTrue ($realFullModel.Services['worker'].Environment['Assets__Storage__Endpoint'] -match 'rustfs') `
     'the real overlay worker references the object-storage endpoint'
 
 # =============================================================================
