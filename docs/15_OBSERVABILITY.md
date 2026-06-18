@@ -196,8 +196,17 @@ only alternative, `OpenTelemetry.Exporter.Prometheus.HttpListener`, is equally p
 stable substitute. The supply-chain risk a prerelease would otherwise carry is contained — the exact build is
 pinned and restored in **locked mode** against the committed `packages.lock.json`, CI verifies that same
 locked restore over the whole solution so the closure cannot float, and the release images are SBOM- and
-CVE-scanned before publish (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, CORE-DEP-003). The pin is revisited when a
-stable `OpenTelemetry.Exporter.Prometheus.AspNetCore` is published.
+CVE-scanned before publish (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, CORE-DEP-003).
+
+The prerelease use is **tracked as an explicit dated, owner-named decision with an upgrade trigger** rather than
+left as a silent `-beta` (CORE-OBS-004): as of **2026-06-18** every published exporter version is a prerelease
+and the latest is the pinned `1.16.0-beta.1` itself, so there is no stable release to upgrade to. The decision
+(owner: **Core-later** — the Core platform / observability maintainers) is to keep the pin and **revisit it when
+the first STABLE `OpenTelemetry.Exporter.Prometheus.AspNetCore` is published**; the `/metrics` endpoint behavior
+is unchanged (it reuses the existing `AddLiveCorePrometheusMetrics` wiring). The pinned version and the upgrade
+trigger are asserted by `tests/LiveCore.Api.UnitTests/Observability/PrometheusExporterPinTests.cs`, so a silent
+bump fails the build. The full dated decision is recorded in `docs/24_SPEC_CONSISTENCY.md` ("Prerelease
+Prometheus exporter pin tracked as a dated decision (CORE-OBS-004)").
 
 The background **worker** records job failures — and, since CORE-OBS-007, the per-loop success count, sweep
 duration and backlog/queue depth SLIs — onto the same `LiveCore` meter from each of its job loops (asset

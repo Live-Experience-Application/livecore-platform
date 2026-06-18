@@ -88,8 +88,19 @@
          substitute. The supply-chain risk a prerelease would otherwise carry is contained: the exact build is
          pinned and restored in locked mode against the committed packages.lock.json (content hash captured,
          CORE-DEP-003), CI verifies that same locked restore over the whole solution so the closure cannot
-         float, and the release images are SBOM- and CVE-scanned before publish. Revisit the pin when a stable
-         OpenTelemetry.Exporter.Prometheus.AspNetCore is published. -->
+         float, and the release images are SBOM- and CVE-scanned before publish.
+         DECISION (CORE-OBS-004, recorded 2026-06-18; owner: Core-later - the Core platform / observability
+         maintainers): the prerelease use is TRACKED as an explicit dated decision, not silently riding a -beta.
+         As of 2026-06-18 EVERY published OpenTelemetry.Exporter.Prometheus.AspNetCore version is a prerelease
+         (alpha/beta/rc) and the latest published version is this 1.16.0-beta.1 itself, so there is no stable
+         release to upgrade to; the decision is to keep the pin and record it rather than churn.
+         UPGRADE TRIGGER: replace this pin with the FIRST STABLE (non -alpha/-beta/-rc)
+         OpenTelemetry.Exporter.Prometheus.AspNetCore release once one is published, regenerate the locked
+         restore, and then retire this justification and the matching notes in docs/15_OBSERVABILITY.md and
+         docs/24_SPEC_CONSISTENCY.md. The metrics endpoint behavior is unchanged. The pinned version and this
+         trigger are asserted by PrometheusExporterPinTests, so a silent bump fails the build. The full dated,
+         owner-named decision is recorded in docs/24_SPEC_CONSISTENCY.md ("Prerelease Prometheus exporter pin
+         tracked as a dated decision (CORE-OBS-004)"). -->
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.16.0-beta.1" />
     <!-- OpenTelemetry distributed tracing export (CORE-OBS-003). docs/15_OBSERVABILITY.md requires the key
          request and realtime flows to be exportable to a configured collector. LiveCoreActivitySource produces

@@ -670,6 +670,65 @@ the `docs/02` contracts paragraph). It is recorded here as **reconciled** — th
 claim is now backed by the implementation — the companion to the ui-core correction
 in (a).
 
+## Prerelease Prometheus exporter pin tracked as a dated decision (CORE-OBS-004)
+
+The API's Prometheus `/metrics` scrape endpoint (CORE-OBS-001;
+`apps/api/Observability/MetricsServiceCollectionExtensions.cs`) is served by
+`OpenTelemetry.Exporter.Prometheus.AspNetCore`, pinned to a **prerelease**
+(`1.16.0-beta.1`) in `apps/api/LiveCore.Api.csproj`. AGENTS.md's "no new
+dependencies without explicit justification" rule applies equally to **keeping a
+`-beta` in a release build**, so — the same register style CORE-DOC-003 /
+CORE-SPEC-003 used for the deliberately-absent capabilities — the prerelease use is
+recorded here as an explicit **dated, owner-named decision with an upgrade
+trigger**, so the `/metrics` dependency is **tracked, not silently riding a beta**.
+
+**Decision (2026-06-18; owner: Core-later — the Core platform / observability
+maintainers): keep the prerelease pin and track it; do not churn.** As of
+**2026-06-18** **every** published `OpenTelemetry.Exporter.Prometheus.AspNetCore`
+version is a prerelease (`alpha`/`beta`/`rc`) and the latest published version is
+the pinned `1.16.0-beta.1` itself — there is **no stable release to upgrade to**.
+The package ships on the same `1.16.0` train as its **stable** OpenTelemetry SDK
+siblings but keeps the `-beta` suffix because the upstream
+OpenTelemetry-to-Prometheus exposition specification is not yet declared stable;
+the suffix reflects that spec's status, not instability of the package (it is the
+OpenTelemetry-maintained exporter, not an unofficial fork). It cannot be swapped
+for a stable release without dropping the `/metrics` endpoint
+`docs/15_OBSERVABILITY.md` mandates — the only alternative,
+`OpenTelemetry.Exporter.Prometheus.HttpListener`, is equally prerelease, so there
+is no stable substitute. The supply-chain risk a prerelease would otherwise carry
+is contained: the exact build is pinned and restored in **locked mode** against the
+committed `packages.lock.json` (content hash captured, CORE-DEP-003), CI verifies
+that same locked restore over the whole solution so the closure cannot float, and
+the release images are SBOM- and CVE-scanned before publish
+(`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+**Upgrade trigger.** Replace the pin with the **first STABLE**
+(non-`alpha`/`-beta`/`-rc`) `OpenTelemetry.Exporter.Prometheus.AspNetCore` release
+once one is published, regenerate `packages.lock.json`, and then retire this
+decision (and the matching `apps/api/LiveCore.Api.csproj` justification and the
+`docs/15_OBSERVABILITY.md` note). The metrics endpoint behavior is **unchanged** by
+this story — it reuses the existing wiring
+(`MetricsServiceCollectionExtensions.cs`), it does not alter it.
+
+**Enforced, not just written down.** The pinned version and the upgrade trigger are
+asserted by
+`tests/LiveCore.Api.UnitTests/Observability/PrometheusExporterPinTests.cs`: it reads
+the pin from `apps/api/LiveCore.Api.csproj` and the resolved version from
+`apps/api/packages.lock.json`, asserts both are the recorded `1.16.0-beta.1`
+prerelease, and asserts this decision and the trigger are written here and in
+`docs/15`. So a **silent bump** of the pin — or quietly dropping the decision —
+fails the build, which is what makes the prerelease "tracked". The sibling prerelease
+pin `OpenTelemetry.Instrumentation.EntityFrameworkCore` (`1.15.1-beta.1`) carries the
+same CORE-CMP-002 justification in the csproj for the same reason (its upstream
+database-semantic-conventions spec is likewise not yet stable); CORE-OBS-004 tracks
+the Prometheus exporter specifically because it is the one the mandated `/metrics`
+endpoint depends on.
+
+This note is **documentation plus a dependency assertion** (and a one-line
+csproj/doc wording change); it **adds no route, table, event or migration** and does
+not change the metrics wiring, so all twelve spec-consistency checks and the boundary
+scan stay green.
+
 ## Checking consistency
 
 ```bash
