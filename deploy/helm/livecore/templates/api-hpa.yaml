@@ -1,0 +1,49 @@
+{{- if .Values.autoscaling.enabled }}
+{{- include "livecore.validateRealtimeBackplane" . }}
+# Optional HorizontalPodAutoscaler for the API Deployment (CORE-DEP-011). Rendered ONLY when
+# autoscaling.enabled is true — the default install ships no HPA and the API runs at
+# api.replicaCount. It scales the API Deployment between autoscaling.minReplicas and
+# autoscaling.maxReplicas to hold the configured CPU/memory utilization targets, the automated
+# mechanism behind the horizontal-scaling guidance in docs/13.
+#
+# Enabling autoscaling implies the multi-replica realtime backplane requirement (CORE-DEP-009):
+# an HPA can scale the API past one pod, which silently drops cross-pod SignalR delivery without
+# a shared backplane (CORE-OPS-007). The validateRealtimeBackplane guard (templates/_helpers.tpl)
+# therefore fails the render when autoscaling is enabled without a backplane, exactly as it does
+# for api.replicaCount > 1. The Deployment omits its static replicas while this is enabled so the
+# HPA owns the replica count (templates/api-deployment.yaml).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "livecore.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "livecore.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "livecore.fullname" . }}-api
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  {{- if or .Values.autoscaling.targetCPUUtilizationPercentage .Values.autoscaling.targetMemoryUtilizationPercentage }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  {{- end }}
+{{- end }}

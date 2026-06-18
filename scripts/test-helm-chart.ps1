@@ -60,7 +60,8 @@ function Get-FixtureHelmChart {
         [switch]$DefaultMultiReplica,
         [switch]$OmitBackplaneGuard,
         [switch]$OmitResources,
-        [switch]$OmitStickyAffinity
+        [switch]$OmitStickyAffinity,
+        [switch]$OmitHpa
     )
 
     $migrateHook = if ($OmitMigrateHook) {
@@ -91,12 +92,38 @@ function Get-FixtureHelmChart {
     # in-process backplane (CORE-DEP-009).
     $apiReplicaCount = if ($DefaultMultiReplica) { 2 } else { 1 }
 
-    # The render-time guard that ties api.replicaCount > 1 to the realtime backplane.
+    # The render-time guard that ties api.replicaCount > 1 OR an enabled autoscaler
+    # (CORE-DEP-011) to the realtime backplane (CORE-DEP-009).
     $backplaneGuard = if ($OmitBackplaneGuard) { '' } else { @'
-{{- if and (gt (int .Values.api.replicaCount) 1) (not .Values.secrets.Realtime__Backplane__ConnectionString) }}
-{{- fail "api.replicaCount > 1 requires Realtime__Backplane__ConnectionString" }}
+{{- if and (or (gt (int .Values.api.replicaCount) 1) .Values.autoscaling.enabled) (not .Values.secrets.Realtime__Backplane__ConnectionString) }}
+{{- fail "api.replicaCount > 1 or autoscaling.enabled requires Realtime__Backplane__ConnectionString" }}
 {{- end }}
 '@ }
+
+    # The optional API HorizontalPodAutoscaler (CORE-DEP-011): gated on autoscaling.enabled
+    # and targeting the API Deployment. The negative test (-OmitHpa) leaves the file present but
+    # defines the wrong kind, so the validator's "must define a HorizontalPodAutoscaler" rule trips.
+    $hpaTemplate = if ($OmitHpa) {
+        @'
+{{- if .Values.autoscaling.enabled }}
+apiVersion: v1
+kind: ConfigMap
+{{- end }}
+'@
+    }
+    else {
+        @'
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: livecore-api
+{{- end }}
+'@
+    }
 
     # The default resource ceilings (CORE-DEP-007/CORE-DEP-010): a non-empty
     # requests/limits cpu+memory block per component in values.yaml (indent 2, under
@@ -193,6 +220,12 @@ $migrationsResources
 api:
   replicaCount: $apiReplicaCount
 $apiResources
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
 worker:
   replicaCount: 1
 $workerResources
@@ -234,6 +267,7 @@ spec:
 $apiReadiness
 $resourcesTpl
 "@
+        'templates/api-hpa.yaml'           = $hpaTemplate
         'templates/api-service.yaml'       = "apiVersion: v1`nkind: Service`n"
         'templates/worker-deployment.yaml' = @"
 apiVersion: apps/v1
@@ -304,6 +338,12 @@ AssertTrue (-not $noAffinity.IsValid) 'a chart that does not wire SignalR sticky
 AssertTrue (($noAffinity.Findings -join "`n") -match 'AFFINITY') `
     'the rejection flags the missing multi-replica sticky-session affinity wiring'
 
+# --- Negative: dropping the optional API HorizontalPodAutoscaler (CORE-DEP-011) is rejected. ---
+$noHpa = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitHpa)
+AssertTrue (-not $noHpa.IsValid) 'a chart whose api-hpa.yaml does not define a HorizontalPodAutoscaler is rejected'
+AssertTrue (($noHpa.Findings -join "`n") -match 'AUTOSCALING') `
+    'the rejection flags the missing optional API HorizontalPodAutoscaler'
+
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
 $incomplete.Remove('templates/worker-deployment.yaml')
@@ -363,6 +403,20 @@ AssertTrue ($realIngress -match 'sessionAffinity' -and $realIngress -match 'repl
 $realValuesNoComments = Get-LiveCoreHelmContentWithoutComments -Content $realFiles['values.yaml']
 AssertTrue ($realValuesNoComments -match 'sessionAffinity' -and $realValuesNoComments -match 'affinity:\s*"?cookie"?') `
     'the real values.yaml ships an ingress.sessionAffinity block defaulting to cookie session affinity (CORE-DEP-013)'
+
+# Spot-check the optional API HorizontalPodAutoscaler on the real chart (CORE-DEP-011).
+$realAutoscaling = Get-LiveCoreHelmAutoscalingValues -ValuesContent $realFiles['values.yaml']
+AssertTrue ($realAutoscaling['enabled'] -eq 'false') `
+    'the real chart defaults autoscaling.enabled to false (the API HPA is opt-in; a default install renders none, CORE-DEP-011)'
+AssertTrue (-not [string]::IsNullOrEmpty($realAutoscaling['minReplicas']) -and -not [string]::IsNullOrEmpty($realAutoscaling['maxReplicas'])) `
+    'the real chart documents autoscaling min/max replicas (CORE-DEP-011)'
+AssertTrue ($realAutoscaling.ContainsKey('targetCPUUtilizationPercentage') -or $realAutoscaling.ContainsKey('targetMemoryUtilizationPercentage')) `
+    'the real chart documents a CPU/memory autoscaling utilization target (CORE-DEP-011)'
+$realHpa = $realFiles['templates/api-hpa.yaml']
+AssertTrue ($realHpa -match 'kind:\s*HorizontalPodAutoscaler' -and $realHpa -match 'scaleTargetRef' -and $realHpa -match 'autoscaling\.enabled') `
+    'the real chart ships an opt-in HorizontalPodAutoscaler targeting the API Deployment (CORE-DEP-011)'
+AssertTrue ($realHelpers -match 'autoscaling\.enabled') `
+    'the real backplane guard ties autoscaling.enabled to the realtime backplane (CORE-DEP-009 implication, CORE-DEP-011)'
 
 if ($failures.Count -gt 0) {
     Write-Host ''

@@ -176,6 +176,34 @@ api:
     type: ClusterIP
     port: 80
 
+# Optional HorizontalPodAutoscaler for the API Deployment (CORE-DEP-011). DISABLED by
+# default: a default install ships NO HPA and the API runs at api.replicaCount (1). When
+# enabled the chart renders an autoscaling/v2 HorizontalPodAutoscaler (templates/api-hpa.yaml)
+# that targets the API Deployment and scales it between minReplicas and maxReplicas to hold
+# the CPU/memory utilization targets below — the automated mechanism behind the documented
+# horizontal-scaling guidance (docs/13, "When to add API replicas"). The Deployment's static
+# replicas field is omitted while autoscaling is enabled so the HPA owns the replica count.
+#
+# Enabling autoscaling IMPLIES the multi-replica realtime requirement (CORE-DEP-009): an HPA
+# can scale the API past one pod, and SignalR tracks hub-group membership per process, so a
+# reveal computed on one pod is silently dropped for clients on another unless a shared
+# backplane is configured (CORE-OPS-007). So the chart FAILS TO RENDER when autoscaling is
+# enabled and no backplane (secrets.Realtime__Backplane__ConnectionString, or an existingSecret
+# that carries it) is configured — the SAME guard CORE-DEP-009 applies to api.replicaCount > 1
+# (templates/_helpers.tpl "livecore.validateRealtimeBackplane"). Enable it only together with
+# the backplane AND ingress sticky sessions (CORE-DEP-002 / CORE-DEP-013).
+autoscaling:
+  enabled: false
+  # Replica bounds the HPA keeps the API Deployment within.
+  minReplicas: 2
+  maxReplicas: 5
+  # Target average CPU utilization (percent of the api.resources.requests.cpu above) the HPA
+  # holds the API at by scaling. Set to null to omit the CPU metric.
+  targetCPUUtilizationPercentage: 75
+  # Target average memory utilization (percent of api.resources.requests.memory). Set to null
+  # to omit the memory metric. At least one of the two targets must be set when enabled.
+  targetMemoryUtilizationPercentage: 80
+
 worker:
   replicaCount: 1
   image:

@@ -56,6 +56,14 @@ handshake stays pinned to one replica (CORE-DEP-002).
     (CORE-DEP-002).
 {{- end }}
 {{- end }}
+{{- if .Values.autoscaling.enabled }}
+
+Autoscaling (CORE-DEP-011): a HorizontalPodAutoscaler scales the API Deployment between
+{{ .Values.autoscaling.minReplicas }} and {{ .Values.autoscaling.maxReplicas }} replicas on its CPU/memory
+utilization targets. Because it can run more than one API pod, the realtime backplane (CORE-OPS-007 / CORE-DEP-009)
+is REQUIRED — the chart enforced it at render time — and SignalR sticky sessions must be in place at the ingress
+(CORE-DEP-002 / CORE-DEP-013) so each client's negotiate + transport handshake stays pinned to one replica.
+{{- end }}
 {{- if .Values.ingress.enabled }}
 
 Ingress is enabled for:

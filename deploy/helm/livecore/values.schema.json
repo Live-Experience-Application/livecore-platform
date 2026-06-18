@@ -80,6 +80,18 @@
         }
       }
     },
+    "autoscaling": {
+      "type": "object",
+      "description": "Optional HorizontalPodAutoscaler for the API Deployment (CORE-DEP-011). Disabled by default; enabling it implies the realtime backplane requirement (CORE-DEP-009).",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+        "targetMemoryUtilizationPercentage": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 }
+      }
+    },
     "worker": {
       "type": "object",
       "additionalProperties": true,

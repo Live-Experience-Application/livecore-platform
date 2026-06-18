@@ -127,6 +127,51 @@ function Get-LiveCoreHelmValuesSecretValue {
     return $result
 }
 
+function Get-LiveCoreHelmAutoscalingValues {
+    <#
+    .SYNOPSIS
+        Extracts the scalar leaves nested under the top-level `autoscaling:` mapping of a
+        values.yaml document, so the optional-API-HPA rules (CORE-DEP-011) can be asserted
+        over the default install (enabled defaults to false, min/max replicas and a
+        CPU/memory utilization target are documented).
+    .OUTPUTS
+        A hashtable of autoscaling key -> raw scalar value (unquoted, trimmed). Empty when
+        the block is absent.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ValuesContent)
+
+    $result = @{}
+    $lines = $ValuesContent -split "`r?`n"
+
+    $inBlock = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreHelmIndent -Line $line
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        if (-not $inBlock) {
+            if ($indent -eq 0 -and $trimmed -match '^autoscaling:\s*$') { $inBlock = $true }
+            continue
+        }
+
+        # The autoscaling mapping ends at the next top-level (indent 0) key.
+        if ($indent -eq 0) { break }
+
+        if ($trimmed -match '^([A-Za-z0-9_.:-]+):\s*(.*)$') {
+            $key = $Matches[1]
+            $value = $Matches[2]
+            if ($value -match '^(.*?)\s+#.*$') { $value = $Matches[1] }
+            $value = $value.Trim().Trim('"', "'")
+            $result[$key] = $value
+        }
+    }
+    return $result
+}
+
 function Get-LiveCoreHelmApiReplicaCount {
     <#
     .SYNOPSIS
@@ -256,6 +301,7 @@ function Test-LiveCoreHelmChart {
         'values.yaml',
         'templates/migrate-job.yaml',
         'templates/api-deployment.yaml',
+        'templates/api-hpa.yaml',
         'templates/api-service.yaml',
         'templates/worker-deployment.yaml',
         'templates/configmap.yaml',
@@ -419,6 +465,15 @@ function Test-LiveCoreHelmChart {
         $findings.Add('BACKPLANE GUARD: the chart must fail the render when api.replicaCount > 1 without a realtime backplane - a guard tying api.replicaCount to Realtime__Backplane__ConnectionString via `fail` (CORE-DEP-009)')
     }
 
+    # CORE-DEP-011 implies CORE-DEP-009: an enabled HorizontalPodAutoscaler can scale the API
+    # past one pod, so enabling autoscaling carries the SAME multi-replica realtime-backplane
+    # requirement. The backplane guard must therefore also tie autoscaling.enabled to the
+    # backplane connection string, so enabling autoscaling without a backplane is rejected.
+    $tiesAutoscalingToBackplane = ($templateCorpus -match 'autoscaling\.enabled') -and ($templateCorpus -match 'Realtime__Backplane__ConnectionString')
+    if (-not ($hasFailGuard -and $tiesAutoscalingToBackplane)) {
+        $findings.Add('AUTOSCALING GUARD: enabling autoscaling must imply the realtime backplane requirement (CORE-DEP-009) - the backplane guard must tie autoscaling.enabled to Realtime__Backplane__ConnectionString via `fail` (CORE-DEP-011)')
+    }
+
     # 11. CORE-DEP-013 / CORE-DEP-002: SignalR sticky-session affinity for multi-replica
     #     realtime. A SignalR connection's negotiate + (SSE/long-polling) follow-up
     #     requests must all reach the replica that issued its connectionId, and the hub
@@ -444,6 +499,44 @@ function Test-LiveCoreHelmChart {
         }
     }
 
+    # 12. CORE-DEP-011: an OPTIONAL HorizontalPodAutoscaler for the API, disabled by default,
+    #     that targets the API Deployment. Two invariants make it opt-in and correct:
+    #     (a) values.yaml ships an autoscaling block defaulting enabled:false with min/max
+    #         replicas and at least one CPU/memory utilization target; and
+    if ($Files.ContainsKey('values.yaml')) {
+        $autoscaling = Get-LiveCoreHelmAutoscalingValues -ValuesContent $Files['values.yaml']
+        if ($autoscaling.Count -eq 0) {
+            $findings.Add('AUTOSCALING: values.yaml must ship an autoscaling block for the optional API HorizontalPodAutoscaler (CORE-DEP-011)')
+        }
+        else {
+            if (-not $autoscaling.ContainsKey('enabled') -or $autoscaling['enabled'] -ne 'false') {
+                $findings.Add('AUTOSCALING: values.yaml autoscaling.enabled must default to false so the HPA is opt-in and a default install renders none (CORE-DEP-011)')
+            }
+            foreach ($key in @('minReplicas', 'maxReplicas')) {
+                if (-not $autoscaling.ContainsKey($key) -or [string]::IsNullOrEmpty($autoscaling[$key])) {
+                    $findings.Add("AUTOSCALING: values.yaml autoscaling.$key must ship a documented default (CORE-DEP-011)")
+                }
+            }
+            if (-not ($autoscaling.ContainsKey('targetCPUUtilizationPercentage') -or $autoscaling.ContainsKey('targetMemoryUtilizationPercentage'))) {
+                $findings.Add('AUTOSCALING: values.yaml autoscaling must document a CPU or memory utilization target (CORE-DEP-011)')
+            }
+        }
+    }
+    # (b) templates/api-hpa.yaml renders a HorizontalPodAutoscaler, gated on autoscaling.enabled,
+    #     that targets the API Deployment via scaleTargetRef (so the default install ships no HPA).
+    if ($Files.ContainsKey('templates/api-hpa.yaml')) {
+        $hpa = Get-LiveCoreHelmContentWithoutComments -Content $Files['templates/api-hpa.yaml']
+        if ($hpa -notmatch '(?m)^\s*kind:\s*HorizontalPodAutoscaler\s*$') {
+            $findings.Add('AUTOSCALING: templates/api-hpa.yaml must define a HorizontalPodAutoscaler (CORE-DEP-011)')
+        }
+        if ($hpa -notmatch 'autoscaling\.enabled') {
+            $findings.Add('AUTOSCALING: templates/api-hpa.yaml must gate the HPA on .Values.autoscaling.enabled so the default install ships no HPA (CORE-DEP-011)')
+        }
+        if ($hpa -notmatch 'scaleTargetRef' -or $hpa -notmatch 'Deployment') {
+            $findings.Add('AUTOSCALING: templates/api-hpa.yaml must target the API Deployment via scaleTargetRef (CORE-DEP-011)')
+        }
+    }
+
     return [pscustomobject]@{
         IsValid  = ($findings.Count -eq 0)
         Findings = $findings.ToArray()
@@ -456,5 +549,6 @@ Export-ModuleMember -Function `
     Get-LiveCoreHelmContentWithoutComments, `
     Get-LiveCoreHelmValuesSecretValue, `
     Get-LiveCoreHelmApiReplicaCount, `
+    Get-LiveCoreHelmAutoscalingValues, `
     Get-LiveCoreHelmComponentResources, `
     Test-LiveCoreHelmChart

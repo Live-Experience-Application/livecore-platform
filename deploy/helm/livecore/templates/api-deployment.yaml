@@ -14,7 +14,11 @@ metadata:
     {{- include "livecore.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # Static replica count. Omitted when autoscaling.enabled (CORE-DEP-011) so the
+  # HorizontalPodAutoscaler (templates/api-hpa.yaml) owns the replica count instead.
   replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "livecore.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}

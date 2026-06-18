@@ -213,6 +213,49 @@ nginx.ingress.kubernetes.io/session-cookie-name: "livecore-affinity"
 - **Opt out** with `--set ingress.sessionAffinity.enabled=false` when the client forces a
   WebSockets-only transport (no negotiate fallback), the one topology that needs no affinity.
 
+### Optional API autoscaling (CORE-DEP-011)
+
+The chart ships an **opt-in** `HorizontalPodAutoscaler` for the API
+([`templates/api-hpa.yaml`](templates/api-hpa.yaml)), **disabled by default**
+(`autoscaling.enabled: false`) — a default install renders **no** HPA and the API runs at
+`api.replicaCount`. Enabling it is the automated form of the "When to add API replicas"
+decision in `docs/13`: the chart renders an `autoscaling/v2` `HorizontalPodAutoscaler` that
+**targets the API `Deployment`** and scales it between `autoscaling.minReplicas` and
+`autoscaling.maxReplicas` to hold the documented CPU/memory utilization targets. While
+autoscaling is enabled the `Deployment` omits its static `replicas` so the HPA owns the
+count.
+
+| Value                                          | Default | Meaning                                                        |
+| ---------------------------------------------- | ------- | -------------------------------------------------------------- |
+| `autoscaling.enabled`                          | `false` | Render the HPA (opt-in).                                       |
+| `autoscaling.minReplicas`                      | `2`     | Lower replica bound.                                           |
+| `autoscaling.maxReplicas`                      | `5`     | Upper replica bound.                                           |
+| `autoscaling.targetCPUUtilizationPercentage`   | `75`    | Target average CPU utilization (% of `requests.cpu`). `null` to drop the CPU metric.    |
+| `autoscaling.targetMemoryUtilizationPercentage`| `80`    | Target average memory utilization (% of `requests.memory`). `null` to drop the memory metric. |
+
+**Enabling autoscaling implies the multi-replica realtime backplane requirement
+(CORE-DEP-009).** An HPA can scale the API past one pod, and SignalR tracks hub-group
+membership per process, so without a shared backplane a reveal computed on one pod is
+silently dropped for clients on another (CORE-OPS-007). So the chart **fails to render** when
+`autoscaling.enabled` is set and no backplane is configured — exactly the guard
+`api.replicaCount > 1` trips — and SignalR sticky sessions (CORE-DEP-002 / CORE-DEP-013) are
+also required:
+
+```bash
+# Fails fast (autoscaling on, no backplane configured):
+helm template livecore deploy/helm/livecore --set autoscaling.enabled=true
+#   Error: ... ERROR (CORE-DEP-009): autoscaling.enabled is true but no realtime backplane is configured. ...
+
+# Renders the HPA once the backplane is set (enable the Ingress for the sticky-session affinity):
+helm template livecore deploy/helm/livecore \
+  --set autoscaling.enabled=true \
+  --set-string secrets.Realtime__Backplane__ConnectionString="valkey:6379" \
+  --set ingress.enabled=true
+```
+
+Utilization targets need the API's `resources.requests` (shipped by default, see above) so the
+HPA has a denominator to scale against.
+
 ## Validation
 
 The chart is linted and schema-validated in CI (the `helm-chart` job), with a
@@ -221,8 +264,9 @@ no-tooling static gate runnable locally:
 ```bash
 # Static validation (no helm/kubeconform needed): asserts the pre-install migrate
 # Job hook, the probes, the resource requests/limits ceiling, the ConfigMap/Secret
-# split, that no secret is hardcoded and that the multi-replica sticky-session
-# affinity annotations are gated on api.replicaCount > 1 (CORE-DEP-013).
+# split, that no secret is hardcoded, that the multi-replica sticky-session affinity
+# annotations are gated on api.replicaCount > 1 (CORE-DEP-013), and that the optional
+# API HPA is opt-in, targets the API Deployment and implies the backplane (CORE-DEP-011).
 pwsh -NoProfile -File scripts/test-helm-chart.ps1
 
 # Full render + schema validation (needs helm + kubeconform):

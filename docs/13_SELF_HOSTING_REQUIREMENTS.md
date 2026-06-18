@@ -286,6 +286,16 @@ The worker is a **singleton by default** (CORE-RES-003 covers multi-replica work
 safety); scale the API for request/realtime load, not the worker, unless that story's
 guidance applies.
 
+**Automating the scale-up decision (Kubernetes, CORE-DEP-011).** On the Helm path the
+scale-up decision above can be **automated** instead of set by hand: the chart ships an
+**optional** `HorizontalPodAutoscaler` for the API (`autoscaling.enabled`, **off by
+default**) that scales the API `Deployment` between `autoscaling.minReplicas` and
+`autoscaling.maxReplicas` to hold a CPU/memory utilization target — the automated mechanism
+for this section's guidance. Because an HPA can take the API past one pod, **enabling it
+requires the realtime backplane exactly as a manual `replicaCount > 1` does** (the chart
+refuses to render otherwise, CORE-DEP-009) and the ingress sticky sessions (CORE-DEP-002).
+See "In-repo Kubernetes Helm chart" below.
+
 ## Production options
 
 - single VPS with Docker Compose — the in-repo stack at
@@ -364,18 +374,35 @@ the auto affinity is opt-out (`ingress.sessionAffinity.enabled: false`) for a
 WebSockets-only client transport. See "Multi-instance SignalR requires sticky sessions /
 ARR affinity" above for the full rationale and the override/opt-out knobs.
 
+**Optional API autoscaling (CORE-DEP-011).** The chart ships an **opt-in**
+`HorizontalPodAutoscaler` for the API ([`templates/api-hpa.yaml`](../deploy/helm/livecore/templates/api-hpa.yaml)),
+**disabled by default** (`autoscaling.enabled: false`) so a default install renders no HPA
+and the API runs at `api.replicaCount`. When enabled it renders an `autoscaling/v2`
+`HorizontalPodAutoscaler` that **targets the API `Deployment`** and scales it between
+`autoscaling.minReplicas` and `autoscaling.maxReplicas` on the documented
+`autoscaling.targetCPUUtilizationPercentage` / `autoscaling.targetMemoryUtilizationPercentage`
+targets (the `Deployment`'s static `replicas` is then omitted so the HPA owns the count).
+**Enabling it implies the multi-replica realtime requirement (CORE-DEP-009):** an HPA can
+scale the API past one pod, so the chart refuses to render with `autoscaling.enabled` set and
+no backplane configured — the same guard `api.replicaCount > 1` trips — and the ingress
+sticky sessions (CORE-DEP-002) apply. Enable it only with the backplane and sticky sessions
+in place.
+
 **Tested.** `scripts/test-helm-chart.ps1` statically validates that the chart wires
 the pre-install/pre-upgrade migrate `Job`, the documented probes, the
 `ConfigMap`/`Secret` externalization, bakes no secret, **defaults to a single API
-replica with the multi-replica backplane guard** and **gates the sticky-session affinity
-annotations on a multi-replica API** (no helm/kubeconform needed), and the `helm-chart`
+replica with the multi-replica backplane guard**, **gates the sticky-session affinity
+annotations on a multi-replica API** and **ships an opt-in API HPA that targets the API
+`Deployment` and implies the backplane** (no helm/kubeconform needed), and the `helm-chart`
 CI job (`.github/workflows/ci.yml`) runs `helm lint`, renders the chart with
 `helm template`, **schema-validates** every rendered manifest with `kubeconform`, and
 asserts the pre-install migrate `Job`, the probes, that no secret is hardcoded, that a
-multi-replica render **fails without a backplane and succeeds with one** (CORE-DEP-009)
-and that **a multi-replica render with the `Ingress` enabled carries the cookie
+multi-replica render **fails without a backplane and succeeds with one** (CORE-DEP-009),
+that **a multi-replica render with the `Ingress` enabled carries the cookie
 session-affinity annotations while the single-replica default carries none**
-(CORE-DEP-013). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
+(CORE-DEP-013), and that **the default render carries no HPA while enabling autoscaling
+renders a schema-valid HPA targeting the API `Deployment` and trips the backplane guard
+without one** (CORE-DEP-011). See [`deploy/helm/livecore/README.md`](../deploy/helm/livecore/README.md).
 
 ## Operational requirements
 

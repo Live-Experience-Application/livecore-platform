@@ -942,6 +942,11 @@ jobs:
     #      annotations automatically (so SignalR's negotiate + transport handshake stays
     #      pinned to one replica); the single-replica default carries none, and the auto
     #      affinity is opt-out for a WebSockets-only transport.
+    #   6. OPTIONAL API HPA (CORE-DEP-011): the default render carries no
+    #      HorizontalPodAutoscaler; enabling autoscaling renders a schema-valid HPA targeting
+    #      the API Deployment (and the Deployment yields its static replicas to the HPA); and
+    #      enabling autoscaling without a backplane trips the CORE-DEP-009 guard, since an HPA
+    #      can scale the API past one pod.
     # Tooling justification: helm (the chart renderer/linter) and kubeconform (the
     # Kubernetes-schema validator) are installed from PINNED release binaries via curl
     # - the same "pin the tool, add no extra GitHub Action to the supply chain"
@@ -1131,6 +1136,57 @@ jobs:
             echo "UNEXPECTED: ingress.sessionAffinity.enabled=false still rendered the affinity annotation"; cat ingress-optout.yaml; exit 1
           fi
           echo "OK: ingress.sessionAffinity.enabled=false opts out of the auto affinity annotation (the WebSockets-only path)"
+
+      - name: Assert the optional API HorizontalPodAutoscaler (CORE-DEP-011)
+        run: |
+          set -euo pipefail
+          chart=deploy/helm/livecore
+          backplane='secrets.Realtime__Backplane__ConnectionString=redis://valkey:6379'
+
+          # CORE-DEP-011: the chart ships an OPTIONAL HorizontalPodAutoscaler for the API,
+          # disabled by default. The default render carries no HPA; enabling it renders a
+          # schema-valid HPA targeting the API Deployment; and because an HPA can scale the
+          # API past one pod, enabling it implies the CORE-DEP-009 backplane requirement.
+
+          # (a) The DEFAULT install renders NO HorizontalPodAutoscaler.
+          helm template livecore "$chart" > rendered-default-hpa.yaml
+          if grep -Eq '^[[:space:]]*kind:[[:space:]]*HorizontalPodAutoscaler[[:space:]]*$' rendered-default-hpa.yaml; then
+            echo "UNEXPECTED: the default render contains a HorizontalPodAutoscaler"; exit 1
+          fi
+          echo "OK: the default install renders no HPA (autoscaling is opt-in)"
+
+          # (b) Enabling autoscaling WITHOUT a backplane FAILS the render, citing CORE-DEP-009
+          #     (an HPA can scale the API past one pod, so it carries the multi-replica
+          #     realtime requirement just like api.replicaCount > 1).
+          if helm template livecore "$chart" --set autoscaling.enabled=true > hpa-empty.yaml 2> hpa-empty.err; then
+            echo "EXPECTED FAILURE: autoscaling.enabled=true with no backplane rendered successfully"; cat hpa-empty.yaml; exit 1
+          fi
+          grep -q 'CORE-DEP-009' hpa-empty.err \
+            || { echo "MISSING: enabling autoscaling without a backplane must cite the CORE-DEP-009 guard"; cat hpa-empty.err; exit 1; }
+          echo "OK: autoscaling without a backplane fails the render and cites CORE-DEP-009"
+
+          # (c) Enabling autoscaling WITH a backplane renders a schema-valid HPA that targets
+          #     the API Deployment, and the Deployment then omits its static replicas (the HPA
+          #     owns the replica count).
+          helm template livecore "$chart" --set autoscaling.enabled=true --set-string "$backplane" --show-only templates/api-hpa.yaml > hpa.yaml
+          kubeconform -strict -summary -schema-location default hpa.yaml
+          grep -Eq '^[[:space:]]*kind:[[:space:]]*HorizontalPodAutoscaler[[:space:]]*$' hpa.yaml \
+            || { echo "MISSING: the enabled render does not contain a HorizontalPodAutoscaler"; cat hpa.yaml; exit 1; }
+          # The HPA's scaleTargetRef must point at the API Deployment (livecore-api).
+          grep -Eq '^[[:space:]]*kind:[[:space:]]*Deployment[[:space:]]*$' hpa.yaml \
+            || { echo "MISSING: the HPA scaleTargetRef does not reference a Deployment"; cat hpa.yaml; exit 1; }
+          grep -Eq '^[[:space:]]*name:[[:space:]]*livecore-api[[:space:]]*$' hpa.yaml \
+            || { echo "MISSING: the HPA scaleTargetRef does not reference the API Deployment (livecore-api)"; cat hpa.yaml; exit 1; }
+          echo "OK: enabling autoscaling renders a schema-valid HPA targeting the API Deployment"
+
+          # The whole-chart render with autoscaling enabled also schema-validates (HPA + the rest).
+          helm template livecore "$chart" --set autoscaling.enabled=true --set-string "$backplane" > autoscaling-full.yaml
+          kubeconform -strict -summary -schema-location default autoscaling-full.yaml
+          # The API Deployment must omit its static replicas so the HPA owns the count.
+          if helm template livecore "$chart" --set autoscaling.enabled=true --set-string "$backplane" --show-only templates/api-deployment.yaml | grep -Eq '^[[:space:]]*replicas:'; then
+            echo "UNEXPECTED: the API Deployment still sets a static replicas while autoscaling is enabled"; exit 1
+          fi
+          echo "OK: the autoscaling render schema-validates and the API Deployment yields replica control to the HPA"
 
   observability-assets:
     name: Observability assets (alert rules, SLOs, dashboard) (CORE-OBS-008)
