@@ -755,6 +755,28 @@ aggregating endpoint make a **single** hung loop detectable.
   file go stale, which is fail-safe). It carries only a timestamp — no identifiers, no
   secrets (threat T7).
 
+### Metrics scraping and example alerting/SLOs (CORE-OBS-008)
+
+Both hosts expose a Prometheus scrape endpoint at `GET /metrics` — the API host (CORE-OBS-001) and the worker on
+its configurable `Worker:Metrics:Url` (default port `9464`, CORE-DR-003). Both are **unauthenticated by
+convention**: a Prometheus server scrapes them from inside the deployment network, and a deployment **restricts
+them at the reverse-proxy/network edge**. They carry only low-cardinality aggregate series — no tenant, principal
+or resource detail (threat T7).
+
+So an operator is not left with raw metrics and no thresholds, the repository ships **example observability
+assets** under [`deploy/observability/`](../deploy/observability/README.md): a Prometheus scrape configuration
+(targeting the API and worker `/metrics`), example **recording and alert rules**, **documented SLO targets** for
+the `livecore_*` series, and a **starter Grafana dashboard**. They are examples to copy and tune. Point Prometheus
+at `deploy/observability/prometheus/prometheus.yml` (or copy its `scrape_configs` and `rule_files` into an existing
+Prometheus) and import the dashboard.
+
+The worker tags its `livecore_job_*` series with a `job` attribute naming the loop; under the default
+`honor_labels: false` Prometheus renames it to `exported_job` (the target `job` label, e.g. `livecore-worker`,
+wins). The full SLO target table, the per-alert thresholds and the CI validation (`promtool check` plus the
+consistency gate) are documented in `docs/15_OBSERVABILITY.md` ("Example alert rules, SLO targets and a starter
+dashboard") and [`deploy/observability/README.md`](../deploy/observability/README.md). A consolidated
+failure-response runbook mapping each signal to operator actions is a documented follow-up (CORE-OPS-014).
+
 ### Multi-replica worker safety (CORE-RES-003)
 
 The worker is **horizontally scalable**: you may run more than one replica for availability or throughput, and a

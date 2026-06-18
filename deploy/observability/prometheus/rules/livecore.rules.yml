@@ -1,0 +1,201 @@
+# LiveCore example Prometheus recording and alerting rules (CORE-OBS-008).
+#
+# STARTER rules over the livecore_* series the API and worker export on /metrics
+# (docs/15_OBSERVABILITY.md). They turn raw metrics into actionable SLO tracking
+# and alerting out of the box; tune the thresholds and "for" windows to your
+# traffic. The documented SLO targets these encode live in
+# docs/15_OBSERVABILITY.md ("Example alert rules, SLO targets and a starter
+# dashboard").
+#
+# LABEL NOTE (important). The worker tags its background-job series with a
+# low-cardinality "job" attribute naming the loop (asset-cleanup,
+# recap-generation, export-processing, store-notification-reconciliation,
+# data-retention). When Prometheus scrapes, its own target "job" label
+# (livecore-worker) takes precedence and the exposed loop label is renamed to
+# "exported_job" (the default honor_labels: false). The worker rules below
+# therefore group by exported_job, while the API rules group by the scrape "job".
+#
+# VALIDATED IN CI. "promtool check rules" validates this file, and
+# scripts/test-observability-assets.ps1 asserts every livecore_* series
+# referenced here is a series documented in docs/15_OBSERVABILITY.md or a
+# recording rule defined in this file (so the docs and these rules cannot drift).
+groups:
+  # Recording rules pre-compute the SLO burn series the alerts and the dashboard
+  # read, so the thresholds are expressed once and evaluated cheaply.
+  - name: livecore_recording_rules
+    interval: 30s
+    rules:
+      # API request throughput (requests/second), by scrape job.
+      - record: job:livecore_api_requests:rate5m
+        expr: sum by (job) (rate(livecore_api_request_duration_seconds_count[5m]))
+
+      # API server-error (5xx) rate (errors/second), by scrape job.
+      - record: job:livecore_api_request_errors:rate5m
+        expr: sum by (job) (rate(livecore_api_request_errors_total[5m]))
+
+      # API server-error ratio (5xx / all requests), by scrape job - the availability
+      # SLO burn series. With no traffic both rates are 0 and 0/0 is NaN, so the
+      # ratio simply has no value rather than alerting.
+      - record: job:livecore_api_request_error_ratio:rate5m
+        expr: |
+          sum by (job) (rate(livecore_api_request_errors_total[5m]))
+          /
+          sum by (job) (rate(livecore_api_request_duration_seconds_count[5m]))
+
+      # API request latency p95 (seconds), by scrape job - the latency SLO series.
+      - record: job:livecore_api_request_duration_seconds:p95_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (rate(livecore_api_request_duration_seconds_bucket[5m]))
+          )
+
+      # API auth-failure rate (401/403 per second), by scrape job.
+      - record: job:livecore_api_auth_failures:rate5m
+        expr: sum by (job) (rate(livecore_api_auth_failures_total[5m]))
+
+      # API rate-limit rejection rate (429 per second), by scrape job.
+      - record: job:livecore_api_rate_limit_rejections:rate5m
+        expr: sum by (job) (rate(livecore_api_rate_limit_rejections_total[5m]))
+
+      # Reveal command latency p95 (seconds) - the central host-driven state change.
+      - record: job:livecore_reveal_duration_seconds:p95_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (rate(livecore_reveal_duration_seconds_bucket[5m]))
+          )
+
+      # Per-loop worker success ratio over 15m (success / (success + failure)).
+      # exported_job is the loop name (see the LABEL NOTE above).
+      - record: exported_job:livecore_job_success_ratio:rate15m
+        expr: |
+          sum by (exported_job) (rate(livecore_job_successes_total[15m]))
+          /
+          (
+            sum by (exported_job) (rate(livecore_job_successes_total[15m]))
+            + sum by (exported_job) (rate(livecore_job_failures_total[15m]))
+          )
+
+  - name: livecore_api_alerts
+    rules:
+      - alert: LiveCoreApiErrorRatioHigh
+        expr: job:livecore_api_request_error_ratio:rate5m > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API 5xx error ratio above the 99% availability SLO
+          description: >-
+            The API 5xx error ratio for job {{ $labels.job }} has exceeded 1%
+            (below the 99% availability SLO) for 10 minutes. Current value:
+            {{ $value | humanizePercentage }}.
+
+      - alert: LiveCoreApiErrorRatioCritical
+        expr: job:livecore_api_request_error_ratio:rate5m > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: API 5xx error ratio critically high
+          description: >-
+            The API 5xx error ratio for job {{ $labels.job }} has exceeded 5%
+            for 5 minutes. Current value: {{ $value | humanizePercentage }}.
+
+      - alert: LiveCoreApiLatencyP95High
+        expr: job:livecore_api_request_duration_seconds:p95_5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API p95 request latency above the 1s SLO
+          description: >-
+            The API p95 request latency for job {{ $labels.job }} has been above
+            1s for 10 minutes. Current value: {{ $value | humanizeDuration }}.
+
+      - alert: LiveCoreApiAuthFailureSpike
+        expr: job:livecore_api_auth_failures:rate5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Elevated authentication/authorization failure rate (401/403)
+          description: >-
+            The API 401/403 rate for job {{ $labels.job }} has exceeded 1/s for
+            10 minutes, which can indicate credential brute-forcing, token replay
+            or a misconfigured client. Current value: {{ $value }} per second.
+
+      - alert: LiveCoreApiRateLimitRejectionsHigh
+        expr: job:livecore_api_rate_limit_rejections:rate5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Elevated rate-limit rejection rate (429)
+          description: >-
+            The API 429 rate-limit rejection rate for job {{ $labels.job }} has
+            exceeded 1/s for 10 minutes. Current value: {{ $value }} per second.
+
+  - name: livecore_dependency_alerts
+    rules:
+      - alert: LiveCoreDatabaseFailures
+        expr: sum by (job) (rate(livecore_database_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Database command failures observed
+          description: >-
+            Database command failures for job {{ $labels.job }} have been
+            non-zero for 10 minutes. Current value: {{ $value }} per second.
+
+      - alert: LiveCoreEventDeliveryFailures
+        expr: sum by (job) (rate(livecore_event_delivery_failures_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Realtime event-delivery failures observed
+          description: >-
+            Realtime session-event delivery is failing at the transport for job
+            {{ $labels.job }}. Delivery is best-effort (the durable event is
+            persisted and replayed on reconnect), but a sustained failure rate
+            points at a backplane problem. Current value: {{ $value }} per second.
+
+      - alert: LiveCoreAssetFailures
+        expr: sum by (job, operation) (rate(livecore_asset_failures_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Asset storage operations failing
+          description: >-
+            Asset {{ $labels.operation }} operations against the configured
+            storage backend are failing for job {{ $labels.job }}. Current value:
+            {{ $value }} per second.
+
+  - name: livecore_worker_alerts
+    rules:
+      - alert: LiveCoreWorkerJobFailing
+        expr: exported_job:livecore_job_success_ratio:rate15m < 0.9
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker loop success ratio below 90%
+          description: >-
+            The {{ $labels.exported_job }} worker loop has a 15m success ratio
+            below 90% for 30 minutes. Current value:
+            {{ $value | humanizePercentage }}.
+
+      - alert: LiveCoreWorkerBacklogNotDraining
+        expr: min by (exported_job) (min_over_time(livecore_job_backlog[1h])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker loop backlog not draining
+          description: >-
+            The {{ $labels.exported_job }} worker loop backlog has not returned
+            to zero within the last hour, so the loop may be falling behind.
+            Current floor: {{ $value }} pending item(s).

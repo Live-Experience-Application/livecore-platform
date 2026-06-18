@@ -275,6 +275,76 @@ performance optimizations, **observable through the existing signals** and addin
   fail-closed `401`/`403`/`404` paths are still counted and logged exactly as before — caching adds no failure or
   decision surface to observe.
 
+### Example alert rules, SLO targets and a starter dashboard (CORE-OBS-008)
+
+The instruments above expose the right series, but a self-hoster scraping
+`/metrics` still faces raw metrics with **no thresholds** — nothing that says what
+"good" looks like or what to alert on. CORE-OBS-008 closes that gap by shipping,
+under [`deploy/observability/`](../deploy/observability/README.md), example
+Prometheus recording/alert rules, a scrape configuration, **documented SLO
+targets** for the `livecore_*` series and a starter Grafana dashboard, so an
+operator gets actionable alerting and SLO tracking out of the box. They are
+**examples to copy and tune**, not a managed monitoring stack.
+
+| Asset                                                   | Purpose                                                                       |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `deploy/observability/prometheus/prometheus.yml`        | Example scrape config: scrapes the API (`:8080`) and worker (`:9464`) `/metrics`, loads the rules. |
+| `deploy/observability/prometheus/rules/livecore.rules.yml` | Recording rules (the SLO burn series) and alert rules over the `livecore_*` metrics. |
+| `deploy/observability/grafana/dashboards/livecore-overview.json` | Starter dashboard: API SLOs, auth/rate-limit signals, dependency failures and worker-loop health. |
+
+#### Scrape guidance
+
+The API and worker each serve `GET /metrics` (the worker on `Worker:Metrics:Url`,
+default port `9464`; CORE-DR-003). Both are **unauthenticated by convention**,
+scraped from inside the deployment network, and restricted at the
+reverse-proxy/network edge (`docs/13_SELF_HOSTING_REQUIREMENTS.md`). The example
+config's targets match the in-repo Docker Compose service names/ports
+(`deploy/compose/docker-compose.yml`). The recording rules pre-compute each SLO
+burn series so a threshold is expressed once and evaluated cheaply.
+
+**Worker loop label.** The worker tags its `livecore_job_*` series with a
+low-cardinality `job` attribute naming the loop (`asset-cleanup`,
+`recap-generation`, `export-processing`, `store-notification-reconciliation`,
+`data-retention`). When Prometheus scrapes, its **own** target `job` label
+(`livecore-worker`) wins and the exposed loop label is renamed to **`exported_job`**
+(the default `honor_labels: false`), so the worker rules and dashboard panels group
+by `exported_job`.
+
+#### Documented SLO targets
+
+The example rules encode these starter targets (tune them to your traffic). Each
+is computed from the documented `livecore_*` series via the named recording rule:
+
+| Objective                   | Recording-rule series                                | Starter target        | Alert(s)                                                |
+| --------------------------- | ---------------------------------------------------- | --------------------- | ------------------------------------------------------ |
+| API availability            | `job:livecore_api_request_error_ratio:rate5m`        | 5xx ratio < 1%        | `LiveCoreApiErrorRatioHigh` (warn), `…Critical` (>5%)  |
+| API latency                 | `job:livecore_api_request_duration_seconds:p95_5m`   | p95 < 1s              | `LiveCoreApiLatencyP95High` (warn)                     |
+| Auth-failure rate           | `job:livecore_api_auth_failures:rate5m`              | < 1/s sustained       | `LiveCoreApiAuthFailureSpike` (warn)                   |
+| Rate-limit rejection rate   | `job:livecore_api_rate_limit_rejections:rate5m`      | < 1/s sustained       | `LiveCoreApiRateLimitRejectionsHigh` (warn)           |
+| Dependency failures         | `livecore_database_failures_total`, `livecore_event_delivery_failures_total`, `livecore_asset_failures_total` | none sustained | `LiveCoreDatabaseFailures`, `LiveCoreEventDeliveryFailures`, `LiveCoreAssetFailures` (warn) |
+| Worker loop success ratio   | `exported_job:livecore_job_success_ratio:rate15m`    | >= 90%                | `LiveCoreWorkerJobFailing` (warn)                      |
+| Worker backlog drains       | `livecore_job_backlog`                              | returns to 0 hourly   | `LiveCoreWorkerBacklogNotDraining` (warn)             |
+
+A worker loop that **hangs** rather than fails is caught by the per-loop
+`/health/live` heartbeat (CORE-DR-003), not by a metric alert; wire both. Event
+delivery is **best-effort** (the durable event is persisted and replayed on
+reconnect; CORE-RES-001), so its alert is a sustained-rate warning, not a hard
+failure.
+
+#### Validated in CI, kept consistent with this doc
+
+The `observability-assets` CI job (`.github/workflows/ci.yml`) validates the assets
+two ways: `promtool check config`/`promtool check rules` (the canonical Prometheus
+validator) over the scrape config and the rules, and
+`scripts/test-observability-assets.ps1` (`scripts/LiveCoreObservabilityAssets.psm1`)
+which lints the dashboard JSON, checks each alert carries a severity and an
+annotation, and asserts **every `livecore_*` series the rules and dashboard
+reference is a series documented in the metrics table above or a recording rule
+defined in the rules file** — so the rules, the dashboard and this document cannot
+silently drift. The gate-logic test proves itself over fixtures (an undocumented
+series reference, an alert with no severity and a malformed dashboard JSON are each
+rejected) before guarding the real files.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

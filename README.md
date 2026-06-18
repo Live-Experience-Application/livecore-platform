@@ -70,6 +70,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
 - [Operations and observability](#operations-and-observability)
     - [Health endpoints](#health-endpoints)
     - [Metrics endpoint](#metrics-endpoint)
+    - [Example alerting, SLOs and a starter dashboard](#example-alerting-slos-and-a-starter-dashboard)
     - [Source offer endpoint (AGPL section 13)](#source-offer-endpoint-agpl-section-13)
     - [Worker metrics and per-loop liveness](#worker-metrics-and-per-loop-liveness)
     - [Structured logging](#structured-logging)
@@ -301,7 +302,10 @@ scripts/lint-log-redaction.ps1  CI lint that fails the build on a content-bearin
 scripts/test-log-redaction.ps1  tests for the log-redaction guardrail (a seeded content-bearing/interpolated template is flagged; the real ID-only logs pass — CORE-OBS-006)
 scripts/LiveCoreComposeDeploy.psm1  compose deployment-manifest validation (migrate gate, postgres healthcheck, required services, documented probes; CORE-DEP-001)
 scripts/test-compose-deploy.ps1  tests the compose validation and guards deploy/compose/docker-compose.yml (CORE-DEP-001)
+scripts/LiveCoreObservabilityAssets.psm1  observability-assets validation logic: every livecore_* series the example rules/dashboard reference is documented in docs/15 or a defined recording rule; lints the dashboard JSON and alert severity/annotation (CORE-OBS-008)
+scripts/test-observability-assets.ps1  tests the observability-assets validation and guards deploy/observability/ (an undocumented series, a severity-less alert, a malformed dashboard JSON are rejected; the real assets pass — CORE-OBS-008)
 deploy/compose           in-repo Docker Compose deployment stack: postgres + migrations runner + API + worker, with the migrate-before-API gate and documented health/readiness/liveness probes (CORE-DEP-001)
+deploy/observability     example Prometheus scrape config + recording/alert rules, documented SLO targets and a starter Grafana dashboard over the livecore_* metrics (CORE-OBS-008)
 docs/                    architecture and product documentation
 csv/                     backlog stories and forbidden term list
 ```
@@ -918,6 +922,44 @@ CVE scan — see `docs/15_OBSERVABILITY.md` and `docs/13_SELF_HOSTING_REQUIREMEN
 (CORE-CMP-002). The background worker records job failures onto the same meter and now
 exposes its **own** Prometheus scrape endpoint too (see "Worker metrics and per-loop
 liveness" below).
+
+### Example alerting, SLOs and a starter dashboard
+
+Scraping `/metrics` gives you the `livecore_*` series, but raw metrics carry no
+thresholds — nothing that says what to alert on or what "good" looks like. The
+repository ships **example observability assets** (CORE-OBS-008) under
+[`deploy/observability/`](deploy/observability/README.md) so a self-hoster gets
+actionable alerting and SLO tracking out of the box:
+
+| Asset                                                            | Purpose                                                                                            |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `deploy/observability/prometheus/prometheus.yml`                 | Example scrape config: scrapes the API (`:8080`) and worker (`:9464`) `/metrics`, loads the rules. |
+| `deploy/observability/prometheus/rules/livecore.rules.yml`       | Recording rules (the SLO burn series) and alert rules over the `livecore_*` metrics.               |
+| `deploy/observability/grafana/dashboards/livecore-overview.json` | Starter dashboard: API SLOs, auth/rate-limit signals, dependency failures and worker-loop health.  |
+
+They are **examples to copy and tune**, not a managed monitoring stack. Point
+Prometheus at the config (or copy its `scrape_configs` and `rule_files` into an
+existing Prometheus) and import the dashboard:
+
+```bash
+prometheus --config.file=deploy/observability/prometheus/prometheus.yml
+```
+
+The documented SLO targets (API 5xx ratio `< 1%`, p95 latency `< 1s`, worker loop
+success ratio `>= 90%`, backlog drains hourly, and sustained-rate auth-failure /
+rate-limit / dependency-failure alerts) and the per-alert thresholds are in
+[`docs/15_OBSERVABILITY.md`](docs/15_OBSERVABILITY.md) and
+[`deploy/observability/README.md`](deploy/observability/README.md). The assets are
+validated in CI by the `observability-assets` job: `promtool check config` /
+`promtool check rules` plus `scripts/test-observability-assets.ps1`, which lints
+the dashboard JSON and asserts every `livecore_*` series the rules and dashboard
+reference is documented in `docs/15` or is a recording rule defined in the rules
+file, so the assets and the docs cannot drift.
+
+> Note on the worker loop label: the worker tags its `livecore_job_*` series with
+> a `job` attribute naming the loop; under the default `honor_labels: false`
+> Prometheus renames it to `exported_job` (the target `job` label wins), so the
+> worker rules and dashboard panels group by `exported_job`.
 
 ### Source offer endpoint (AGPL section 13)
 
@@ -4877,6 +4919,7 @@ run on `ubuntu-latest` and execute the commands documented above verbatim:
 | `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                       |
 | `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                       |
 | `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                     |
+| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)  |
 | `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                      |
 | `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002) |
 | `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                   |

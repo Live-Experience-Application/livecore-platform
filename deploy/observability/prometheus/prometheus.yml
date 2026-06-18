@@ -1,0 +1,54 @@
+# LiveCore example Prometheus scrape configuration (CORE-OBS-008).
+#
+# A minimal, self-contained scrape config that pulls the API and worker
+# /metrics endpoints (docs/15_OBSERVABILITY.md) and loads the example
+# recording/alert rules next to it. It is STARTER guidance: a self-hoster
+# points Prometheus at this file (or copies the relevant parts into an existing
+# Prometheus) and gets the livecore_* series, the SLO recording rules and the
+# alerts described in docs/15 and deploy/observability/README.md.
+#
+# The /metrics endpoints are unauthenticated by convention and meant to be
+# scraped from inside the deployment network (a deployment restricts them at the
+# reverse-proxy/network edge - docs/13_SELF_HOSTING_REQUIREMENTS.md). The
+# targets below match the in-repo Docker Compose stack service names and ports
+# (deploy/compose/docker-compose.yml): the API on 8080 and the worker metrics
+# surface on 9464. Change them to your own hosts/ports.
+#
+# Validated in CI with "promtool check config".
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# The example recording and alert rules, loaded relative to this file.
+rule_files:
+  - rules/livecore.rules.yml
+
+# Wire an Alertmanager here to route the alerts the rules above raise. Left
+# commented so this file is runnable without an Alertmanager.
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#             - alertmanager:9093
+
+scrape_configs:
+  # The API host's Prometheus scrape endpoint (CORE-OBS-001).
+  - job_name: livecore-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api:8080
+        labels:
+          service: livecore-api
+
+  # The worker's own Prometheus scrape endpoint (CORE-DR-003 / CORE-OBS-007).
+  # The worker tags its job.* series with a "job" attribute naming the loop;
+  # under the default honor_labels: false that attribute is exposed as
+  # "exported_job" (see deploy/observability/prometheus/rules/livecore.rules.yml).
+  - job_name: livecore-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - worker:9464
+        labels:
+          service: livecore-worker
