@@ -1232,10 +1232,15 @@ startup migration is unsafe for a multi-instance deployment, where replicas woul
 race to migrate). The schema is applied by a separate, run-to-completion
 **migrations runner** that must finish before the API rolls out (CORE-OPS-001).
 
-`apps/api/Migrations.Dockerfile` builds the runner image: a self-applying EF Core
-migrations bundle that applies every pending migration to the database named by
-`ConnectionStrings__Database` and then exits (idempotent; no credentials are
-baked in). Build and run it:
+`apps/api/Migrations.Dockerfile` builds the runner image: the published API
+assembly invoked with the `migrate` verb, which applies every pending migration to
+the database named by `ConnectionStrings__Database` and then exits (idempotent; no
+credentials are baked in) — without ever building the web host, so the API host's
+"never migrate on startup" guarantee is untouched. The apply is wrapped in a
+**session-level PostgreSQL advisory lock on a fixed app key** (CORE-OPS-012), so two
+runner invocations racing (a retried Helm hook, an overlapping redeploy, two
+operator runs) serialise instead of corrupting the schema or `__EFMigrationsHistory`:
+the second blocks until the first releases, then applies nothing. Build and run it:
 
 ```bash
 docker build -f apps/api/Migrations.Dockerfile -t livecore-migrations .
@@ -1244,10 +1249,11 @@ docker run --rm \
   livecore-migrations
 ```
 
-The same path runs without Docker via `dotnet ef database update --project apps/api`
-against a configured `ConnectionStrings__Database`. The exact command, how to gate
-an API rollout on it (Kubernetes Job / init container, a Compose `migrate` service,
-a Railway pre-deploy command) and the standalone-bundle alternative are documented
+The same locked apply runs without Docker via `dotnet run --project apps/api -- migrate`
+against a configured `ConnectionStrings__Database` (or, as a developer convenience
+without the lock, `dotnet ef database update --project apps/api`). The exact command,
+how to gate an API rollout on it (Kubernetes Job / init container, a Compose `migrate`
+service, a Railway pre-deploy command) and the concurrent-runner lock are documented
 in `docs/13_SELF_HOSTING_REQUIREMENTS.md`. CI's `migrations` job applies all
 migrations to an empty PostgreSQL database on every change.
 

@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     The Core applies migrations FORWARD ONLY (the migrations runner image's
-    efbundle entrypoint), and the documented rollback policy is roll-forward-only
+    migrate command), and the documented rollback policy is roll-forward-only
     plus restore-from-backup: a Down() is never run in production because every
     checked-in Down() drops the table or column its Up() added and would discard
     committed tenant data and the append-only systems of record

@@ -273,11 +273,14 @@ deploy gets its schema applied deterministically before the API serves traffic.
 ### The migration runner
 
 `apps/api/Migrations.Dockerfile` builds a one-shot **migrations runner image**:
-a self-applying EF Core migrations bundle that applies every pending migration to
-the target database and then exits. It carries no credentials; the connection
-string is supplied at run time through the **same** configuration key the API
-runtime reads, `ConnectionStrings:Database` (environment variable
-`ConnectionStrings__Database`).
+the published API assembly invoked with the `migrate` verb
+(`apps/api/Hosting/MigrationCommand.cs`), which applies every pending migration to
+the target database and then exits. The `migrate` verb is a distinct invocation,
+not a startup hook — it applies the migrations and exits **without ever building
+the web host**, so the API host's "never migrate on startup" guarantee is
+untouched. It carries no credentials; the connection string is supplied at run
+time through the **same** configuration key the API runtime reads,
+`ConnectionStrings:Database` (environment variable `ConnectionStrings__Database`).
 
 Build it from the repository root:
 
@@ -297,6 +300,28 @@ The runner exits `0` on success; re-running it when the database is already up t
 date applies nothing and still exits `0` (idempotent). The connection string can
 also be passed as `--connection "<value>"`, which overrides the environment
 variable.
+
+#### Locking concurrent runners (CORE-OPS-012)
+
+The migrate-before-API gate (below) orders the runner **before** the API, but it
+does **not** stop two migration *runner* invocations from racing each other — a
+retried Helm pre-upgrade hook, an overlapping redeploy, or two operator runs can
+each start a runner against the same database. Two concurrent runners attempting
+the same migration `Up()` (made worse by the retrying execution strategy, which can
+re-issue a half-applied migration) could corrupt the schema or the
+`__EFMigrationsHistory` table.
+
+To make the step safe under those races, the runner wraps the apply in a
+**session-level PostgreSQL advisory lock on a fixed application key**
+(`LiveCoreMigrationRunner`): it `pg_advisory_lock`s the key before applying and
+releases it after. So a second runner started while the first is mid-apply
+**blocks** (it does not error) until the first releases, then finds the schema
+already current and applies nothing — both runners exit `0` and the history table
+stays consistent, with exactly one applied set. The lock is held on its own
+connection for the whole apply; because a session advisory lock is released when
+its connection closes, a crashed runner never wedges the lock. This complements the
+Helm pre-install/pre-upgrade `Job` (CORE-DEP-004) and the Compose `migrate` gate
+(CORE-DEP-001), which order the runner before the API but do not serialise runners.
 
 ### Gating the API rollout on the migration step
 
@@ -337,20 +362,20 @@ missing never leaks (threat T7, `docs/07_SECURITY_THREAT_MODEL.md`).
 
 ### Running the migrations without the image
 
-The same path runs without Docker for local development and CI, because both use
-the pinned `dotnet-ef` tool and the same `ConnectionStrings:Database` resolution:
+The same apply runs without Docker, against a configured `ConnectionStrings:Database`:
 
 ```bash
-dotnet tool restore
+# The locked apply the runner image performs (the migrate verb takes the
+# CORE-OPS-012 advisory lock), for an environment without a container runtime:
+ConnectionStrings__Database="Host=localhost;Port=5432;Database=livecore;Username=livecore;Password=..." \
+  dotnet run --project apps/api -- migrate
 
-# Apply migrations directly to a configured database:
+# Or, for local development, apply directly with the pinned dotnet-ef tool. This is
+# a developer convenience and does NOT take the advisory lock, so use the migrate
+# verb above wherever two runners could race:
+dotnet tool restore
 ConnectionStrings__Database="Host=localhost;Port=5432;Database=livecore;Username=livecore;Password=..." \
   dotnet ef database update --project apps/api
-
-# Or build the standalone bundle the image wraps (an executable that applies
-# migrations), e.g. for an environment without a container runtime:
-dotnet ef migrations bundle --project apps/api --self-contained -r linux-x64 -o ./efbundle
-ConnectionStrings__Database="Host=...;Password=..." ./efbundle
 ```
 
 CI proves this path on every change: the `migrations` job
@@ -385,9 +410,9 @@ gates on every change:
 ### Migration rollback policy: roll-forward-only + restore-from-backup, and expand/contract (CORE-DR-004)
 
 **The chosen policy, stated plainly: this platform is roll-forward-only.** The migrations runner image
-(`apps/api/Migrations.Dockerfile`) applies migrations **forward only** — its `efbundle` entrypoint runs
-every pending migration's `Up()` and exits — and a deployment **never runs a migration's `Down()` in
-production**. The backward path for a bad deploy is therefore **not** "run the down migration"; it is, in order:
+(`apps/api/Migrations.Dockerfile`) applies migrations **forward only** — its `migrate` command runs
+every pending migration's `Up()` (under the CORE-OPS-012 advisory lock) and exits — and a deployment
+**never runs a migration's `Down()` in production**. The backward path for a bad deploy is therefore **not** "run the down migration"; it is, in order:
 
 1. **Roll the application image back, not the schema.** The first response to a bad deploy is to redeploy the
    **previous** released API/worker image (`ghcr.io/<owner>/livecore-api:<previous-version>`, CORE-OPS-009).

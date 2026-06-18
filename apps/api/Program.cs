@@ -25,6 +25,19 @@ using LiveCore.Api.Visibility;
 using LiveCore.Api.Workspaces;
 using Microsoft.EntityFrameworkCore;
 
+// Migration runner command (CORE-OPS-012). When launched as `migrate` (the apps/api/Migrations.Dockerfile
+// image's entrypoint, run as a Kubernetes pre-install/pre-upgrade Job or a Compose `migrate` service), this
+// process is the run-to-completion migration RUNNER, not the API host: it applies every pending EF Core
+// migration under a session-level PostgreSQL advisory lock on a fixed app key — so two runner invocations
+// racing (a retried Helm hook, an overlapping redeploy, two operator runs) serialise instead of corrupting the
+// schema or __EFMigrationsHistory — and exits with that step's status code. It returns BEFORE the web host is
+// built, so it never starts Kestrel or serves traffic and the host's "never migrate on startup" guarantee
+// (CORE-OPS-001) is untouched. A normal API launch passes no `migrate` verb and falls through.
+if (args is [MigrationCommand.CommandName, ..])
+{
+    return MigrationCommand.Run(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Structured logging baseline (CORE-FND-004): one JSON object per log entry
@@ -1920,6 +1933,10 @@ app.MapStoreNotificationEndpoints();
 app.MapRealtimeHubs();
 
 app.Run();
+
+// app.Run() blocks until the host shuts down; reaching here means a clean exit. The explicit 0 is required
+// because the `migrate` command branch above returns a status code, making this entry point return int.
+return 0;
 
 /// <summary>
 /// Marker for in-memory smoke tests (WebApplicationFactory).
