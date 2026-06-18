@@ -57,12 +57,24 @@ function Get-FixtureCompose {
     param(
         [string]$ApiMigrateCondition = 'service_completed_successfully',
         [switch]$OmitPostgresHealthcheck,
-        [switch]$OmitWorker
+        [switch]$OmitWorker,
+        [switch]$OmitApiResourceLimit
     )
 
     $postgresHealthcheck = if ($OmitPostgresHealthcheck) { '' } else { @'
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U livecore -d livecore"]
+'@ }
+
+    # Every service carries a deploy.resources.limits ceiling (CORE-DEP-007); the
+    # api's is conditional so a negative test can drop exactly one and still leave the
+    # rest well-formed.
+    $apiResourceLimit = if ($OmitApiResourceLimit) { '' } else { @'
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
 '@ }
 
     $worker = if ($OmitWorker) { '' } else { @'
@@ -78,6 +90,11 @@ function Get-FixtureCompose {
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 768M
 '@ }
 
     return @"
@@ -88,6 +105,11 @@ services:
     environment:
       POSTGRES_USER: livecore
 $postgresHealthcheck
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
   migrate:
     build:
       context: ../..
@@ -98,6 +120,11 @@ $postgresHealthcheck
     depends_on:
       postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
   api:
     build:
       context: ../..
@@ -111,6 +138,7 @@ $postgresHealthcheck
         condition: service_healthy
       migrate:
         condition: $ApiMigrateCondition
+$apiResourceLimit
 $worker
 volumes:
   livecore-postgres-data:
@@ -124,6 +152,14 @@ AssertTrue ($validModel.Services['api'].DependsOn['migrate'] -eq 'service_comple
     'the parser reads the api -> migrate gate condition'
 AssertTrue ((Test-LiveCoreComposeDeployment -Model $validModel).IsValid) `
     'a well-formed manifest passes validation'
+
+# --- Parser: the container resource limits are read (CORE-DEP-007). ---
+AssertTrue ($validModel.Services['api'].HasResourceLimit) `
+    'the parser reads that the api service carries a deploy.resources.limits ceiling'
+AssertTrue ($validModel.Services['api'].ResourceLimits['memory'] -eq '1024M') `
+    'the parser reads the api memory limit value'
+AssertTrue ($validModel.Services['api'].ResourceLimits['cpus'] -eq '1.0') `
+    'the parser reads the api cpus limit value (surrounding quotes stripped)'
 
 # --- Negative: dropping the migrate gate is rejected. ---
 $noGate = Get-LiveCoreComposeModel -Content (Get-FixtureCompose -ApiMigrateCondition 'service_started')
@@ -146,6 +182,13 @@ AssertTrue (-not $noWorkerResult.IsValid) 'a manifest missing the worker service
 AssertTrue (($noWorkerResult.Findings -join "`n") -match "MISSING SERVICE: .*'worker'") `
     'the rejection names the missing worker service'
 
+# --- Negative: a service with no container resource limit is rejected (CORE-DEP-007). ---
+$noLimit = Get-LiveCoreComposeModel -Content (Get-FixtureCompose -OmitApiResourceLimit)
+$noLimitResult = Test-LiveCoreComposeDeployment -Model $noLimit
+AssertTrue (-not $noLimitResult.IsValid) 'a manifest whose api declares no container resource limit is rejected'
+AssertTrue (($noLimitResult.Findings -join "`n") -match "RESOURCE LIMIT: .*'api'") `
+    'the rejection names the service missing a resource limit'
+
 # --- Guard the real checked-in manifest. ---
 $composePath = Join-Path $repoRoot 'deploy/compose/docker-compose.yml'
 AssertTrue (Test-Path -LiteralPath $composePath) 'the deploy/compose/docker-compose.yml manifest exists'
@@ -166,6 +209,13 @@ AssertTrue ($realModel.Services['api'].DependsOn['migrate'] -eq 'service_complet
     'the real api service gates on migrate completion (service_completed_successfully)'
 AssertTrue ($realModel.Services['worker'].DependsOn['migrate'] -eq 'service_completed_successfully') `
     'the real worker service gates on migrate completion (service_completed_successfully)'
+
+# Spot-check that every service in the real manifest carries a container resource
+# limit (CORE-DEP-007), so no unbounded process can starve a single-VPS host.
+foreach ($limitedService in @('postgres', 'migrate', 'api', 'worker')) {
+    AssertTrue ($realModel.Services[$limitedService].HasResourceLimit) `
+        "the real $limitedService service declares a deploy.resources.limits ceiling (CORE-DEP-007)"
+}
 
 # =============================================================================
 # Full local stack overlay (docker-compose.full.yml, CORE-DEP-006)
@@ -389,5 +439,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck and the documented probes, the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them, and the production overlay forces ASPNETCORE_ENVIRONMENT=Production on the api and worker.' -ForegroundColor Green
+Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck, the documented probes and a container resource limit on every service (CORE-DEP-007), the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them, and the production overlay forces ASPNETCORE_ENVIRONMENT=Production on the api and worker.' -ForegroundColor Green
 exit 0

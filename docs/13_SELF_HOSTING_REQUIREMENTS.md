@@ -189,6 +189,76 @@ legitimate local-dev default**:
   readiness gate (CORE-OPS-005); it logs only the bind addresses, never a secret or
   tenant identifier (threat T7).
 
+## Container resource limits and capacity sizing (CORE-DEP-007)
+
+Without a ceiling, any one runtime process can consume all of a host's CPU and
+memory and **starve the others** — on a single-VPS Compose deployment a runaway API
+or a memory-hungry query can take the whole box down. So the bundled Compose stack
+(`deploy/compose/docker-compose.yml`) declares a **default `deploy.resources.limits`
+ceiling on every service** (`postgres`, `migrate`, `api`, `worker`). The limits are
+**caps, not reservations**, so they never block scheduling on a small host, and
+**`docker compose up` honors them** (Compose v2 maps `deploy.resources.limits.cpus`
+/ `.memory` to the container `--cpus` / `--memory`). The Kubernetes path sizes the
+same ceilings as `resources.requests`/`limits` through the Helm chart
+(`deploy/helm/livecore`, CORE-DEP-004), independently of these Compose values.
+
+**Every limit is overridable via env**, so an operator tunes the ceiling to the host
+without editing the manifest — set the variable in `deploy/compose/.env`
+(`deploy/compose/.env.example` lists them):
+
+| Component                 | Minimum (small/idle) | Recommended (the shipped compose default) | Override env vars                                       |
+| ------------------------- | -------------------- | ----------------------------------------- | ------------------------------------------------------ |
+| API (`api`)               | 0.5 vCPU / 512 MB    | **1.0 vCPU / 1024 MB**                     | `LIVECORE_API_CPUS` / `LIVECORE_API_MEMORY`            |
+| Worker (`worker`)         | 0.25 vCPU / 384 MB   | **0.75 vCPU / 768 MB**                     | `LIVECORE_WORKER_CPUS` / `LIVECORE_WORKER_MEMORY`      |
+| PostgreSQL (`postgres`)   | 0.5 vCPU / 512 MB    | **1.0 vCPU / 1024 MB**                     | `LIVECORE_POSTGRES_CPUS` / `LIVECORE_POSTGRES_MEMORY`  |
+| Migrations runner (`migrate`) | 0.25 vCPU / 256 MB | **0.5 vCPU / 512 MB**                    | `LIVECORE_MIGRATE_CPUS` / `LIVECORE_MIGRATE_MEMORY`    |
+
+The CPU values are fractional cores (vCPUs); the memory values accept the Compose
+suffixes (`512M`, `1024M`, `1g`). Two sizing notes:
+
+- **Whole-host baseline.** The `migrate` runner only runs at deploy time and then
+  exits, so the **steady-state** footprint is `postgres` + `api` + `worker`. With the
+  recommended defaults that is ≈ **2.75 vCPU / ~2.8 GB** of limits; a single-VPS host
+  with **2 vCPU / 4 GB** runs the stack comfortably with headroom for the OS, and a
+  **2 vCPU / 2 GB** host should drop each component to the minimum column. The CPU
+  limits are caps, not reservations, so their sum may legitimately exceed the host's
+  physical cores — the kernel time-shares — while each cap stops any single process
+  from monopolizing the box.
+- **The DB limit pairs with the connection-pool sizing (CORE-RES-004).** PostgreSQL's
+  memory and `max_connections` must fit the container limit; size `Maximum Pool Size`
+  in `ConnectionStrings__Database` so all API and worker replicas together stay within
+  the database's `max_connections` (see "Database connection tuning"). Container CPU/
+  memory limits and the connection-pool cap are complementary controls.
+
+### When to add API replicas and the realtime backplane (CORE-OPS-007)
+
+Vertical scaling (raising the limits above) is the first lever and is enough for most
+single-VPS deployments. **Scale the API horizontally — run more than one `api`
+instance — when** a single instance saturates its CPU/memory ceiling under sustained
+load, when concurrent connection counts outgrow one process, or when you need
+high availability (no single point of failure / zero-downtime rolling deploys). The
+moment you run **more than one API instance**, two additional controls become
+**required**, not optional:
+
+- **A Valkey/Redis realtime backplane (CORE-OPS-007).** SignalR tracks hub group
+  membership per-process, so without a shared backplane an event computed on one
+  instance reaches only the clients connected to **that** instance and is **silently
+  dropped** for everyone connected to the others. Configure
+  `Realtime__Backplane__ConnectionString` (see "Realtime scale-out backplane") so
+  every instance fans realtime out to all connections. With a single instance the
+  in-process backplane is correct and **no** backplane is needed.
+- **Sticky sessions / session affinity (CORE-DEP-002).** A SignalR connection's
+  negotiate + transport handshake must reach the **same** instance; enable
+  cookie/affinity at the reverse proxy or load balancer for the `/hubs` endpoint (see
+  "Multi-instance SignalR requires sticky sessions / ARR affinity"). The backplane and
+  affinity solve **different** problems and are both required at scale.
+
+Also re-check the **connection-pool sizing** (CORE-RES-004) when adding replicas: more
+API/worker instances multiply the pools that share the database's `max_connections`.
+The worker is a **singleton by default** (CORE-RES-003 covers multi-replica worker
+safety); scale the API for request/realtime load, not the worker, unless that story's
+guidance applies.
+
 ## Production options
 
 - single VPS with Docker Compose — the in-repo stack at

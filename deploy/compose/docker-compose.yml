@@ -65,6 +65,16 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    # Container resource limits (CORE-DEP-007): a sane default ceiling so an
+    # unbounded process cannot starve a single-VPS host. Each limit is overridable
+    # via env; docs/13 ("Container resource limits and capacity sizing") gives the
+    # minimum/recommended sizing baseline per component. These are limits (caps),
+    # not reservations, so they never block scheduling on a small host.
+    deploy:
+      resources:
+        limits:
+          cpus: "${LIVECORE_POSTGRES_CPUS:-1.0}"
+          memory: ${LIVECORE_POSTGRES_MEMORY:-1024M}
     restart: unless-stopped
 
   migrate:
@@ -79,6 +89,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Container resource limits (CORE-DEP-007) — a small ceiling for the one-shot
+    # schema runner; overridable via env (docs/13 sizing baseline).
+    deploy:
+      resources:
+        limits:
+          cpus: "${LIVECORE_MIGRATE_CPUS:-0.5}"
+          memory: ${LIVECORE_MIGRATE_MEMORY:-512M}
     # A run-to-completion job: it applies the migrations and exits 0. It must not
     # be restarted (a restart would re-run it pointlessly); its exit code is the
     # success signal the api/worker gate waits on.
@@ -131,6 +148,15 @@ services:
     ports:
       # Liveness: GET /health/live, Readiness: GET /health/ready, Metrics: /metrics.
       - "${LIVECORE_API_PORT:-8080}:8080"
+    # Container resource limits (CORE-DEP-007), overridable via env (docs/13 sizing
+    # baseline). Raise these — and add API replicas plus the realtime backplane
+    # (CORE-OPS-007) behind sticky sessions (CORE-DEP-002) — as load grows; see
+    # docs/13 "when to add API replicas and the backplane".
+    deploy:
+      resources:
+        limits:
+          cpus: "${LIVECORE_API_CPUS:-1.0}"
+          memory: ${LIVECORE_API_MEMORY:-1024M}
     restart: unless-stopped
 
   worker:
@@ -163,6 +189,14 @@ services:
     ports:
       # Per-loop heartbeat liveness: GET /health/live; Prometheus scrape: GET /metrics.
       - "${LIVECORE_WORKER_METRICS_PORT:-9464}:9464"
+    # Container resource limits (CORE-DEP-007), overridable via env (docs/13 sizing
+    # baseline). The worker runs a handful of background loops, so it defaults to a
+    # smaller ceiling than the API.
+    deploy:
+      resources:
+        limits:
+          cpus: "${LIVECORE_WORKER_CPUS:-0.75}"
+          memory: ${LIVECORE_WORKER_MEMORY:-768M}
     restart: unless-stopped
 
 volumes:

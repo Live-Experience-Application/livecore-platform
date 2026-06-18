@@ -861,6 +861,12 @@ migrate gate and the documented health/readiness/liveness probes are tested by
 `scripts/test-compose-deploy.ps1` and the `compose-smoke` CI job. See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("In-repo deployment manifest").
 
+Every service ships a default container resource limit (CPU/memory) so an unbounded
+process cannot starve a single-VPS host (CORE-DEP-007); each limit is overridable via
+env (`deploy/compose/.env.example`). See `docs/13_SELF_HOSTING_REQUIREMENTS.md`
+("Container resource limits and capacity sizing") for the minimum/recommended sizing
+baseline per component and when to add API replicas plus the realtime backplane.
+
 Need to run the platform **end-to-end** locally — authenticated traffic, asset
 upload/download and multi-instance realtime? The minimal stack omits the OIDC
 provider, object storage and the backplane on purpose. The optional, opt-in overlay

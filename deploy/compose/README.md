@@ -176,6 +176,28 @@ in-container `HEALTHCHECK`; probing is done over HTTP from outside the container
 (a reverse proxy, a kubelet, or the published host ports above), exactly as the
 image design intends.
 
+## Resource limits and capacity sizing (CORE-DEP-007)
+
+Every service declares a default `deploy.resources.limits` ceiling (cpus + memory)
+so an unbounded process cannot starve a single-VPS host. Compose v2 honors these on
+`docker compose up`, and each is **overridable via env** — set the variable in `.env`
+(see [`.env.example`](.env.example), "Container resource limits"):
+
+| Service    | Default limit (cpus / memory) | Override env vars                                     |
+| ---------- | ----------------------------- | ----------------------------------------------------- |
+| `api`      | 1.0 / 1024M                   | `LIVECORE_API_CPUS` / `LIVECORE_API_MEMORY`           |
+| `worker`   | 0.75 / 768M                   | `LIVECORE_WORKER_CPUS` / `LIVECORE_WORKER_MEMORY`     |
+| `postgres` | 1.0 / 1024M                   | `LIVECORE_POSTGRES_CPUS` / `LIVECORE_POSTGRES_MEMORY` |
+| `migrate`  | 0.5 / 512M                    | `LIVECORE_MIGRATE_CPUS` / `LIVECORE_MIGRATE_MEMORY`   |
+
+These defaults are the **recommended** baseline; `docs/13_SELF_HOSTING_REQUIREMENTS.md`
+("Container resource limits and capacity sizing") gives the **minimum/recommended**
+sizing per component, the whole-host baseline, and **when to add API replicas plus the
+realtime backplane** (CORE-OPS-007) and sticky sessions (CORE-DEP-002) as load grows.
+The migrate runner exits after applying the schema, so the steady-state footprint is
+`postgres` + `api` + `worker`. `scripts/test-compose-deploy.ps1` asserts every service
+carries a limit.
+
 ## License and attribution in the images
 
 The images Compose builds from the in-repo Dockerfiles are legally complete

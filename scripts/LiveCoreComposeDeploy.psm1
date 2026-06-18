@@ -125,6 +125,7 @@ function Get-LiveCoreComposeServiceModel {
     $dependsOn = @{}
     $environmentKeys = New-Object System.Collections.Generic.List[string]
     $environment = @{}
+    $resourceLimits = @{}
 
     for ($i = 0; $i -lt $BlockLine.Count; $i++) {
         $line = $BlockLine[$i]
@@ -146,6 +147,10 @@ function Get-LiveCoreComposeServiceModel {
         }
         if ($indent -eq 4 -and $trimmed -eq 'depends_on:') {
             $dependsOn = Get-LiveCoreComposeDependsOn -BlockLine $BlockLine -StartIndex ($i + 1)
+            continue
+        }
+        if ($indent -eq 4 -and $trimmed -eq 'deploy:') {
+            $resourceLimits = Get-LiveCoreComposeResourceLimits -BlockLine $BlockLine -StartIndex ($i + 1)
             continue
         }
         if ($indent -eq 4 -and $trimmed -eq 'environment:') {
@@ -170,14 +175,49 @@ function Get-LiveCoreComposeServiceModel {
     }
 
     return [pscustomobject]@{
-        Name            = $Name
-        Image           = $image
-        Dockerfile      = $dockerfile
-        HasHealthcheck  = $hasHealthcheck
-        DependsOn       = $dependsOn
-        EnvironmentKeys = $environmentKeys.ToArray()
-        Environment     = $environment
+        Name             = $Name
+        Image            = $image
+        Dockerfile       = $dockerfile
+        HasHealthcheck   = $hasHealthcheck
+        DependsOn        = $dependsOn
+        EnvironmentKeys  = $environmentKeys.ToArray()
+        Environment      = $environment
+        ResourceLimits   = $resourceLimits
+        HasResourceLimit = ($resourceLimits.Count -gt 0)
     }
+}
+
+function Get-LiveCoreComposeResourceLimits {
+    # Parses the `deploy: > resources: > limits:` mapping (cpus/memory) that begins
+    # at $StartIndex (the line after `deploy:`). `resources:` is at indent 6,
+    # `limits:` at indent 8 and the `cpus:`/`memory:` ceilings at indent 10. The
+    # deploy block ends when indentation returns to <= 4. A sibling of `limits:` at
+    # the same indent (e.g. `reservations:`) closes the limits sub-block, so only the
+    # hard ceilings are captured.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$BlockLine,
+        [Parameter(Mandatory = $true)][int]$StartIndex
+    )
+
+    $result = @{}
+    $inLimits = $false
+    for ($i = $StartIndex; $i -lt $BlockLine.Count; $i++) {
+        $line = $BlockLine[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreComposeIndent -Line $line
+        if ($indent -le 4) { break }
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+        if ($trimmed -eq 'limits:') { $inLimits = $true; continue }
+        if ($inLimits -and $indent -le 8) { $inLimits = $false }
+        if ($inLimits -and $trimmed -match '^(cpus|memory):\s*(.+?)\s*$') {
+            # Strip surrounding quotes from the value (cpus is usually quoted).
+            $result[$Matches[1]] = $Matches[2].Trim('"', "'")
+        }
+    }
+    return $result
 }
 
 function Get-LiveCoreComposeDependsOn {
@@ -286,6 +326,16 @@ function Test-LiveCoreComposeDeployment {
     foreach ($probe in $expectedProbe) {
         if ($Model.RawText -notmatch [regex]::Escape($probe)) {
             $findings.Add("PROBE: the documented endpoint '$probe' is not referenced in the manifest")
+        }
+    }
+
+    # 8. Every service declares a container resource limit (CORE-DEP-007) so an
+    #    unbounded process cannot starve a single-VPS host. The defaults are
+    #    overridable via env; here we only assert each service carries a ceiling.
+    foreach ($name in $required) {
+        if (-not $services.ContainsKey($name)) { continue }
+        if (-not $services[$name].HasResourceLimit) {
+            $findings.Add("RESOURCE LIMIT: the '$name' service declares no deploy.resources.limits (cpus/memory) - an unbounded process can starve a single-VPS host (CORE-DEP-007)")
         }
     }
 
@@ -466,6 +516,7 @@ Export-ModuleMember -Function `
     Get-LiveCoreComposeModel, `
     Get-LiveCoreComposeServiceModel, `
     Get-LiveCoreComposeDependsOn, `
+    Get-LiveCoreComposeResourceLimits, `
     Test-LiveCoreComposeDeployment, `
     Test-LiveCoreComposeFullStack, `
     Test-LiveCoreComposeProdOverlay, `
