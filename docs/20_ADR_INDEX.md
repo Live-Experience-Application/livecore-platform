@@ -16,3 +16,7 @@ Initial ADRs:
 
 - `0010-core-owned-entitlements-and-quotas.md`
 - `0011-mobile-ads-stay-outside-core.md`
+- `0012-resource-deletion-cascades-dependents.md`
+- `0013-session-scoped-visibility-rules.md`
+- `0014-platform-level-audit-facts.md`
+- `0015-rustfs-over-minio-object-store.md`
