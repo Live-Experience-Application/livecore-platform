@@ -5,6 +5,7 @@
 #   coverage             - collect code coverage, report it, run the threshold gate (warn-only -> blocking, CORE-TST-001)
 #   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
+#   codeql               - CodeQL SAST over the first-party C# and TypeScript sources; fails the build on a high/critical security finding, gate-logic tested (CORE-SEC-006)
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
@@ -213,6 +214,85 @@ jobs:
 
       - name: Run boundary scan
         run: pwsh -NoProfile -File scripts/boundary-scan.ps1
+
+  codeql:
+    name: CodeQL static analysis (C# and TypeScript)
+    runs-on: ubuntu-latest
+    # CORE-SEC-006: the first static security analysis of FIRST-PARTY code. CI
+    # already scanned dependencies (the Trivy CVE scan and pinned lock files,
+    # CORE-DEP-003/CORE-CMP-002) but never statically analyzed the C# and
+    # TypeScript the project itself writes. This job runs CodeQL over both
+    # languages on every push and pull request and FAILS THE BUILD on a
+    # high/critical security finding, so a newly introduced injection,
+    # cleartext-secret or similar high-severity defect in the sources cannot
+    # merge or reach a release.
+    #
+    # The severity gate is fail-closed and self-contained: rather than depend on
+    # GitHub code scanning being enabled, CodeQL writes its SARIF locally
+    # (upload: false) and scripts/assert-codeql-findings.ps1 decides the verdict
+    # over it - blocking on any result whose rule scores security-severity >= 7.0
+    # (the high/critical band; the documented gate). The gate logic is proven
+    # first by scripts/test-codeql-gate.ps1 (a seeded high/critical SARIF fails
+    # closed; a clean or medium/low one passes; a malformed/non-SARIF document is
+    # rejected), then the real analysis is gated. C# is analyzed in manual build
+    # mode against the same `dotnet build` the dotnet job runs; TypeScript needs
+    # no build (build-mode: none). See docs/14 and README "Continuous integration".
+    permissions:
+      # Least privilege: the SARIF is gated locally and never uploaded to code
+      # scanning, so the default read-only token is enough - no security-events
+      # write scope is requested.
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: csharp
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Test the CodeQL severity-gate logic (a seeded high/critical finding fails closed)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-codeql-gate.ps1
+
+      - name: Set up .NET SDK
+        if: matrix.language == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build the .NET solution for CodeQL (manual build mode)
+        if: matrix.language == 'csharp'
+        run: dotnet build LiveCore.slnx
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: codeql-results
+          # Gate locally on the SARIF rather than upload to code scanning, so the
+          # gate needs no GitHub Advanced Security and fails closed on its own.
+          upload: false
+
+      - name: Gate on high/critical security findings (fail closed)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/assert-codeql-findings.ps1 -ResultsDirectory codeql-results
+
+      - name: Upload the CodeQL SARIF results (build artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ matrix.language }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
 
   spec-consistency:
     name: Spec consistency (routes/tables/events/epics)
@@ -1068,6 +1148,7 @@ jobs:
       - coverage
       - typescript
       - boundary-scan
+      - codeql
       - spec-consistency
       - license-compliance
       - contributor-policy
@@ -1241,6 +1322,7 @@ jobs:
       - coverage
       - typescript
       - boundary-scan
+      - codeql
       - spec-consistency
       - license-compliance
       - contributor-policy

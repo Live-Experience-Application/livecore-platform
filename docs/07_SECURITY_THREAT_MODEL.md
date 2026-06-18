@@ -423,6 +423,41 @@ Controls (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "Pinned base images, SBOM and 
 - cryptographic build provenance/attestation (e.g. cosign) is a documented follow-up (it needs signing-key
   management out of scope here)
 
+## Static analysis of first-party code (CORE-SEC-006)
+
+CORE-DEP-003 scans the published images' DEPENDENCIES for known vulnerabilities, and the lock files pin them
+(CORE-CMP-002), but until this story nothing statically analyzed the C# and TypeScript the project ITSELF writes.
+First-party code was never security-analyzed, so a newly introduced injection, a cleartext-secret write or a
+similar high-severity defect in the sources had no automated tripwire - it rested on author and reviewer
+discipline alone, exactly the gap the boundary scan, the log-redaction guardrail and the coverage gate each close
+for their own concern.
+
+Risk:
+
+- a high/critical security defect (an injection, path traversal, cleartext storage of a secret, unsafe
+  deserialization, ...) is introduced into the first-party C# or TypeScript and merges or ships unnoticed because
+  no static analysis runs over the code
+
+Controls (`docs/14_TESTING_STRATEGY.md`, "Static analysis (SAST) and the CI gate"):
+
+- the CI `codeql` job runs **CodeQL** (GitHub's first-party SAST engine) over BOTH first-party languages on every
+  push and pull request - C# in `manual` build mode against the same `dotnet build` the `dotnet` job runs, and
+  TypeScript buildless (`build-mode: none`)
+- a **fail-closed severity gate** (`scripts/assert-codeql-findings.ps1`) **fails the build** on any result whose
+  rule scores `security-severity >= 7.0` (the high/critical band, GitHub's documented CVSS mapping); a
+  medium/low or a non-security finding is reported but not blocking. The gate decides over CodeQL's SARIF
+  LOCALLY (`upload: false`), so it needs no GitHub Advanced Security and cannot be silently disabled by a
+  repository setting; a missing, empty or malformed SARIF blocks rather than passing
+- the gate DECISION is unit-tested from seeded SARIF fixtures (`scripts/test-codeql-gate.ps1`, run first in the
+  job): a seeded high/critical finding fails closed, a clean/medium/low one passes, the floor is configurable
+  and a malformed/non-SARIF document is rejected - the "fails closed on a high/critical finding" proof, without
+  committing a real vulnerability to obtain it
+- the job is wired into the SAME required-checks set the release jobs depend on (`publish`/`publish-packages`
+  `needs:` every gate including `codeql`), so a high/critical finding blocks not only the merge signal but,
+  transitively, any image push or npm publish
+- broadening the query suite (for example `security-extended`) and uploading the SARIF to GitHub code scanning
+  for triage (when Advanced Security is enabled) are documented options that do not change the fail-closed gate
+
 ## Transport security: HSTS and HTTPS redirection (CORE-SEC-005)
 
 The Core API is documented to run BEHIND a TLS-terminating reverse proxy (CORE-OPS-003;

@@ -166,3 +166,80 @@ The gate logic is itself tested (`scripts/test-coverage-gate.ps1`, run first in
 the CI `coverage` job): a deliberately-untested new handler trips the threshold
 once blocking is enabled, coverage from several reports merges without double
 counting, and test/generated code is excluded.
+
+## Static analysis (SAST) and the CI gate (CORE-SEC-006)
+
+Coverage and the test suite prove the first-party code does what it should; SAST
+proves it does not do something dangerous. CI scanned _dependencies_ for known
+vulnerabilities (the Trivy CVE scan and pinned lock files, CORE-DEP-003 /
+CORE-CMP-002) but, until this gate, never statically analyzed the C# and
+TypeScript the project itself writes — so an injection, a cleartext-secret or a
+similar high-severity defect in first-party code had no automated tripwire.
+
+The CI `codeql` job closes that gap. It runs **CodeQL** (GitHub's first-party
+SAST engine) over both first-party languages on every push and pull request:
+
+- **C#** is analyzed in CodeQL `manual` build mode against the same
+  `dotnet build LiveCore.slnx` the `dotnet` job runs, so the analysis sees the
+  exact compiled sources;
+- **TypeScript** (`javascript-typescript`) is analyzed buildless
+  (`build-mode: none`), because CodeQL extracts it from source directly.
+
+### The severity gate and how it fails closed
+
+The acceptance bar is that the **build fails on a high/critical finding**. The
+gate keys on CodeQL's `security-severity` property — the CVSS-style score it
+attaches to a security query's rule — and GitHub's documented bands:
+
+```text
+critical  9.0 - 10.0
+high      7.0 -  8.9
+medium    4.0 -  6.9
+low       0.1 -  3.9
+```
+
+so the gate **blocks the build on any result scoring `security-severity >= 7.0`**
+(high and critical). A medium/low or a non-security maintainability finding (no
+`security-severity`) is reported but never blocking — it is a _security_ gate.
+The floor is configurable (`scripts/assert-codeql-findings.ps1
+-MinimumSecuritySeverity`).
+
+The gate is **self-contained and fail-closed**, the same posture as the
+supply-chain image-scan and coverage gates:
+
+- CodeQL writes its SARIF result file locally (`upload: false`) instead of relying
+  on GitHub code scanning being enabled, and `scripts/assert-codeql-findings.ps1`
+  makes the pass/fail decision over it — so the gate needs no GitHub Advanced
+  Security and cannot be silently disabled by a repository setting;
+- a missing, empty or malformed SARIF file, or a results directory with no SARIF
+  at all, **blocks** the build (an analysis that produced no readable output is
+  not a clean analysis);
+- the decision logic lives in `scripts/LiveCoreCodeQL.psm1` as pure functions, so
+  it is deterministically testable without running CodeQL.
+
+### Proving the gate fails closed
+
+Committing a real vulnerability to "prove the gate fails" would itself be a
+finding, so the required "fails closed on a high/critical finding" test is the
+gate-logic test `scripts/test-codeql-gate.ps1`, run **first** in the `codeql` job
+(before the real analysis) exactly like `test-coverage-gate.ps1` and
+`test-image-scan.ps1`. It feeds the gate seeded SARIF fixtures and asserts:
+
+- a SARIF carrying a **high (7.5) and a critical (9.8)** security finding fails
+  the gate (and, end to end, the `assert-codeql-findings.ps1` CLI exits non-zero);
+- a **clean** SARIF, and a **medium/low-only** SARIF, pass the default
+  high/critical floor;
+- lowering the floor to 4.0 then blocks the medium finding (the floor is
+  configurable);
+- severity is resolved whether the rule metadata lives under `tool.driver.rules`
+  or a `tool.extensions[].rules` entry;
+- a malformed document, a document with no `runs` array, an empty results
+  directory and a missing directory all **fail closed**.
+
+### Wired into the required-checks set
+
+The `codeql` job is part of the same required-checks set the release jobs depend
+on: both `publish` and `publish-packages` `needs:` every gate including `codeql`,
+so a high/critical finding fails the build and, transitively, blocks any release
+(no image push, no npm publish). See the README "Continuous integration" section
+and `docs/07_SECURITY_THREAT_MODEL.md` ("Static analysis of first-party code").

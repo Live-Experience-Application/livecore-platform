@@ -4943,29 +4943,33 @@ GitHub Actions runs `.github/workflows/ci.yml` on every push to `main`, on every
 pull request, and on every release tag push (`v<MAJOR>.<MINOR>.<PATCH>`). All jobs
 run on `ubuntu-latest` and execute the commands documented above verbatim:
 
-| Job                        | What it runs                                                                                                                                         |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                |
-| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                               |
-| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                          |
-| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)       |
-| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                             |
-| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                          |
-| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                       |
-| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                       |
-| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                     |
-| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)  |
-| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                      |
-| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002) |
-| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                   |
-| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                    |
-| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                             |
-| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)             |
+| Job                        | What it runs                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                 |
+| `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                |
+| `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                           |
+| `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006) |
+| `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)        |
+| `contributor-policy`       | DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (CORE-LIC-004)                                              |
+| `backup-restore-drill`     | `pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1` (restore drill, CORE-OPS-010)                                                           |
+| `backup-restore-postgres`  | seeds Postgres, runs the real `backup`/`restore` scripts and asserts the backup → restore → integrity round-trip (CORE-DR-002)                        |
+| `powershell-lint`          | PSScriptAnalyzer (Error/Warning severity) over `scripts/*.ps1`                                                                                        |
+| `docker`                   | `docker build` for both Dockerfiles, then container smoke tests (`/health/live`, worker startup)                                                      |
+| `observability-assets`     | `scripts/test-observability-assets.ps1` + `promtool check` over the example Prometheus rules/scrape config and the starter dashboard (CORE-OBS-008)   |
+| `publish-dry-run`          | `scripts/test-image-tags.ps1`, then a no-push dry-run build of the publish path (off a non-tag)                                                       |
+| `publish-packages-dry-run` | `scripts/test-package-publish.ps1`, then `pnpm publish --dry-run` packing all four `@livecore` packages on every push/PR (no registry, CORE-PUB-002)  |
+| `migrations`               | builds the migrations runner image and applies all migrations to an empty Postgres                                                                    |
+| `integration-postgres`     | model-vs-migration drift gate, then the integration suite against a real Postgres                                                                     |
+| `publish`                  | **release tag only**: pushes immutable, versioned API and worker images to `ghcr.io` once the gates pass                                              |
+| `publish-packages`         | **release tag only**: publishes the four `@livecore` packages to npm at the shared lockstep version, refusing a republish (CORE-PUB-002)              |
 
 The `publish` and `publish-packages` jobs run **only on a release tag** and **only
 after every other job passes**; pull requests and branch pushes never reach them, so
 neither a registry image push nor an npm publish happens off a release (CORE-OPS-009,
-CORE-PUB-002). Line endings are normalized to LF in the repository via `.gitattributes`, so
+CORE-PUB-002). Because both publish jobs `needs:` every gate, the `codeql` static-analysis
+job is part of that same required-checks set (CORE-SEC-006): a high/critical security
+finding in the first-party C# or TypeScript fails the build and, transitively, blocks any
+release. Line endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
 
