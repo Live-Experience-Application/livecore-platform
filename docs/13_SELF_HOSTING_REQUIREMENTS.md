@@ -1083,7 +1083,8 @@ The worker tags its `livecore_job_*` series with a `job` attribute naming the lo
 wins). The full SLO target table, the per-alert thresholds and the CI validation (`promtool check` plus the
 consistency gate) are documented in `docs/15_OBSERVABILITY.md` ("Example alert rules, SLO targets and a starter
 dashboard") and [`deploy/observability/README.md`](../deploy/observability/README.md). A consolidated
-failure-response runbook mapping each signal to operator actions is a documented follow-up (CORE-OPS-014).
+failure-response runbook mapping each signal to operator actions is the **"Failure-response operations
+runbook"** section at the end of this document (CORE-OPS-014).
 
 ### Multi-replica worker safety (CORE-RES-003)
 
@@ -1808,3 +1809,200 @@ database (threats T5/T7):
 - **No secrets in the repository:** the scripts read the database password from configuration and pass it via
   `PGPASSWORD`; object-storage credentials belong to the mirror tool's own environment. Nothing here is
   committed (CORE-OPS-008).
+
+## Failure-response operations runbook (CORE-OPS-014)
+
+The observability stack tells an operator **what** is wrong — the readiness gate leaves the rotation, a
+per-loop liveness heartbeat goes stale, an alert fires on a `livecore_*` series — but those signals stop at
+**detection**. CORE-OBS-008 deliberately ships *what to alert on* (rules, SLO targets, a dashboard), not *how
+to respond*, and CORE-RES-002 adds a dead-letter state and metric but no drain procedure, so an operator is
+left with signals and no playbook. This runbook is the **response** half: for each of the four documented
+runtime dependencies, and for worker backlog/dead-letter growth, it maps the signal to the concrete operator
+actions. It is a **failure-response** runbook — it is intentionally not named after the vertical term for an
+unplanned-disruption event, which is forbidden in this repository (`csv/forbidden_core_terms.csv`) — and it is
+the companion to the **Restore runbook** (data-loss recovery, CORE-OPS-010 above) and the **migration
+rollback policy** (a bad schema change, CORE-DR-004 above).
+
+### The three signal classes it maps
+
+Every entry below is driven by one or more of three signals already documented in this file and in
+`docs/15_OBSERVABILITY.md`:
+
+- **The readiness gate** (`/health/ready`, CORE-OPS-005). A `503` means either a **required** dependency is
+  unconfigured or malformed (the startup configuration contract, CORE-OPS-008/013) or a **configured**
+  dependency is unreachable (the live deep-reachability probes, CORE-OBS-009: `oidc-discovery`,
+  `object-storage`, `realtime-backplane`, plus the live `database` check). A not-ready instance **leaves the
+  load-balancer rotation**; `/health/live` is deliberately unaffected, so a not-ready dependency never restarts
+  an otherwise-live process. The response is **status-only** (threat T7): it tells you *something required* is
+  down, never *which* dependency — you localize the culprit from `/metrics` and the logs, never from the
+  unauthenticated endpoint.
+- **Heartbeat liveness** (the worker's per-loop `/health/live`, CORE-DR-003). A loop that **hangs** — a stuck
+  database or storage call that throws nothing — lets its own heartbeat file go stale past
+  `Worker:Heartbeat:StaleAfter`, the worker reports **not-live**, and orchestration restarts it. This catches a
+  hang that no failure counter would see.
+- **The CORE-OBS-007/008 metrics and alerts** — the `livecore_*` series on both `/metrics` endpoints and the
+  example alert rules over them (`deploy/observability/`, `docs/15`). These localize *which* dependency or loop
+  is degraded once the readiness gate or a heartbeat has told you *that* something is.
+
+Apply them in that order: **localize** (which dependency, from the metric/probe/log), **contain** (the
+fail-closed posture below already protects tenant data — confirm the blast radius), **remediate** (the
+per-dependency steps), then **verify recovery** (readiness green, the alert cleared, the backlog drained).
+
+### Dependency signal-to-action map
+
+The four dependencies below are exactly the **required/critical** rows of the configuration contract
+(CORE-OPS-008, "The contract: setting → injection mechanism"): persistence, OIDC, object storage and the
+realtime backplane. Every dependency in that contract that carries a runtime fail-closed posture has an entry
+here.
+
+| Dependency | Config (CORE-OPS-008) | Primary signals | Fail-closed blast radius |
+| --- | --- | --- | --- |
+| **Database** | `ConnectionStrings:Database` (API, worker) | not-ready (live `database` check, or missing/malformed in prod); `livecore_database_failures_total` → `LiveCoreDatabaseFailures`; knock-on `LiveCoreApiErrorRatioHigh`/`…LatencyP95High` | Domain routes `503`, instance leaves rotation; worker loops idle (no DB → liveness vacuously healthy) |
+| **OIDC identity provider** | `Authentication:Oidc:Authority` / `:Audience` (API) | not-ready (`oidc-discovery` probe, or missing in prod); **fail-to-start** if `Authority` set but `Audience` blank (CORE-OPS-004); `livecore_api_auth_failures_total` → `LiveCoreApiAuthFailureSpike` | Authenticated routes `401`, instance leaves rotation; unauthenticated `/health/*` and `/metrics` still serve |
+| **Object storage** | `Assets:Storage:*` (API, worker) | not-ready (`object-storage` probe, only when configured); `livecore_asset_failures_total` → `LiveCoreAssetFailures` | Asset operations `503`, private-by-default preserved (threat T4); worker cleanup/retention deletes fail fast (bounded, CORE-RES-005) |
+| **Realtime backplane** | `Realtime:Backplane:ConnectionString` (API) | not-ready (`realtime-backplane` PING probe, only when configured); `livecore_event_delivery_failures_total` → `LiveCoreEventDeliveryFailures` | Live cross-instance delivery degraded but **best-effort** (CORE-RES-001) — durable events persist and replay on reconnect (CORE-RT-005); **no data loss** |
+
+### Database degraded or unreachable
+
+`/health/ready` returns `503` either because `ConnectionStrings:Database` is unset or malformed in Production
+(the startup contract logs a named `Critical` listing the key, never the value — threat T7; CORE-OPS-008/013)
+or because the live database readiness check cannot reach PostgreSQL. `livecore_database_failures_total` climbs
+(alert `LiveCoreDatabaseFailures`), and because every domain route then fails closed with `503`, the API
+availability/latency SLO alerts can fire as a knock-on.
+
+1. Confirm PostgreSQL is up and reachable from the API and worker network — the readiness response will not say
+   which dependency is down, so read `livecore_database_failures_total` and the API logs to confirm it is the
+   database.
+2. If unconfigured/malformed, fix the `ConnectionStrings:Database` value in your secret store (the startup
+   `Critical` log names the offending key) and roll the instance.
+3. If reachable but slow or pool-exhausted, check the pool ceiling and the command/statement timeouts
+   (`Maximum Pool Size`, `Persistence:CommandTimeout` / `:StatementTimeout`, CORE-RES-004) — a hung query trips
+   the timeout and fails fast rather than stalling the pool.
+4. If a **migration** is stuck, only one runner holds the advisory lock (CORE-OPS-012); do not start a second.
+   The API rollout is gated on the migration step and on the schema-version readiness gate (CORE-OBS-010), so it
+   will not serve against an unmigrated schema.
+5. If the database is **lost or corrupt**, go to the **Restore runbook** (CORE-OPS-010); if a **bad migration**
+   caused it, follow the roll-forward-only + restore policy (CORE-DR-004) — never hand-run a destructive
+   `Down()`.
+
+**Recovered when:** `/health/ready` is healthy, `livecore_database_failures_total` stops climbing, and the
+instance re-enters rotation.
+
+### OIDC identity provider degraded or unreachable
+
+`/health/ready` returns `503` when `Authentication:Oidc:Authority` is unset in Production or the
+`oidc-discovery` probe cannot fetch `{Authority}/.well-known/openid-configuration` (CORE-OBS-009). The one
+**hard** case is a configured `Authority` with a blank `Audience`: the host **refuses to start** (CORE-OPS-004)
+rather than silently disabling audience validation. A genuine provider outage also raises
+`livecore_api_auth_failures_total` — but so does a token-replay/brute-force attempt or a misconfigured client
+hammering `401`/`403`, and the `LiveCoreApiAuthFailureSpike` alert does not distinguish them, so **localize
+first**.
+
+1. Separate the two cases: a **provider outage** shows not-ready with the `oidc-discovery` probe failing; an
+   **auth-failure spike with readiness green** is a client/attacker problem, not a dependency outage — treat it
+   as a security signal (rate limiting already caps abuse, CORE-SEC-001/007).
+2. For an outage, confirm the identity provider is up and the discovery URL is reachable from the API; check
+   `Authority` is an absolute `http(s)` issuer URL (the startup validator rejects a malformed one,
+   CORE-OPS-013) and that the backchannel timeout (CORE-RES-005) is not tripping on a slow provider.
+3. For a fail-to-start, set `Authentication:Oidc:Audience` (or, outside production, unset `Authority` to return
+   to the local-development latitude) — the audience guard will not start without it.
+
+**Recovered when:** the `oidc-discovery` probe is green, `/health/ready` is healthy, and the auth-failure rate
+falls back to baseline.
+
+### Object storage degraded or unreachable
+
+When storage is configured, the `object-storage` deep probe makes an account-level call on each readiness
+evaluation; a transport failure (refused / DNS / timeout) makes the instance not-ready. The probe cares about
+**reachability, not authorization** — a backend that answers with a client error (for example a
+permissions-scoped credential) is still *reachable* and stays **ready** — so a **credential or permission**
+problem does **not** surface as not-ready: it surfaces as a rising `livecore_asset_failures_total` (alert
+`LiveCoreAssetFailures`) and asset operations returning `503`. With storage **unconfigured** or only partially
+configured, the deep gate does not probe it and the fail-closed default returns `503` on every asset
+operation — assets stay private by default (threat T4).
+
+1. If **not-ready**, the backend is unreachable: confirm the S3-compatible endpoint is up and reachable, then
+   check `Assets:Storage:Endpoint`. A hung backend fails fast rather than stalling a worker thread because the
+   delete call is bounded (`RequestTimeout` / `MaxErrorRetry` / `RetryMode`, CORE-RES-005).
+2. If **ready but `livecore_asset_failures_total` is climbing**, it is not a reachability failure: check the
+   credentials (`AccessKeyId` / `SecretAccessKey`), that the bucket exists and is private, and the object-level
+   permissions.
+3. The same configuration drives the worker, so confirm the cleanup and data-retention loops are not
+   dead-lettering or backing up on storage deletes (see the worker section below).
+
+**Recovered when:** the `object-storage` probe is green / `livecore_asset_failures_total` is flat, and asset
+upload-intent and download succeed.
+
+### Realtime backplane degraded or unreachable
+
+For a **multi-instance** deployment, a configured-but-dead backplane fails the `realtime-backplane` PING probe
+and the instance leaves rotation. Live cross-instance delivery is **best-effort** (CORE-RES-001): a backplane
+transport failure is recorded on `livecore_event_delivery_failures_total` (alert
+`LiveCoreEventDeliveryFailures`) and **swallowed**, so a committed reveal/hide/session/participant operation
+still returns success during a backplane outage and a reconnecting client **replays** any missed event from the
+durable session-event stream (CORE-RT-005). There is **no data loss** — only degraded live fan-out across
+instances.
+
+1. Confirm the Redis/Valkey server is up and reachable and that `Realtime:Backplane:ConnectionString` (and the
+   `ChannelPrefix`, which must match across all instances) is correct.
+2. While the backplane is down on a multi-instance deployment, clients still receive their own instance's
+   events and replay the rest on reconnect; if the outage is prolonged, scaling to a **single** API instance
+   temporarily restores full delivery without a backplane (the documented single-instance constraint). Note
+   that multi-instance also requires sticky sessions / ARR affinity for SignalR (CORE-DEP-002), so verify that
+   too when you scale back out.
+3. A `LiveCoreEventDeliveryFailures` warning with the backplane healthy points at a transient per-recipient
+   transport hiccup, not an outage — it is a sustained-rate warning by design, not a hard failure.
+
+**Recovered when:** the `realtime-backplane` probe is green and `livecore_event_delivery_failures_total` is
+flat.
+
+### Worker backlog growth and dead-lettered jobs
+
+The worker's health is three independent signals. (1) A loop that **hangs** goes not-live on the per-loop
+heartbeat (CORE-DR-003) and is restarted. (2) A loop that **fails** drives `livecore_job_failures_total` up and
+its `exported_job:livecore_job_success_ratio:rate15m` below the 90% target (alert `LiveCoreWorkerJobFailing`).
+(3) A loop that **falls behind** shows its `livecore_job_backlog` gauge saturating at the batch size sweep after
+sweep and not returning to 0 (alert `LiveCoreWorkerBacklogNotDraining`). Export processing additionally
+**dead-letters** a poison job after `Exports:Processing:MaxAttempts` (default 5): the job goes terminal
+`Failed` and drops out of the queued read, the worker logs an identifier-only WARNING (job id + attempt count,
+threat T7), the sweep summary counts it as `dead-lettered`, and its requester sees a distinct `409` on
+`GET /api/v1/exports/{id}` (disclosed only after authorization; CORE-RES-002).
+
+First identify the loop from the `exported_job` label (`asset-cleanup`, `recap-generation`,
+`export-processing`, `store-notification-reconciliation`, `data-retention`), then:
+
+1. **Backlog growing, success ratio healthy** — a throughput shortfall, not a fault: raise the loop's
+   `BatchSize` or shorten its `SweepInterval`, or add worker replicas. Replicas are safe (CORE-RES-003) —
+   export processing leases each job (`Exports:Processing:LeaseDuration`), so two replicas never double-process
+   one job and a crashed lease is reclaimed on the next sweep.
+2. **Success ratio dropping / failures rising** — a downstream dependency is degraded: triage the database or
+   object storage first (above); the loop catches up once the dependency recovers.
+3. **Dead-lettered jobs** — read the WARNING log for the job id and attempt count and fix the root cause. A
+   dead-lettered export is **terminal by design** (it stops re-consuming a batch slot and starving newer work),
+   so there is no in-place resurrection: the requester re-requests a fresh export. If jobs dead-letter too
+   eagerly during a transient dependency blip, raise `Exports:Processing:MaxAttempts`.
+4. **A loop hung (worker not-live)** — orchestration restarts it; if it recurs, the stuck call is a
+   database/storage hang, so triage that dependency. The export lease lets another replica reclaim the
+   in-flight job after the lease expires.
+
+**Recovered when:** `livecore_job_backlog` returns to 0, the success ratio recovers above target, and the
+worker is live.
+
+### When the failure is data loss or a bad schema change
+
+A failure that **lost or corrupted data**, or a **bad schema change**, is handled by the existing procedures,
+not by re-running a sweep:
+
+- **Data loss or corruption** → the **Restore runbook** (CORE-OPS-010 above): restore PostgreSQL and the object
+  store from the most recent verified backup and re-verify coverage against the manifest. Rehearse it as a drill
+  so the real recovery time is known.
+- **A bad migration** → the **migration rollback policy** (CORE-DR-004 above): roll **forward** with a
+  corrective migration, or restore from backup — never hand-run a destructive `Down()`; expand/contract keeps a
+  destructive change from being applied blindly.
+
+### Closing out a failure-response
+
+A failure is resolved when `/health/ready` is healthy on every instance, the firing alert has cleared, and any
+worker backlog has drained to 0. Record what changed (the config value, the dependency, the tuning) alongside
+the alert so the next response is faster. The SLO targets and alert thresholds (CORE-OBS-008, `docs/15`) are
+starting points — tune them to the traffic you actually see.
