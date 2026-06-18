@@ -349,9 +349,74 @@ The `dependency-audit` job is part of the same required-checks set the release
 jobs depend on: both `publish` and `publish-packages` `needs:` it, so a
 high/critical dependency advisory fails the build and, transitively, blocks any
 release (no image push, no npm publish). This audits the project's source
-dependency graph; **Dependabot / action pinning and an update-PR policy are a
-separate story (CORE-DEP-008)**. See the README "Continuous integration" and
+dependency graph; **GitHub Actions pinning and the Dependabot update-PR policy are
+the next section (CORE-DEP-008)**. See the README "Continuous integration" and
 "Supply chain" sections.
+
+## GitHub Actions pinning and the dependency-update policy (CORE-DEP-008)
+
+The dependency audit above proves the project's _declared_ packages carry no known
+vulnerability, but the **build pipeline itself** has a dependency surface of its
+own: every third-party GitHub Action a workflow runs. Those actions were referenced
+by a **mutable major tag** (`actions/checkout@v4`, `actions/setup-dotnet@v4`,
+`actions/setup-node@v4`, `actions/upload-artifact@v4`, `github/codeql-action@v3`),
+so the tag could be re-pointed at a different commit at any time. A compromised or
+retagged action would then run inside CI — including the `publish` job that holds
+the registry's `packages: write` token — with no gate noticing.
+
+CORE-DEP-008 closes that surface by extending the **digest-pinning discipline the
+Dockerfiles already apply to their base images** (`name:tag@sha256:...`,
+`apps/api/Dockerfile`) to the workflows, and adds the automation that keeps the
+pins from going stale:
+
+- **Every `uses:` is pinned to an immutable commit SHA.** Each reference in
+  `.github/workflows/*` is a full 40-char commit SHA, with the readable version
+  kept in a trailing comment (`uses: actions/checkout@34e1148… # v4.3.1`), so the
+  pin is immutable but a human can still see what it resolves to.
+- **A fail-closed CI lint (`action-pin-lint`).** `scripts/lint-action-pins.ps1`
+  scans the workflows on every push and pull request and **fails the build** on any
+  `uses:` reference that is not a 40-char SHA — a floating tag (`@v4`), a
+  pinned-looking but still-mutable semver tag (`@v4.3.1`), a branch (`@main`), a
+  ref-less action, an un-digested `docker://` image, or a SHA with no readable
+  version comment. A first-party in-repo action (`./.github/actions/...`) has no
+  third-party ref and is allowed.
+- **`.github/dependabot.yml` keeps the pins current.** Dependabot is GitHub-native
+  (no heavyweight tool, no extra supply-chain dependency). It raises grouped weekly
+  update PRs for the three ecosystems this repo declares dependencies in —
+  `github-actions`, `npm` (the pnpm workspace) and `nuget` (the .NET solution). For
+  a SHA-pinned action it bumps the SHA **and** rewrites the `# vX.Y.Z` comment, so
+  immutability never means staleness, and a Dependabot PR runs the full pipeline
+  (including `action-pin-lint` and `dependency-audit`), so an update only merges
+  green.
+
+### Proving the lint fails closed
+
+The gate decision is pure logic (`scripts/LiveCoreActionPinLint.psm1`), so it is
+deterministically testable with no network and no GitHub. The required test
+`scripts/test-action-pin-lint.ps1` runs **first** in the `action-pin-lint` job
+(before the real lint), exactly like the other gate-logic tests, and asserts:
+
+- a 40-char SHA ref **with** a version comment is accepted, and one **without** a
+  comment is rejected;
+- a floating major tag (`@v4`), a semver tag (`@v4.3.1`), a branch (`@main`) and a
+  ref-less action are each rejected as unpinned — **the required "a seeded
+  floating-tag ref fails the lint" case** — while a `docker://` digest ref and a
+  local in-repo action are handled correctly;
+- a `uses:` appearing inside a `run:` script body or a comment is **not** mistaken
+  for a step key;
+- end to end, a seeded floating-tag workflow makes the directory-level review fail,
+  and the real `.github/workflows/*` tree passes (every `uses:` is SHA-pinned).
+
+Run it locally with `pwsh -NoProfile -File scripts/test-action-pin-lint.ps1`.
+
+### Wired into the required-checks set
+
+The `action-pin-lint` job is part of the same required-checks set the release jobs
+depend on: both `publish` and `publish-packages` `needs:` it, so an unpinned
+`uses:` fails the build and, transitively, blocks any release. This is the
+workflow-side analogue of the base-image digest pinning the supply-chain story
+(CORE-DEP-003) applies to the Dockerfiles. See the README "Continuous integration"
+and "Supply chain" sections.
 
 ## Image signing and SBOM attestation and the CI gate (CORE-SEC-008)
 

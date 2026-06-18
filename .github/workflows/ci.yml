@@ -11,6 +11,7 @@
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
+#   action-pin-lint      - fail the build on any workflow uses: ref not pinned to a full 40-char commit SHA (CORE-DEP-008)
 #   log-redaction        - enforce ID-only structured logging: fail the build on a content/PII/secret or interpolated log template (CORE-OBS-006, threat T7)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
 #   backup-restore-postgres - REAL backup/restore round-trip against live Postgres (CORE-DR-002)
@@ -54,10 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -111,10 +112,10 @@ jobs:
     # blocking posture the supply-chain image scan followed (CORE-DEP-005).
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -125,7 +126,7 @@ jobs:
         run: dotnet test LiveCore.slnx --collect:"XPlat Code Coverage" --results-directory ./TestResults
 
       - name: Upload the coverage reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-cobertura
           path: "TestResults/**/coverage.cobertura.xml"
@@ -148,10 +149,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -219,7 +220,7 @@ jobs:
     # not, and a non-git tree fails closed), then guards the real tree.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the boundary scan logic
         run: pwsh -NoProfile -File scripts/test-boundary-scan.ps1
@@ -264,7 +265,7 @@ jobs:
             build-mode: none
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the CodeQL severity-gate logic (a seeded high/critical finding fails closed)
         shell: pwsh
@@ -272,12 +273,12 @@ jobs:
 
       - name: Set up .NET SDK
         if: matrix.language == 'csharp'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -287,7 +288,7 @@ jobs:
         run: dotnet build LiveCore.slnx
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
         with:
           output: codeql-results
           # Gate locally on the SARIF rather than upload to code scanning, so the
@@ -300,7 +301,7 @@ jobs:
 
       - name: Upload the CodeQL SARIF results (build artifact)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: codeql-sarif-${{ matrix.language }}
           path: codeql-results/*.sarif
@@ -334,14 +335,14 @@ jobs:
     #      dependency fails the build. The two reports are uploaded as an artifact.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the dependency-audit gate logic (a seeded vulnerable package fails closed)
         shell: pwsh
         run: pwsh -NoProfile -File scripts/test-dependency-audit.ps1
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -357,7 +358,7 @@ jobs:
         run: dotnet list LiveCore.slnx package --vulnerable --include-transitive --format json > dotnet-vulnerable.json
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -380,7 +381,7 @@ jobs:
 
       - name: Upload the dependency-audit reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dependency-audit
           path: |
@@ -401,7 +402,7 @@ jobs:
     # check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the spec consistency check logic
         run: pwsh -NoProfile -File scripts/test-spec-consistency.ps1
@@ -410,7 +411,7 @@ jobs:
         run: pwsh -NoProfile -File scripts/spec-consistency.ps1
 
       - name: Upload the OpenAPI document (build artifact, CORE-OAS-001)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: openapi-v1
           path: openapi/livecore-v1.json
@@ -435,7 +436,7 @@ jobs:
     #      CycloneDX SBOM in the publish-dry-run/publish jobs.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the license-compliance gate logic (a seeded disallowed license fails)
         shell: pwsh
@@ -469,7 +470,7 @@ jobs:
     #      commits - hence fetch-depth: 0, so the base..head range is available.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           # Full history so the DCO lint can resolve the base..head commit range.
           fetch-depth: 0
@@ -510,13 +511,38 @@ jobs:
     # docs/scripts check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the destructive-Down lint logic
         run: pwsh -NoProfile -File scripts/test-migration-down-lint.ps1
 
       - name: Flag any unreviewed destructive migration Down()
         run: pwsh -NoProfile -File scripts/lint-migration-downs.ps1
+
+  action-pin-lint:
+    name: GitHub Actions commit-SHA pinning (CORE-DEP-008)
+    runs-on: ubuntu-latest
+    # CORE-DEP-008: every `uses:` in .github/workflows/* must be pinned to an
+    # immutable commit SHA (with the readable version in a trailing comment), so a
+    # compromised or retagged third-party action cannot silently run inside this
+    # pipeline - including the publish job that holds the registry's packages: write
+    # token. This extends the digest-pinning discipline the Dockerfiles already
+    # apply to their base images (apps/api/Dockerfile) to the workflows. The
+    # companion .github/dependabot.yml keeps the pins current (Dependabot bumps the
+    # SHA and rewrites the version comment on a new release). The test step proves
+    # the lint logic over fixtures (a SHA-pinned ref passes; a floating tag, a
+    # semver tag, a branch and a comment-less SHA each fail) and then guards the
+    # real tree, then the lint itself guards the tree. Pure source check, no build
+    # needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Test the action-pin lint logic (a seeded floating-tag ref fails closed)
+        run: pwsh -NoProfile -File scripts/test-action-pin-lint.ps1
+
+      - name: Fail on any unpinned workflow action reference
+        run: pwsh -NoProfile -File scripts/lint-action-pins.ps1
 
   log-redaction:
     name: Log redaction guardrail (CORE-OBS-006)
@@ -533,7 +559,7 @@ jobs:
     # tree, then the scan itself guards the tree. Pure source check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the log-redaction guardrail logic
         run: pwsh -NoProfile -File scripts/test-log-redaction.ps1
@@ -551,7 +577,7 @@ jobs:
     # object store needed (scripts/test-backup-restore-drill.ps1).
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run the backup/restore drill
         run: pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
@@ -593,7 +619,7 @@ jobs:
       Backup__Encryption__Passphrase: "ci-backup-restore-roundtrip-passphrase"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Install the PostgreSQL 17 client (matching pg_dump/pg_restore/psql)
         # The runner's bundled client may be older than the postgres:17 service, and
@@ -630,7 +656,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Build API image
         run: docker build --file apps/api/Dockerfile --build-arg SOURCE_REVISION=${{ github.sha }} --tag livecore-api:ci .
@@ -709,7 +735,7 @@ jobs:
     #      endpoints answer 200.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Validate the compose manifest (gate + probes, no Docker)
         shell: pwsh
@@ -803,7 +829,7 @@ jobs:
     # Pure docs/deploy assets, no application build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Test the observability-assets gate logic and guard the real files
         shell: pwsh
@@ -844,7 +870,7 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Verify image tags are immutable and versioned
         shell: pwsh
@@ -1027,7 +1053,7 @@ jobs:
 
       - name: Upload the dry-run SBOMs and scan reports
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: supply-chain-dry-run
           path: |
@@ -1050,10 +1076,10 @@ jobs:
     # publish-packages job runs the same gate against the actual release tag.
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
@@ -1092,7 +1118,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Run PSScriptAnalyzer on scripts/
         shell: pwsh
@@ -1169,7 +1195,7 @@ jobs:
       MIGRATIONS_CONNECTION_STRING: "Host=localhost;Port=5432;Database=livecore_migrations_ci;Username=postgres;Password=postgres"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Build migrations runner image
         run: docker build --file apps/api/Migrations.Dockerfile --tag livecore-migrations:ci .
@@ -1241,10 +1267,10 @@ jobs:
       LIVECORE_TEST_REDIS: "localhost:6379"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -1305,10 +1331,10 @@ jobs:
       LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
 
@@ -1336,6 +1362,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - action-pin-lint
       - log-redaction
       - backup-restore-drill
       - backup-restore-postgres
@@ -1363,7 +1390,7 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Assert the release tag matches the packages' shared version (drift cannot ship)
         # CORE-CMP-003: fail the publish before building or pushing any image when
@@ -1537,7 +1564,7 @@ jobs:
           done
 
       - name: Upload the published SBOMs, scan reports and attestation verifications
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: supply-chain-attestations
           path: |
@@ -1607,6 +1634,7 @@ jobs:
       - license-compliance
       - contributor-policy
       - migration-down-lint
+      - action-pin-lint
       - log-redaction
       - backup-restore-drill
       - backup-restore-postgres
@@ -1631,10 +1659,10 @@ jobs:
       id-token: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 

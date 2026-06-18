@@ -1,0 +1,68 @@
+# Dependency-update policy (CORE-DEP-008).
+#
+# Dependabot is GitHub-native, so this adds no heavyweight tool and no extra
+# dependency to the supply chain. It raises update pull requests for the three
+# ecosystems this repository declares dependencies in, so a pinned dependency
+# cannot silently rot:
+#
+#   - github-actions: every `uses:` in .github/workflows/* is pinned to an
+#     immutable commit SHA, with the readable version in a trailing comment
+#     (enforced by the `action-pin-lint` CI gate, scripts/lint-action-pins.ps1).
+#     Dependabot bumps the SHA and rewrites the `# vX.Y.Z` comment when a new
+#     action release ships, so the pin stays current without losing immutability.
+#   - npm: the pnpm workspace (pnpm-lock.yaml at the repository root).
+#   - nuget: the .NET solution (LiveCore.slnx) and its committed packages.lock.json
+#     files.
+#
+# A Dependabot pull request runs the full CI pipeline - every gate, including
+# action-pin-lint, the dependency vulnerability audit (CORE-DEP-005) and the
+# build/test suites - so an update only merges if it is green. Updates are grouped
+# per ecosystem to keep the pull-request volume manageable. See
+# docs/14_TESTING_STRATEGY.md ("GitHub Actions pinning and the dependency-update
+# policy").
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "javascript"
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "dotnet"
+    groups:
+      nuget:
+        patterns:
+          - "*"

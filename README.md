@@ -305,6 +305,9 @@ scripts/test-backup-restore-postgres.ps1  real backup/restore round-trip against
 scripts/LiveCoreMigrationLint.psm1  destructive migration Down() detection + acknowledgement-baseline reconciliation (CORE-DR-004)
 scripts/lint-migration-downs.ps1  CI lint that flags a Down() dropping a table/column for review (roll-forward-only policy, CORE-DR-004)
 scripts/test-migration-down-lint.ps1  tests for the destructive-Down lint logic (CORE-DR-004)
+scripts/LiveCoreActionPinLint.psm1  GitHub Actions pin analysis: classifies each workflow `uses:` ref as SHA-pinned, an unpinned tag/branch, a comment-less SHA or an undigested docker:// ref (CORE-DEP-008)
+scripts/lint-action-pins.ps1  CI lint that fails the build on any workflow `uses:` ref not pinned to a full 40-char commit SHA with a readable version comment (CORE-DEP-008)
+scripts/test-action-pin-lint.ps1  tests for the action-pin lint (a SHA-pinned ref passes; a seeded floating tag, semver tag, branch and comment-less SHA fail; the real workflows pass — CORE-DEP-008)
 scripts/LiveCoreLogRedaction.psm1  C#-aware ID-only-logging analysis: flags an ILogger template that is interpolated, concatenates a value, or names a content/PII/secret structured property (CORE-OBS-006, threat T7)
 scripts/lint-log-redaction.ps1  CI lint that fails the build on a content-bearing/interpolated log template in apps/ source (CORE-OBS-006)
 scripts/test-log-redaction.ps1  tests for the log-redaction guardrail (a seeded content-bearing/interpolated template is flagged; the real ID-only logs pass — CORE-OBS-006)
@@ -4934,9 +4937,35 @@ on critical**: the `publish-dry-run` job now runs `scripts/assert-image-scan.ps1
 same critical-only bar the release `publish` job enforces (clear it by bumping the
 pinned base-image digest in the Dockerfiles). Both publish jobs `needs:` the
 `dependency-audit` gate, so a high/critical dependency advisory also blocks any
-release. Dependabot / GitHub Actions pinning and an update-PR policy are a separate
-follow-up (CORE-DEP-008). See `docs/14_TESTING_STRATEGY.md` ("Dependency
+release. GitHub Actions pinning and the Dependabot update-PR policy are the next
+subsection (CORE-DEP-008). See `docs/14_TESTING_STRATEGY.md` ("Dependency
 vulnerability audit (SCA) and the CI gate").
+
+### Pinned GitHub Actions and the dependency-update policy (CORE-DEP-008)
+
+The audit above fixes the project's _declared_ dependencies, but the **build
+pipeline** has its own dependency surface: every third-party GitHub Action a
+workflow runs. Those actions were referenced by a **mutable major tag**
+(`actions/checkout@v4`, `actions/setup-dotnet@v4`, `actions/setup-node@v4`,
+`actions/upload-artifact@v4`, `github/codeql-action@v3`), so a retagged or
+compromised action could run inside CI — including the `publish` job that holds the
+registry's `packages: write` token. CORE-DEP-008 extends the **base-image
+digest-pinning discipline** (CORE-DEP-003) from the Dockerfiles to the workflows:
+
+- **Every `uses:` is pinned to an immutable commit SHA**, with the readable version
+  in a trailing comment (`uses: actions/checkout@34e1148… # v4.3.1`).
+- **The `action-pin-lint` CI job fails closed** on any `uses:` ref that is not a
+  40-char SHA — a floating tag, a still-mutable semver tag, a branch, a ref-less
+  action, an un-digested `docker://` image, or a SHA with no version comment. The
+  decision is pure logic (`scripts/LiveCoreActionPinLint.psm1`) proven from seeded
+  fixtures by `scripts/test-action-pin-lint.ps1` (a seeded floating-tag ref fails),
+  and both `publish` jobs `needs:` it, so an unpinned action blocks any release.
+- **`.github/dependabot.yml` keeps the pins current.** Dependabot is GitHub-native
+  (no extra tool) and raises grouped weekly update PRs for `github-actions`, `npm`
+  (the pnpm workspace) and `nuget` (the .NET solution); for a SHA-pinned action it
+  bumps the SHA and rewrites the version comment, so immutability never means
+  staleness. See `docs/14_TESTING_STRATEGY.md` ("GitHub Actions pinning and the
+  dependency-update policy").
 
 ### Third-party attribution and license compliance (CORE-LIC-003)
 
@@ -5030,6 +5059,7 @@ run on `ubuntu-latest` and execute the commands documented above verbatim:
 | `dotnet`                   | `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes` on `LiveCore.slnx`                                                                                                                                                                                                                              |
 | `typescript`               | `pnpm install --frozen-lockfile`, `lint`, `format:check`, recursive `build` and `test`                                                                                                                                                                                                                             |
 | `boundary-scan`            | `pwsh -NoProfile -File scripts/boundary-scan.ps1` (forbidden vertical terms fail the build)                                                                                                                                                                                                                        |
+| `action-pin-lint`          | `scripts/lint-action-pins.ps1` — **fails the build on any workflow `uses:` ref not pinned to a full 40-char commit SHA** with a readable version comment (gate-logic tested, CORE-DEP-008)                                                                                                                         |
 | `codeql`                   | CodeQL SAST over the first-party C# and TypeScript sources; **fails the build on a high/critical security finding** (gate-logic tested, CORE-SEC-006)                                                                                                                                                              |
 | `dependency-audit`         | `dotnet list --vulnerable` (transitive included) + `pnpm audit`; **fails closed on a high/critical dependency advisory** (gate-logic tested, CORE-DEP-005)                                                                                                                                                         |
 | `license-compliance`       | NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (CORE-LIC-003)                                                                                                                                                                     |
@@ -5054,8 +5084,11 @@ job is part of that same required-checks set (CORE-SEC-006): a high/critical sec
 finding in the first-party C# or TypeScript fails the build and, transitively, blocks any
 release. The `dependency-audit` job is wired in the same way (CORE-DEP-005): a high/critical
 advisory on a first-party direct or transitive dependency — from `dotnet list --vulnerable`
-or `pnpm audit` — likewise fails the build and blocks any release. Line endings are
-normalized to LF in the repository via `.gitattributes`, so
+or `pnpm audit` — likewise fails the build and blocks any release. So is `action-pin-lint`
+(CORE-DEP-008): a workflow `uses:` reference that is not pinned to a full 40-char commit SHA
+fails the build and blocks any release, and `.github/dependabot.yml` keeps those pins current
+with grouped weekly update PRs across the `github-actions`, `npm` and `nuget` ecosystems. Line
+endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
 
