@@ -5,11 +5,9 @@
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "accessTokenLifespan": 900,
-  "_comment": "Local-development OIDC realm for the LiveCore full local stack (CORE-DEP-006). Imported by Keycloak with --import-realm so the api validates real bearer tokens. Product-neutral (AGENTS.md); contains only well-known LOCAL credentials, never a production secret (threat T7). Harden or replace before exposing anywhere — see deploy/compose/README.md.",
   "clients": [
     {
       "clientId": "livecore-api",
-      "_comment": "The API resource. Its clientId is the token audience the api validates (Authentication__Oidc__Audience=livecore-api). Bearer-only: it never initiates a login, it only consumes tokens.",
       "enabled": true,
       "bearerOnly": true,
       "publicClient": false,
@@ -18,7 +16,6 @@
     },
     {
       "clientId": "livecore-app",
-      "_comment": "A public client a vertical app uses to obtain tokens for the api. Direct access grants are enabled so a local developer can mint a token with the demo user (password grant); the audience mapper adds livecore-api to the token so the api accepts it.",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
@@ -38,7 +35,6 @@
         },
         {
           "name": "organization-claim",
-          "_comment": "A starter tenant claim so a token carries the organization the api resolves to a Workspace tenant. Replace the value with a slug that matches an Organization you create through the api.",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-hardcoded-claim-mapper",
           "config": {
@@ -55,7 +51,6 @@
   "users": [
     {
       "username": "demo",
-      "_comment": "A local demo user for password-grant token testing. Local-only credentials.",
       "enabled": true,
       "emailVerified": true,
       "email": "demo@example.com",
