@@ -3281,6 +3281,19 @@ SignalR backplane (`Microsoft.AspNetCore.SignalR.StackExchangeRedis`) **conditio
 - **Unconfigured:** SignalR keeps its in-memory `HubLifetimeManager` — correct for a **single** API instance
   only (the documented single-instance constraint; a multi-replica deployment must configure a backplane).
 
+**Fail fast on a multi-instance misconfiguration (CORE-RES-006).** Because the backplane is opt-in, that
+single-instance constraint used to fail **silently** — more than one API instance with no backplane started
+cleanly and then dropped cross-instance delivery. The chart now refuses to render that topology (CORE-DEP-009),
+and the API is the matching app-side defence in depth for any path that bypasses the chart (a `kubectl scale`, a
+Compose `--scale api=N`, a hand-written manifest). The deployment declares its instance count in
+`Realtime:InstanceCount` (set to the replica count; absent = a single instance), and a startup guard
+(`RealtimeBackplaneStartupValidator`, reusing the `ProductionConfigurationValidator` pure-decision pattern)
+**refuses to start** when more than one instance is configured with no backplane — and logs **one prominent
+startup warning** for a single instance on the in-process backplane in a container/production deployment. A
+configured backplane (any count) and a single-instance development run start silently, and the guard reads only
+the topology (the count and whether a connection string is present), never the connection string value (threat
+T7).
+
 Enabling the backplane swaps only the **transport beneath** `IHubContext`: the `IRealtimeBackplane` stays the
 same `InProcessRealtimeBackplane`, the publisher still hands it one already-authorized per-recipient delivery,
 and the per-recipient recipient computation is **unchanged** — so the Redis backplane only transports an

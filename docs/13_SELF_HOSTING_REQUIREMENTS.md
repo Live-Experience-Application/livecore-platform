@@ -264,7 +264,16 @@ moment you run **more than one API instance**, two additional controls become
   dropped** for everyone connected to the others. Configure
   `Realtime__Backplane__ConnectionString` (see "Realtime scale-out backplane") so
   every instance fans realtime out to all connections. With a single instance the
-  in-process backplane is correct and **no** backplane is needed.
+  in-process backplane is correct and **no** backplane is needed. **Tell the API its
+  instance count.** Set `Realtime__InstanceCount` to the number of API instances you
+  run (the Helm `api.replicaCount`, a Compose `--scale api=N`; absent or non-positive
+  = a single instance). The API uses it to **fail fast** at startup (CORE-RES-006): more
+  than one declared instance with no backplane configured **refuses to start** with a
+  clear error, and a single instance on the in-process backplane in a
+  container/production deployment logs **one prominent startup warning** that
+  cross-instance delivery is disabled. This is the app-side defence in depth for the
+  same misconfiguration the Helm chart refuses to render (CORE-DEP-009); a configured
+  backplane (any count) and a single-instance development run start silently.
 - **Sticky sessions / session affinity (CORE-DEP-002).** A SignalR connection's
   negotiate + transport handshake must reach the **same** instance; enable
   cookie/affinity at the reverse proxy or load balancer for the `/hubs` endpoint (see

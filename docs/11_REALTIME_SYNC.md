@@ -275,6 +275,25 @@ multi-replica deployment **must** configure a backplane; without one, an event c
 only the clients connected to that replica and is silently dropped for clients connected to the others. This
 is the documented single-instance fallback (see `docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
+**The app fails fast on a multi-instance misconfiguration (CORE-RES-006).** Because the backplane is opt-in,
+that single-instance constraint used to fail **silently**: a deployment that ran more than one API instance with
+no backplane started cleanly and then dropped cross-instance delivery with no signal. The chart now refuses to
+render that topology (CORE-DEP-009), and the **API itself** is the matching defence in depth for any path that
+bypasses the chart guard (a `kubectl scale`, a Compose `--scale api=N`, a hand-written manifest). The deployment
+declares its instance count in `Realtime:InstanceCount` (`Realtime__InstanceCount`, set to the replica count;
+absent or non-positive = a single instance), and a startup guard (`RealtimeBackplaneStartupValidator`, reusing the
+`ProductionConfigurationValidator` pure-decision pattern) reads only the **topology** — the declared count and
+whether a connection string is present, never the connection string value (threat T7):
+
+- **More than one declared instance with no backplane** is a definite misconfiguration in **any** environment, so
+  the host **refuses to start** with a clear, named error (the same fail-fast posture as the OIDC audience guard,
+  CORE-OPS-004) rather than serving a broken multi-instance realtime topology.
+- **A single declared instance on the in-process backplane in a container/production deployment** is correct now
+  but a scale-up foot-gun, so the host starts normally and logs **one prominent startup warning** that
+  cross-instance realtime delivery is disabled.
+- **A configured backplane** (any instance count) and a **single-instance development run** start **silently** —
+  single-instance development is unaffected.
+
 **Sticky-session affinity is also required at scale (CORE-DEP-002).** The backplane is necessary but not
 sufficient for multiple instances: a SignalR connection starts with a **negotiate** request that issues a
 `connectionId`, and the non-WebSocket fallbacks (Server-Sent Events, long polling) then make further HTTP

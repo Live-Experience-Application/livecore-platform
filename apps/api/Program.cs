@@ -254,8 +254,42 @@ builder.Services.AddLiveCoreOpenApi();
 // single-instance constraint. Enabling the backplane changes only the transport beneath IHubContext: the
 // per-recipient recipient computation and the one-payload-to-one-group send path are UNCHANGED, so the
 // backplane only ever transports an ALREADY-AUTHORIZED delivery and cannot widen the audience or leak a
-// hidden event (threat T3). No backplane connection string lives in source (threat T7).
-builder.Services.AddLiveCoreRealtime(builder.Configuration);
+// hidden event (threat T3). No backplane connection string lives in source (threat T7). The return value
+// records whether a backplane is configured; the realtime topology guard below reuses it.
+var realtimeBackplaneConfigured = builder.Services.AddLiveCoreRealtime(builder.Configuration);
+
+// Realtime backplane topology guard (CORE-RES-006, the "Multi-Instance Runtime Correctness" epic). The realtime
+// backplane is opt-in (RealtimeBackplaneOptions): with no Realtime:Backplane:ConnectionString configured the host
+// keeps the in-process SignalR backplane, which delivers correctly only for a SINGLE API instance — an event
+// computed on one instance is silently dropped for clients connected to the others (docs/11_REALTIME_SYNC.md
+// "Scale-out"). ProductionConfigurationValidator deliberately omits the backplane from its always-required set
+// (it is conditionally required), so before this story a multi-instance deployment with no backplane started
+// silently and then silently dropped cross-instance delivery. CORE-DEP-009 made the Helm chart REFUSE TO RENDER
+// that topology; this is the matching app-side defence in depth for any path that bypasses the chart guard (a
+// kubectl scale, a Compose --scale api=N, a hand-written manifest). It reuses the same pure, environment-aware,
+// fail-closed decision pattern as the production-config contract over the deployment-declared Realtime:InstanceCount.
+//
+// The unambiguous misconfiguration — more than one declared instance with NO backplane — is handled here, BEFORE
+// the host is built: the host REFUSES TO START with a clear, named error, exactly as the Helm chart refuses to
+// render it (CORE-DEP-009) and the OIDC audience guard refuses to start (CORE-OPS-004). The single-instance
+// container/production foot-gun is a prominent startup WARNING emitted once the logger exists (below); a
+// configured backplane and a single-instance development run start silently. Only the topology (an instance count
+// and whether a connection string is present) is read — never the connection string value — so nothing sensitive
+// is logged (threat T7).
+var realtimeBackplaneStatus = RealtimeBackplaneStartupValidator.Evaluate(
+    RealtimeBackplaneStartupValidator.ReadConfiguredInstanceCount(builder.Configuration),
+    realtimeBackplaneConfigured,
+    builder.Environment.IsProduction());
+if (realtimeBackplaneStatus == RealtimeBackplaneStartupStatus.MultiInstanceMisconfigured)
+{
+    throw new InvalidOperationException(
+        $"Realtime is misconfigured for multi-instance: '{RealtimeBackplaneStartupValidator.InstanceCountKey}' is " +
+        "greater than 1 but no realtime backplane connection string is configured under " +
+        $"'{RealtimeBackplaneStartupValidator.BackplaneConnectionStringKey}'. Without a shared backplane an event " +
+        "computed on one instance is silently dropped for clients connected to the others. Configure a Valkey/Redis " +
+        "backplane (docs/11_REALTIME_SYNC.md \"Scale-out\"; docs/13_SELF_HOSTING_REQUIREMENTS.md) or run a single " +
+        "API instance.");
+}
 
 // Asset storage adapter seam (CORE-AST-002, the storage adapter interface story of the "Asset Storage and
 // Authorization" epic). IAssetStorage is the single port between Core and the private, S3-compatible
@@ -1315,6 +1349,25 @@ if (!oidcConfigured)
 {
     app.Logger.LogWarning(
         "No OIDC Authority configured (Authentication:Oidc:Authority); authentication is disabled and authenticated endpoints fail closed.");
+}
+
+// Realtime backplane single-instance warning (CORE-RES-006). The unambiguous multi-instance-without-backplane
+// misconfiguration already refused to start above (before the host was built); this is the softer foot-gun: a
+// single declared instance on the in-process backplane in a container/production deployment is correct now, but a
+// scale-up without a backplane would silently drop cross-instance delivery. Surface ONE prominent startup warning
+// so the operator knows cross-instance realtime delivery is disabled before they scale. Only the backplane key
+// NAME is logged, never any connection string value (threat T7); a configured backplane and a single-instance
+// development run reach here as Ok and warn about nothing.
+if (realtimeBackplaneStatus == RealtimeBackplaneStartupStatus.SingleInstanceWarning)
+{
+    app.Logger.LogWarning(
+        "Realtime cross-instance delivery is disabled: no realtime backplane is configured ({BackplaneKey}), so " +
+        "the in-process SignalR backplane is in use. This is correct only while exactly ONE API instance runs; " +
+        "before scaling to more than one instance configure a Valkey/Redis backplane (docs/11_REALTIME_SYNC.md " +
+        "\"Scale-out\"; docs/13_SELF_HOSTING_REQUIREMENTS.md) and set {InstanceCountKey} to the instance count, or " +
+        "events computed on one instance are silently dropped for clients connected to the others.",
+        RealtimeBackplaneStartupValidator.BackplaneConnectionStringKey,
+        RealtimeBackplaneStartupValidator.InstanceCountKey);
 }
 
 // Production configuration contract (CORE-OPS-008): fail loudly when a required production value is missing.
