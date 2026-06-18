@@ -72,6 +72,14 @@ public static class WorkerHostFactory
         // host - one JSON object per log entry on stdout, UTC timestamps,
         // scopes included. Uses the JSON console formatter built into
         // Microsoft.Extensions.Logging; no external logging dependency.
+        //
+        // As in the API host, the JSON FORMAT is fixed but the log LEVEL is an
+        // operator configuration surface (CORE-OBS-011): ClearProviders()/
+        // AddJsonConsole leave the configuration-driven log FILTERING intact, so
+        // Logging:LogLevel:Default and per-category Logging:LogLevel:<Category>
+        // overrides (Logging__LogLevel__* env vars) tune verbosity with safe
+        // defaults from appsettings.json (the worker keeps Microsoft.Hosting.Lifetime
+        // at Information). See docs/13_SELF_HOSTING_REQUIREMENTS.md and .env.example.
         builder.Logging.ClearProviders();
         builder.Logging.AddJsonConsole(options =>
         {

@@ -1052,10 +1052,19 @@ aggregates and an overall status — never content (threat T7). See
 
 Both hosts write structured, single-line JSON log entries to stdout using the
 JSON console formatter built into `Microsoft.Extensions.Logging` (UTC
-timestamps, scopes included); no external logging dependency is used. Log
-levels are configured per host in `appsettings.json`. Logs must carry
-identifiers and metadata, never sensitive content (threat T7 in
-`docs/07_SECURITY_THREAT_MODEL.md`).
+timestamps, scopes included); no external logging dependency is used. That JSON
+**format** is a fixed, safe default — it keeps logs machine-parseable and is the
+shape the per-request context and the ID-only-logging guardrail build on — so the
+only operator knob is the **level** (CORE-OBS-011). The hosts ship safe defaults
+in `appsettings.json` (`Logging:LogLevel:Default=Information`, the API quieting
+`Microsoft.AspNetCore` to `Warning` and the worker keeping
+`Microsoft.Hosting.Lifetime` at `Information`), and a self-hoster raises or lowers
+production verbosity at runtime with the standard .NET keys — for example
+`Logging__LogLevel__Default=Debug` to raise it, or a per-category
+`Logging__LogLevel__<Category>` override — with no image rebuild. The full
+contract is in `docs/13_SELF_HOSTING_REQUIREMENTS.md` and `.env.example`. Logs must
+carry identifiers and metadata, never sensitive content (threat T7 in
+`docs/07_SECURITY_THREAT_MODEL.md`), at every level.
 
 `docs/15_OBSERVABILITY.md` requires a documented per-request context on every
 request/event log line (`request_id`, `organization_id`, `workspace_id`,

@@ -32,6 +32,15 @@ var builder = WebApplication.CreateBuilder(args);
 // built into Microsoft.Extensions.Logging; no external logging dependency.
 // Log identifiers and metadata, never sensitive content (threat T7 in
 // docs/07_SECURITY_THREAT_MODEL.md).
+//
+// The JSON FORMAT is a fixed, safe default; the log LEVEL is an operator
+// configuration surface (CORE-OBS-011). ClearProviders()/AddJsonConsole replace
+// only the PROVIDERS and leave the host's configuration-driven log FILTERING
+// intact, so the standard .NET keys Logging:LogLevel:Default and per-category
+// Logging:LogLevel:<Category> overrides (read from the Logging__LogLevel__* env
+// vars) still tune verbosity with safe defaults shipped in appsettings.json —
+// documented in docs/13_SELF_HOSTING_REQUIREMENTS.md and .env.example. Setting
+// Logging__LogLevel__Default=Debug raises the host's minimum emitted level.
 builder.Logging.ClearProviders();
 builder.Logging.AddJsonConsole(options =>
 {

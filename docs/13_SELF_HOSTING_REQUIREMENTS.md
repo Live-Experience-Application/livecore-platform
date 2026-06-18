@@ -1051,6 +1051,34 @@ the repository. The host environment that selects the production vs sandbox hono
 `ASPNETCORE_ENVIRONMENT` (the same variable the OIDC audience guard, the readiness gate and the configuration
 contract below key off); a production deployment sets it to `Production`.
 
+## Log level and format (CORE-OBS-011)
+
+Both hosts (the API and the worker) emit **structured, single-line JSON** log entries to stdout through the
+JSON console formatter built into `Microsoft.Extensions.Logging` (UTC timestamps, scopes included; CORE-FND-004,
+CORE-OBS-002) — no external logging dependency. The **format posture is a fixed, safe default**, deliberately
+not an operator knob: structured JSON is what makes the logs machine-parseable for a log aggregator and is the
+shape the per-request context (CORE-OBS-002) and the ID-only-logging guardrail (CORE-OBS-006) are built on, so a
+self-hoster always gets parseable, ID-only logs. What an operator **does** tune is the **verbosity**, through
+the standard .NET logging configuration, so production log volume can be raised for an incident or lowered for a
+quiet deployment **without rebuilding an image**.
+
+- **`Logging:LogLevel:Default` (`Logging__LogLevel__Default`)** is the **minimum emitted level** for every
+  category without a more specific override. The shipped default is **`Information`**; set it to `Debug` (or
+  `Trace`) to raise verbosity while diagnosing an incident, or `Warning`/`Error` to quiet a noisy deployment.
+  Setting `Logging__LogLevel__Default=Debug` demonstrably lowers the host's minimum emitted level — a `Debug`
+  line the host suppresses by default is then emitted.
+- **Per-category overrides** (`Logging:LogLevel:<Category>` / `Logging__LogLevel__<Category>`) raise or lower one
+  category prefix without touching the rest. The hosts ship two as safe defaults: the API quiets the framework's
+  own request logging with `Logging__LogLevel__Microsoft.AspNetCore=Warning`, and the worker keeps the
+  host-lifecycle (start/stop) messages at `Logging__LogLevel__Microsoft.Hosting.Lifetime=Information`. A
+  deployment can add any other category prefix the same way (for example `Logging__LogLevel__LiveCore=Debug` to
+  raise only the platform's own logs).
+
+The levels are `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` and `None`. Like the other host
+knobs the keys are read from configuration only and carry no secret (threat T7). The level changes only the log
+**volume**, never the **content**: every line stays ID-only — identifiers and metadata, never tokens, PII or
+resource content (CORE-OBS-006, threat T7) — at every verbosity, and the JSON format is unchanged.
+
 ## Secret management and the configuration contract (CORE-OPS-008)
 
 Core holds **no secret in source**. Every connection string, identity setting and credential is supplied at
@@ -1089,6 +1117,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `RateLimiting:Enabled` / `Global:*` / `Anonymous:*` / `Webhooks:*` | `RateLimiting__Enabled`, `RateLimiting__Global__PermitLimit`, `RateLimiting__Anonymous__PermitLimit`, `RateLimiting__Webhooks__FloorPermitLimit`, … | no | no (tunable) | API | Rate limiting ON: 300/60s per principal, 300/60s per anonymous IP, 60/60s per webhook IP; non-disableable webhook floor 600/60s (CORE-SEC-001, CORE-SEC-007) |
 | `ResponseCompression:Enabled` / `EnableForHttps` | `ResponseCompression__Enabled`, `ResponseCompression__EnableForHttps` | no | no (tunable) | API | JSON response compression ON (Brotli/gzip), incl. over HTTPS; JSON-only, hub transport excluded; content unchanged (CORE-PERF-006) |
 | `Hosting:ShutdownTimeout`           | `Hosting__ShutdownTimeout`         |   no   | no (tunable)            | API, worker | `00:00:25` graceful-shutdown drain window for in-flight HTTP/SignalR/job work (CORE-DEP-002) |
+| `Logging:LogLevel:Default` / `:<Category>` | `Logging__LogLevel__Default`, `Logging__LogLevel__Microsoft.AspNetCore`, `Logging__LogLevel__Microsoft.Hosting.Lifetime`, … | no | no (tunable) | API, worker | `Information` minimum emitted level (JSON console format fixed); per-category overrides quiet `Microsoft.AspNetCore` to `Warning` (API) and keep `Microsoft.Hosting.Lifetime` at `Information` (worker); `Debug` raises verbosity (CORE-OBS-011) |
 | `Assets:Storage:Endpoint`           | `Assets__Storage__Endpoint`        |   no   | for any media feature   | API, worker | Storage fail-closed; asset ops `503` (CORE-OPS-006)     |
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
