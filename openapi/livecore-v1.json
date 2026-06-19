@@ -1268,6 +1268,35 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/roster": {
+      "get": {
+        "tags": [
+          "SessionRosterEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationSlug",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspaceId}/scenes": {
       "get": {
         "tags": [
@@ -2705,6 +2734,9 @@
     },
     {
       "name": "SessionEventReplayEndpoints"
+    },
+    {
+      "name": "SessionRosterEndpoints"
     },
     {
       "name": "SceneEndpoints"

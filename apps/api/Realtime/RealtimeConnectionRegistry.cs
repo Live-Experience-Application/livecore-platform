@@ -63,6 +63,58 @@ internal sealed class RealtimeConnectionRegistry : IRealtimeConnectionEvictor
     internal int Count => _connections.Count;
 
     /// <summary>
+    /// The set of participant ids that currently hold at least one live PARTICIPANT connection to the given
+    /// session on THIS API instance — the presence input to the participant roster + presence read
+    /// (CORE-PRS-002, the "Vertical Adopter Consumability Completeness" epic). It snapshots the tracked
+    /// connections and returns the distinct participant ids whose connection matches the full
+    /// tenant/workspace/session tuple and carries a participant id, so a host/member roster read can mark
+    /// exactly those participants present.
+    ///
+    /// SCOPED EXACTLY like eviction (<see cref="EvictParticipantLocal"/>): a connection matches only when its
+    /// organization, workspace AND session all equal the arguments, so a participant connected to another
+    /// session, workspace or tenant is never reported present here (threats T1/T5 in
+    /// docs/07_SECURITY_THREAT_MODEL.md). A host/observer MEMBER connection carries no participant id
+    /// (<see cref="RealtimeConnectionSubject.ParticipantId"/> is null) and is excluded — presence here is the
+    /// PARTICIPANT audience, the roster's population. An empty boundary id can never address a real session, so
+    /// it matches nothing and returns the empty set rather than matching loosely.
+    ///
+    /// THIS-INSTANCE ONLY. The registry records the connections THIS instance holds (the same per-instance
+    /// record eviction acts on); the SignalR scale-out backplane transports group SENDS across instances but
+    /// does not aggregate a global connection list, so the returned set reflects presence on this instance.
+    /// Aggregating presence across every replica would need a shared presence store and is a documented
+    /// follow-up (docs/11_REALTIME_SYNC.md "Participant roster and presence read"). It never widens
+    /// authorization — a participant connected only to another replica simply reads as not-present, never more
+    /// visible — so it is a fail-safe under-report, exactly like the single-instance realtime delivery
+    /// constraint.
+    /// </summary>
+    public IReadOnlySet<Guid> GetConnectedParticipantIds(Guid organizationId, Guid workspaceId, Guid sessionId)
+    {
+        var present = new HashSet<Guid>();
+
+        // An empty boundary can never address a real session; return the empty set rather than match loosely.
+        if (organizationId == Guid.Empty || workspaceId == Guid.Empty || sessionId == Guid.Empty)
+        {
+            return present;
+        }
+
+        // Snapshot first (a ToArray of the entries) so the scan never races a concurrent register/disconnect
+        // mutating the dictionary, mirroring EvictWhere.
+        foreach (var (_, entry) in _connections.ToArray())
+        {
+            var subject = entry.Subject;
+            if (subject.ParticipantId is { } participantId
+                && subject.SessionId == sessionId
+                && subject.WorkspaceId == workspaceId
+                && subject.OrganizationId == organizationId)
+            {
+                present.Add(participantId);
+            }
+        }
+
+        return present;
+    }
+
+    /// <summary>
     /// Records an admitted connection so a later re-authorization can find and evict it. Called by the hub
     /// AFTER the resolver admitted the connection and it joined its groups, with the admission's
     /// <paramref name="subject"/> and an <paramref name="abort"/> handle that tears the connection down

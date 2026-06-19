@@ -79,6 +79,77 @@ export interface SessionEventReplayResponse {
 }
 
 /**
+ * Participant roster + presence contracts (CORE-PRS-002): the role-projected read
+ * of a session's roster with each participant's realtime presence returned by
+ * `GET /api/v1/sessions/{sessionId}/roster`. The roster is the session AUDIENCE —
+ * the session's workspace active participants — and each participant's `present`
+ * flag reflects whether they currently hold a live realtime connection to the
+ * session. The read is projected by the caller's workspace role: the host-content
+ * roles (Owner/Admin/Host/CoHost) receive the full {@link SessionRosterView} WITH
+ * the host-only participant user link, while the audience roles
+ * (Participant/Observer/Auditor) receive the host-only-field-stripped
+ * {@link ParticipantRosterView} WITHOUT it — so a participant sees who is present
+ * but never which user backs another participant (threat T2 in
+ * docs/07_SECURITY_THREAT_MODEL.md; docs/11_REALTIME_SYNC.md).
+ */
+
+/** One participant of the FULL host roster (the only view with the user link). */
+export interface SessionRosterParticipant {
+  /** Surrogate id of the participant. */
+  participantId: Uuid;
+  /** The participant's session-facing display identity. */
+  displayName: string;
+  /**
+   * HOST-ONLY: the authenticated user this participant represents, or `null` for
+   * an anonymous/guest participant. Absent from the audience projection.
+   */
+  userProfileId: Uuid | null;
+  /**
+   * Whether the participant currently holds a live realtime connection to the
+   * session on this API instance (the presence signal).
+   */
+  present: boolean;
+}
+
+/** Full, host/metadata-facing projection of a session's participant roster + presence. */
+export interface SessionRosterView {
+  /** The session whose roster this is. */
+  sessionId: Uuid;
+  /** The session's active participants, each with its presence flag. */
+  participants: SessionRosterParticipant[];
+}
+
+/**
+ * One participant of the AUDIENCE-safe roster. It carries only the non-sensitive
+ * id, the session-facing display name and the presence flag; the host-only
+ * user-account link is deliberately absent.
+ */
+export interface ParticipantRosterParticipant {
+  /** Surrogate id of the participant; a non-sensitive handle. */
+  participantId: Uuid;
+  /** The participant's session-facing display identity. */
+  displayName: string;
+  /**
+   * Whether the participant currently holds a live realtime connection to the
+   * session on this API instance (the presence signal).
+   */
+  present: boolean;
+}
+
+/**
+ * Audience-safe, host-only-field-stripped projection of a session's participant
+ * roster + presence returned to the audience roles. It omits the host-only
+ * participant user-account link, carrying only each participant's id, display
+ * name and presence flag.
+ */
+export interface ParticipantRosterView {
+  /** The session whose roster this is. */
+  sessionId: Uuid;
+  /** The session's active participants, each with its presence flag (no host-only fields). */
+  participants: ParticipantRosterParticipant[];
+}
+
+/**
  * Live realtime hub contract (CORE-RT-007): the stable mirror of the server's
  * SignalR live path so a vertical can open the live session stream without
  * hard-coding the server's C# constants. The live stream carries the SAME

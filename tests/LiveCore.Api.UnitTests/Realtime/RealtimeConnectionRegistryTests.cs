@@ -377,6 +377,100 @@ public sealed class RealtimeConnectionRegistryTests
         Assert.False(connection.Aborted);
     }
 
+    // --- Presence query (CORE-PRS-002) -------------------------------------------
+
+    [Fact]
+    public void GetConnectedParticipantIds_returns_only_matching_participant_connections()
+    {
+        var registry = new RealtimeConnectionRegistry();
+        var present1 = Guid.NewGuid();
+        var present2 = Guid.NewGuid();
+
+        Track(registry, "conn-1", ParticipantSubject(present1, Guid.NewGuid()));
+        Track(registry, "conn-2", ParticipantSubject(present2, Guid.NewGuid()));
+
+        var ids = registry.GetConnectedParticipantIds(_org, _workspace, _session);
+
+        Assert.Equal(new HashSet<Guid> { present1, present2 }, ids);
+    }
+
+    [Fact]
+    public void GetConnectedParticipantIds_excludes_member_connections()
+    {
+        // A host/observer member connection carries no participant id and is NOT a roster presence signal.
+        var registry = new RealtimeConnectionRegistry();
+        var participantId = Guid.NewGuid();
+        Track(registry, "conn-participant", ParticipantSubject(participantId, Guid.NewGuid()));
+        Track(registry, "conn-member", MemberSubject(Guid.NewGuid()));
+
+        var ids = registry.GetConnectedParticipantIds(_org, _workspace, _session);
+
+        Assert.Equal(new HashSet<Guid> { participantId }, ids);
+    }
+
+    [Fact]
+    public void GetConnectedParticipantIds_collapses_multiple_connections_for_one_participant()
+    {
+        // A participant with two tabs (two connections) is present once.
+        var registry = new RealtimeConnectionRegistry();
+        var participantId = Guid.NewGuid();
+        Track(registry, "conn-tab-1", ParticipantSubject(participantId, Guid.NewGuid()));
+        Track(registry, "conn-tab-2", ParticipantSubject(participantId, Guid.NewGuid()));
+
+        var ids = registry.GetConnectedParticipantIds(_org, _workspace, _session);
+
+        Assert.Equal(participantId, Assert.Single(ids));
+    }
+
+    [Theory]
+    [InlineData(true, false, false)] // foreign tenant
+    [InlineData(false, true, false)] // foreign workspace
+    [InlineData(false, false, true)] // foreign session
+    public void GetConnectedParticipantIds_in_a_foreign_scope_returns_nothing(bool foreignOrg, bool foreignWorkspace, bool foreignSession)
+    {
+        // Presence is matched on the full tenant/workspace/session tuple, so a participant connected elsewhere is
+        // never reported present here (threats T1/T5).
+        var registry = new RealtimeConnectionRegistry();
+        Track(registry, "conn", ParticipantSubject(Guid.NewGuid(), Guid.NewGuid()));
+
+        var ids = registry.GetConnectedParticipantIds(
+            foreignOrg ? Guid.NewGuid() : _org,
+            foreignWorkspace ? Guid.NewGuid() : _workspace,
+            foreignSession ? Guid.NewGuid() : _session);
+
+        Assert.Empty(ids);
+    }
+
+    [Theory]
+    [InlineData(true, false, false)] // empty org
+    [InlineData(false, true, false)] // empty workspace
+    [InlineData(false, false, true)] // empty session
+    public void GetConnectedParticipantIds_with_an_empty_boundary_returns_nothing(bool emptyOrg, bool emptyWorkspace, bool emptySession)
+    {
+        // An empty boundary id can never address a real session, so it matches nothing rather than matching loosely.
+        var registry = new RealtimeConnectionRegistry();
+        Track(registry, "conn", ParticipantSubject(Guid.NewGuid(), Guid.NewGuid()));
+
+        var ids = registry.GetConnectedParticipantIds(
+            emptyOrg ? Guid.Empty : _org,
+            emptyWorkspace ? Guid.Empty : _workspace,
+            emptySession ? Guid.Empty : _session);
+
+        Assert.Empty(ids);
+    }
+
+    [Fact]
+    public void GetConnectedParticipantIds_excludes_a_disconnected_participant()
+    {
+        var registry = new RealtimeConnectionRegistry();
+        var participantId = Guid.NewGuid();
+        Track(registry, "conn", ParticipantSubject(participantId, Guid.NewGuid()));
+
+        registry.Unregister("conn");
+
+        Assert.Empty(registry.GetConnectedParticipantIds(_org, _workspace, _session));
+    }
+
     // --- Helpers -----------------------------------------------------------------
 
     private static RealtimeConnectionSubject ParticipantSubject(Guid participantId, Guid userProfileId)

@@ -118,6 +118,7 @@ POST   /api/v1/sessions/{sessionId}/cancel
 POST   /api/v1/sessions/{sessionId}/participants/{participantId}/join
 POST   /api/v1/sessions/{sessionId}/participants/{participantId}/leave
 GET    /api/v1/sessions/{sessionId}/events
+GET    /api/v1/sessions/{sessionId}/roster
 POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide
 POST   /api/v1/sessions/{sessionId}/visibility-rules

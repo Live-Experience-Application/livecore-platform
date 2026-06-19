@@ -27,8 +27,10 @@ import {
 } from "@livecore/contracts";
 import type {
   LiveSessionEvent,
+  ParticipantRosterView,
   SessionEventReplayResponse,
   SessionHubConnectionParams,
+  SessionRosterView,
   Uuid,
 } from "@livecore/contracts";
 
@@ -133,6 +135,30 @@ export class RealtimeClient {
         participantId: params.participantId,
         afterSequence: params.afterSequence?.toString(),
       },
+    });
+  }
+
+  /**
+   * `GET /api/v1/sessions/{sessionId}/roster` — the session's participant roster
+   * (its workspace's active participants) with each participant's realtime presence
+   * state, projected by the caller's workspace role (CORE-PRS-002).
+   *
+   * The host-content roles (Owner/Admin/Host/CoHost) receive the full
+   * {@link SessionRosterView} WITH each participant's host-only user link; the
+   * audience roles (Participant/Observer/Auditor) receive the host-only-field-stripped
+   * {@link ParticipantRosterView} — so the return type is the union of both shapes. A
+   * foreign tenant, an unknown session or a non-member of the session's workspace is
+   * hidden as `404` (a `LiveCoreApiError`), fail-closed (threats T1/T5/T2). Presence
+   * reflects active realtime connections (per API instance; docs/11_REALTIME_SYNC.md).
+   */
+  getSessionRoster(
+    sessionId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<SessionRosterView | ParticipantRosterView> {
+    return this.http.send<SessionRosterView | ParticipantRosterView>({
+      method: "GET",
+      path: `/sessions/${encodeURIComponent(sessionId)}/roster`,
+      query: { organizationSlug: params.organizationSlug },
     });
   }
 

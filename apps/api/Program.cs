@@ -1850,6 +1850,20 @@ app.MapHideEndpoints();
 // reconnect replay never leaks a hidden event (threat T3; docs/09_EVENT_CATALOG.md "Reconnect replay").
 app.MapSessionEventReplayEndpoints();
 
+// Participant roster + presence read endpoint (CORE-PRS-002, the "Vertical Adopter Consumability Completeness"
+// epic): the Realtime module's read route GET /api/v1/sessions/{sessionId}/roster. It surfaces WHO is in a
+// session (its workspace's active participants — the audience population) and who currently holds a live
+// realtime connection, REUSING the Participants repository, the RealtimeConnectionRegistry for presence and the
+// central Visibility role projection — no parallel roster engine. It lives in an authenticated route group and
+// fails closed (503) when persistence is not configured. No new DI registration is required: the tenant context
+// resolver, the session/workspace-member/participant repositories are already registered above inside the
+// persistence conditional, and the RealtimeConnectionRegistry is registered unconditionally. Any workspace
+// member may read; the member's role drives the projection — the host roles get the full roster with the
+// host-only participant user link, the audience roles get the host-only-field-stripped projection (a
+// participant sees no host-only fields; threat T2) — and a foreign tenant / unknown session / non-member is
+// hidden as 404 (threats T1/T5), fail-closed.
+app.MapSessionRosterEndpoints();
+
 // Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read; CORE-LIFE-005 adds the
 // DELETE; CORE-SCENE-006 adds the reorder POST): the Scenes module's HTTP routes,
 // GET/POST /api/v1/workspaces/{workspaceId}/scenes, GET /api/v1/scenes/{sceneId},

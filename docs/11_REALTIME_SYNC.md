@@ -64,6 +64,37 @@ the Presence epic), so the session's audience is its workspace's active particip
 participant connection is admitted from. The session boundary is enforced by the session-keyed groups (the
 shared `:audience` group included) and the session-scoped gate above, not by a roster.
 
+## Participant roster and presence read (CORE-PRS-002)
+
+A vertical UI needs a "who is present" panel, so `GET /api/v1/sessions/{sessionId}/roster` (module
+**Realtime**, roles "workspace members") reads a session's participant roster together with each
+participant's current presence/connection state. It is a read built **on top of** the existing building
+blocks — no parallel roster engine:
+
+- **The roster is the session AUDIENCE.** Because a participant is workspace-scoped and there is no persisted
+  session-participant roster (above), the roster is the session's workspace **active participants** — the same
+  population each participant connection is admitted from — read through the reused, tenant- AND
+  workspace-scoped `IParticipantRepository.ListActiveByWorkspaceAsync`. A soft-removed participant has left
+  the audience and is excluded.
+- **Presence comes from the realtime connection registry.** Each participant's `present` flag is true iff the
+  participant currently holds a live realtime connection to **this** session, read from
+  `RealtimeConnectionRegistry.GetConnectedParticipantIds` (matched on the full tenant/workspace/session tuple,
+  exactly like eviction; a host/observer member connection carries no participant id and is not counted). The
+  registry records the connections **this API instance** holds (the same per-instance record connection
+  eviction acts on, "Connection re-authorization and eviction" below). Under scale-out the SignalR backplane
+  transports group **sends** across instances but does **not** aggregate a global connection list, so presence
+  is reported **per instance**; aggregating it across replicas would need a shared presence store and is a
+  documented follow-up. This only ever **under-reports** presence (a participant connected to another replica
+  reads as not-present) and never widens authorization.
+- **Role-projected, fail-closed, hidden-404.** The read is allowed to any member of the session's workspace
+  and is projected by the member's role through the central Visibility role classification
+  (`VisibilityRoles`): the host-content roles (Owner/Admin/Host/CoHost) get the full roster **with** the
+  host-only participant user-account link, while every other role (Participant/Observer/Auditor) gets the
+  host-only-field-**stripped** projection — so a participant sees who is present by display identity but never
+  which user backs them (threat T2). The target tenant is the required `?organizationSlug=` query parameter;
+  a foreign tenant, an unknown session and a non-member of the session's workspace are all hidden as `404`
+  (threats T1/T5), never `403`.
+
 ## Collapsed audience delivery (CORE-PERF-001)
 
 An audience-wide reveal used to resolve its recipients by **enumerating the workspace's active participants
