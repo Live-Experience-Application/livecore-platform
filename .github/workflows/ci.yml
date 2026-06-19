@@ -1113,12 +1113,18 @@ jobs:
             echo "OK: $tpl carries resources.requests + resources.limits (cpu + memory)"
           done
 
-          # The ceilings are OVERRIDABLE: a values override changes the rendered number.
-          default_cpu="$(helm template livecore "$chart" --show-only templates/api-deployment.yaml | grep -E '^[[:space:]]*cpu:' | tail -n1 | awk '{print $2}')"
-          override_cpu="$(helm template livecore "$chart" --set api.resources.limits.cpu=2500m --show-only templates/api-deployment.yaml | grep -E '^[[:space:]]*cpu:' | tail -n1 | awk '{print $2}')"
-          [ "$override_cpu" = "2500m" ] || { echo "OVERRIDE: api.resources.limits.cpu override did not render (got '$override_cpu')"; exit 1; }
-          [ "$default_cpu" != "$override_cpu" ] || { echo "OVERRIDE: the override did not change the rendered cpu limit (both '$default_cpu')"; exit 1; }
-          echo "OK: api.resources.limits.cpu is overridable (default '$default_cpu' -> override '$override_cpu')"
+          # The ceilings are OVERRIDABLE: a values override changes the rendered limit.
+          # toYaml emits the resources map with keys sorted alphabetically (limits before
+          # requests), so prove the override by its VALUE rather than by the order of the
+          # cpu: lines: 2500m must be absent by default and present under --set.
+          helm template livecore "$chart" --show-only templates/api-deployment.yaml > res-default.yaml
+          helm template livecore "$chart" --set api.resources.limits.cpu=2500m --show-only templates/api-deployment.yaml > res-override.yaml
+          if grep -Eq '^[[:space:]]*cpu:[[:space:]]*2500m([[:space:]]|$)' res-default.yaml; then
+            echo "OVERRIDE: cpu 2500m already present by default - cannot prove the override"; exit 1
+          fi
+          grep -Eq '^[[:space:]]*cpu:[[:space:]]*2500m([[:space:]]|$)' res-override.yaml \
+            || { echo "OVERRIDE: api.resources.limits.cpu=2500m did not render"; cat res-override.yaml; exit 1; }
+          echo "OK: api.resources.limits.cpu is overridable (2500m renders only under --set)"
 
       - name: Assert the multi-replica realtime-backplane fail-safe (CORE-DEP-009)
         run: |

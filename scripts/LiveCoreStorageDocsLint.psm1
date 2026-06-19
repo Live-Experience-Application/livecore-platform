@@ -51,6 +51,11 @@ function Get-LiveCoreStorageDocFinding {
         #    where RustFS is now the default. Report each offending line for a quick fix.
         $lines = $content -split "`r?`n"
         for ($i = 0; $i -lt $lines.Count; $i++) {
+            # Skip repository-layout inventory entries that merely DESCRIBE the RustFS-migration
+            # tooling (a "scripts/<name>.ps1 ..." line that names MinIO to explain what the lint
+            # detects). Those are tooling descriptions, not storage setup/console/credential
+            # guidance, so they must not trip the backstop (CORE-STOR-002).
+            if ($lines[$i] -match '(?i)\bscripts/\S+\.psm?1\b') { continue }
             if ($lines[$i] -match '(?i)minio') {
                 $lineNumber = $i + 1
                 $snippet = $lines[$i].Trim()

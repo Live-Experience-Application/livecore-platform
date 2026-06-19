@@ -627,8 +627,8 @@ function Test-LiveCoreHelmChart {
     }
 
     # 14. CORE-SEC-010: the chart must NOT render an empty allow-all AllowedHosts host filter by
-    #     default. ASP.NET Core treats an empty (or "*") AllowedHosts as allow-all — host-header
-    #     validation OFF — so the rendered ConfigMap must carry a NON-EMPTY host allow-list. Two
+    #     default. ASP.NET Core treats an empty (or "*") AllowedHosts as allow-all - host-header
+    #     validation OFF - so the rendered ConfigMap must carry a NON-EMPTY host allow-list. Two
     #     invariants prove it (leaving the value overridable, and keeping the in-pod probes working):
     #     (a) the ConfigMap must not render AllowedHosts as a literal empty/"*" value; and
     if ($Files.ContainsKey('templates/configmap.yaml')) {
@@ -636,14 +636,14 @@ function Test-LiveCoreHelmChart {
         if ($configmapNoComments -match '(?m)^\s*AllowedHosts:\s*""\s*$' -or
             $configmapNoComments -match "(?m)^\s*AllowedHosts:\s*''\s*$" -or
             $configmapNoComments -match '(?m)^\s*AllowedHosts:\s*"?\*"?\s*$') {
-            $findings.Add('ALLOWEDHOSTS: templates/configmap.yaml renders an empty/allow-all AllowedHosts; ASP.NET treats empty/"*" as allow-all (host-header validation off) — render a non-empty host allow-list (CORE-SEC-010)')
+            $findings.Add('ALLOWEDHOSTS: templates/configmap.yaml renders an empty/allow-all AllowedHosts; ASP.NET treats empty/"*" as allow-all (host-header validation off) - render a non-empty host allow-list (CORE-SEC-010)')
         }
     }
     # (b) a POSITIVE guarantee of a non-empty host filter: either a non-empty config.AllowedHosts
     #     default, or the ConfigMap renders AllowedHosts through the livecore.allowedHosts helper,
     #     which injects a non-empty loopback fallback so the value can never render empty. The
     #     ConfigMap must also actually render an AllowedHosts key so the host filter is set
-    #     explicitly (an unset key would let the image default — or allow-all — leak through).
+    #     explicitly (an unset key would let the image default - or allow-all - leak through).
     if ($Files.ContainsKey('values.yaml')) {
         $configValues = Get-LiveCoreHelmConfigValues -ValuesContent $Files['values.yaml']
         $allowedHostsDefault = if ($configValues.ContainsKey('AllowedHosts')) { $configValues['AllowedHosts'] } else { $null }
@@ -652,7 +652,7 @@ function Test-LiveCoreHelmChart {
         $viaHelper = ($configmapRaw -match 'livecore\.allowedHosts') -and ($helpersRaw -match 'allowedHosts') -and ($helpersRaw -match 'localhost|127\.0\.0\.1')
         $nonEmptyDefault = (-not [string]::IsNullOrEmpty($allowedHostsDefault)) -and ($allowedHostsDefault -ne '*')
         if (-not ($viaHelper -or $nonEmptyDefault)) {
-            $findings.Add('ALLOWEDHOSTS: the chart must guarantee a non-empty AllowedHosts host filter by default — a non-empty config.AllowedHosts default, or a ConfigMap that renders AllowedHosts through the livecore.allowedHosts helper (which injects a loopback fallback) (CORE-SEC-010)')
+            $findings.Add('ALLOWEDHOSTS: the chart must guarantee a non-empty AllowedHosts host filter by default - a non-empty config.AllowedHosts default, or a ConfigMap that renders AllowedHosts through the livecore.allowedHosts helper (which injects a loopback fallback) (CORE-SEC-010)')
         }
         if ($Files.ContainsKey('templates/configmap.yaml') -and $configmapRaw -notmatch 'AllowedHosts') {
             $findings.Add('ALLOWEDHOSTS: templates/configmap.yaml must render an AllowedHosts key so the host filter is set explicitly, not left to the image default (CORE-SEC-010)')
@@ -662,7 +662,7 @@ function Test-LiveCoreHelmChart {
     # 15. CORE-SEC-010: the chart must document the ForwardedHeaders KnownProxies/KnownNetworks
     #     requirement behind a load balancer, AND that without it the anonymous per-IP rate-limit
     #     partition collapses to a SINGLE bucket (the API sees the proxy IP as every client's, so
-    #     one bucket covers all anonymous callers — one flood throttles everyone). The operator
+    #     one bucket covers all anonymous callers - one flood throttles everyone). The operator
     #     guidance lives in the chart values.yaml comments and the chart README.
     $docCorpus = ''
     if ($Files.ContainsKey('values.yaml')) { $docCorpus += $Files['values.yaml'] + "`n" }
