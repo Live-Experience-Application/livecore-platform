@@ -101,6 +101,82 @@ public sealed class LiveCoreActivitySourceTests
     }
 
     [Fact]
+    public void StartWorkerJobLoop_produces_an_internal_span_tagged_by_the_loop_name()
+    {
+        // CORE-OBS-012: one INTERNAL span per background worker job-loop iteration, tagged with the coarse loop
+        // name. The loop sets the outcome tag when the iteration completes (asserted end-to-end in the worker's
+        // own tests); here we pin the span name, kind and loop-name attribute the worker emits.
+        using var source = new LiveCoreActivitySource();
+        using var recorded = new RecordedActivities();
+
+        using (source.StartWorkerJobLoop("data-retention"))
+        {
+        }
+
+        var activity = recorded.Single(LiveCoreActivitySource.WorkerJobLoopActivityName);
+        Assert.Equal(ActivityKind.Internal, activity.Kind);
+        Assert.True(recorded.HasTag(
+            LiveCoreActivitySource.WorkerJobLoopActivityName,
+            LiveCoreActivitySource.WorkerJobNameTag,
+            "data-retention"));
+    }
+
+    [Fact]
+    public void StartWorkerJobLoop_produces_no_span_when_nothing_is_listening()
+    {
+        // Same inert posture as the request/reveal spans: with no listener (no tracer/exporter wired) starting
+        // the worker loop span is a no-op that returns null, so an unconfigured worker pays nothing.
+        using var source = new LiveCoreActivitySource();
+
+        using var activity = source.StartWorkerJobLoop("data-retention");
+
+        Assert.Null(activity);
+    }
+
+    [Fact]
+    public void AddLiveCoreWorkerOpenTelemetryTracing_wires_an_exportable_tracer_with_an_otlp_collector()
+    {
+        // CORE-OBS-012, parity with the API: with an OTLP endpoint configured the worker's tracing pipeline
+        // (TracerProvider + OTLP exporter + the LiveCore source) resolves and builds without error, and the
+        // export decision reports the exporter is wired. The exporter connects lazily, so building opens no
+        // connection.
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [TracingServiceCollectionExtensions.OtlpEndpointConfigurationKey] = "http://collector.test:4317",
+            })
+            .Build();
+
+        var services = new ServiceCollection();
+        services.AddLiveCoreWorkerOpenTelemetryTracing(configuration);
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<LiveCoreActivitySource>());
+        Assert.NotNull(provider.GetService<TracerProvider>());
+        Assert.True(TracingServiceCollectionExtensions.IsOtlpExportConfigured(configuration));
+    }
+
+    [Fact]
+    public void AddLiveCoreWorkerOpenTelemetryTracing_wires_no_exporter_without_an_endpoint()
+    {
+        // The "with no endpoint configured no exporter is wired" acceptance criterion (inert by default, parity
+        // with the API). With nothing configured the source is still registered (so spans are produced and any
+        // in-process listener observes them) but the OTLP exporter is NOT wired, so the worker never reaches a
+        // non-existent collector.
+        var configuration = new ConfigurationBuilder().Build();
+
+        var services = new ServiceCollection();
+        services.AddLiveCoreWorkerOpenTelemetryTracing(configuration);
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<LiveCoreActivitySource>());
+        Assert.NotNull(provider.GetService<TracerProvider>());
+        Assert.False(TracingServiceCollectionExtensions.IsOtlpExportConfigured(configuration));
+    }
+
+    [Fact]
     public void AddLiveCoreOpenTelemetryTracing_wires_an_exportable_tracer_with_an_otlp_collector()
     {
         // The "traces can be exported by a configured collector" acceptance criterion: with an OTLP endpoint

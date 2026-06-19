@@ -43,6 +43,7 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
     private readonly RecapGenerationOptions _options;
     private readonly WorkerHeartbeat _heartbeat;
     private readonly LiveCoreMetrics _metrics;
+    private readonly LiveCoreActivitySource _activitySource;
     private readonly ILogger<RecapGenerationBackgroundService> _logger;
 
     public RecapGenerationBackgroundService(
@@ -50,18 +51,21 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
         RecapGenerationOptions options,
         WorkerJobHeartbeats heartbeats,
         LiveCoreMetrics metrics,
+        LiveCoreActivitySource activitySource,
         ILogger<RecapGenerationBackgroundService> logger)
     {
         ArgumentNullException.ThrowIfNull(scopeFactory);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(heartbeats);
         ArgumentNullException.ThrowIfNull(metrics);
+        ArgumentNullException.ThrowIfNull(activitySource);
         ArgumentNullException.ThrowIfNull(logger);
 
         _scopeFactory = scopeFactory;
         _options = options;
         _heartbeat = heartbeats.ForJob(_jobName);
         _metrics = metrics;
+        _activitySource = activitySource;
         _logger = logger;
     }
 
@@ -95,6 +99,11 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
     private async Task RunSweepAsync(CancellationToken stoppingToken)
     {
         var startTimestamp = Stopwatch.GetTimestamp();
+
+        // Distributed-tracing span for this recap-generation iteration (CORE-OBS-012). Tagged with the coarse
+        // loop name and, below, the outcome; any database command the sweep issues nests under it. A no-op
+        // (null) when no tracer/exporter is listening, so an unconfigured worker pays nothing (threat T7).
+        using var activity = _activitySource.StartWorkerJobLoop(_jobName);
         try
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
@@ -111,6 +120,7 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
             _metrics.RecordBackgroundJobSuccess(_jobName);
             _metrics.RecordBackgroundJobDuration(_jobName, Stopwatch.GetElapsedTime(startTimestamp).TotalSeconds);
             _metrics.RecordBackgroundJobBacklog(_jobName, result.Examined);
+            activity?.SetTag(LiveCoreActivitySource.WorkerJobOutcomeTag, WorkerJobOutcomes.Success);
 
             if (result.Examined > 0)
             {
@@ -125,6 +135,7 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Host shutdown during a sweep is expected; let the loop end quietly.
+            activity?.SetTag(LiveCoreActivitySource.WorkerJobOutcomeTag, WorkerJobOutcomes.Canceled);
         }
         catch (Exception exception)
         {
@@ -134,6 +145,8 @@ internal sealed class RecapGenerationBackgroundService : BackgroundService
             // detail goes to the structured log, never a metric label (threat T7).
             _metrics.RecordBackgroundJobFailure(_jobName);
             _metrics.RecordBackgroundJobDuration(_jobName, Stopwatch.GetElapsedTime(startTimestamp).TotalSeconds);
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag(LiveCoreActivitySource.WorkerJobOutcomeTag, WorkerJobOutcomes.Failure);
             _logger.LogError(exception, "Recap generation sweep failed; it will be retried on the next interval.");
         }
     }

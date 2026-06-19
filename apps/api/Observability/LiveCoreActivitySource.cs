@@ -6,13 +6,15 @@ using System.Diagnostics;
 namespace LiveCore.Api.Observability;
 
 /// <summary>
-/// The single owner of the Core platform's distributed-tracing instrumentation (CORE-OBS-003). It defines one
-/// <see cref="ActivitySource"/> (<see cref="SourceName"/>) and exposes a small <c>Start*</c> method per
-/// instrumented flow, so the key request and realtime flows docs/15_OBSERVABILITY.md calls out — the HTTP
-/// request pipeline and the reveal/publish path — produce spans through ONE source. Concentrating the source
-/// here keeps the tracing CONTRACT in one place (the source name an exporter subscribes to and the span names
-/// it emits) rather than scattering ad-hoc <see cref="ActivitySource"/> instances across modules, exactly as
-/// <see cref="LiveCoreMetrics"/> is the single owner of the operational meters.
+/// The single owner of the Core platform's distributed-tracing instrumentation (CORE-OBS-003, extended to the
+/// background worker by CORE-OBS-012). It defines one <see cref="ActivitySource"/> (<see cref="SourceName"/>)
+/// and exposes a small <c>Start*</c> method per instrumented flow, so the key request and realtime flows
+/// docs/15_OBSERVABILITY.md calls out — the HTTP request pipeline and the reveal/publish path — AND the worker's
+/// background job loops produce spans through ONE source. Concentrating the source here keeps the tracing
+/// CONTRACT in one place (the source name an exporter subscribes to and the span names it emits) rather than
+/// scattering ad-hoc <see cref="ActivitySource"/> instances across modules, exactly as
+/// <see cref="LiveCoreMetrics"/> is the single owner of the operational meters. Both hosts subscribe this one
+/// source (the API and the worker), so a deployment configures a single source name to collect every Core span.
 ///
 /// The instruments use <see cref="System.Diagnostics"/> activities — the vendor-neutral .NET tracing API the
 /// OpenTelemetry SDK collects from — so STARTING a span is decoupled from how it is exported. The API host
@@ -36,6 +38,25 @@ public sealed class LiveCoreActivitySource : IDisposable
     /// assert the documented spans are produced under it.
     /// </summary>
     public const string SourceName = "LiveCore";
+
+    /// <summary>
+    /// The operation name of the span that wraps ONE background worker job-loop iteration (CORE-OBS-012) — one
+    /// span per sweep of a loop (the retention purge, asset cleanup, export, recap or store reconciliation, each
+    /// an irreversible data operation). The worker's loops subscribe and tag spans through this name.
+    /// </summary>
+    public const string WorkerJobLoopActivityName = "livecore.worker.job";
+
+    /// <summary>
+    /// The span attribute carrying the coarse worker LOOP NAME (e.g. <c>data-retention</c>) — a low-cardinality,
+    /// product-neutral identifier, never a tenant/principal/resource id or content (threat T7).
+    /// </summary>
+    public const string WorkerJobNameTag = "livecore.job.name";
+
+    /// <summary>
+    /// The span attribute carrying the loop iteration OUTCOME (<c>success</c>, <c>failure</c> or
+    /// <c>canceled</c>) — a low-cardinality status value, never content (threat T7).
+    /// </summary>
+    public const string WorkerJobOutcomeTag = "livecore.job.outcome";
 
     private readonly ActivitySource _source;
 
@@ -75,6 +96,23 @@ public sealed class LiveCoreActivitySource : IDisposable
     {
         var activity = _source.StartActivity("livecore.session_event.publish", ActivityKind.Producer);
         activity?.SetTag("livecore.event.type", eventType);
+        return activity;
+    }
+
+    /// <summary>
+    /// Starts the INTERNAL span for one background worker job-loop iteration (CORE-OBS-012) — the host doing the
+    /// irreversible purge/cleanup/export/recap/reconciliation work, mirrored from the API's tracing wiring. The
+    /// span is tagged with the coarse <paramref name="jobName"/> loop name (<see cref="WorkerJobNameTag"/>); the
+    /// calling loop records the <see cref="WorkerJobOutcomeTag"/> outcome when the iteration completes, and any
+    /// database command the sweep issues nests under this span as a child (the EF Core auto-instrumentation
+    /// parents to <see cref="Activity.Current"/>). Returns <see langword="null"/> when nothing is listening (no
+    /// tracer provider / exporter wired), so an unconfigured worker pays nothing and the caller null-checks the
+    /// returned activity — never an error.
+    /// </summary>
+    public Activity? StartWorkerJobLoop(string jobName)
+    {
+        var activity = _source.StartActivity(WorkerJobLoopActivityName, ActivityKind.Internal);
+        activity?.SetTag(WorkerJobNameTag, jobName);
         return activity;
     }
 

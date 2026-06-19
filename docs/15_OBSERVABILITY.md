@@ -453,8 +453,8 @@ Like the metrics, every span carries only **low-cardinality, non-sensitive** att
 coarse `operation` name; the publish span with the stable session-event **type** name. No access token, tenant
 identifier, participant id, asset coordinate or resource content is ever attached to a span. The frequently
 polled, context-free infrastructure endpoints (`/health/*`, `/metrics`) are not traced. The background
-**worker** is not yet instrumented for tracing (it owns no request/reveal flow); extending tracing to its jobs
-is a follow-up.
+**worker** is instrumented for tracing too — its background job loops produce spans on the same source
+(CORE-OBS-012, below).
 
 ### Auto-instrumentation and request/trace correlation (CORE-OBS-005)
 
@@ -503,6 +503,40 @@ a log-safe character set (ASCII letters/digits and `-`/`.`/`_`); anything else f
 id, so a correlation token can never forge a log line or smuggle content (threat T7). Both headers are
 non-sensitive identifiers and the CORS policy **exposes** them so a browser/PWA SDK can read them (CORE-DX-005;
 `docs/08_API_CONTRACTS.md`).
+
+### Worker tracing (CORE-OBS-012)
+
+CORE-OBS-003/005 instrumented the API host, but the background **worker** — the host doing the **irreversible**
+purge/cleanup/export/recap/reconciliation work — had **no** `ActivitySource`, `TracerProvider` or OTLP exporter
+anywhere under `apps/worker`, so it produced **zero** spans even when a deployment had configured tracing for the
+API. CORE-OBS-012 closes that blind spot by **mirroring the API tracing wiring** in the worker host.
+
+**One span per loop iteration.** Each of the worker's five background job loops produces one span per sweep on
+the **same** single `LiveCore` `ActivitySource`:
+
+| Loop (irreversible operation)        | `livecore.job.name`                  | Span (operation name)  | Kind     |
+| ------------------------------------ | ------------------------------------ | ---------------------- | -------- |
+| Data-retention purge                 | `data-retention`                     | `livecore.worker.job`  | Internal |
+| Asset cleanup                        | `asset-cleanup`                      | `livecore.worker.job`  | Internal |
+| Export processing                    | `export-processing`                 | `livecore.worker.job`  | Internal |
+| Recap generation                     | `recap-generation`                  | `livecore.worker.job`  | Internal |
+| Store-notification reconciliation    | `store-notification-reconciliation` | `livecore.worker.job`  | Internal |
+
+Every span carries the coarse **loop name** (`livecore.job.name`) and the iteration **outcome**
+(`livecore.job.outcome` — `success`, `failure` or `canceled`; a failed sweep also sets the span status to
+`Error`). Because the loop span is opened at the top of the sweep, the EF Core auto-instrumentation nests each
+database command the sweep issues **under** it, so a collector reconstructs the loop → {db commands} tree for an
+irreversible operation. The wiring is **identical** to the API's
+(`AddLiveCoreWorkerOpenTelemetryTracing` reuses the same source, auto-instrumentations and OTLP gate); only the
+resource `service.name` differs (`livecore-worker` vs. `livecore-api`), so a collector tells the two hosts apart.
+
+**Same inert-by-default posture and threat-T7 surface.** The OTLP exporter is attached **only when**
+`Tracing:Otlp:Endpoint` is configured (parity with the API): with nothing configured the source is still
+registered with the `TracerProvider` (so spans are produced and an in-process listener observes them) but shipped
+nowhere, so an unconfigured worker never reaches a non-existent collector. Every span attribute is a
+**low-cardinality, non-sensitive** value — a coarse loop name and a status word — never a tenant identifier,
+participant id, purchase/asset coordinate or resource content (threat T7); the worker's only HTTP surface
+(`/metrics`, `/health/live`) is filtered out exactly as the API's infrastructure paths are.
 
 ## Health checks
 

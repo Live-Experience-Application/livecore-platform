@@ -1190,6 +1190,20 @@ coarse operation name and the stable session-event type name — never a token,
 tenant identifier or resource content (threat T7), and the `/health/*` and
 `/metrics` infrastructure endpoints are not traced.
 
+The background **worker** is instrumented too (CORE-OBS-012). It is the host doing
+the **irreversible** purge/cleanup/export/recap/reconciliation work, yet produced
+**no** spans before — no `ActivitySource`/`TracerProvider`/OTLP anywhere under
+`apps/worker` — even when tracing was configured for the API. It now mirrors the API
+wiring (`AddLiveCoreWorkerOpenTelemetryTracing`): each background job loop emits one
+`livecore.worker.job` Internal span per iteration on the **same** `LiveCore` source,
+tagged with the coarse loop name (`livecore.job.name`, e.g. `data-retention`) and the
+iteration outcome (`livecore.job.outcome` — `success`/`failure`/`canceled`), with a
+sweep's database commands nested under it. Only the resource `service.name` differs
+(`livecore-worker`), and the **same inert-by-default** posture holds — the OTLP
+exporter is attached only when `Tracing:Otlp:Endpoint` is configured, and every span
+attribute is a low-cardinality status value, never a tenant identifier or content
+(threat T7). See `docs/15_OBSERVABILITY.md`.
+
 ## Identity, persistence and migrations
 
 The host's authentication model (the OIDC principal), the persisted user-profile

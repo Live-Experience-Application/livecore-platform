@@ -9,11 +9,15 @@ namespace LiveCore.Api.Observability;
 
 /// <summary>
 /// Dependency-injection wiring for the Core distributed-tracing surface (CORE-OBS-003, extended by
-/// CORE-OBS-005). It binds the single <see cref="LiveCoreActivitySource"/> AND the framework / outbound-HTTP /
-/// EF Core auto-instrumentations to an OpenTelemetry <c>TracerProvider</c> and, when a collector endpoint is
-/// configured, exports the produced spans over OTLP, realizing the docs/15_OBSERVABILITY.md tracing surface
-/// (which docs/15 explicitly defers to "later, when multiple services are deployed" — this is that work, added
-/// ahead of the multi-service deployment so the seams exist).
+/// CORE-OBS-005, and extended to the background WORKER by CORE-OBS-012). It binds the single
+/// <see cref="LiveCoreActivitySource"/> AND the framework / outbound-HTTP / EF Core auto-instrumentations to an
+/// OpenTelemetry <c>TracerProvider</c> and, when a collector endpoint is configured, exports the produced spans
+/// over OTLP, realizing the docs/15_OBSERVABILITY.md tracing surface (which docs/15 explicitly defers to "later,
+/// when multiple services are deployed" — this is that work, added ahead of the multi-service deployment so the
+/// seams exist). The API host wires it through <see cref="AddLiveCoreOpenTelemetryTracing"/> and the worker host
+/// through <see cref="AddLiveCoreWorkerOpenTelemetryTracing"/>; the wiring is identical (same source, same
+/// auto-instrumentations, same OTLP gate) and only the resource <c>service.name</c> differs, so the worker doing
+/// irreversible purge/cleanup/export work is no longer a tracing blind spot.
 ///
 /// WHY OPENTELEMETRY OTLP (the CORE-OBS-003 justified new dependency). docs/15 mandates that key request and
 /// realtime flows be exportable to a configured collector; <see cref="LiveCoreActivitySource"/> produces the
@@ -56,7 +60,14 @@ public static class TracingServiceCollectionExtensions
     public const string OtlpEndpointConfigurationKey = "Tracing:Otlp:Endpoint";
 
     /// <summary>The OpenTelemetry resource <c>service.name</c> the API host's exported traces are tagged with.</summary>
-    private const string _serviceName = "livecore-api";
+    private const string _apiServiceName = "livecore-api";
+
+    /// <summary>
+    /// The OpenTelemetry resource <c>service.name</c> the WORKER host's exported traces are tagged with
+    /// (CORE-OBS-012), so a collector can tell the worker's background-job spans apart from the API's request
+    /// spans even though both subscribe the single <see cref="LiveCoreActivitySource.SourceName"/> source.
+    /// </summary>
+    private const string _workerServiceName = "livecore-worker";
 
     /// <summary>
     /// The frequently-polled, context-free infrastructure path prefixes the ASP.NET Core instrumentation skips,
@@ -98,8 +109,59 @@ public static class TracingServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
+        return AddLiveCoreOpenTelemetryTracingCore(services, configuration, _apiServiceName);
+    }
+
+    /// <summary>
+    /// Registers the shared <see cref="LiveCoreActivitySource"/> AND the OpenTelemetry tracing pipeline for the
+    /// background WORKER host (CORE-OBS-012): the SAME wiring the API host uses, only the resource
+    /// <c>service.name</c> differs (<c>livecore-worker</c>). The worker's background job loops produce one
+    /// <see cref="LiveCoreActivitySource.WorkerJobLoopActivityName"/> span per iteration on the
+    /// <see cref="LiveCoreActivitySource.SourceName"/> source, and — exactly as on the API — the OTLP exporter is
+    /// attached only when <see cref="OtlpEndpointConfigurationKey"/> is configured, so an unconfigured worker
+    /// produces spans but ships none. Used by the worker host.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">The application configuration (read for the optional OTLP endpoint).</param>
+    /// <returns>The same service collection, for chaining.</returns>
+    /// <exception cref="ArgumentNullException">The service collection or configuration is null.</exception>
+    public static IServiceCollection AddLiveCoreWorkerOpenTelemetryTracing(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        return AddLiveCoreOpenTelemetryTracingCore(services, configuration, _workerServiceName);
+    }
+
+    /// <summary>Whether the deployment has configured an OTLP collector endpoint to export traces to.</summary>
+    /// <param name="configuration">The application configuration.</param>
+    /// <returns>
+    /// <see langword="true"/> when <see cref="OtlpEndpointConfigurationKey"/> holds a non-blank value (so the
+    /// OTLP exporter is wired); otherwise <see langword="false"/> (spans are still produced but shipped nowhere).
+    /// </returns>
+    /// <exception cref="ArgumentNullException">The configuration is null.</exception>
+    public static bool IsOtlpExportConfigured(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        return !string.IsNullOrWhiteSpace(configuration[OtlpEndpointConfigurationKey]);
+    }
+
+    /// <summary>
+    /// Shared wiring for both hosts: registers the <see cref="LiveCoreActivitySource"/>, a <c>TracerProvider</c>
+    /// subscribed to the <see cref="LiveCoreActivitySource.SourceName"/> source plus the framework /
+    /// outbound-HTTP / EF Core auto-instrumentations, and (only when an OTLP endpoint is configured) the OTLP
+    /// exporter — tagging the exported resource with <paramref name="serviceName"/>.
+    /// </summary>
+    private static IServiceCollection AddLiveCoreOpenTelemetryTracingCore(
+        IServiceCollection services,
+        IConfiguration configuration,
+        string serviceName)
+    {
         services.AddLiveCoreTracing();
 
+        var exportTraces = IsOtlpExportConfigured(configuration);
         var otlpEndpoint = configuration[OtlpEndpointConfigurationKey];
 
         services
@@ -107,14 +169,16 @@ public static class TracingServiceCollectionExtensions
             .WithTracing(tracing =>
             {
                 tracing
-                    .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(_serviceName))
+                    .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName))
                     .AddSource(LiveCoreActivitySource.SourceName)
                     // Framework request auto-instrumentation (CORE-OBS-005). Produces the SERVER span every DB /
                     // outbound-HTTP / hand-rolled span nests under, FILTERED to skip the /health and /metrics
                     // infrastructure paths so it follows the same "do not trace infrastructure noise" posture as
                     // the hand-rolled request middleware. It also honors an inbound W3C traceparent (the ASP.NET
                     // Core hosting layer adopts the caller's trace context), so a request continues the caller's
-                    // trace rather than starting a fresh one.
+                    // trace rather than starting a fresh one. On the worker host the only HTTP surface is the
+                    // /metrics and /health/live endpoints, which this filter skips, so it produces nothing there
+                    // — the worker's spans come from its job loops (CORE-OBS-012).
                     .AddAspNetCoreInstrumentation(options =>
                         options.Filter = static context => !IsUntracedInfrastructurePath(context.Request.Path))
                     // Outbound HTTP auto-instrumentation (CORE-OBS-005): every System.Net.Http call (the OIDC
@@ -122,16 +186,17 @@ public static class TracingServiceCollectionExtensions
                     // under the request span, and PROPAGATES the trace context downstream via traceparent.
                     .AddHttpClientInstrumentation()
                     // EF Core database auto-instrumentation (CORE-OBS-005): every database command becomes a
-                    // CLIENT span nested under the request span. The SQL text and its parameters are never
+                    // CLIENT span nested under the parent span (on the worker, under the job-loop span, so a
+                    // sweep's queries appear inside its loop trace). The SQL text and its parameters are never
                     // captured (SetDbStatementForText defaults off), so a DB span carries no content (threat T7).
                     .AddEntityFrameworkCoreInstrumentation();
 
                 // Attach the OTLP exporter only when a collector endpoint is configured; otherwise the spans
                 // are produced but not shipped anywhere (no noisy connection attempts to a non-existent
                 // collector). The endpoint comes from configuration only (threat T7).
-                if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+                if (exportTraces)
                 {
-                    tracing.AddOtlpExporter(options => options.Endpoint = new Uri(otlpEndpoint));
+                    tracing.AddOtlpExporter(options => options.Endpoint = new Uri(otlpEndpoint!));
                 }
             });
 

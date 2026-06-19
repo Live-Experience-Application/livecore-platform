@@ -75,7 +75,7 @@ public class WorkerHeartbeatTests
             var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
             var options = new AssetCleanupOptions(TimeSpan.FromHours(24), TimeSpan.FromHours(1), batchSize: 100);
             var service = new AssetCleanupBackgroundService(
-                scopeFactory, options, heartbeats, new LiveCoreMetrics(),
+                scopeFactory, options, heartbeats, new LiveCoreMetrics(), new LiveCoreActivitySource(),
                 NullLogger<AssetCleanupBackgroundService>.Instance);
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));

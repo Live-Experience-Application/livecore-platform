@@ -104,6 +104,20 @@ public static class WorkerHostFactory
         // worker runs without a database.
         builder.Services.AddLiveCorePrometheusMetrics();
 
+        // Distributed tracing (CORE-OBS-012). Mirror the API host's tracing wiring so the worker — the host
+        // doing the IRREVERSIBLE purge/cleanup/export/recap/reconciliation work — is no longer a tracing blind
+        // spot when a deployment configures tracing for the API. Each background loop iteration produces one
+        // LiveCoreActivitySource.WorkerJobLoopActivityName span tagged with the coarse loop name and outcome
+        // (the loops below set it), and the same auto-instrumentations the API uses nest a sweep's database
+        // commands under it. Identical wiring to the API, only the resource service.name differs
+        // (livecore-worker). INERT BY DEFAULT (parity with the API): the OTLP exporter is attached ONLY when
+        // Tracing:Otlp:Endpoint is configured; with nothing configured the source is still registered (so spans
+        // are produced and any in-process listener observes them) but shipped nowhere, so an unconfigured worker
+        // never reaches a non-existent collector. Registered unconditionally (no database/identity needed), and
+        // it also registers the singleton LiveCoreActivitySource the loops inject. The endpoint is read from
+        // configuration only; the spans carry only low-cardinality, non-sensitive attributes (threat T7).
+        builder.Services.AddLiveCoreWorkerOpenTelemetryTracing(builder.Configuration);
+
         // Graceful shutdown drain window (CORE-DEP-002). The same wiring the API host uses, so BOTH hosts drain
         // in-flight work within ONE explicit, tuned, configurable HostOptions.ShutdownTimeout
         // (Hosting:ShutdownTimeout) on a rolling restart rather than relying on the implicit framework default.
