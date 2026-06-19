@@ -361,26 +361,31 @@ status
 - long-lived signed URLs
 - direct storage credentials in frontend
 
-## Export artifacts (CORE-EXP-001)
+## Export artifacts (CORE-EXP-001, CORE-EXP-002)
 
 The export read/download route — `GET /api/v1/exports/{exportId}` (`ExportEndpoints.cs`,
 `csv/api_routes.csv`) — applies the same "no public URL, authorized delivery" rule as the asset
-signed-download flow. In the Core model a completed workspace export's produced artifact is its
-`ExportManifest` (the per-kind table of contents — counts only, never any exported scene/content body;
-threats T7/T8); the Core stores no separate export blob in object storage, so the artifact is delivered
-as an **authorized stream** — the role-projected manifest in the authenticated, authorized response body
-— and **never** through a public or static URL.
+signed-download flow, for BOTH export scopes. The Core stores no separate export blob in object
+storage, so an export is always delivered as an **authorized stream** — the response body of the
+authenticated, authorized request — and **never** through a public or static URL. Either way the
+download is **authorized before any artifact/state is disclosed** (the asset signed-URL discipline):
+resolve the trusted tenant, load the export job within it, and only then authorize and return.
 
-- the download is **authorized before any artifact is produced** (the asset signed-URL discipline):
-  resolve the trusted tenant, load the export job within it, resolve the caller's role in the export's
-  **own** workspace, and only then return the artifact
-- only the **"Export workspace"** roles {Owner, Admin, Host} may download (`ExportAccessPolicy`); a
-  non-authoring role is **403**, so a participant-scoped (audience) caller never receives host-only
-  export content (threat T8 "Export leak")
-- a foreign-tenant, unknown export, or non-member of the export's workspace is hidden as **404**
-  (threats T1/T5); an incomplete or failed export (no retrievable artifact) is **409**
-- the artifact is role-projected through the existing `ExportManifestProjection`, so the export shape
-  stays role-scoped (defence in depth)
+- a **workspace** export's produced artifact is its `ExportManifest` (the per-kind table of contents —
+  counts only, never any exported scene/content body; threats T7/T8). Only the **"Export workspace"**
+  roles {Owner, Admin, Host} may download (`ExportAccessPolicy`, resolved in the export's **own**
+  workspace); a non-authoring role is **403**, so a participant-scoped (audience) caller never receives
+  host-only export content (threat T8 "Export leak"). The manifest is role-projected through the existing
+  `ExportManifestProjection`, so the export shape stays role-scoped (defence in depth)
+- a **user-data** export (`ExportScope.UserData`, CORE-EXP-002) discloses the data subject's personal
+  data. The worker PRODUCES it by driving the queued job to terminal `Completed` (no persisted artifact —
+  the PII is never stored), and the download then assembles the subject's data **on disclosure** through
+  the reused `PersonalDataExportService` (CORE-PRIV-004): authorized to the data subject themselves or an
+  Owner/Admin acting on their behalf (the access/portability model), tenant-scoped, and audited
+  (`PersonalDataExported`, by id only); a non-entitled requester is **403**
+- for either scope a foreign-tenant or unknown export (and, for a workspace export, a non-member of its
+  workspace) is hidden as **404** (threats T1/T5); an incomplete or failed export (no retrievable
+  artifact/personal data) is **409**
 
 A retention-based expiry of the artifact (a true `ExpiresAt` with an object-storage purge) lands with
-the data-retention sweeps (CORE-PRIV-003), as does a user-data (`ExportScope.UserData`) export pipeline.
+the data-retention sweeps (CORE-PRIV-003).

@@ -28,7 +28,9 @@ namespace LiveCore.Api.UnitTests.Exports;
 ///   already-produced manifest (a duplicate add) leaves the job completed without producing a second manifest.</item>
 ///   <item>TENANT-SCOPED (threat T5): each job is inventoried and manifested with its OWN tenant/workspace —
 ///   one workspace's manifest never carries another workspace's counts.</item>
-///   <item>SCOPE-BOUNDED (threat T8): a user-data export job is never processed into a workspace manifest.</item>
+///   <item>SCOPE-BRANCHED (CORE-EXP-002; threat T8): a workspace job is processed into a workspace manifest,
+///   while a user-data job is driven to terminal Completed WITHOUT a workspace manifest (its personal data is
+///   assembled on download, never persisted in an artifact) — never widened into a workspace inventory.</item>
 ///   <item>RECOVERY: a job left Running by a crashed worker is finished (its already-applied Start is skipped).</item>
 ///   <item>BATCH SIZE: the configured batch size bounds a single sweep.</item>
 /// </list>
@@ -167,11 +169,12 @@ public sealed class ExportProcessingServiceTests
     }
 
     [Fact]
-    public async Task Never_processes_a_user_data_scoped_job()
+    public async Task Processes_a_user_data_scoped_job_to_completion_without_a_manifest()
     {
-        // Scope boundary (threat T8): a UserData export's narrower manifest is a separate, later artifact. The
-        // queued reader surfaces only workspace-scoped jobs, so a user-data job is never processed into a
-        // workspace manifest and stays Pending.
+        // CORE-EXP-002: a user-data export now has a producer. The processor branches on the loaded job's scope:
+        // it drives the user-data job to terminal Completed (so it becomes retrievable) but produces NO workspace
+        // manifest — its personal data is assembled on download, never persisted in an artifact (threats T7/T8).
+        // A workspace job alongside it still produces its manifest, so both scopes are handled in one sweep.
         var store = new FakeExportStore();
         var workspaceJob = store.SeedPendingWorkspaceJob();
         var userDataJob = store.SeedPendingJob(ExportScope.UserData);
@@ -179,12 +182,41 @@ public sealed class ExportProcessingServiceTests
 
         var result = await service.ProcessQueuedExportsAsync(CancellationToken.None);
 
-        Assert.Equal(1, result.Examined);
-        Assert.Equal(1, result.Processed);
-        Assert.Equal(ExportJobStatus.Completed, workspaceJob.Status);
-        // The user-data job was never touched: still Pending, no manifest.
-        Assert.Equal(ExportJobStatus.Pending, userDataJob.Status);
+        // Both jobs were examined and processed in the one sweep.
+        Assert.Equal(2, result.Examined);
+        Assert.Equal(2, result.Processed);
+        Assert.Equal(0, result.Failed);
+
+        // The user-data job settled Completed and was persisted through the completion (UpdateAsync) path, with
+        // NO workspace manifest produced for it.
+        Assert.Equal(ExportJobStatus.Completed, userDataJob.Status);
+        Assert.Equal(_now, userDataJob.UpdatedAt);
+        Assert.Contains(userDataJob.Id, store.UpdatedJobIds);
         Assert.DoesNotContain(store.Manifests, m => m.ExportJobId == userDataJob.Id);
+
+        // The workspace job still produced its manifest atomically (never through UpdateAsync).
+        Assert.Equal(ExportJobStatus.Completed, workspaceJob.Status);
+        Assert.Contains(store.Manifests, m => m.ExportJobId == workspaceJob.Id);
+        Assert.DoesNotContain(workspaceJob.Id, store.UpdatedJobIds);
+    }
+
+    [Fact]
+    public async Task A_user_data_export_is_idempotent_a_second_sweep_processes_nothing_more()
+    {
+        // Once completed (terminal), the user-data job drops out of the queued read, so a second sweep does
+        // nothing — it is produced exactly once with no manifest, exactly as a workspace export is produced once.
+        var store = new FakeExportStore();
+        var userDataJob = store.SeedPendingJob(ExportScope.UserData);
+        var service = CreateService(store);
+
+        var first = await service.ProcessQueuedExportsAsync(CancellationToken.None);
+        var second = await service.ProcessQueuedExportsAsync(CancellationToken.None);
+
+        Assert.Equal(1, first.Processed);
+        Assert.Equal(0, second.Examined);
+        Assert.Equal(0, second.Processed);
+        Assert.Equal(ExportJobStatus.Completed, userDataJob.Status);
+        Assert.Empty(store.Manifests);
     }
 
     [Fact]
@@ -268,6 +300,9 @@ public sealed class ExportProcessingServiceTests
 
         public HashSet<Guid> PretendManifestExistsFor { get; } = [];
 
+        /// <summary>Job ids the service persisted through <see cref="UpdateAsync"/> (the user-data completion path).</summary>
+        public HashSet<Guid> UpdatedJobIds { get; } = [];
+
         public int? LastMaxCount { get; private set; }
 
         public ExportJob SeedPendingJob(ExportScope scope)
@@ -292,11 +327,11 @@ public sealed class ExportProcessingServiceTests
 
         // IQueuedExportJobReader -------------------------------------------------------------------------------
 
-        public Task<IReadOnlyList<QueuedExportJob>> ListQueuedWorkspaceExportsAsync(int maxCount, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<QueuedExportJob>> ListQueuedExportsAsync(int maxCount, CancellationToken cancellationToken)
         {
             LastMaxCount = maxCount;
             IReadOnlyList<QueuedExportJob> queued = _jobs
-                .Where(job => job.Scope == ExportScope.Workspace && !job.IsTerminal)
+                .Where(job => !job.IsTerminal)
                 .OrderBy(job => job.Id)
                 .Take(maxCount)
                 .Select(job => new QueuedExportJob(
@@ -353,14 +388,18 @@ public sealed class ExportProcessingServiceTests
         }
 
         public Task UpdateAsync(ExportJob exportJob, CancellationToken cancellationToken)
-            // The HAPPY-PATH processor commits a job's status transitions atomically through the manifest add's
-            // unit of work (the repositories share one EF DbContext), so the success path never calls UpdateAsync
-            // separately. The dead-letter / failed-attempt accounting (CORE-RES-002) DOES persist through
-            // UpdateAsync, but only after a rolled-back work transaction — a path that needs real persistence to
-            // model the rollback faithfully, so it is exercised in the SQLite ExportProcessingJobTests, not over
-            // this in-memory fake. Throwing here keeps the fake suite asserting only the happy/idempotent/scoping
-            // paths and guards against an accidental non-atomic status persist on the success path.
-            => throw new NotSupportedException();
+        {
+            // A WORKSPACE export commits its status transitions atomically through the manifest add's unit of
+            // work, so its happy path never calls UpdateAsync. A USER-DATA export has no manifest to be atomic
+            // WITH, so its happy path completes the job through UpdateAsync (CORE-EXP-002); the stored ExportJob
+            // is the same instance the service mutated in place (exactly as EF tracks the loaded aggregate), so
+            // recording the call is enough to model the persist. The dead-letter / failed-attempt accounting
+            // (CORE-RES-002) also persists through UpdateAsync, but only after a rolled-back work transaction —
+            // a path that needs real persistence and is exercised in the SQLite ExportProcessingJobTests.
+            ArgumentNullException.ThrowIfNull(exportJob);
+            UpdatedJobIds.Add(exportJob.Id);
+            return Task.CompletedTask;
+        }
 
         public Task<ExportJob?> ReloadAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
             // ReloadAsync is the worker's reload-after-a-rolled-back-attempt primitive (CORE-RES-002). The

@@ -425,28 +425,32 @@ the implementation **both directions** (check 6), so "no row in
 exist yet — an endpoint cannot be silently present or silently missing. The
 following are deferred by design (date recorded **2026-06-15**):
 
-- **User-data export pipeline and retention-based export expiry** (the export
-  read/download route now exists). The export job (CORE-AUD-002, `ExportJob.cs`)
-  and the workspace export manifest with its role-based projection (CORE-AUD-003,
+- **Retention-based export expiry** (the export read/download route and BOTH
+  export scopes now exist). The export job (CORE-AUD-002, `ExportJob.cs`) and the
+  workspace export manifest with its role-based projection (CORE-AUD-003,
   `ExportManifestProjection.cs`) were modeled, persisted and migrated, and the
-  worker drives queued jobs into manifests (CORE-JOB-002); the **export
-  read/download route is now mounted** — `GET /api/v1/exports/{exportId}`
-  (CORE-EXP-001, `ExportEndpoints.cs`, `csv/api_routes.csv`), authorized to the
-  "Export workspace" roles {Owner, Admin, Host} (`ExportAccessPolicy`; a
-  non-authoring role is 403, a foreign-tenant/unknown-export/non-member is
-  hidden-404, an incomplete/failed export is 409, all fail-closed), with the
-  completed export's artifact (its manifest) returned role-projected through the
-  existing `ExportManifestProjection` and delivered as an authorized stream —
-  never a public/static URL (threats T4/T8). What remains deferred is the
-  **user-data (`ExportScope.UserData`) export pipeline** — there is no producer of
-  a user-data manifest yet, so only workspace exports are retrievable — and a
+  worker drives queued jobs to their produced output (CORE-JOB-002); the **export
+  read/download route is mounted** — `GET /api/v1/exports/{exportId}`
+  (CORE-EXP-001, `ExportEndpoints.cs`, `csv/api_routes.csv`). A **workspace**
+  export is authorized to the "Export workspace" roles {Owner, Admin, Host}
+  (`ExportAccessPolicy`) and its completed artifact (its manifest) is returned
+  role-projected through the existing `ExportManifestProjection`. The **user-data
+  (`ExportScope.UserData`) export pipeline now has a producer** (CORE-EXP-002): the
+  same worker drives a queued user-data job to terminal `Completed`, and the same
+  download route then discloses the data subject's personal data to the subject
+  themselves or an Owner/Admin — assembled tenant-scoped and audited
+  (`PersonalDataExported`) through the reused `PersonalDataExportService`
+  (CORE-PRIV-004), the PII never persisted in an artifact (threats T7/T8). Both
+  scopes authorize BEFORE disclosing any artifact/state (a non-entitled requester
+  is 403, a foreign-tenant/unknown-export/non-member is hidden-404, an
+  incomplete/failed export is 409, all fail-closed) and deliver as an authorized
+  stream — never a public/static URL (threats T4/T8). What remains deferred is a
   **retention-based export expiry** (a true `ExpiresAt` with an object-storage
   purge of the artifact), which lands with the data-retention sweeps
   (CORE-PRIV-003); until then the only states that gate the download are the
-  export's own lifecycle status. Owner: **Core-later** (the user-data export and
-  retention stories). CORE-E2E-003 still asserts the export's role-based
-  projection at the projection layer (the worker composition test exercises the
-  worker, not the endpoint).
+  export's own lifecycle status. Owner: **Core-later** (the retention story).
+  CORE-E2E-003 still asserts the export's role-based projection at the projection
+  layer (the worker composition test exercises the worker, not the endpoint).
 - **Separate participant reveal of a recap body** (the recap READ route now
   exists). The `Recap` aggregate, its persistence, EF migration and
   host-vs-audience role-based projection (`Recap.cs`) were implemented ahead of

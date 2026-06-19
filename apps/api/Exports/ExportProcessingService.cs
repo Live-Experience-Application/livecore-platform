@@ -7,14 +7,18 @@ namespace LiveCore.Api.Exports;
 
 /// <summary>
 /// The background export processing job's application service (CORE-JOB-002, the export-processing story of the
-/// "Worker Background Jobs" epic). It processes queued export jobs asynchronously into workspace export
-/// manifests — picking up the workspace-scoped jobs that have not yet finished, driving each through its guarded
-/// status transitions and producing its <see cref="ExportManifest"/> — on the worker's configurable cadence,
-/// idempotently and tenant-scoped (the acceptance criterion: "Export jobs are processed asynchronously by the
-/// worker into manifests, authorized and tenant-scoped, with status transitions"). The scheduling host — the
-/// background worker — invokes this service on an interval (docs/02_ARCHITECTURE.md: the worker owns async
-/// jobs), exactly as it invokes the recap generation and asset cleanup services; the service itself is
-/// host-agnostic and fully unit-testable.
+/// "Worker Background Jobs" epic; extended by CORE-EXP-002 to also PRODUCE user-data exports). It processes
+/// queued export jobs asynchronously — picking up the jobs that have not yet finished, driving each through its
+/// guarded status transitions and producing the right artifact for its scope — on the worker's configurable
+/// cadence, idempotently and tenant-scoped (the acceptance criterion: "Export jobs are processed asynchronously
+/// by the worker, authorized and tenant-scoped, with status transitions"). A <see cref="ExportScope.Workspace"/>
+/// job is driven into its workspace export <see cref="ExportManifest"/> (the per-kind table of contents); a
+/// <see cref="ExportScope.UserData"/> job is driven to the terminal <see cref="ExportJobStatus.Completed"/>
+/// state so it becomes RETRIEVABLE, after which the download route assembles the data subject's personal data on
+/// disclosure (the personal data is never persisted in an artifact — CORE-PRIV-004; threats T7/T8). The
+/// scheduling host — the background worker — invokes this service on an interval (docs/02_ARCHITECTURE.md: the
+/// worker owns async jobs), exactly as it invokes the recap generation and asset cleanup services; the service
+/// itself is host-agnostic and fully unit-testable.
 ///
 /// <para>
 /// It REUSES the existing Exports module (the story note): the queued jobs come from
@@ -66,9 +70,9 @@ namespace LiveCore.Api.Exports;
 /// by the job's own organization and workspace, the organization boundary checked first), the workspace is
 /// inventoried with exactly that job's organization and workspace, and the manifest is produced with exactly
 /// those, so one workspace's export only ever counts its own resources and its manifest is attributed only to
-/// its own tenant/workspace — never another's. Scope is honoured too: the reader surfaces only
-/// <see cref="ExportScope.Workspace"/> jobs and the processor re-checks the loaded job's scope, so a user-data
-/// export is never widened into a workspace inventory (threat T8).
+/// its own tenant/workspace — never another's. Scope is honoured too: the processor branches on the loaded job's
+/// own scope, so a workspace export is inventoried into a workspace manifest and a user-data export is completed
+/// without ever being widened into a workspace inventory (threat T8).
 /// </para>
 ///
 /// <para>
@@ -136,10 +140,12 @@ public sealed class ExportProcessingService
 
     /// <summary>
     /// Runs one processing sweep: finds up to <see cref="ExportProcessingOptions.BatchSize"/> queued export
-    /// jobs (workspace-scoped, not terminal), processes each to completion (started, inventoried, completed and
-    /// given a workspace export manifest) and returns the run's count-only summary. Idempotent (a terminal job
-    /// is never eligible and a job's manifest is admitted at most once, so a job produces exactly one manifest)
-    /// and tenant-scoped (each job is re-resolved, inventoried and manifested with its own tenant/workspace).
+    /// jobs (any scope, not terminal), processes each to completion (a workspace job is started, inventoried,
+    /// completed and given a workspace export manifest; a user-data job is started and completed so it becomes
+    /// retrievable) and returns the run's count-only summary. Idempotent (a terminal job is never eligible and a
+    /// workspace job's manifest is admitted at most once, so a workspace job produces exactly one manifest and a
+    /// user-data job is completed exactly once) and tenant-scoped (each job is re-resolved with its own
+    /// tenant/workspace).
     /// The sweep is resilient and bounded (CORE-RES-002): a per-job failure is recorded on the job's attempt
     /// counter and the job is left for the next sweep to retry, rather than aborting the run — UNLESS the
     /// failure exhausts the configured <see cref="ExportProcessingOptions.MaxAttempts"/>, in which case the job
@@ -151,7 +157,7 @@ public sealed class ExportProcessingService
     public async Task<ExportProcessingResult> ProcessQueuedExportsAsync(CancellationToken cancellationToken)
     {
         var queued = await _queuedExports
-            .ListQueuedWorkspaceExportsAsync(_options.BatchSize, cancellationToken)
+            .ListQueuedExportsAsync(_options.BatchSize, cancellationToken)
             .ConfigureAwait(false);
 
         if (queued.Count == 0)
@@ -272,22 +278,27 @@ public sealed class ExportProcessingService
             return ProcessOutcome.NotProcessed;
         }
 
-        if (job.Scope != ExportScope.Workspace)
-        {
-            // The reader only surfaces workspace-scoped jobs; this is defence in depth. A user-data export's
-            // narrower manifest is a later story, never widened into a workspace inventory here (threat T8).
-            return ProcessOutcome.NotProcessed;
-        }
-
         try
         {
-            return await ProcessWorkspaceExportAsync(job, processedAt, cancellationToken).ConfigureAwait(false);
+            // Branch on the loaded job's explicit, immutable scope (CORE-EXP-002): a Workspace job is inventoried
+            // into its produced manifest; a UserData job is driven to the terminal Completed state so it becomes
+            // RETRIEVABLE, after which the download route assembles the data subject's personal data on disclosure
+            // (the PII is never persisted in an artifact — threats T7/T8). An undefined/unsupported scope is left
+            // untouched (defence in depth: a cast could otherwise smuggle in an undefined value).
+            return job.Scope switch
+            {
+                ExportScope.Workspace =>
+                    await ProcessWorkspaceExportAsync(job, processedAt, cancellationToken).ConfigureAwait(false),
+                ExportScope.UserData =>
+                    await ProcessUserDataExportAsync(job, processedAt, cancellationToken).ConfigureAwait(false),
+                _ => ProcessOutcome.NotProcessed,
+            };
         }
         catch (DbUpdateException workFailure)
         {
             // The atomic work failed to persist — the job's workspace/tenant may have been removed between the
             // queued read and processing (a foreign-key violation), or a transient persistence error occurred. No
-            // manifest was committed and the work's in-memory transitions rolled back. Record this failed attempt
+            // artifact was committed and the work's in-memory transitions rolled back. Record this failed attempt
             // durably and dead-letter the job if it has exhausted its attempt budget (CORE-RES-002), then move on.
             return await RecordFailedAttemptAsync(queuedJob, processedAt, workFailure, cancellationToken)
                 .ConfigureAwait(false);
@@ -357,6 +368,60 @@ public sealed class ExportProcessingService
                 "Queued export job {ExportJobId} was already processed by another run; left its existing manifest in place.",
                 job.Id);
         }
+
+        return ProcessOutcome.Processed;
+    }
+
+    /// <summary>
+    /// Produces a USER-DATA export (CORE-EXP-002, "Add the user-data export producer", GDPR Art.15 access /
+    /// Art.20 portability): drives the queued <see cref="ExportScope.UserData"/> job's guarded
+    /// Pending -&gt; Running -&gt; Completed transitions and commits them so the job becomes RETRIEVABLE.
+    ///
+    /// <para>
+    /// Unlike a workspace export, a user-data export produces NO persisted artifact here. The personal data a
+    /// user-data export discloses (the data subject's identity profile, memberships, participant records and
+    /// invited-email rows) is PII, and the privacy model keeps that PII out of any durable artifact — it lives
+    /// ONLY in the export RESPONSE delivered to the entitled recipient (CORE-PRIV-004). So the producer's job is
+    /// only to mark the export READY: the download route then assembles the subject's data on disclosure through
+    /// <see cref="LiveCore.Api.IdentityAccess.PersonalDataExportService"/> (tenant-scoped, audited
+    /// <c>PersonalDataExported</c>). Completing the job is therefore a status-only transition committed in its
+    /// own unit of work (there is no manifest to make it atomic WITH), exactly as the failed-attempt accounting
+    /// persists through <see cref="IExportJobRepository.UpdateAsync"/>.
+    /// </para>
+    ///
+    /// <para>
+    /// The tenant, workspace, requester and scope are immutable, so completing the job never moves it or widens
+    /// its scope (threats T5/T8). Idempotency rests on the terminal status (a Completed job drops out of the
+    /// queued read) plus the worker claim/lease (CORE-RES-003), so a user-data export is produced exactly once
+    /// no matter how many sweeps or replicas run; a transient persistence failure surfaces as a
+    /// <see cref="DbUpdateException"/> that the caller turns into a recorded failed attempt. The log is
+    /// identifier-only — never the requester or any disclosed personal data (threats T7/T8).
+    /// </para>
+    /// </summary>
+    private async Task<ProcessOutcome> ProcessUserDataExportAsync(
+        ExportJob job,
+        DateTimeOffset processedAt,
+        CancellationToken cancellationToken)
+    {
+        // Drive the guarded status transitions on the aggregate: Pending -> Running -> Completed. Start is
+        // guarded so a job re-surfaced while already Running (a crashed worker) skips straight to completing;
+        // a Pending job transitions through Running to Completed.
+        if (job.CanStart)
+        {
+            job.Start(processedAt);
+        }
+
+        job.Complete(processedAt);
+
+        // Commit the completion in its own unit of work. The status transition is the entire produced output of a
+        // user-data export (the personal data itself is assembled on download, never persisted), so there is no
+        // artifact to make the save atomic WITH. A persistence failure surfaces as a DbUpdateException the caller
+        // records as a failed attempt (CORE-RES-002).
+        await _exportJobs.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Processed user-data export job {ExportJobId} to completion; its personal data is assembled on download.",
+            job.Id);
 
         return ProcessOutcome.Processed;
     }

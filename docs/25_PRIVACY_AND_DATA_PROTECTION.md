@@ -239,10 +239,24 @@ Core capabilities:
 
 | Right (GDPR) | Core mechanism | Authorization |
 | --- | --- | --- |
-| Access (Art.15) / Portability (Art.20) | `GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export` (CORE-PRIV-004) | The subject themselves, or `Owner`/`Admin` on their behalf; tenant-scoped, fail-closed. |
+| Access (Art.15) / Portability (Art.20) | `GET /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data-export` (CORE-PRIV-004) — synchronous; OR a `ExportScope.UserData` export job produced by the worker and downloaded via `GET /api/v1/exports/{exportId}` (CORE-EXP-002) | The subject themselves, or `Owner`/`Admin` on their behalf; tenant-scoped, fail-closed. |
 | Erasure (Art.17) | `DELETE /api/v1/organizations/{organizationSlug}/members/{memberId}/personal-data` (CORE-PRIV-001) | `Owner`/`Admin`; tenant-scoped authorization, global effect; audited by id. |
 | Storage limitation (Art.5(1)(e)) | The data-retention sweep (CORE-PRIV-003), per-family windows above. | System job; audited by id. |
 | Erasure of a whole tenant / offboarding | `DELETE /api/v1/organizations/{organizationSlug}` (CORE-PRIV-002) | `Owner` only; cascades the tenant; platform-level audit fact survives. |
+
+Access and portability are served by **two paths that share one assembly**: the
+synchronous `personal-data-export` route (CORE-PRIV-004) returns the subject's data
+inline, while a `ExportScope.UserData` **export job** lets the same right be fulfilled
+through the asynchronous Exports pipeline (CORE-EXP-002) — the worker drives the queued
+job to terminal `Completed` (its producer), and the existing export download route
+`GET /api/v1/exports/{exportId}` then discloses the subject's data. Both reuse
+`PersonalDataExportService`, so the disclosed set, the tenant scoping and the
+`PersonalDataExported` audit (by id, never the PII) are identical; the user-data export
+is authorized to the subject themselves or an `Owner`/`Admin`, fail-closed, and — unlike
+a workspace export's manifest — its personal data is never persisted in an artifact, only
+assembled into the authorized response on download (threats T7/T8). It is DISTINCT from a
+workspace export (which exports a workspace's content artifacts, not a subject's personal
+data).
 
 ## Compliance posture checklist for the self-hoster
 

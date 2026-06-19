@@ -102,6 +102,7 @@ internal static class ExportEndpoints
         HttpContext httpContext,
         string exportId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -150,6 +151,17 @@ internal static class ExportEndpoints
         if (job is null)
         {
             return HiddenExport();
+        }
+
+        // Branch on the export's explicit, immutable SCOPE (CORE-EXP-002). A user-data export discloses a data
+        // subject's personal data and is authorized to the subject themselves or an Owner/Admin (the
+        // access/portability authorization model of CORE-PRIV-004) — NOT the workspace-membership/role model a
+        // workspace export uses — so it is handled on its own path. The workspace export path (below) is
+        // unchanged.
+        if (job.Scope == ExportScope.UserData)
+        {
+            return await ReadUserDataExportAsync(deps, context, job, timeProvider, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         // Object-level authorization: the caller must be a member of the EXPORT'S own workspace. A caller who is
@@ -220,6 +232,96 @@ internal static class ExportEndpoints
     }
 
     /// <summary>
+    /// Serves a USER-DATA export (CORE-EXP-002, GDPR Art.15 access / Art.20 portability): the disclosure half of
+    /// the producer that this story adds. The export job has already been loaded WITHIN the resolved tenant
+    /// (so a foreign-tenant/unknown export is already hidden 404); this method authorizes the disclosure, gates
+    /// it on the export's availability and, only then, assembles and returns the data subject's personal data.
+    ///
+    /// <para>
+    /// THE SUBJECT. A user-data export discloses the personal data of its REQUESTER — the authenticated subject
+    /// who requested their own data (the job's immutable <see cref="ExportJob.RequestedByUserProfileId"/>). So
+    /// the export contains ONLY the requesting subject's data (the acceptance criterion); it never widens into
+    /// another subject's data or into workspace-wide host content (threat T8).
+    /// </para>
+    ///
+    /// <para>
+    /// AUTHORIZATION (the access/portability model of CORE-PRIV-004; docs/06_AUTHORIZATION_MATRIX.md "Export data
+    /// subject personal data"; threats T1/T5). The PII is delivered ONLY to the entitled recipient: the data
+    /// SUBJECT themselves (self-service — the caller's resolved profile matches the export's subject) OR an
+    /// Owner/Admin of the resolved tenant (the data controller acting on the subject's behalf). The caller is
+    /// already a known member of the tenant (the resolution proved it), so any OTHER tenant member — a
+    /// Host/CoHost/Participant/Observer/Auditor who is neither the subject nor an Owner/Admin — is denied 403,
+    /// fail-closed. Exact, non-linear role checks (no &gt;/&lt;).
+    /// </para>
+    ///
+    /// <para>
+    /// AVAILABILITY then DISCLOSURE. Only AFTER authorization is the export's state checked, so an unauthorized
+    /// caller never learns it: a dead-lettered (terminal Failed) export is a distinct 409, a not-yet-produced
+    /// (pending/running) export is a 409, and an export whose subject was since erased (the requester column is
+    /// SET NULL) is a 409 — no personal data to disclose. A produced, completed export is assembled TENANT-SCOPED
+    /// and audited through the existing <see cref="PersonalDataExportService"/> (an append-only
+    /// <c>PersonalDataExported</c> fact by id — the actor and the exported subject — never the disclosed PII;
+    /// threats T1/T5/T7) and returned as the authorized stream (the response body), never a public/static URL
+    /// (threat T4).
+    /// </para>
+    /// </summary>
+    private static async Task<IResult> ReadUserDataExportAsync(
+        ExportEndpointDependencies deps,
+        TenantContext context,
+        ExportJob job,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        // The export discloses the requester's OWN personal data. Authorize the disclosure to the data subject
+        // themselves OR an Owner/Admin of the resolved tenant; any other tenant member is 403, fail-closed. The
+        // self check matches the caller's resolved user profile against the export's requester (a null requester —
+        // an anonymized/erased subject — can never match a real caller).
+        var callerIsSubject = job.RequestedByUserProfileId is { } subjectId
+            && subjectId == context.UserProfileId;
+        var callerIsTenantAdmin = context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin);
+        if (!(callerIsSubject || callerIsTenantAdmin))
+        {
+            return Forbidden();
+        }
+
+        // Authorized. Only NOW is the export's availability checked, so an unauthorized caller never learns its
+        // state. A dead-lettered (terminal Failed) export surfaces distinctly so a requester polling the route
+        // learns it permanently failed; an export that has not settled Completed (still pending/running) has no
+        // retrievable personal data yet — both 409, disclosed only after authorization (threats T7/T8).
+        if (job.Status == ExportJobStatus.Failed)
+        {
+            return ExportFailed();
+        }
+
+        if (job.Status != ExportJobStatus.Completed)
+        {
+            return ExportNotDownloadable();
+        }
+
+        // The export's subject must still exist. The requester column is SET NULL when the subject is erased
+        // (GDPR Art.17), so a null requester means the personal data is gone — there is nothing to disclose, a
+        // fail-closed 409 (defence in depth; an Owner/Admin who reaches here learns only that it is unavailable).
+        if (job.RequestedByUserProfileId is not { } subject)
+        {
+            return ExportNotDownloadable();
+        }
+
+        // Assemble the subject's tenant-scoped personal data and audit the disclosure through the SAME service the
+        // synchronous access/portability route uses (CORE-PRIV-004) — no parallel assembly path. The actor is the
+        // caller who obtained the export (the subject or the admin); the audited subject is the export's subject.
+        var now = timeProvider.GetUtcNow();
+        var export = await deps.PersonalDataExport
+            .ExportAsync(context.OrganizationId, context.UserProfileId, subject, now, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Defensive: the requester is a foreign key into a real user profile, so the subject should always exist;
+        // if it somehow does not, fail closed rather than disclose anything.
+        return export is null
+            ? ExportNotDownloadable()
+            : Results.Ok(PersonalDataExportResponse.From(export));
+    }
+
+    /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They exist only when a database
     /// connection string is configured; when absent, the endpoint fails closed with 503 instead of throwing.
     /// </summary>
@@ -230,14 +332,20 @@ internal static class ExportEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var exportJobs = services.GetService<IExportJobRepository>();
         var exportManifests = services.GetService<IExportManifestRepository>();
+        var personalDataExport = services.GetService<PersonalDataExportService>();
 
-        if (resolver is null || workspaceMembers is null || exportJobs is null || exportManifests is null)
+        if (resolver is null
+            || workspaceMembers is null
+            || exportJobs is null
+            || exportManifests is null
+            || personalDataExport is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new ExportEndpointDependencies(resolver, workspaceMembers, exportJobs, exportManifests);
+        dependencies = new ExportEndpointDependencies(
+            resolver, workspaceMembers, exportJobs, exportManifests, personalDataExport);
         return true;
     }
 
@@ -323,5 +431,6 @@ internal static class ExportEndpoints
         TenantContextResolver Resolver,
         IWorkspaceMemberRepository WorkspaceMembers,
         IExportJobRepository ExportJobs,
-        IExportManifestRepository ExportManifests);
+        IExportManifestRepository ExportManifests,
+        PersonalDataExportService PersonalDataExport);
 }

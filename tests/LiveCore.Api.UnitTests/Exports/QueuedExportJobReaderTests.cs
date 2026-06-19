@@ -12,18 +12,18 @@ using Microsoft.EntityFrameworkCore;
 namespace LiveCore.Api.UnitTests.Exports;
 
 /// <summary>
-/// Integration-style tests for the EF Core-backed <see cref="QueuedExportJobReader"/> (CORE-JOB-002) — the
-/// system read that finds the export jobs the processing job should pick up (workspace-scoped jobs that are not
-/// yet terminal).
+/// Integration-style tests for the EF Core-backed <see cref="QueuedExportJobReader"/> (CORE-JOB-002, extended by
+/// CORE-EXP-002) — the system read that finds the export jobs the processing job should pick up (jobs of any
+/// scope that are not yet terminal).
 ///
 /// They run against an in-memory SQLite database with foreign keys enforced (<c>PRAGMA foreign_keys = ON</c>),
 /// the same harness as <see cref="ExportJobRepositoryTests"/>, so the real model mapping and the scope/status
 /// name conversions are exercised on every run without a database server. The behaviors under test are the
 /// job's eligibility rules at the data layer:
 /// <list type="bullet">
-///   <item>ELIGIBILITY: only WORKSPACE-scoped, NON-TERMINAL (Pending or Running) jobs are returned — a
-///   Completed/Failed job is never re-processed, and a user-data export is never surfaced (its narrower
-///   manifest is a later story; threat T8).</item>
+///   <item>ELIGIBILITY: NON-TERMINAL (Pending or Running) jobs of ANY scope are returned — a Completed/Failed
+///   job is never re-processed, but a user-data export IS now surfaced so it has a producer (CORE-EXP-002); the
+///   processor branches on the loaded job's scope.</item>
 ///   <item>RECOVERY: a Running job (left behind by a crashed worker) is still returned, so the next sweep
 ///   finishes it.</item>
 ///   <item>TENANT-SCOPED (threat T5): the sweep spans tenants (a system job) but each returned entry carries
@@ -68,7 +68,7 @@ public sealed class QueuedExportJobReaderTests : IDisposable
     }
 
     [Fact]
-    public async Task Returns_only_workspace_scoped_non_terminal_jobs()
+    public async Task Returns_non_terminal_jobs_of_any_scope()
     {
         var organization = await SeedOrganizationAsync("northwind-labs");
         var workspace = await SeedWorkspaceAsync(organization.Id, "summer-show");
@@ -76,19 +76,21 @@ public sealed class QueuedExportJobReaderTests : IDisposable
 
         var pending = await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Pending);
         var running = await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Running);
-        // Excluded: terminal jobs are never re-processed.
+        // Included: a user-data export now has a producer (CORE-EXP-002), so a non-terminal user-data job is
+        // surfaced exactly like a workspace one; the processor branches on the loaded job's scope.
+        var userData = await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.UserData, ExportJobStatus.Pending);
+        // Excluded: terminal jobs are never re-processed, regardless of scope.
         await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Completed);
         await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Failed);
-        // Excluded: a user-data export's narrower manifest is a later story (threat T8).
-        await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.UserData, ExportJobStatus.Pending);
+        await SeedJobAsync(organization.Id, workspace.Id, user.Id, ExportScope.UserData, ExportJobStatus.Completed);
 
         await using var context = CreateContext();
         var reader = new QueuedExportJobReader(context);
-        var queued = await reader.ListQueuedWorkspaceExportsAsync(50, CancellationToken.None);
+        var queued = await reader.ListQueuedExportsAsync(50, CancellationToken.None);
 
-        // Exactly the Pending and Running workspace jobs, each carrying its own coordinates.
+        // Exactly the non-terminal jobs (both workspace AND user-data), each carrying its own coordinates.
         Assert.Equal(
-            new[] { pending.Id, running.Id }.OrderBy(id => id),
+            new[] { pending.Id, running.Id, userData.Id }.OrderBy(id => id),
             queued.Select(item => item.ExportJobId).OrderBy(id => id));
         Assert.All(queued, item =>
         {
@@ -111,7 +113,7 @@ public sealed class QueuedExportJobReaderTests : IDisposable
         var jobB = await SeedJobAsync(organizationB.Id, workspaceB.Id, user.Id, ExportScope.Workspace, ExportJobStatus.Pending);
 
         await using var context = CreateContext();
-        var queued = await new QueuedExportJobReader(context).ListQueuedWorkspaceExportsAsync(50, CancellationToken.None);
+        var queued = await new QueuedExportJobReader(context).ListQueuedExportsAsync(50, CancellationToken.None);
 
         var fromA = Assert.Single(queued, item => item.ExportJobId == jobA.Id);
         Assert.Equal(organizationA.Id, fromA.OrganizationId);
@@ -141,12 +143,12 @@ public sealed class QueuedExportJobReaderTests : IDisposable
         var reader = new QueuedExportJobReader(context);
 
         // The batch is bounded and surfaces the smallest ids first.
-        var firstBatch = await reader.ListQueuedWorkspaceExportsAsync(2, CancellationToken.None);
+        var firstBatch = await reader.ListQueuedExportsAsync(2, CancellationToken.None);
         Assert.Equal(
             expectedOrder.Take(2).ToArray(),
             firstBatch.Select(item => item.ExportJobId).ToArray());
 
-        var fullBatch = await reader.ListQueuedWorkspaceExportsAsync(50, CancellationToken.None);
+        var fullBatch = await reader.ListQueuedExportsAsync(50, CancellationToken.None);
         Assert.Equal(
             expectedOrder,
             fullBatch.Select(item => item.ExportJobId).ToArray());
@@ -159,9 +161,9 @@ public sealed class QueuedExportJobReaderTests : IDisposable
         var reader = new QueuedExportJobReader(context);
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => reader.ListQueuedWorkspaceExportsAsync(0, CancellationToken.None));
+            () => reader.ListQueuedExportsAsync(0, CancellationToken.None));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => reader.ListQueuedWorkspaceExportsAsync(-1, CancellationToken.None));
+            () => reader.ListQueuedExportsAsync(-1, CancellationToken.None));
     }
 
     [Fact]
@@ -187,7 +189,7 @@ public sealed class QueuedExportJobReaderTests : IDisposable
         }
 
         await using var context = CreateContext();
-        var queued = await new QueuedExportJobReader(context).ListQueuedWorkspaceExportsAsync(50, CancellationToken.None);
+        var queued = await new QueuedExportJobReader(context).ListQueuedExportsAsync(50, CancellationToken.None);
 
         var unleasedEntry = Assert.Single(queued, item => item.ExportJobId == unleased.Id);
         Assert.Null(unleasedEntry.LeaseOwner);
