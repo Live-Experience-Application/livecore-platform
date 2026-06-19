@@ -12,15 +12,19 @@
  * idempotency. Reuse one key for one logical reveal across all its retries.
  */
 import type {
+  CreateVisibilityRuleRequest,
   HideRequest,
   HideResponse,
+  PageResponse,
   ParticipantVisibleFeedResponse,
   RevealRequest,
   RevealResponse,
   Uuid,
+  VisibilityRuleResponse,
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import { pageQuery, type PageParams } from "./pagination.js";
 
 /** Options for the reveal command. */
 export interface RevealOptions {
@@ -79,6 +83,61 @@ export class VisibilityClient {
       path: `/sessions/${encodeURIComponent(sessionId)}/hide`,
       body: request,
       idempotencyKey: options.idempotencyKey,
+    });
+  }
+
+  /**
+   * `POST /api/v1/sessions/{sessionId}/visibility-rules` — create a session-scoped
+   * visibility rule for a resource (audience-wide, or for one selected
+   * participant). The organization slug travels in the request body. The
+   * same-workspace invariant for the referenced resource is enforced server-side;
+   * the authoring caller always receives the host {@link VisibilityRuleResponse}.
+   */
+  createRule(
+    sessionId: Uuid,
+    request: CreateVisibilityRuleRequest,
+  ): Promise<VisibilityRuleResponse> {
+    return this.http.send<VisibilityRuleResponse>({
+      method: "POST",
+      path: `/sessions/${encodeURIComponent(sessionId)}/visibility-rules`,
+      body: request,
+    });
+  }
+
+  /**
+   * `GET /api/v1/sessions/{sessionId}/visibility-rules` — the session's visibility
+   * rules (both the audience-wide and the selected-participant dimensions) in
+   * deterministic id order, as a bounded page (CORE-DX-003). Restricted to the
+   * authoring roles — a participant cannot enumerate rules.
+   */
+  listRules(
+    sessionId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<VisibilityRuleResponse>> {
+    return this.http.send<PageResponse<VisibilityRuleResponse>>({
+      method: "GET",
+      path: `/sessions/${encodeURIComponent(sessionId)}/visibility-rules`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
+   * `GET /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}` — one visibility
+   * rule within its session. A foreign-tenant, wrong-session, unknown rule or
+   * non-member is hidden as `404`.
+   */
+  getRule(
+    sessionId: Uuid,
+    ruleId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<VisibilityRuleResponse> {
+    return this.http.send<VisibilityRuleResponse>({
+      method: "GET",
+      path: `/sessions/${encodeURIComponent(sessionId)}/visibility-rules/${encodeURIComponent(ruleId)}`,
+      query: { organizationSlug: params.organizationSlug },
     });
   }
 

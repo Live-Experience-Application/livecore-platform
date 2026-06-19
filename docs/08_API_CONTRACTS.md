@@ -120,6 +120,9 @@ POST   /api/v1/sessions/{sessionId}/participants/{participantId}/leave
 GET    /api/v1/sessions/{sessionId}/events
 POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide
+POST   /api/v1/sessions/{sessionId}/visibility-rules
+GET    /api/v1/sessions/{sessionId}/visibility-rules
+GET    /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}
 GET    /api/v1/sessions/{sessionId}/recap
 GET    /api/v1/exports/{exportId}
 GET    /api/v1/workspaces/{workspaceId}/scenes

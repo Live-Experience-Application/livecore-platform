@@ -25,6 +25,7 @@ import type {
   CreateSessionRequest,
   CreateTemplateRequest,
   CreateUploadIntentRequest,
+  CreateVisibilityRuleRequest,
   CreateWorkspaceRequest,
   GoogleTokenVerificationRequest,
   HideRequest,
@@ -303,6 +304,9 @@ export type CreateTemplateRequestMatchesSchema = Assert<
 export type HideRequestMatchesSchema = Assert<
   SameKeys<HideRequest, Schemas["HideRequest"]>
 >;
+export type CreateVisibilityRuleRequestMatchesSchema = Assert<
+  SameKeys<CreateVisibilityRuleRequest, Schemas["CreateVisibilityRuleRequest"]>
+>;
 export type ReorderSceneRequestMatchesSchema = Assert<
   SameKeys<ReorderSceneRequest, Schemas["ReorderSceneRequest"]>
 >;
@@ -338,6 +342,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "CreateSessionRequest"
     | "CreateTemplateRequest"
     | "CreateUploadIntentRequest"
+    | "CreateVisibilityRuleRequest"
     | "CreateWorkspaceRequest"
     | "GoogleTokenVerificationRequest"
     | "HideRequest"

@@ -851,6 +851,21 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (CORE-RT-003), exactly as the session start/end commands deferred their events.
     builder.Services.AddScoped<RevealService>();
 
+    // Visibility-rule create command + its same-workspace resource locator (CORE-SVIS-005): the Visibility
+    // module's authoring API lets an authoring role create/list/read VisibilityRules over HTTP so a vertical
+    // can configure session-scoped visibility (the create/list endpoints were deliberately-absent until this
+    // story; docs/24_SPEC_CONSISTENCY.md). The VisibilityRuleService creates a rule (reusing the CORE-VIS-001
+    // aggregate) and appends the VisibilityRuleChanged audit fact in ONE transaction; it enforces the
+    // same-workspace invariant for the referenced resource SERVER-SIDE through the IVisibilityResourceWorkspaceLocator
+    // PORT. Because the Visibility module — THE central security module — is not allowed to reference the
+    // Scenes/Content/Entities modules (the enforced module dependency graph, CORE-ARCH-001), the port's adapter
+    // (VisibilityResourceWorkspaceLocator) lives in this composition root (the shared-kernel Hosting namespace,
+    // which references every module by design) and consults the three resource repositories' workspace-scoped
+    // lookups. Registered here, inside the persistence conditional, because they depend on the visibility-rule,
+    // resource, participant and audit repositories above.
+    builder.Services.AddScoped<IVisibilityResourceWorkspaceLocator, VisibilityResourceWorkspaceLocator>();
+    builder.Services.AddScoped<VisibilityRuleService>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities
@@ -1804,6 +1819,16 @@ app.MapVisibilityEndpoints();
 // to the reveal roles (Owner/Admin/Host/CoHost) in the session's own workspace exactly like the
 // session start/end commands. The durable reveal event emission is deferred to the Realtime epic.
 app.MapRevealEndpoints();
+
+// Visibility-rule authoring endpoints (CORE-SVIS-005): the Visibility module's create/list/read routes under
+// /api/v1/sessions/{sessionId}/visibility-rules. They let an authoring role configure session-scoped
+// visibility over HTTP (a capability previously deliberately-absent; docs/24). The create enforces the
+// same-workspace invariant for the referenced resource server-side and audits the creation; all three routes
+// are restricted to the authoring roles (Owner/Admin/Host/CoHost) in the session's own workspace — a
+// participant can neither author nor enumerate rules — fail-closed and hidden-404 exactly like the reveal
+// command. No new persistence registration beyond the VisibilityRuleService + IVisibilityResourceWorkspaceLocator
+// above is required.
+app.MapVisibilityRuleEndpoints();
 
 // Hide (un-reveal) command endpoint (CORE-REV-001, the "Reveal Lifecycle" hide): the inverse of the
 // reveal route, POST /api/v1/sessions/{sessionId}/hide. It takes a reveal back so a previously visible

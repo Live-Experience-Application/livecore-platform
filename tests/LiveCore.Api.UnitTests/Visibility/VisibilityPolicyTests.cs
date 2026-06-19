@@ -833,6 +833,12 @@ public sealed class VisibilityPolicyTests : IDisposable
         public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
             => throw new InvalidOperationException("The in-memory gate must not query the repository.");
 
+        public Task<VisibilityRule?> FindByIdInSessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, Guid id, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
+        public Task<IReadOnlyList<VisibilityRule>> ListPageBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, int skip, int take, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("The in-memory gate must not query the repository.");
+
         public Task<IReadOnlyList<VisibilityRule>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
             => throw new InvalidOperationException("The in-memory gate must not query the repository.");
 

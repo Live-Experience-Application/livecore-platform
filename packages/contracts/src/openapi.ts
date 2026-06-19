@@ -1186,6 +1186,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/visibility-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    organizationSlug?: string;
+                    limit?: string;
+                    offset?: string;
+                };
+                header?: never;
+                path: {
+                    sessionId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sessionId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": unknown | components["schemas"]["CreateVisibilityRuleRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    organizationSlug?: string;
+                };
+                header?: never;
+                path: {
+                    sessionId: string;
+                    ruleId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/hide": {
         parameters: {
             query?: never;
@@ -2347,6 +2447,15 @@ export interface components {
             contentType: string | null;
             /** Format: int64 */
             sizeBytes: unknown;
+        };
+        CreateVisibilityRuleRequest: {
+            organizationSlug: string | null;
+            resourceType: string | null;
+            /** Format: uuid */
+            resourceId: string;
+            visibility: string | null;
+            /** Format: uuid */
+            participantId?: string | null;
         };
         CreateWorkspaceRequest: {
             organizationSlug: string | null;

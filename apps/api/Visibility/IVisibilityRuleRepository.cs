@@ -61,6 +61,54 @@ public interface IVisibilityRuleRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Finds the visibility rule with exactly the given id WITHIN the given organization, workspace AND
+    /// SESSION, or <see langword="null"/> when no such rule exists there (CORE-SVIS-005). All three
+    /// boundaries scope the lookup, so a rule that exists under another organization's, workspace's or
+    /// session's id is never returned, even when the surrogate id matches (threat T5/T1). This is the
+    /// session-scoped by-id read the visibility-rule read endpoint
+    /// (<c>GET /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}</c>) performs: a reveal is
+    /// session-scoped (CORE-SVIS-001), so a rule of another concurrent session of the same workspace is
+    /// never reachable through this session's route (the cross-session leak; threat T5/T3). The predicate
+    /// leads with <c>organization_id</c> then matches <c>workspace_id</c> and <c>session_id</c>, so the
+    /// organization boundary is checked before the workspace boundary before the session.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id, session id or rule id is empty.
+    /// </exception>
+    Task<VisibilityRule?> FindByIdInSessionAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Guid id,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given session's visibility rules (of the given workspace, owned by the
+    /// given organization) in the deterministic (time-ordered surrogate id) order, limited to
+    /// <paramref name="take"/> rows starting at <paramref name="skip"/>, backing the bounded visibility-rule
+    /// list route (<c>GET /api/v1/sessions/{sessionId}/visibility-rules</c>, CORE-SVIS-005 / CORE-DX-003).
+    /// The page is exactly tenant-, workspace- AND SESSION-scoped (the predicate leads with
+    /// <c>organization_id</c> then matches <c>workspace_id</c> and <c>session_id</c>), so a foreign tenant's,
+    /// workspace's or session's rules are NEVER returned even when their ids would otherwise be addressable
+    /// (threat T5/T1; the cross-session leak T3) — a reveal in a concurrent session of the same workspace is
+    /// never enumerated here. The caller over-fetches one extra row (<c>take = limit + 1</c>) to decide
+    /// <c>hasMore</c> without a second COUNT. Bounding the read means a single list response can never
+    /// materialize the whole table (threat T9). It returns BOTH the audience-wide rule and every
+    /// selected-participant rule of the session (the dimension is part of each returned rule).
+    /// </summary>
+    /// <exception cref="ArgumentException">The organization id, workspace id or session id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<VisibilityRule>> ListPageBySessionAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists every visibility rule governing the given resource (named by type + id) WITHIN the given
     /// organization, workspace AND SESSION, in deterministic (time-ordered surrogate id) order. This is
     /// the session-scoped lookup the documented critical index

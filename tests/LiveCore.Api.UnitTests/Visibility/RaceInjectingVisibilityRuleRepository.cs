@@ -44,6 +44,12 @@ internal sealed class RaceInjectingVisibilityRuleRepository : IVisibilityRuleRep
     public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
         => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
 
+    public Task<VisibilityRule?> FindByIdInSessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, Guid id, CancellationToken cancellationToken)
+        => _inner.FindByIdInSessionAsync(organizationId, workspaceId, sessionId, id, cancellationToken);
+
+    public Task<IReadOnlyList<VisibilityRule>> ListPageBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, int skip, int take, CancellationToken cancellationToken)
+        => _inner.ListPageBySessionAsync(organizationId, workspaceId, sessionId, skip, take, cancellationToken);
+
     public Task<IReadOnlyList<VisibilityRule>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
         => _inner.ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken);
 

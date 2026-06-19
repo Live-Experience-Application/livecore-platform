@@ -89,6 +89,98 @@ internal sealed class VisibilityRuleRepository : IVisibilityRuleRepository
     }
 
     /// <inheritdoc />
+    public async Task<VisibilityRule?> FindByIdInSessionAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored rule (ids are generated non-empty), so the lookup fails
+        // fast instead of returning an arbitrary row.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException("Visibility rule id must not be empty.", nameof(id));
+        }
+
+        // All four predicates translate to parameterized SQL equality, leading with the tenant column then
+        // the workspace then the session. The lookup is exactly tenant-, workspace- and session-scoped, so a
+        // rule under another organization, workspace or session is never returned even when the surrogate id
+        // matches; a reveal of a concurrent session of the same workspace is never reachable here (threats
+        // T5/T1; the cross-session leak T3).
+        return await _dbContext.VisibilityRules
+            .FirstOrDefaultAsync(
+                rule => rule.OrganizationId == organizationId
+                    && rule.WorkspaceId == workspaceId
+                    && rule.SessionId == sessionId
+                    && rule.Id == id,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<VisibilityRule>> ListPageBySessionAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored session's rules, so the lookup fails fast instead of
+        // returning an arbitrary set of rows.
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (sessionId == Guid.Empty)
+        {
+            throw new ArgumentException("Session id must not be empty.", nameof(sessionId));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(skip);
+        ArgumentOutOfRangeException.ThrowIfLessThan(take, 1);
+
+        // The predicate leads with the tenant column, then matches the workspace and the SESSION, so the page
+        // is exactly tenant-, workspace- and session-scoped: another tenant's, workspace's or session's rules
+        // are never returned even when their ids would otherwise be addressable (threat T5/T1; the
+        // cross-session leak T3). The ordering is deterministic — sorted by the time-ordered surrogate id —
+        // and the caller over-fetches one extra row (take = limit + 1) to compute HasMore without a second
+        // COUNT (the bounded-list technique, CORE-DX-003; threat T9). Both dimensions are returned (the
+        // audience-wide rule and every selected-participant rule of the session).
+        return await _dbContext.VisibilityRules
+            .Where(rule => rule.OrganizationId == organizationId
+                && rule.WorkspaceId == workspaceId
+                && rule.SessionId == sessionId)
+            .OrderBy(rule => rule.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<VisibilityRule>> ListByResourceAsync(
         Guid organizationId,
         Guid workspaceId,

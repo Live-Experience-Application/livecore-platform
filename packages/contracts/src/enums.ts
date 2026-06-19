@@ -110,6 +110,15 @@ export const VisibilityResourceTypes = [
 export type VisibilityResourceType = (typeof VisibilityResourceTypes)[number];
 
 /**
+ * The base audience visibility state a visibility rule assigns to its resource:
+ * `Hidden` (host-only) until a host reveals it, then `Visible` to the audience.
+ */
+export const VisibilityStates = ["Hidden", "Visible"] as const;
+
+/** A visibility state name. */
+export type VisibilityState = (typeof VisibilityStates)[number];
+
+/**
  * Whether a reveal command newly applied the change or recognized an idempotent
  * retry. Both outcomes leave the resource visible (the command is idempotent).
  */

@@ -2530,6 +2530,43 @@ hide reaches only that participant (plus hosts), an audience-wide hide reaches t
 observers and the shared session-audience group (CORE-PERF-001) — carrying resource
 **identifiers only**, never resolved content.
 
+### Visibility-rule authoring (create, list and read)
+
+Beyond the live reveal/hide commands, an authoring role can **create, list and read**
+the session-scoped visibility rules directly, so a vertical can **configure** session
+visibility over the API and drive the reveal/visibility engine (CORE-SVIS-005):
+
+| Method | Route                                                    | Authorized callers                             |
+| ------ | -------------------------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/visibility-rules`          | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules`          | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+The session id in the path pins the workspace; the `organizationSlug` travels in the
+request body for the create and as a query parameter for the reads (resolved by the
+same token-claim-and-membership tenant check as the other by-session-id routes). The
+caller is authorized by their role in the session's own workspace, and — because a
+visibility rule is an **authoring artifact**, not audience content — **all three
+routes** are restricted to the authoring roles. A **participant can neither author nor
+enumerate** rules: a non-authoring workspace member is `403`, and a caller who cannot
+see the tenant or is not a member of the session's workspace is hidden as `404`.
+
+The create body names the resource generically (`resourceType`
+`Scene`/`ContentBlock`/`Entity` plus `resourceId`), the base `visibility`
+(`Hidden`/`Visible`) and an optional `participantId` for a selected-participant rule.
+The **same-workspace invariant** is enforced **server-side**: the referenced resource
+must live in the session's own workspace (resolved through the owning resource module's
+workspace-scoped lookup), and a resource from another workspace — or an unknown one —
+is rejected with `400`; a selected-participant target outside the workspace is hidden
+as `404`. A second rule for the same `(session, resource, dimension)` is a `409`
+(CORE-SVIS-002). A successful create is **audited** (`VisibilityRuleChanged`), the
+insert and the audit committing together in one transaction. This is the configuration
+surface for rules; the live realtime `ContentRevealed`/`ContentHidden` events remain
+the reveal/hide commands' job. The list is **bounded** (`limit`/`offset`,
+`items + hasMore`; CORE-DX-003) and returns both the audience-wide and the
+selected-participant dimensions; the by-id read is **session-scoped**, so a rule of
+another session, workspace or tenant is an indistinguishable hidden `404`.
+
 ### Scene and content lifecycle session events
 
 Activating a scene and changing a resource's visibility now surface as the documented

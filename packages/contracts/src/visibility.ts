@@ -5,6 +5,7 @@ import type {
   HideOutcome,
   RevealOutcome,
   VisibilityResourceType,
+  VisibilityState,
 } from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
 
@@ -87,6 +88,57 @@ export interface HideResponse {
    * `null` when it was hidden from the whole audience.
    */
   participantId: Uuid | null;
+}
+
+/**
+ * Request body for `POST /api/v1/sessions/{sessionId}/visibility-rules`
+ * (CORE-SVIS-005): an authoring role creates a session-scoped visibility rule for
+ * a resource. The same-workspace invariant for the referenced resource is enforced
+ * server-side (a resource from another workspace is rejected with `400`); the
+ * session id in the path pins the workspace.
+ */
+export interface CreateVisibilityRuleRequest {
+  /** Canonical slug of the organization that owns the session's workspace. */
+  organizationSlug: string;
+  /** The kind of resource the rule governs (`Scene`/`ContentBlock`/`Entity`). */
+  resourceType: VisibilityResourceType;
+  /** The surrogate id of the resource the rule governs (resolved within the workspace). */
+  resourceId: Uuid;
+  /** The base audience visibility the rule assigns (`Hidden`/`Visible`). */
+  visibility: VisibilityState;
+  /**
+   * Optional target of a selected-participant rule. When set, the rule applies
+   * only to that participant; when omitted, it applies to the whole audience. The
+   * target must be a participant of the session's workspace (otherwise hidden as
+   * `404`).
+   */
+  participantId?: Uuid;
+}
+
+/**
+ * Response body of a visibility rule (CORE-SVIS-005) — returned by the create
+ * command and by the list and by-id read routes. A visibility rule is an authoring
+ * artifact, so there is no host-vs-participant projection: the routes are restricted
+ * to the authoring roles, so a participant never receives this shape.
+ */
+export interface VisibilityRuleResponse {
+  /** The surrogate id of the visibility rule. */
+  id: Uuid;
+  /** The kind of resource the rule governs. */
+  resourceType: VisibilityResourceType;
+  /** The surrogate id of the resource the rule governs. */
+  resourceId: Uuid;
+  /** The base audience visibility state of the rule (`Hidden`/`Visible`). */
+  visibility: VisibilityState;
+  /**
+   * The participant a selected-participant rule applies to, or `null` for an
+   * audience-wide rule.
+   */
+  participantId: Uuid | null;
+  /** Server timestamp (UTC) at which the rule was first created. */
+  createdAt: IsoDateTimeString;
+  /** Server timestamp (UTC) at which the rule was last updated. */
+  updatedAt: IsoDateTimeString;
 }
 
 /**

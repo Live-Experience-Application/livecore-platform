@@ -462,12 +462,11 @@ following are deferred by design (date recorded **2026-06-15**):
   reading the recap read route never receives the body until that reveal lands.
   Owner: **Core-later** (the recap-reveal story). Rationale: the host-only body is
   guarded by the projection, not by the absence of a reveal route.
-- **Entity-relationship-list / template / visibility-rule create
-  and list endpoints.** The template and visibility-rule
-  repositories (CORE-ENT-004, CORE-VIS-001) are implemented with **no
-  list-everything method** and **no HTTP route** (`csv/api_routes.csv` defines
-  none). Owner: **Core-later** (the respective endpoint stories — e.g.
-  CORE-VIS-004). Rationale: the **explicit-ids contract** — the same-workspace
+- **Entity-relationship-list endpoint (the template and visibility-rule
+  create/list endpoints now exist).** The entity-relationship repository
+  (CORE-ENT-003) is implemented with **no list-everything method** and **no HTTP
+  route** (`csv/api_routes.csv` defines none). Owner: **Core-later** (the
+  relationship-list endpoint story). Rationale: the **explicit-ids contract** — the same-workspace
   coupling of `entity → entity_type`, an entity_relationship's two endpoints,
   `content_block → scene` and `visibility_rule → resource` is the create
   application flow's responsibility, **not** a database foreign key — is recorded
@@ -509,8 +508,29 @@ following are deferred by design (date recorded **2026-06-15**):
   org-scoped lookup never returns a global template for mutation" holds at every
   route and a global template addressed by id is an indistinguishable hidden-`404`
   (threats T1/T5). A foreign/unknown template is hidden-`404`, a duplicate per-scope
-  key+version is `409`, and the create is audited as `TemplateCreated`. The
-  visibility-rule create/list endpoints remain deferred (CORE-VIS-004).
+  key+version is `409`, and the create is audited as `TemplateCreated`.
+  **Resolved for visibility rules (2026-06-19, CORE-SVIS-005):** the
+  visibility-rule create/list/by-id-read routes are now **mounted** under
+  `/api/v1/sessions/{sessionId}/visibility-rules` — the create resolves the
+  referenced resource through the **workspace-scoped** resource repositories
+  before inserting (so it **honours, rather than bypasses**, the
+  `visibility_rule → resource` same-workspace coupling above; a resource not in
+  the session's workspace is a `400`, and a selected-participant target outside
+  the workspace is hidden-`404`), and the list/read are **session-scoped** (no
+  list-everything). Because the Visibility module — THE central security module —
+  may not reference the Scenes/Content/Entities modules (the enforced module
+  dependency graph, CORE-ARCH-001), the same-workspace resolution goes through a
+  Visibility-owned **port** whose adapter lives in the composition root. A
+  visibility rule is an **authoring artifact** (a host configures session
+  visibility), so all three routes are restricted to the **authoring roles**
+  (`Owner`/`Admin`/`Host`/`CoHost`) with **no** host-vs-participant projection —
+  a **participant can neither author nor enumerate** rules (non-authoring member
+  `403`; foreign-tenant/wrong-session/unknown-rule/non-member hidden-`404`;
+  duplicate per `(session, resource, dimension)` `409`, all fail-closed) — and
+  the create is audited as `VisibilityRuleChanged`. The matching
+  `@livecore/sdk-ts` client methods and the regenerated
+  `openapi/livecore-v1.json` ship in the same story so the SDK-parity and OpenAPI
+  drift gates stay green.
 - **Content-block list/get/update/revise route.** `ContentBlockEndpoints.cs`
   mounts only create and delete; there is deliberately **no
   list/get/update/revise route** (the revise capability lives on the aggregate

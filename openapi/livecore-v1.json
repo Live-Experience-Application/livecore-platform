@@ -1071,6 +1071,122 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/visibility-rules": {
+      "post": {
+        "tags": [
+          "VisibilityRuleEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateVisibilityRuleRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "VisibilityRuleEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationSlug",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}": {
+      "get": {
+        "tags": [
+          "VisibilityRuleEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ruleId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationSlug",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{sessionId}/hide": {
       "post": {
         "tags": [
@@ -2335,6 +2451,38 @@
           }
         }
       },
+      "CreateVisibilityRuleRequest": {
+        "required": [
+          "organizationSlug",
+          "resourceType",
+          "resourceId",
+          "visibility"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "resourceType": {
+            "type": "string",
+            "nullable": true
+          },
+          "resourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "visibility": {
+            "type": "string",
+            "nullable": true
+          },
+          "participantId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        }
+      },
       "CreateWorkspaceRequest": {
         "required": [
           "organizationSlug",
@@ -2548,6 +2696,9 @@
     },
     {
       "name": "RevealEndpoints"
+    },
+    {
+      "name": "VisibilityRuleEndpoints"
     },
     {
       "name": "HideEndpoints"

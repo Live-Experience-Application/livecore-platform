@@ -1125,6 +1125,12 @@ public sealed class EntitySearchServiceTests : IDisposable
         public Task<VisibilityRule?> FindByIdAsync(Guid organizationId, Guid workspaceId, Guid id, CancellationToken cancellationToken)
             => _inner.FindByIdAsync(organizationId, workspaceId, id, cancellationToken);
 
+        public Task<VisibilityRule?> FindByIdInSessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, Guid id, CancellationToken cancellationToken)
+            => _inner.FindByIdInSessionAsync(organizationId, workspaceId, sessionId, id, cancellationToken);
+
+        public Task<IReadOnlyList<VisibilityRule>> ListPageBySessionAsync(Guid organizationId, Guid workspaceId, Guid sessionId, int skip, int take, CancellationToken cancellationToken)
+            => _inner.ListPageBySessionAsync(organizationId, workspaceId, sessionId, skip, take, cancellationToken);
+
         public Task<VisibilityRuleAddResult> AddAsync(VisibilityRule rule, CancellationToken cancellationToken)
             => _inner.AddAsync(rule, cancellationToken);
 
