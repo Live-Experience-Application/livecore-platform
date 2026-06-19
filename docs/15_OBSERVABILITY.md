@@ -219,8 +219,9 @@ port 9464) and, like the API's `/metrics`, it is unauthenticated by convention a
 edge, carrying only low-cardinality aggregates (threat T7). An OTLP push exporter remains a configuration
 follow-up — the instruments are export-agnostic.
 
-The worker also serves a per-loop `GET /health/live` endpoint (CORE-DR-003) backed by the same surface; see
-`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Worker liveness heartbeat").
+The worker also serves a per-loop `GET /health/live` endpoint (CORE-DR-003) and a `GET /health/ready` endpoint
+(CORE-OBS-013) backed by the same surface; see `docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Worker metrics and
+per-loop liveness" and "Worker readiness").
 
 #### Worker max-attempt and dead-letter visibility (CORE-RES-002)
 
@@ -593,3 +594,34 @@ and **fails closed** — a read that errors or times out is counted not-ready. T
 response stays **status-only**, so which migrations are missing never leaks
 (threat T7), and `/health/live` stays shallow and unaffected (a stale schema never
 restarts a live process).
+
+### The worker's liveness and readiness (CORE-OBS-013)
+
+The background **worker** serves the same two-signal split, and the two must not be
+confused. `/health/live` is the **per-loop liveness** check (CORE-DR-003): it is
+healthy only when every *active* loop is beating, so a single **hung** loop makes
+the worker not-live and orchestration **restarts** the wedged process. With **no**
+active loop it is **vacuously healthy** — a process with nothing to do is genuinely
+alive, and restarting it would not help — so liveness is the wrong signal for "the
+worker has nothing to work on".
+
+`/health/ready` is the missing signal that fixes the **vacuously healthy** gap. In a
+**Production** environment the worker reports **not-ready** (`503`) when it can do no
+work — persistence (the database) is unconfigured, or **zero** loops are active
+(CORE-OBS-013, parity with the API's CORE-OPS-005) — or when its configuration is
+malformed (a present-but-unparseable `ConnectionStrings:Database`, parity with the
+API's CORE-OPS-013). Unlike the API the worker requires **no OIDC** identity provider
+(it serves no authenticated request), so OIDC is not part of its required set. The
+worker's one always-required production value is the database connection string the
+loops are gated on; a **missing** required value or a **malformed** critical value
+also emits a loud, **named** `Critical` startup log line (the worker's
+production-config backstop, parity with CORE-OPS-008/CORE-OPS-013), so the
+misconfiguration is unmissable. As with the API, a misconfigured worker **does not
+crash** — it stays up, schedules no loop it cannot back, and reports not-ready —
+and **outside Production** the readiness gate is **inert** (the local-development
+latitude the host already grants: a dev worker with no database stays ready). The
+readiness verdict is captured **at startup** (the configured booleans and the active
+loop count are fixed then), the unauthenticated response stays **status-only** (which
+key is missing/malformed or why the worker is not ready never leaks; threat T7), and
+`/health/live` stays vacuously healthy and unaffected. See
+`docs/13_SELF_HOSTING_REQUIREMENTS.md` ("Worker readiness").

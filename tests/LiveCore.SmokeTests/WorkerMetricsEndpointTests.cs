@@ -113,6 +113,73 @@ public class WorkerMetricsEndpointTests
         }
     }
 
+    [Fact]
+    public async Task Worker_readiness_is_not_ready_in_production_with_no_database_while_liveness_stays_healthy()
+    {
+        // CORE-OBS-013: the readiness signal is DISTINCT from per-loop liveness and the worker is NOT vacuously
+        // healthy. In Production with no database the worker can do no work: /health/live stays 200 (a process
+        // with nothing to stall is genuinely alive) but /health/ready is 503 NOT-READY, so the worker leaves the
+        // ready rotation instead of advertising a readiness it does not have.
+        using var host = WorkerHostFactory.Create(
+            ["--environment", "Production", "--Worker:Metrics:Url=http://127.0.0.1:0"]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        await host.StartAsync(timeout.Token);
+        try
+        {
+            var baseAddress = ResolveBoundAddress(host.Services);
+            using var client = new HttpClient();
+
+            using var live = await client.GetAsync($"{baseAddress}/health/live", timeout.Token);
+            using var ready = await client.GetAsync($"{baseAddress}/health/ready", timeout.Token);
+            var readyBody = await ready.Content.ReadAsStringAsync(timeout.Token);
+
+            // Liveness is vacuously healthy (nothing to stall); readiness is not (no work to do).
+            Assert.True(live.IsSuccessStatusCode);
+            Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+            Assert.Contains("Unhealthy", readyBody);
+            // Status-only: no check name, key or reason leaks to the unauthenticated response (threat T7).
+            Assert.DoesNotContain("ConnectionStrings", readyBody, StringComparison.Ordinal);
+            Assert.DoesNotContain("persistence", readyBody, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await host.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Worker_readiness_is_ready_in_production_with_a_database_and_active_loops()
+    {
+        // The other side of the gate: a correctly configured production worker (a database is configured, so the
+        // loops are scheduled) reports READY. The connection string is supplied through configuration only — no
+        // connection is opened by building/starting the host, exactly as the API host reads it.
+        using var host = WorkerHostFactory.Create(
+        [
+            "--environment", "Production",
+            "--Worker:Metrics:Url=http://127.0.0.1:0",
+            "--ConnectionStrings:Database=Host=localhost;Database=livecore;Username=livecore;Password=ignored",
+        ]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        await host.StartAsync(timeout.Token);
+        try
+        {
+            var baseAddress = ResolveBoundAddress(host.Services);
+            using var client = new HttpClient();
+
+            using var ready = await client.GetAsync($"{baseAddress}/health/ready", timeout.Token);
+            var readyBody = await ready.Content.ReadAsStringAsync(timeout.Token);
+
+            Assert.True(ready.IsSuccessStatusCode);
+            Assert.Contains("Healthy", readyBody);
+        }
+        finally
+        {
+            await host.StopAsync(CancellationToken.None);
+        }
+    }
+
     private static string ResolveBoundAddress(IServiceProvider services)
     {
         var server = services.GetRequiredService<IServer>();

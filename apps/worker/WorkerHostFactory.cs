@@ -56,6 +56,12 @@ namespace LiveCore.Worker;
 ///   <item><c>GET /health/live</c> — the PER-LOOP liveness endpoint (<see cref="WorkerHealthEndpoints"/>),
 ///   healthy only when every active loop is beating (<see cref="WorkerJobHeartbeats"/>), so a single hung loop
 ///   is detectable over one probe instead of being masked by the other healthy loops.</item>
+///   <item><c>GET /health/ready</c> — the readiness endpoint DISTINCT from liveness (CORE-OBS-013): in
+///   Production the worker reports NOT-READY when it can do no work — persistence is unconfigured or no loop is
+///   active (<see cref="WorkerReadiness"/>) — or its configuration is malformed
+///   (<see cref="WorkerProductionConfiguration"/>), so the worker is no longer vacuously healthy with zero
+///   active loops. Liveness restarts a wedged worker; readiness keeps a worker-that-cannot-work out of rotation
+///   without pointlessly restarting it.</item>
 /// </list>
 /// The listen URL is read from configuration (<c>Worker:Metrics:Url</c>, default port 9464) and the surface is
 /// unauthenticated by convention, restricted at the network edge, carrying only low-cardinality aggregates and
@@ -202,6 +208,31 @@ public static class WorkerHostFactory
             .AddCheck<WorkerHeartbeatLivenessHealthCheck>(
                 "worker-job-loops", tags: [WorkerHealthEndpoints.LivenessTag]);
 
+        // Worker readiness gate (CORE-OBS-013), the readiness signal DISTINCT from the per-loop liveness above
+        // and the worker counterpart of the API's required-dependency readiness gate (CORE-OPS-005). Per-loop
+        // liveness is vacuously healthy with zero active loops (a process with nothing to do is genuinely alive),
+        // so a worker deployed to Production with no database advertised "live" while able to do no work at all.
+        // This backs GET /health/ready: in Production it reports NOT-READY when persistence is unconfigured OR no
+        // loop is active (the worker can do no useful work), so a misconfigured production worker leaves the ready
+        // rotation instead. The worker requires NO OIDC (it serves no authenticated request), so — unlike the API
+        // gate — OIDC is not part of its required set. Registered UNCONDITIONALLY (outside any persistence gate)
+        // precisely so it still runs in the no-database case; outside Production it is inert (local-development
+        // latitude), and the readiness response stays status-only so WHY it is not ready never leaks (threat T7).
+        var persistenceConfigured =
+            !string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("Database"));
+        builder.Services.AddWorkerReadinessCheck(
+            builder.Environment, persistenceConfigured, activeJobNames.Count);
+
+        // Malformed worker configuration readiness gate (CORE-OBS-013), parity with the API well-formedness gate
+        // (CORE-OPS-013). The readiness gate above reports NOT-READY when persistence is UNCONFIGURED, but a
+        // connection string that is PRESENT yet malformed passes the non-blank check and (registered lazily with
+        // EF Core) would otherwise surface only on the first sweep. This captures the startup well-formedness
+        // verdict and reports NOT-READY in Production when the connection string is malformed, so it leaves the
+        // ready rotation exactly as an unconfigured dependency does. Registered UNCONDITIONALLY so it runs even
+        // when persistence is absent; inert outside Production; status-only so WHICH key is malformed never leaks
+        // (threat T7). The matching loud, named Critical startup log is emitted below once the host is built.
+        builder.Services.AddMalformedWorkerConfigurationReadinessCheck(builder.Configuration, builder.Environment);
+
         if (assetCleanupConfigured)
         {
             builder.Services.AddHostedService<AssetCleanupBackgroundService>();
@@ -229,8 +260,40 @@ public static class WorkerHostFactory
 
         var app = builder.Build();
 
-        // GET /metrics — the Prometheus scrape endpoint (same mapping the API host uses), and GET /health/live
-        // — the per-loop liveness endpoint. Both unauthenticated by convention and restricted at the edge.
+        // Worker production configuration contract (CORE-OBS-013), parity with the API's loud startup diagnostics
+        // (CORE-OPS-008 / CORE-OPS-013). In Production a missing required value (the database connection string)
+        // or a present-but-malformed connection string does NOT crash the worker — it stays up, schedules no loop
+        // it cannot back, and reports NOT-READY (the readiness gates registered above) — while these log a loud,
+        // NAMED Critical line so the misconfiguration is unmissable. Only the missing/malformed KEY NAMES are
+        // logged, never the configured values, so a secret is never written to the log (threat T7). Outside
+        // Production both contracts are inert (local-development latitude).
+        var missingRequiredSettings = WorkerProductionConfiguration.FindMissingRequiredSettings(
+            builder.Configuration, app.Environment.IsProduction());
+        if (missingRequiredSettings.Count > 0)
+        {
+            app.Logger.LogCritical(
+                "Worker production configuration is incomplete: the required setting(s) {MissingSettings} are not " +
+                "configured. Inject them as environment variables / from your secret store (see .env.example and " +
+                "docs/13_SELF_HOSTING_REQUIREMENTS.md). The worker stays up and reports not-ready, but it can run no " +
+                "job loop until they are set.",
+                string.Join(", ", missingRequiredSettings));
+        }
+
+        var malformedCriticalSettings = WorkerProductionConfiguration.FindMalformedCriticalSettings(
+            builder.Configuration, app.Environment.IsProduction());
+        if (malformedCriticalSettings.Count > 0)
+        {
+            app.Logger.LogCritical(
+                "Worker production configuration is malformed: the setting(s) {MalformedSettings} are present but " +
+                "not well-formed (the connection string must parse). Correct them in your environment / secret store " +
+                "(see docs/13_SELF_HOSTING_REQUIREMENTS.md). The worker stays up and reports not-ready, but it can " +
+                "run no job loop until they are corrected.",
+                string.Join(", ", malformedCriticalSettings));
+        }
+
+        // GET /metrics — the Prometheus scrape endpoint (same mapping the API host uses), and GET /health/live +
+        // GET /health/ready — the per-loop liveness and readiness endpoints. All unauthenticated by convention
+        // and restricted at the edge.
         app.MapLiveCoreMetricsEndpoint();
         app.MapWorkerHealthEndpoints();
 

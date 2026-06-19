@@ -1239,6 +1239,9 @@ listen URL (`Worker:Metrics:Url` / `Worker__Metrics__Url`, default `http://0.0.0
   content (threat T7).
 - **`GET /health/live`** — the worker's **per-loop** liveness endpoint. Wire it to the
   orchestrator's liveness probe (restart on failure), exactly as for the API.
+- **`GET /health/ready`** — the worker's **readiness** endpoint, DISTINCT from liveness
+  (CORE-OBS-013). It reports not-ready (`503`) in Production when the worker can do no
+  work or is misconfigured; see "Worker readiness" below.
 
 The worker runs up to **five** job loops — asset cleanup (`AssetCleanupBackgroundService`),
 recap generation (`RecapGenerationBackgroundService`, CORE-JOB-001), export processing
@@ -1275,6 +1278,44 @@ aggregating endpoint make a **single** hung loop detectable.
   (a transient error is logged and swallowed; a persistent failure makes that loop's
   file go stale, which is fail-safe). It carries only a timestamp — no identifiers, no
   secrets (threat T7).
+
+### Worker readiness (CORE-OBS-013)
+
+Per-loop liveness above is **vacuously healthy** with zero active loops — correctly, a
+worker with nothing to stall is genuinely alive, and restarting it would not help. But
+that left a gap: a worker deployed to **Production** with **no database** (and so **no
+scheduled loop**) advertised "live" while able to do **no work at all**. The missing
+signal is **readiness** — "can this worker actually do its job?" — DISTINCT from
+liveness exactly as the API separates `/health/ready` from `/health/live`.
+
+The worker serves **`GET /health/ready`** backed by two startup-captured checks (parity
+with the API's production-readiness epic), so the worker is **no longer vacuously
+healthy**:
+
+- **Required-dependency / active-loop gate** (parity with CORE-OPS-005). In Production it
+  reports **not-ready** (`503`) when persistence (`ConnectionStrings__Database`) is
+  unconfigured **or** **zero** job loops are active — the worker can do no useful work.
+  Unlike the API the worker requires **no OIDC** (it serves no authenticated request), so
+  OIDC is **not** part of its required set.
+- **Production-config backstop** (parity with CORE-OPS-008 / CORE-OPS-013). The worker's
+  one always-required production value is the database connection string the loops are
+  gated on. A **missing** required value, or a **present-but-malformed** connection string
+  (one that does not parse), reports **not-ready** and emits a loud, **named** `Critical`
+  startup log line so the misconfiguration is unmissable. The metrics listen URL
+  (`Worker:Metrics:Url`) and the heartbeat staleness threshold (`Worker:Heartbeat:StaleAfter`)
+  are already rejected at host build on a malformed value, so they need no readiness re-check.
+
+Like the API's readiness gate this is **environment-aware and fail-closed**: a
+misconfigured worker **does not crash** — it stays up, schedules no loop it cannot back,
+and reports not-ready — and **outside Production** the gate is **inert** (`/health/ready`
+is healthy), preserving the local-development latitude a dev worker with no database
+already has. Only the missing/malformed **key names** are logged, never the configured
+values (threat T7), and the unauthenticated `/health/ready` response stays
+**status-only** so *why* the worker is not ready never leaks. The verdict is captured at
+**startup** (the configured booleans and the active loop count are fixed then), so the
+endpoint adds no per-probe work, and `/health/live` stays vacuously healthy and
+unaffected. The endpoint is unauthenticated by convention and restricted at the network
+edge, exactly like `/health/live` and `/metrics`.
 
 ### Metrics scraping and example alerting/SLOs (CORE-OBS-008)
 

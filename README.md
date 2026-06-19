@@ -1104,19 +1104,33 @@ ASP.NET Core shared framework the referenced API project already brings, so **no
 dependency** — bound to a configurable listen URL (`Worker:Metrics:Url`, default
 `http://0.0.0.0:9464`):
 
-| Endpoint       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                              |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/metrics`     | The Prometheus scrape endpoint, wired exactly as the API's (`AddLiveCorePrometheusMetrics`). It exposes the same `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on failure — and the CORE-OBS-007 per-loop `livecore_job_successes_total`, `livecore_job_duration_seconds` and `livecore_job_backlog` SLIs — are scrapeable (they were recorded onto an unobserved meter before). |
-| `/health/live` | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                                                                                                                                                          |
+| Endpoint        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/metrics`      | The Prometheus scrape endpoint, wired exactly as the API's (`AddLiveCorePrometheusMetrics`). It exposes the same `LiveCore` series, so the `livecore_job_failures_total` counter each loop records on failure — and the CORE-OBS-007 per-loop `livecore_job_successes_total`, `livecore_job_duration_seconds` and `livecore_job_backlog` SLIs — are scrapeable (they were recorded onto an unobserved meter before). |
+| `/health/live`  | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                                                                                                                                                          |
+| `/health/ready` | The **readiness** endpoint, DISTINCT from liveness (CORE-OBS-013): in Production it reports **not-ready** (`503`) when the worker can do no work (persistence unconfigured or **zero** active loops) or its configuration is malformed, so the worker is **not vacuously healthy**.                                                                                                                                  |
 
-Each of the four loops (asset cleanup, recap generation, export processing, and the
-billing-gated store-notification reconciliation) writes the current UTC timestamp to
-its **own** heartbeat file each tick; `/health/live` is healthy only when every active
-loop's file is fresh (within `Worker:Heartbeat:StaleAfter`, default 2 hours). Before
-this, all loops shared **one** file, so a single healthy loop kept it fresh and
-**masked** the others hanging; per-loop files plus the aggregating endpoint make a
-**single** hung loop detectable, and orchestration restarts the wedged worker. Like the
-API's `/metrics` and `/health/*`, both worker endpoints are **unauthenticated by
+Each of the (up to five) loops (asset cleanup, recap generation, export processing, the
+billing-gated store-notification reconciliation, and the data-retention sweep) writes
+the current UTC timestamp to its **own** heartbeat file each tick; `/health/live` is
+healthy only when every active loop's file is fresh (within `Worker:Heartbeat:StaleAfter`,
+default 2 hours). Before this, all loops shared **one** file, so a single healthy loop
+kept it fresh and **masked** the others hanging; per-loop files plus the aggregating
+endpoint make a **single** hung loop detectable, and orchestration restarts the wedged
+worker.
+
+Liveness is **vacuously healthy** with zero active loops — a process with nothing to
+stall is genuinely alive — so `/health/ready` (CORE-OBS-013) is the DISTINCT signal that
+keeps the worker from being **vacuously healthy** with no work to do. In a Production
+environment it reports not-ready when persistence is unconfigured or no loop is active
+(parity with the API's required-dependency gate, CORE-OPS-005), or when the connection
+string is present but malformed (parity with the API's well-formedness gate,
+CORE-OPS-013); a missing/malformed value also emits a loud, **named** `Critical` startup
+log (the worker's production-config backstop, parity with CORE-OPS-008). Unlike the API
+the worker requires **no OIDC**, and like the API it is **fail-closed and
+environment-aware**: a misconfigured worker stays up and reports not-ready rather than
+crashing, and outside Production the gate is inert (local-development latitude). Like the
+API's `/metrics` and `/health/*`, all worker endpoints are **unauthenticated by
 convention** and restricted at the network edge, carrying only low-cardinality
 aggregates and an overall status — never content (threat T7). See
 `docs/13_SELF_HOSTING_REQUIREMENTS.md` and `docs/15_OBSERVABILITY.md`.
