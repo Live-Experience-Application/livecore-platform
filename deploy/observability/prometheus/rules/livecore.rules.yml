@@ -113,6 +113,24 @@ groups:
             The API p95 request latency for job {{ $labels.job }} has been above
             1s for 10 minutes. Current value: {{ $value | humanizeDuration }}.
 
+      # Reveal-latency regression (CORE-OBS-015). The Visibility reveal command is the
+      # central host-driven state change of a live session; its p95 latency was a
+      # dashboard-only signal with no alert. This makes a regression alertable off the
+      # same recording rule the dashboard reads. The 1s starter target mirrors the API
+      # latency SLO (the reveal is itself an API request); tune it to your traffic.
+      - alert: LiveCoreRevealLatencyP95High
+        expr: job:livecore_reveal_duration_seconds:p95_5m > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Reveal command p95 latency above the 1s SLO
+          description: >-
+            The Visibility reveal command p95 latency for job {{ $labels.job }} has
+            been above 1s for 10 minutes, so the central host-driven state change of
+            a live session is regressing. Current value:
+            {{ $value | humanizeDuration }}.
+
       - alert: LiveCoreApiAuthFailureSpike
         expr: job:livecore_api_auth_failures:rate5m > 1
         for: 10m
@@ -174,6 +192,16 @@ groups:
             storage backend are failing for job {{ $labels.job }}. Current value:
             {{ $value }} per second.
 
+  # BACKLOG NOTE (CORE-OBS-015). livecore_job_backlog is a BATCH-CAPPED per-sweep
+  # observed count: each sweep sets it to the number of pending items it examined,
+  # which the loop bounds at its configured BatchSize (docs/15_OBSERVABILITY.md). So
+  # the gauge saturates at the batch size and UNDER-REPORTS a larger true backlog —
+  # it is a coarse "is there pending work" signal, not an exact queue depth. The two
+  # backlog alerts below are written for that limitation: NotDraining catches a
+  # backlog that never returns to zero (a persistently saturated loop), and Growing
+  # catches a steadily-rising backlog from its hour-over-hour high-water mark, which
+  # still fires when the gauge momentarily touches zero between sweeps (where the
+  # earlier min_over_time()>0 test would false-pass).
   - name: livecore_worker_alerts
     rules:
       - alert: LiveCoreWorkerJobFailing
@@ -188,6 +216,24 @@ groups:
             below 90% for 30 minutes. Current value:
             {{ $value | humanizePercentage }}.
 
+      # Direct background-job failure rate (CORE-OBS-015). The success-RATIO alert
+      # above only trips once failures dominate a loop's sweeps; a loop that fails
+      # only intermittently can stay above the 90% ratio yet still keep dropping
+      # work. This alerts directly on livecore_job_failures_total — the same
+      # rate(..._total)>0 shape the dependency-failure alerts use — so any sustained
+      # failure is visible, mirroring the SRE finding that no alert watched it.
+      - alert: LiveCoreWorkerJobFailures
+        expr: sum by (exported_job) (rate(livecore_job_failures_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker background-job failures observed
+          description: >-
+            The {{ $labels.exported_job }} worker loop has recorded background-job
+            failures (livecore_job_failures_total) for 15 minutes. Current value:
+            {{ $value }} per second.
+
       - alert: LiveCoreWorkerBacklogNotDraining
         expr: min by (exported_job) (min_over_time(livecore_job_backlog[1h])) > 0
         for: 30m
@@ -199,3 +245,28 @@ groups:
             The {{ $labels.exported_job }} worker loop backlog has not returned
             to zero within the last hour, so the loop may be falling behind.
             Current floor: {{ $value }} pending item(s).
+
+      # Steadily-growing backlog (CORE-OBS-015). Fires when the backlog's peak over
+      # the last hour exceeds its peak over the PRECEDING hour — the high-water mark
+      # is rising, so the loop is falling further behind. Using max_over_time (the
+      # peak) rather than min_over_time (the floor) makes it ROBUST to the gauge
+      # momentarily touching zero between sweeps: a growing-but-occasionally-draining
+      # backlog still alerts, where the NotDraining floor test stays silent. The
+      # symmetric 1h windows plus for:1h suppress a one-off spike (a single spike
+      # leaves the recent window before the hold elapses), so only a sustained rise
+      # fires. Because the gauge is batch-capped (see BACKLOG NOTE), once the true
+      # backlog exceeds BatchSize the peaks plateau and this stops rising — the
+      # saturated NotDraining signal then carries it.
+      - alert: LiveCoreWorkerBacklogGrowing
+        expr: max_over_time(livecore_job_backlog[1h]) > max_over_time(livecore_job_backlog[1h] offset 1h)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker loop backlog steadily growing
+          description: >-
+            The {{ $labels.exported_job }} worker loop backlog peaked higher over
+            the last hour than over the preceding hour, so it is steadily growing
+            even if the gauge touches zero between sweeps. Current hourly peak:
+            {{ $value | printf "%.0f" }} pending item(s) (batch-capped; see the
+            backlog note in this rules file).

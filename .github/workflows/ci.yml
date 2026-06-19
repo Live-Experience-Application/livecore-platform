@@ -1357,6 +1357,14 @@ jobs:
           promtool check config deploy/observability/prometheus/prometheus.yml
           promtool check rules deploy/observability/prometheus/rules/livecore.rules.yml
 
+      - name: promtool unit-test the alert rules (backlog false-pass fixture)
+        # CORE-OBS-015: prove the worker backlog alert fires on a steadily-growing
+        # backlog that touches zero (where the old floor test false-passed) and does
+        # not fire on a draining backlog, using synthetic series.
+        run: |
+          set -euo pipefail
+          promtool test rules deploy/observability/prometheus/rules/livecore.rules.test.yml
+
       - name: Validate the starter Grafana dashboard JSON
         shell: pwsh
         run: |

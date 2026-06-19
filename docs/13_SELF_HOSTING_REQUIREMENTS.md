@@ -2267,10 +2267,13 @@ flat.
 ### Worker backlog growth and dead-lettered jobs
 
 The worker's health is three independent signals. (1) A loop that **hangs** goes not-live on the per-loop
-heartbeat (CORE-DR-003) and is restarted. (2) A loop that **fails** drives `livecore_job_failures_total` up and
-its `exported_job:livecore_job_success_ratio:rate15m` below the 90% target (alert `LiveCoreWorkerJobFailing`).
-(3) A loop that **falls behind** shows its `livecore_job_backlog` gauge saturating at the batch size sweep after
-sweep and not returning to 0 (alert `LiveCoreWorkerBacklogNotDraining`). Export processing additionally
+heartbeat (CORE-DR-003) and is restarted. (2) A loop that **fails** drives `livecore_job_failures_total` up
+(alert `LiveCoreWorkerJobFailures`, the direct failure signal) and its
+`exported_job:livecore_job_success_ratio:rate15m` below the 90% target (alert `LiveCoreWorkerJobFailing`).
+(3) A loop that **falls behind** shows its `livecore_job_backlog` gauge not returning to 0 (alert
+`LiveCoreWorkerBacklogNotDraining`) or its hour-over-hour peak rising (alert `LiveCoreWorkerBacklogGrowing`);
+that gauge is **batch-capped** — a per-sweep examined count bounded by the loop's `BatchSize`, so it saturates
+at the batch size and under-reports a larger true backlog (CORE-OBS-015, `docs/15`). Export processing additionally
 **dead-letters** a poison job after `Exports:Processing:MaxAttempts` (default 5): the job goes terminal
 `Failed` and drops out of the queued read, the worker logs an identifier-only WARNING (job id + attempt count,
 threat T7), the sweep summary counts it as `dead-lettered`, and its requester sees a distinct `409` on

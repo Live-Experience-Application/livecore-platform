@@ -329,11 +329,13 @@ is computed from the documented `livecore_*` series via the named recording rule
 | --------------------------- | ---------------------------------------------------- | --------------------- | ------------------------------------------------------ |
 | API availability            | `job:livecore_api_request_error_ratio:rate5m`        | 5xx ratio < 1%        | `LiveCoreApiErrorRatioHigh` (warn), `…Critical` (>5%)  |
 | API latency                 | `job:livecore_api_request_duration_seconds:p95_5m`   | p95 < 1s              | `LiveCoreApiLatencyP95High` (warn)                     |
+| Reveal latency              | `job:livecore_reveal_duration_seconds:p95_5m`        | p95 < 1s              | `LiveCoreRevealLatencyP95High` (warn)                  |
 | Auth-failure rate           | `job:livecore_api_auth_failures:rate5m`              | < 1/s sustained       | `LiveCoreApiAuthFailureSpike` (warn)                   |
 | Rate-limit rejection rate   | `job:livecore_api_rate_limit_rejections:rate5m`      | < 1/s sustained       | `LiveCoreApiRateLimitRejectionsHigh` (warn)           |
 | Dependency failures         | `livecore_database_failures_total`, `livecore_event_delivery_failures_total`, `livecore_asset_failures_total` | none sustained | `LiveCoreDatabaseFailures`, `LiveCoreEventDeliveryFailures`, `LiveCoreAssetFailures` (warn) |
+| Worker job failures         | `livecore_job_failures_total`                        | none sustained        | `LiveCoreWorkerJobFailures` (warn)                     |
 | Worker loop success ratio   | `exported_job:livecore_job_success_ratio:rate15m`    | >= 90%                | `LiveCoreWorkerJobFailing` (warn)                      |
-| Worker backlog drains       | `livecore_job_backlog`                              | returns to 0 hourly   | `LiveCoreWorkerBacklogNotDraining` (warn)             |
+| Worker backlog healthy      | `livecore_job_backlog` (batch-capped)              | drains; peak not rising | `LiveCoreWorkerBacklogNotDraining`, `LiveCoreWorkerBacklogGrowing` (warn) |
 
 A worker loop that **hangs** rather than fails is caught by the per-loop
 `/health/live` heartbeat (CORE-DR-003), not by a metric alert; wire both. Event
@@ -354,6 +356,51 @@ defined in the rules file** — so the rules, the dashboard and this document ca
 silently drift. The gate-logic test proves itself over fixtures (an undocumented
 series reference, an alert with no severity and a malformed dashboard JSON are each
 rejected) before guarding the real files.
+
+#### Closing the worker alerting gaps (CORE-OBS-015)
+
+The CORE-OBS-008 starter rules left three worker/visibility gaps an SRE review
+flagged, all closed here without a new metric (the series already exist):
+
+- **No direct alert on `livecore_job_failures_total`.** A loop's failures were
+  alertable only through the success-RATIO rule (`LiveCoreWorkerJobFailing`,
+  `< 90%`), which a loop that fails only intermittently never trips even while it
+  keeps dropping work. `LiveCoreWorkerJobFailures` now alerts directly on
+  `sum by (exported_job) (rate(livecore_job_failures_total[5m])) > 0` (sustained
+  15m) — the same `rate(..._total) > 0` shape the dependency-failure alerts use.
+- **Reveal latency was dashboard-only.** The reveal command is the central
+  host-driven state change of a live session, but its p95 (`job:livecore_reveal_duration_seconds:p95_5m`,
+  already a recording rule) had only a dashboard panel. `LiveCoreRevealLatencyP95High`
+  now alerts on a regression above the 1s starter SLO (mirroring the API latency
+  SLO; the reveal is itself an API request).
+- **The backlog signal is coarse — it is batch-capped.** `livecore_job_backlog`
+  is a **per-sweep observed count**: each sweep sets the gauge to the number of
+  pending items it examined, which the loop bounds at its configured `BatchSize`
+  (the asset-cleanup default is 100; `LiveCoreMetrics.RecordBackgroundJobBacklog`).
+  So the gauge **saturates at the batch size and under-reports a larger true
+  backlog** — it is a coarse "is there pending work" signal, not an exact queue
+  depth. Making it a true unbounded queue-depth gauge would add a full `COUNT`
+  query to every sweep of every loop (work the batch cap exists to bound), so the
+  signal is **documented as batch-capped** and the **alerting adjusted** to that
+  limitation instead. The original `LiveCoreWorkerBacklogNotDraining`
+  (`min_over_time(livecore_job_backlog[1h]) > 0`) catches a backlog that never
+  returns to zero (a persistently saturated loop) but **false-passes on a
+  steadily-growing backlog that momentarily touches zero** between sweeps — a
+  single zero sample drops its floor to 0 and silences it. The new
+  `LiveCoreWorkerBacklogGrowing` closes that: it fires when the backlog's **peak
+  over the last hour exceeds its peak over the preceding hour**
+  (`max_over_time(livecore_job_backlog[1h]) > max_over_time(livecore_job_backlog[1h] offset 1h)`),
+  so a rising high-water mark is detected even when the gauge touches zero, while
+  the symmetric one-hour windows plus the `for: 1h` hold suppress a one-off spike.
+  Once the true backlog exceeds the batch size the peaks plateau and this stops
+  rising — the saturated `LiveCoreWorkerBacklogNotDraining` signal then carries it,
+  so the two alerts are complementary.
+
+The `observability-assets` CI job adds `promtool test rules` over
+`deploy/observability/prometheus/rules/livecore.rules.test.yml`, a fixture that
+asserts the growing-but-touching-zero backlog now fires `LiveCoreWorkerBacklogGrowing`
+(where the old floor test read 0 and false-passed) and that a draining backlog does
+not, alongside the existing `promtool check rules` and the series-documentation gate.
 
 ### Realtime hub capacity baseline (CORE-PERF-009)
 

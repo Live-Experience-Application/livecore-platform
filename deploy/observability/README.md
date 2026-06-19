@@ -62,18 +62,28 @@ truth in
 [`docs/15_OBSERVABILITY.md`](../../docs/15_OBSERVABILITY.md) ("Example alert
 rules, SLO targets and a starter dashboard"). In summary:
 
-| Objective                  | Series                                             | Starter target      |
-| -------------------------- | -------------------------------------------------- | ------------------- |
-| API availability           | `job:livecore_api_request_error_ratio:rate5m`      | 5xx ratio < 1%      |
-| API latency                | `job:livecore_api_request_duration_seconds:p95_5m` | p95 < 1s            |
-| Auth-failure rate          | `job:livecore_api_auth_failures:rate5m`            | < 1/s sustained     |
-| Rate-limit rejection rate  | `job:livecore_api_rate_limit_rejections:rate5m`    | < 1/s sustained     |
-| Worker loop success ratio  | `exported_job:livecore_job_success_ratio:rate15m`  | >= 90%              |
-| Worker loop backlog drains | `livecore_job_backlog`                             | returns to 0 hourly |
+| Objective                   | Series                                             | Starter target          |
+| --------------------------- | -------------------------------------------------- | ----------------------- |
+| API availability            | `job:livecore_api_request_error_ratio:rate5m`      | 5xx ratio < 1%          |
+| API latency                 | `job:livecore_api_request_duration_seconds:p95_5m` | p95 < 1s                |
+| Reveal latency              | `job:livecore_reveal_duration_seconds:p95_5m`      | p95 < 1s                |
+| Auth-failure rate           | `job:livecore_api_auth_failures:rate5m`            | < 1/s sustained         |
+| Rate-limit rejection rate   | `job:livecore_api_rate_limit_rejections:rate5m`    | < 1/s sustained         |
+| Worker job failures         | `livecore_job_failures_total`                      | none sustained          |
+| Worker loop success ratio   | `exported_job:livecore_job_success_ratio:rate15m`  | >= 90%                  |
+| Worker loop backlog healthy | `livecore_job_backlog` (batch-capped)              | drains; peak not rising |
 
 A stalled worker loop (one that hangs rather than fails) is detected by the
 worker's per-loop `/health/live` heartbeat (CORE-DR-003), not by these metric
 alerts; wire both.
+
+> **Worker backlog is batch-capped.** `livecore_job_backlog` is the count of
+> pending items a sweep examined, bounded by each loop's `BatchSize`, so it
+> saturates at the batch size and under-reports a larger true backlog (CORE-OBS-015,
+> [`docs/15`](../../docs/15_OBSERVABILITY.md)). Two complementary alerts cover it:
+> `LiveCoreWorkerBacklogNotDraining` (the backlog never returns to zero) and
+> `LiveCoreWorkerBacklogGrowing` (its hour-over-hour peak is rising — robust to the
+> gauge touching zero between sweeps, which silenced the old floor-based test).
 
 ## Using the dashboard
 
@@ -89,6 +99,10 @@ The assets are validated on every change (CORE-OBS-008):
 
 - `promtool check config` validates the scrape config and `promtool check rules`
   validates the recording/alert rules;
+- `promtool test rules prometheus/rules/livecore.rules.test.yml` unit-tests the
+  alert expressions on synthetic series — notably that the worker backlog alert
+  fires on a steadily-growing backlog that touches zero (where the old floor test
+  false-passed) and not on a draining backlog (CORE-OBS-015);
 - `scripts/test-observability-assets.ps1` lints the dashboard JSON and asserts
   every `livecore_*` series referenced by the rules and the dashboard is a series
   documented in `docs/15_OBSERVABILITY.md` or a recording rule defined here, so

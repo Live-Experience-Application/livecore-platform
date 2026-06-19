@@ -209,11 +209,21 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Reveal command latency p95",
+      "title": "Reveal command latency p95 (SLO: < 1s)",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
       "fieldConfig": {
-        "defaults": { "unit": "s", "min": 0 },
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
         "overrides": []
       },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
@@ -306,7 +316,8 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Worker loop backlog depth",
+      "title": "Worker loop backlog depth (batch-capped)",
+      "description": "Per-sweep observed pending count; capped at each loop's BatchSize so it under-reports a larger true backlog (docs/15). Alerts: LiveCoreWorkerBacklogNotDraining (never drains) and LiveCoreWorkerBacklogGrowing (hour-over-hour peak rising).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
       "fieldConfig": {
@@ -339,6 +350,27 @@
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "expr": "histogram_quantile(0.95, sum by (exported_job, le) (rate(livecore_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{ exported_job }}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Worker job failures (per loop)",
+      "description": "Direct background-job failure rate (livecore_job_failures_total). Alert: LiveCoreWorkerJobFailures fires on any sustained failure, complementing the success-ratio SLO (CORE-OBS-015).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (exported_job) (rate(livecore_job_failures_total[5m]))",
           "legendFormat": "{{ exported_job }}"
         }
       ]

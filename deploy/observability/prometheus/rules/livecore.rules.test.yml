@@ -1,0 +1,58 @@
+# promtool unit tests for the LiveCore example alert rules (CORE-OBS-015).
+#
+# Run by the observability-assets CI job alongside `promtool check rules`:
+#   promtool test rules deploy/observability/prometheus/rules/livecore.rules.test.yml
+#
+# `promtool check rules` proves the rules PARSE and scripts/test-observability-assets.ps1
+# proves every referenced series is documented or recorded; these unit tests prove the
+# worker BACKLOG alert behaves correctly on synthetic series. The headline case is the
+# one the SRE finding flagged: livecore_job_backlog is a BATCH-CAPPED per-sweep observed
+# count (docs/15_OBSERVABILITY.md), so a steadily-growing backlog that momentarily
+# touches zero between sweeps made the old `min_over_time(livecore_job_backlog[1h]) > 0`
+# test read 0 and stay silent — a FALSE PASS. LiveCoreWorkerBacklogGrowing detects that
+# case from the backlog's hour-over-hour high-water mark (max_over_time), which is robust
+# to the gauge touching zero.
+#
+# Each case asserts the alert's firing CONDITION (its `expr`) at a fixed evaluation time,
+# which is what determines whether the alert false-passes; the `for:` hold only delays a
+# true condition, it never turns a true condition false. Values are clean integers, so the
+# assertions are exact and deterministic.
+rule_files:
+  - livecore.rules.yml
+
+tests:
+  # A steadily-growing backlog that touches zero between sweeps (a rising sawtooth:
+  # 0, peak, 0, higher-peak, ...). Over any one-hour window the floor is 0, but the
+  # hourly peak keeps climbing.
+  - interval: 5m
+    name: growing-but-touching-zero backlog is detected (no false pass)
+    input_series:
+      - series: 'livecore_job_backlog{exported_job="asset-cleanup"}'
+        values: "0 10 0 20 0 30 0 40 0 50 0 60 0 70 0 80 0 90 0 100 0 110 0 120 0"
+    promql_expr_test:
+      # The OLD floor-based test reads 0 on this series (a zero is always in the
+      # window), so `> 0` is false and the backlog alert FALSE-PASSED — the defect.
+      - expr: min by (exported_job) (min_over_time(livecore_job_backlog[1h]))
+        eval_time: 2h
+        exp_samples:
+          - labels: '{exported_job="asset-cleanup"}'
+            value: 0
+      # The NEW condition: the last hour's peak (120) exceeds the preceding hour's
+      # peak (60), so the condition holds and LiveCoreWorkerBacklogGrowing fires.
+      - expr: max_over_time(livecore_job_backlog[1h]) > max_over_time(livecore_job_backlog[1h] offset 1h)
+        eval_time: 2h
+        exp_samples:
+          - labels: '{exported_job="asset-cleanup"}'
+            value: 120
+
+  # A healthy, draining backlog: it spikes once, drains to zero and stays there. The
+  # hourly peak is NOT rising, so the growing-backlog condition must NOT fire.
+  - interval: 5m
+    name: draining backlog does not false-fire LiveCoreWorkerBacklogGrowing
+    input_series:
+      - series: 'livecore_job_backlog{exported_job="data-retention"}'
+        values: "100 80 60 40 20 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    promql_expr_test:
+      - expr: max_over_time(livecore_job_backlog[1h]) > max_over_time(livecore_job_backlog[1h] offset 1h)
+        eval_time: 2h
+        exp_samples: []
