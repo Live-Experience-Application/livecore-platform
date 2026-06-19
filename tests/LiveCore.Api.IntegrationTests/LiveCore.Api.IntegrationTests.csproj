@@ -17,6 +17,14 @@
          the product. -->
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <!-- Security pin (GHSA-2m69-gcr7-jv3q, CORE-DEP-005): EntityFrameworkCore.Sqlite 10.0.9
+         transitively resolves the native SQLitePCLRaw.lib.e_sqlite3 2.1.11, which now carries a
+         known high-severity advisory, so a locked-mode restore fails NU1903 (warnings-as-errors).
+         The EF Sqlite provider has no newer 10.x patch, so the native binary is pinned directly to
+         the patched 3.50.3 (SQLitePCLRaw realigned the native-lib package to the bundled SQLite
+         version; the 2.1.x managed P/Invoke layer stays ABI-compatible). Test-only (IsPackable=false):
+         the in-memory SQLite test database; no runtime/product dependency and not in any shipped image. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
     <!-- Same PostgreSQL provider the API host depends on (apps/api, 10.0.2): lets
          the integration suite run against a real PostgreSQL database in CI,
          applying the real checked-in migrations rather than only the SQLite
