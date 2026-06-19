@@ -180,3 +180,41 @@ Owns:
 May not:
 
 - expose the recap body to the audience without a separate reveal
+
+## Enforced dependency graph (CORE-ARCH-001)
+
+The module contracts above describe what each module owns. This section records which OTHER modules each module is
+allowed to reference, and that graph is **enforced** by an automated architecture test
+(`tests/LiveCore.Api.UnitTests/Architecture`, `ModuleBoundaryArchitectureTests`) that reads the compiled
+`LiveCore.Api` assembly with `NetArchTest.Rules` and fails on any governed-to-governed reference not listed here.
+See `docs/02_ARCHITECTURE.md` ("Enforced module dependency graph") for how the graph is modelled (governed domain
+modules vs the shared kernel) and why some existing edges form cycles.
+
+The allowed edges below are the current, reviewed reality. A reference to the **shared kernel** — `Persistence`,
+`Observability`, `Hosting`, `SystemModule`, and the root `LiveCore.Api` helpers (`CoreProblem`, `ProblemCodes`,
+`Pagination`, `EntityTag`) — is always allowed and is not listed. `A -> none` means the module references no other
+governed module.
+
+```text
+Assets         -> Audit, Content, Entities, Entitlements, IdentityAccess, Organizations, Participants, Visibility, Workspaces
+Audit          -> IdentityAccess, Organizations
+Content        -> Assets, Audit, IdentityAccess, Organizations, Scenes, Visibility, Workspaces
+Entities       -> Assets, Audit, IdentityAccess, Organizations, Visibility, Workspaces
+Entitlements   -> Audit, IdentityAccess, Organizations, Workspaces
+Exports        -> Assets, Content, Entities, IdentityAccess, Organizations, Participants, Scenes, Sessions, Workspaces
+IdentityAccess -> Audit, Organizations, Participants, Workspaces
+Organizations  -> Audit, IdentityAccess
+Participants   -> IdentityAccess, Organizations, Workspaces
+Realtime       -> IdentityAccess, Organizations, Participants, Sessions, Visibility, Workspaces
+Recaps         -> IdentityAccess, Organizations, Realtime, Sessions, Workspaces
+Retention      -> Assets, Audit, Exports, Recaps, Sessions, Workspaces
+Scenes         -> Assets, Audit, Content, IdentityAccess, Organizations, Visibility, Workspaces
+Sessions       -> Audit, Entitlements, IdentityAccess, Organizations, Participants, Realtime, Workspaces
+Store          -> Audit, Entitlements, IdentityAccess
+Templates      -> Audit, Entities, IdentityAccess, Organizations
+Visibility     -> Audit, IdentityAccess, Organizations, Participants, Realtime, Sessions, Workspaces
+Workspaces     -> Audit, Entitlements, IdentityAccess, Organizations
+```
+
+To add or widen an edge, get it reviewed, then update BOTH this list and
+`ModuleDependencyGraph.AllowedDependencies`; the doc-sync test (`ModuleContractsDocTests`) fails if they drift.

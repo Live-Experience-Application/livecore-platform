@@ -147,6 +147,37 @@ System
 
 Each module owns its own domain rules. Cross-module access uses application services or explicit contracts, not direct database table ownership violations.
 
+### Enforced module dependency graph (CORE-ARCH-001)
+
+The modules above are folders/namespaces (`LiveCore.Api.*`) inside the single `LiveCore.Api.csproj`, so until
+this story nothing in the compiler stopped one module referencing another it must not — the boundaries rested on
+author discipline. **The allowed inter-module dependency graph is now an explicit, reviewed list enforced by an
+automated architecture test** (`tests/LiveCore.Api.UnitTests/Architecture`, `ModuleBoundaryArchitectureTests`).
+The test reads the COMPILED `LiveCore.Api` assembly with `NetArchTest.Rules` (Mono.Cecil, so references **in
+method bodies** are inspected, not just signatures) and fails when a module references a module the graph does not
+allow. It runs in the standard `LiveCore.Api.UnitTests` suite, so it **gates CI**, and a deliberately-forbidden
+edge is proven to fail it (the negative test).
+
+The graph is captured as data in `ModuleDependencyGraph` and mirrored, per module, in
+`docs/05_MODULE_CONTRACTS.md`. It has two kinds of namespace:
+
+- **Governed domain modules** (the nodes): `Assets`, `Audit`, `Content`, `Entities`, `Entitlements`, `Exports`,
+  `IdentityAccess`, `Organizations`, `Participants`, `Realtime`, `Recaps`, `Retention`, `Scenes`, `Sessions`,
+  `Store`, `Templates`, `Visibility`, `Workspaces`. An edge `A -> B` means types in `A` may reference types in
+  `B`; any governed-to-governed reference not listed is forbidden.
+- **Shared kernel** (cross-cutting infrastructure every module may depend on, NOT a governed node): `Persistence`
+  (the shared EF data layer / `LiveCoreDbContext` and repositories — it deliberately references every aggregate,
+  so it is infrastructure, not a peer module), `Observability` (metrics/tracing/log context), `Hosting` (the
+  composition root and the mobile API gateway), and `SystemModule` (shared idempotency primitives), plus the root
+  `LiveCore.Api` helpers (`CoreProblem`, `ProblemCodes`, `Pagination`, `EntityTag`).
+
+The allowed edges are a **freeze of the current, reviewed reality**, not an aspiration: the purpose is to prevent a
+new illegal edge being added silently and to document the intended graph. Some existing edges form cycles (for
+example `Content`↔`Scenes` and `Realtime`↔`Visibility`); breaking those is a refactor outside CORE-ARCH-001's
+scope, so they are recorded as the reviewed status quo. Adding or widening an edge is a reviewed change: update
+`ModuleDependencyGraph.AllowedDependencies` **and** the per-module list in `docs/05_MODULE_CONTRACTS.md` (a doc-sync
+test keeps the two in step).
+
 ## Request flow
 
 ```text
