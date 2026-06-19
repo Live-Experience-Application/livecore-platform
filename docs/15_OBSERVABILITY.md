@@ -354,6 +354,67 @@ silently drift. The gate-logic test proves itself over fixtures (an undocumented
 series reference, an alert with no severity and a malformed dashboard JSON are each
 rejected) before guarding the real files.
 
+### Realtime hub capacity baseline (CORE-PERF-009)
+
+The HA/scaling guidance (`docs/13_SELF_HOSTING_REQUIREMENTS.md`, "When to add API
+replicas and the realtime backplane") used to say "add a replica when concurrent
+connection counts outgrow one process" with **no measured number** behind the
+claim — an SRE gap before launch. CORE-PERF-009 closes it with a **documented,
+repeatable load/soak harness** that drives the SignalR realtime hub to a target
+concurrency, **measures the capacity baseline from the realtime metrics already on
+the `LiveCore` meter** (no new instrument, no new shipped dependency), and **asserts
+the recorded baseline** so a regression below it fails the run.
+
+**The harness.** `tests/LiveCore.Api.IntegrationTests/RealtimeHubLoadBaselineTests.cs`
+boots **N API instances** sharing one PostgreSQL system of record and a Redis/Valkey
+SignalR backplane under one channel prefix — the same backplane-backed
+multi-instance topology the cross-instance correctness suite uses (CORE-TST-003), and
+the production HA shape (CORE-DEP-009 backplane, CORE-DEP-013 affinity, CORE-RES-006
+fail-fast, CORE-RES-008 eviction). It opens the target number of authenticated hub
+connections, distributed across the instances, then drives audience-wide reveal/event
+fan-out rounds from a host on one instance — so each reveal must fan out **across the
+backplane** to the connections held by the others. The load is driven by the
+test-only `Microsoft.AspNetCore.SignalR.Client` (the same client the eviction/delivery
+suites use), so it **adds no shipped runtime dependency**.
+
+**The measurement source is the existing realtime metrics** (the signals in the table
+above), captured with a `MeterListener` scoped to each instance's own
+`LiveCoreMetrics` meter reference (so a concurrently-running host's measurements are
+never captured):
+
+| Baseline dimension          | Default baseline (the recorded floor/ceiling) | Measurement source                                                        |
+| --------------------------- | --------------------------------------------- | ------------------------------------------------------------------------- |
+| Target concurrency          | ≥ 50 connections **per instance** (× 2 instances = 100 total) | the harness opens and holds them                          |
+| Sustained connections       | held for the whole soak (no drop)             | `livecore_realtime_connections` gauge (summed across instances)           |
+| Reveal latency **p95**      | < 1500 ms                                     | `livecore_reveal_duration_seconds` histogram samples                      |
+| Reveal latency **p99**      | < 3000 ms                                     | `livecore_reveal_duration_seconds` histogram samples                      |
+| Fan-out delivery error rate | < 1%                                          | missed fan-out deliveries ÷ delivery attempts (+ `livecore_event_delivery_failures_total`, reported) |
+
+Every parameter and threshold is read from an environment variable with the documented
+default (`RealtimeHubLoadProfile`): `LIVECORE_REALTIME_LOAD_INSTANCES`,
+`…_CONNECTIONS_PER_INSTANCE`, `…_REVEALS`, `…_P95_MS`, `…_P99_MS`,
+`…_MAX_ERROR_RATE`, `…_TIMEOUT_SECONDS`, so the harness is repeatable and tunable
+without a code change. The defaults above ARE the recorded baseline; an always-on test
+fact pins them in code so this table and the harness cannot silently drift. The
+baseline values are **conservative floors/ceilings validated on a modest 2 vCPU CI
+runner** — per-instance capacity scales with the instance's CPU/memory sizing
+(`docs/13`, CORE-DEP-007), so raise the target to measure a sized deployment.
+
+**A regression below the baseline is detectable**: the harness asserts the sustained
+connection count, the p95/p99 reveal latency and the delivery error rate against the
+recorded thresholds, so a run that cannot sustain the target connections, whose latency
+percentiles exceed the ceilings, or whose error rate exceeds the cap, **fails**.
+
+**On-demand or scheduled, NOT a per-PR blocker.** The harness only does work when the
+opt-in `LIVECORE_REALTIME_LOAD` flag is set **and** the shared PostgreSQL + Redis/Valkey
+backplane are configured; a default `dotnet test` (and the per-PR `integration-postgres`
+job, which never sets the flag) returns early, so the load/soak never slows a normal
+build. The dedicated workflow `.github/workflows/realtime-load-baseline.yml` runs it on
+a **weekly schedule and on demand** (`workflow_dispatch`, with optional inputs to raise
+the target), stands up the Postgres + Valkey service containers, and uploads the measured
+baseline summary line as a build artifact. The HA/scaling guidance in `docs/13` cites
+this measured baseline.
+
 ## Tracing
 
 Add trace propagation later when multiple services are deployed.

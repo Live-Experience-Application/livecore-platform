@@ -1,0 +1,117 @@
+# Realtime hub load/capacity baseline (CORE-PERF-009).
+#
+# A DEDICATED, on-demand / scheduled job that runs the realtime hub load/soak harness
+# (tests/LiveCore.Api.IntegrationTests/RealtimeHubLoadBaselineTests.cs) against the
+# backplane-backed MULTI-INSTANCE topology and asserts the recorded capacity baseline
+# (sustained connections, p95/p99 reveal latency, error rate under the cap). It is kept
+# OUT of the per-PR CI critical path on purpose: the harness only does work when the
+# opt-in LIVECORE_REALTIME_LOAD flag is set, which the per-PR `dotnet`/`integration-postgres`
+# jobs never set — so a normal build skips it (it is a no-op early return). This workflow
+# is the place the load/soak actually runs, on a schedule and on demand, so it never slows
+# every build. The measured baseline is documented in docs/15_OBSERVABILITY.md and cited by
+# the HA/scaling guidance in docs/13_SELF_HOSTING_REQUIREMENTS.md.
+name: Realtime load baseline
+
+on:
+  # On-demand: trigger from the Actions tab, optionally raising the target to measure a
+  # sized deployment. Each input is optional; a blank value falls back to the documented
+  # default baseline the harness defines (RealtimeHubLoadProfile).
+  workflow_dispatch:
+    inputs:
+      instances:
+        description: "API instances to boot (multi-instance topology)"
+        required: false
+        default: "2"
+      connections_per_instance:
+        description: "Target simultaneous hub connections per instance"
+        required: false
+        default: "50"
+      reveals:
+        description: "Reveal/event fan-out rounds (the soak length)"
+        required: false
+        default: "20"
+  # Scheduled: a weekly baseline run so a capacity regression is caught before launch
+  # without gating every PR. Mondays at 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: realtime-load-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  realtime-load-baseline:
+    name: Realtime hub capacity baseline (CORE-PERF-009)
+    runs-on: ubuntu-latest
+    # The same backplane-backed multi-instance topology the cross-instance correctness
+    # suite uses (CORE-TST-003): a shared PostgreSQL system of record + a Redis/Valkey
+    # SignalR backplane (CORE-OPS-007). The harness boots multiple API instances against
+    # both and drives the hub to the target concurrency.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Opt in to the load/soak harness (absent on every per-PR build, so this is the
+      # only place it does work).
+      LIVECORE_REALTIME_LOAD: "1"
+      # Point the integration suite at the ephemeral service containers. No credential is
+      # committed: these throwaway CI databases/backplane exist only for this job.
+      LIVECORE_TEST_DB_PROVIDER: Postgres
+      LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
+      LIVECORE_TEST_REDIS: "localhost:6379"
+      # Capture the measured baseline summary line as a build artifact.
+      LIVECORE_REALTIME_LOAD_RESULT_PATH: "${{ github.workspace }}/realtime-load-baseline.txt"
+      # Tunable target (workflow_dispatch inputs); blank on a schedule run, which the
+      # harness treats as the documented default baseline.
+      LIVECORE_REALTIME_LOAD_INSTANCES: ${{ github.event.inputs.instances }}
+      LIVECORE_REALTIME_LOAD_CONNECTIONS_PER_INSTANCE: ${{ github.event.inputs.connections_per_instance }}
+      LIVECORE_REALTIME_LOAD_REVEALS: ${{ github.event.inputs.reveals }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore the solution (locked mode)
+        run: dotnet restore LiveCore.slnx --locked-mode
+
+      - name: Run the realtime hub load/capacity baseline
+        # Only the load harness fact (and its always-on baseline-profile sanity check)
+        # runs here; it asserts the recorded baseline thresholds and fails on a regression.
+        run: >-
+          dotnet test tests/LiveCore.Api.IntegrationTests/LiveCore.Api.IntegrationTests.csproj
+          --filter "FullyQualifiedName~RealtimeHubLoadBaselineTests"
+
+      - name: Upload the measured baseline summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: realtime-load-baseline
+          path: realtime-load-baseline.txt
+          if-no-files-found: warn

@@ -260,6 +260,22 @@ high availability (no single point of failure / zero-downtime rolling deploys). 
 moment you run **more than one API instance**, two additional controls become
 **required**, not optional:
 
+> **The "concurrent connection counts outgrow one process" trigger is a MEASURED
+> number, not an assumption (CORE-PERF-009).** A realtime hub load/soak harness
+> exercises the SignalR hub at a target concurrency against this exact
+> backplane-backed multi-instance topology and records a per-instance capacity
+> baseline. As recorded in `docs/15_OBSERVABILITY.md` ("Realtime hub capacity
+> baseline"), a single API instance **sustains at least 50 simultaneous
+> authenticated hub connections** carrying audience-wide reveal fan-out at a **p95
+> reveal-command latency under 1.5 s and p99 under 3 s**, with a **fan-out delivery
+> error rate under 1%** — validated on a modest 2 vCPU CI runner. Treat that as a
+> conservative **floor** that scales with the instance's CPU/memory sizing (the table
+> above, CORE-DEP-007): add a replica as sustained connections approach the
+> per-instance number your sizing has validated. The harness is repeatable and
+> tunable, so re-measure with your own instance size and connection target before
+> committing to a topology (see `docs/15_OBSERVABILITY.md`, "Realtime hub capacity
+> baseline", for how to run it and raise the target).
+
 - **A Valkey/Redis realtime backplane (CORE-OPS-007).** SignalR tracks hub group
   membership per-process, so without a shared backplane an event computed on one
   instance reaches only the clients connected to **that** instance and is **silently

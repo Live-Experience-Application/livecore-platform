@@ -1289,6 +1289,28 @@ no Redis/Valkey server is needed locally. No credentials live in the repository:
 the connection string points at the ephemeral CI service container only (threat
 T7).
 
+The same backplane-backed multi-instance topology backs the **realtime hub
+load/capacity baseline** (CORE-PERF-009). `RealtimeHubLoadBaselineTests` drives the
+SignalR hub to a target concurrency (N simultaneous connections + reveal/event
+fan-out per instance) across multiple API instances sharing one PostgreSQL system of
+record and the real Redis/Valkey backplane, **measures the capacity baseline from the
+existing realtime metrics** (the `livecore_realtime_connections` gauge and the
+`livecore_reveal_duration_seconds` histogram) and **asserts** the recorded baseline —
+sustained connections, p95/p99 reveal latency and a delivery error rate under the cap
+— so a regression below the baseline fails the run. It is **opt-in and kept off the
+per-PR critical path**: it does work only when `LIVECORE_REALTIME_LOAD` is set **and**
+the Postgres + Redis/Valkey backplane are configured, so a default `dotnet test` (and
+the per-PR `integration-postgres` job, which never sets the flag) skips it. The
+dedicated **`Realtime load baseline`** workflow
+(`.github/workflows/realtime-load-baseline.yml`) runs it on a weekly schedule and on
+demand (`workflow_dispatch`, with inputs to raise the target), stands up the service
+containers and uploads the measured-baseline summary as an artifact. The load is
+driven by the test-only `Microsoft.AspNetCore.SignalR.Client`, so it **adds no shipped
+runtime dependency**; every target/threshold is an environment variable with the
+documented default (`RealtimeHubLoadProfile`). The recorded baseline is documented in
+`docs/15_OBSERVABILITY.md` ("Realtime hub capacity baseline") and cited by the
+HA/scaling guidance in `docs/13_SELF_HOSTING_REQUIREMENTS.md`.
+
 The **unit and smoke suites** now also run against real PostgreSQL
 (CORE-TST-004). The `.NET` `dotnet` job's whole-solution test step runs the unit +
 smoke + integration projects on in-memory SQLite (that step used to be mislabeled
@@ -5191,6 +5213,17 @@ with grouped weekly update PRs across the `github-actions`, `npm` and `nuget` ec
 endings are normalized to LF in the repository via `.gitattributes`, so
 the boundary scan and `dotnet format` behave identically on Linux CI and on
 Windows working copies.
+
+A separate workflow, **`.github/workflows/realtime-load-baseline.yml`** (CORE-PERF-009),
+is **deliberately kept off the per-PR critical path**: it runs the realtime hub
+load/capacity baseline (`RealtimeHubLoadBaselineTests`) on a **weekly schedule and on
+demand** (`workflow_dispatch`), not on every push/PR. It stands up the Postgres + Valkey
+service containers, sets the opt-in `LIVECORE_REALTIME_LOAD` flag, drives the SignalR hub
+to the target concurrency across the backplane-backed multi-instance topology, asserts the
+recorded baseline (sustained connections, p95/p99 reveal latency, error rate under the cap)
+and uploads the measured-baseline summary as an artifact. See the realtime
+load/capacity baseline note in [Identity, persistence and migrations](#identity-persistence-and-migrations)
+and `docs/15_OBSERVABILITY.md` ("Realtime hub capacity baseline").
 
 ## License
 
