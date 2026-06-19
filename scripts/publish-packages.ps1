@@ -42,8 +42,11 @@
 
     Registry and access come from each package's publishConfig (the public npm
     registry under the @livecore scope, docs/23_PACKAGE_VERSIONING.md). No
-    credential lives in the repository: the real publish authenticates with an
-    ~/.npmrc the CI job writes from a secret (CORE-PUB-002).
+    credential lives in the repository AND none is stored as a secret: the real
+    publish authenticates via npm TRUSTED PUBLISHING (OIDC) - pnpm exchanges the
+    publish job's short-lived GitHub OIDC id-token with the registry for a one-time
+    publish credential, against the Trusted Publisher configured on each @livecore
+    package (CORE-PUB-002).
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 

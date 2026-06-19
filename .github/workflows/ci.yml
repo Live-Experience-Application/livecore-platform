@@ -2231,13 +2231,14 @@ jobs:
       - integration-postgres
       - unit-smoke-postgres
     permissions:
-      # Least privilege: this job keeps the read-only repository token and
-      # authenticates to the npm registry with the NPM_TOKEN secret written to a
-      # runner-local ~/.npmrc below - no registry credential is stored in the repo.
-      # id-token: write is the ONE added scope, granted to this publish job only
-      # (the workflow default is contents: read), so npm build provenance can mint
-      # the short-lived OIDC token that attests each published @livecore/* version
-      # to this pipeline (CORE-PUB-004). No other job can request an id-token.
+      # Least privilege: this job keeps the read-only repository token and uses NO
+      # long-lived npm token. It publishes via npm TRUSTED PUBLISHING (OIDC): pnpm
+      # exchanges the short-lived GitHub OIDC id-token for a one-time registry publish
+      # credential, against the Trusted Publisher configured on each @livecore package
+      # (CORE-PUB-002). id-token: write is the ONE added scope, granted to this publish
+      # job only (the workflow default is contents: read), so no other job can request
+      # an id-token; the same token mints the build-provenance attestation each
+      # published @livecore/* version carries (CORE-PUB-004).
       contents: read
       id-token: write
     steps:
@@ -2267,19 +2268,6 @@ jobs:
 
       - name: Build packages
         run: pnpm --recursive run build
-
-      - name: Configure npm authentication from the release secret (no credential in the repo)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "The NPM_TOKEN secret is not set; refusing to publish the packages." >&2
-            exit 1
-          fi
-          # Write the auth token to a runner-local user .npmrc that pnpm reads. The
-          # token comes from the encrypted CI secret and never lives in the repo.
-          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$HOME/.npmrc"
 
       - name: Publish all four packages at the shared version (immutability + provenance)
         # CORE-PUB-002: build the fail-closed publish plan from the release tag and
