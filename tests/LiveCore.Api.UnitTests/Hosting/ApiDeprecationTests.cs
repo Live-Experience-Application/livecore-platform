@@ -35,6 +35,37 @@ public class ApiDeprecationTests
     }
 
     [Fact]
+    public void The_minimum_deprecation_window_is_the_documented_180_days()
+    {
+        // The concrete, dated stability commitment (CORE-REL-002). ApiStabilityPolicyDocTests pins the docs to this
+        // same value; this asserts the code constant itself is the documented 180 days (six months).
+        Assert.Equal(180, ApiDeprecation.MinimumDeprecationWindowDays);
+        Assert.Equal(TimeSpan.FromDays(180), ApiDeprecation.MinimumDeprecationWindow);
+    }
+
+    [Fact]
+    public void DeprecationNotice_rejects_a_window_shorter_than_the_minimum()
+    {
+        // A deprecation date too close to the sunset (less than the documented window) cannot be constructed, so a
+        // route can never emit a Sunset/Deprecation pair that promises consumers less notice than the policy states.
+        var tooLate = _sunsetAt - ApiDeprecation.MinimumDeprecationWindow + TimeSpan.FromDays(1);
+        Assert.Throws<ArgumentException>(() => new DeprecationNotice(_sunsetAt, tooLate));
+    }
+
+    [Fact]
+    public void DeprecationNotice_accepts_a_window_at_or_above_the_minimum()
+    {
+        // Exactly the minimum window is allowed; a longer one (the default _deprecatedSince span) too.
+        var exactlyMinimum = _sunsetAt - ApiDeprecation.MinimumDeprecationWindow;
+
+        var atMinimum = new DeprecationNotice(_sunsetAt, exactlyMinimum);
+        Assert.Equal(exactlyMinimum, atMinimum.DeprecatedSince);
+
+        var aboveMinimum = new DeprecationNotice(_sunsetAt, _deprecatedSince);
+        Assert.Equal(_deprecatedSince, aboveMinimum.DeprecatedSince);
+    }
+
+    [Fact]
     public void DeprecationNotice_keeps_the_schedule()
     {
         var notice = new DeprecationNotice(_sunsetAt, _deprecatedSince);

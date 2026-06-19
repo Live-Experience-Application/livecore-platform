@@ -16,6 +16,17 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- A single API/SDK **stability policy and path to 1.0** (CORE-REL-002), documented
+  in `docs/23_PACKAGE_VERSIONING.md` so an adopter reads one clear policy before
+  building on the Core. It states the **public surface** the commitment covers (the
+  four `@livecore/*` packages plus the `/api/v1` runtime contract), the **pre-1.0
+  posture** (a breaking change is a MINOR bump while `0.y.z`; pin a caret range and
+  read the changelog), a **concrete deprecation window** of at least **180 days (six
+  months)** of RFC 8594 `Sunset`/`Deprecation` advance notice, and **what declaring
+  1.0 means** (full SemVer on that surface). The window is enforced, not just written
+  down: the server's `DeprecationNotice` refuses to construct a deprecation whose
+  deprecation-to-sunset gap is shorter than the documented 180 days, and a test pins
+  the code constant to the documented value. No published package surface changed.
 - Third-party attribution and a CI license-compliance gate (CORE-LIC-003). A
   generated `THIRD-PARTY-NOTICES.md` inventory (from `csv/third_party_notices.csv`)
   now ships in the container images (under `/licenses`) and in every package

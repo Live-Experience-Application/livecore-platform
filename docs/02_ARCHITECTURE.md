@@ -342,10 +342,13 @@ closes that gap:
   deprecated and the API then emits the RFC 8594 `Sunset` header (the date it is
   expected to stop responding) together with the `Deprecation` header, so a vertical
   gets the retirement date **before** the contract changes rather than discovering it
-  when a call breaks. The header mechanism and the exact format are documented in
-  `docs/08_API_CONTRACTS.md`; the headers are exposed to browser consumers via CORS
-  (CORE-DX-005). The convention and mechanism exist even though no route is deprecated
-  yet.
+  when a call breaks. The deprecation is held for at least the documented **minimum
+  window of 180 days (six months)** between deprecation and sunset — the enforced
+  stability commitment in `docs/23_PACKAGE_VERSIONING.md` ("API and SDK stability policy
+  and the path to 1.0", CORE-REL-002). The header mechanism and the exact format are
+  documented in `docs/08_API_CONTRACTS.md`; the headers are exposed to browser consumers
+  via CORS (CORE-DX-005). The convention and mechanism exist even though no route is
+  deprecated yet.
 
 ## Error format
 

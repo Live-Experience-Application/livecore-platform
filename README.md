@@ -709,6 +709,16 @@ upgrade semantics, the four published packages (`@livecore/contracts`,
 full process — what makes a major/minor/patch change, how a release is cut and
 how it is enforced — is documented in `docs/23_PACKAGE_VERSIONING.md`.
 
+Before building on the Core, read the single stability policy documented there
+(the section **"API and SDK stability policy and the path to 1.0"**, CORE-REL-002).
+It states the **public surface** the commitment covers (the four packages plus the
+`/api/v1` runtime contract), the **pre-1.0 posture** (a breaking change is a MINOR
+bump while `0.y.z`; pin a caret range and read the changelog), the **deprecation
+window** (at least **180 days / six months** of RFC 8594 `Sunset`/`Deprecation`
+advance notice, enforced by the server's `DeprecationNotice`), and **what declaring
+1.0 means** (full SemVer on that surface — a breaking change then needs a MAJOR bump
+and a new `/api/v2`, never an in-place break).
+
 Each package exports its release as a stable runtime value next to its
 `PACKAGE_NAME`, so a consumer can introspect exactly which Core release it is
 running against:
@@ -1844,15 +1854,21 @@ conventions close that gap:
   deprecated, and the response then carries the `Sunset` header (the IMF-fixdate the route
   is expected to stop responding) plus the `Deprecation` header (the token `true`, or the
   date deprecation took effect when known), so a vertical learns the retirement date
-  **before** the contract changes. Both headers describe only the route's own schedule — no
-  tenant/principal/resource content (threat T7) — and the CORS policy **exposes** them (with
-  the other browser-consumer headers, CORE-DX-005) so a cross-origin SDK can read them;
-  `@livecore/contracts` `ResponseHeaders` names `Deprecation` and `Sunset`.
+  **before** the contract changes. The deprecation is held for at least a **minimum window
+  of 180 days (six months)** between deprecation and sunset — the enforced stability
+  commitment (CORE-REL-002); the server's `DeprecationNotice` refuses a shorter window.
+  Both headers describe only the route's own schedule — no tenant/principal/resource content
+  (threat T7) — and the CORS policy **exposes** them (with the other browser-consumer
+  headers, CORE-DX-005) so a cross-origin SDK can read them; `@livecore/contracts`
+  `ResponseHeaders` names `Deprecation` and `Sunset`.
 
 The signal is strictly opt-in (only a flagged route emits the headers; a current route
 emits neither), and **no route is deprecated yet** — the policy and the mechanism are
 established ahead of the first deprecation. The header format and the additive-only rule
-are in `docs/08_API_CONTRACTS.md` and `docs/02_ARCHITECTURE.md`.
+are in `docs/08_API_CONTRACTS.md` and `docs/02_ARCHITECTURE.md`; the full stability policy
+(the public surface, the pre-1.0 posture, the deprecation window and what declaring 1.0
+means) is in `docs/23_PACKAGE_VERSIONING.md` ("API and SDK stability policy and the path to
+1.0").
 
 ### Current principal
 

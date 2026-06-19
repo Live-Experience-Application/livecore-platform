@@ -20,7 +20,9 @@ namespace LiveCore.Api.Hosting;
 ///   endpoint emit the RFC 8594 <c>Sunset</c> header (the IMF-fixdate the resource is expected to stop
 ///   responding) together with the <c>Deprecation</c> header (the boolean token <c>true</c>, or the IMF-fixdate
 ///   the deprecation took effect when one is known), so a consumer gets the retirement date BEFORE the contract
-///   changes.</item>
+///   changes. When the deprecation date is known the schedule must honor the documented minimum deprecation
+///   window (<see cref="MinimumDeprecationWindow"/>, CORE-REL-002), so the advance notice is the dated stability
+///   commitment in <c>docs/23_PACKAGE_VERSIONING.md</c>, not an arbitrary gap.</item>
 /// </list>
 ///
 /// The headers are advisory metadata about the RESOURCE: they carry no tenant, principal or resource content
@@ -48,6 +50,23 @@ public static class ApiDeprecation
     /// date as an IMF-fixdate instead.
     /// </summary>
     public const string DeprecatedTrueValue = "true";
+
+    /// <summary>
+    /// The concrete, documented deprecation window length in days (CORE-REL-002): the MINIMUM time a deprecation
+    /// must give consumers between the deprecation taking effect (<see cref="DeprecationNotice.DeprecatedSince"/>)
+    /// and the route's sunset (<see cref="DeprecationNotice.SunsetAt"/>). It is the dated stability commitment an
+    /// adopter plans a migration against — documented as the public-surface stability policy in
+    /// <c>docs/23_PACKAGE_VERSIONING.md</c> ("API and SDK stability policy and the path to 1.0").
+    /// </summary>
+    public const int MinimumDeprecationWindowDays = 180;
+
+    /// <summary>
+    /// The <see cref="MinimumDeprecationWindowDays"/> window as a <see cref="TimeSpan"/>. The RFC 8594
+    /// deprecation/sunset mechanism is TIED to this window: <see cref="DeprecationNotice"/> refuses to construct a
+    /// deprecation whose deprecation-to-sunset gap is shorter than this, so a route can never ship a window shorter
+    /// than the documented one.
+    /// </summary>
+    public static readonly TimeSpan MinimumDeprecationWindow = TimeSpan.FromDays(MinimumDeprecationWindowDays);
 
     /// <summary>
     /// Flags an endpoint (a single route via <c>RouteHandlerBuilder</c>, or a whole route group via
@@ -119,11 +138,13 @@ public sealed class DeprecationNotice
     /// </param>
     /// <param name="deprecatedSince">
     /// The instant the route became deprecated, if known. When omitted, the <c>Deprecation</c> header carries the
-    /// boolean token <c>true</c> rather than a date.
+    /// boolean token <c>true</c> rather than a date. When supplied, it must precede <paramref name="sunsetAt"/> by
+    /// at least the documented minimum deprecation window
+    /// (<see cref="ApiDeprecation.MinimumDeprecationWindow"/>, CORE-REL-002).
     /// </param>
     /// <exception cref="ArgumentException">
-    /// <paramref name="sunsetAt"/> is the default instant, or <paramref name="deprecatedSince"/> is not strictly
-    /// before <paramref name="sunsetAt"/>.
+    /// <paramref name="sunsetAt"/> is the default instant, or the deprecation-to-sunset gap from
+    /// <paramref name="deprecatedSince"/> is shorter than <see cref="ApiDeprecation.MinimumDeprecationWindow"/>.
     /// </exception>
     public DeprecationNotice(DateTimeOffset sunsetAt, DateTimeOffset? deprecatedSince = null)
     {
@@ -132,10 +153,15 @@ public sealed class DeprecationNotice
             throw new ArgumentException("A sunset instant is required.", nameof(sunsetAt));
         }
 
-        if (deprecatedSince is { } since && since >= sunsetAt)
+        // The RFC 8594 mechanism is tied to the documented stability commitment (CORE-REL-002): when the
+        // deprecation date is known, the gap to the sunset must be at least the minimum deprecation window, so a
+        // deprecation can never promise consumers less notice than docs/23_PACKAGE_VERSIONING.md states. This
+        // subsumes the older "strictly before the sunset" rule, since the window is a positive span.
+        if (deprecatedSince is { } since && sunsetAt - since < ApiDeprecation.MinimumDeprecationWindow)
         {
             throw new ArgumentException(
-                "Deprecation must take effect strictly before the sunset instant.",
+                "A deprecation must give consumers at least the minimum deprecation window of " +
+                $"{ApiDeprecation.MinimumDeprecationWindowDays} days between the deprecation date and the sunset instant.",
                 nameof(deprecatedSince));
         }
 

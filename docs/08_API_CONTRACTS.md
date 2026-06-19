@@ -356,7 +356,13 @@ is flagged deprecated, and the response then carries:
 | `Deprecation` | the boolean token `true`, or — when known — the IMF-fixdate deprecation took effect | the route is deprecated (in effect since the given date) |
 
 So a consumer gets the retirement date **before** the contract changes and can migrate
-ahead of the sunset. The two headers are advisory metadata about the route itself — they
+ahead of the sunset. The deprecation carries a **minimum window of 180 days (six months)**
+between the `Deprecation` date and the `Sunset` instant — the concrete, enforced stability
+commitment documented in `docs/23_PACKAGE_VERSIONING.md` ("API and SDK stability policy and
+the path to 1.0", CORE-REL-002). The window is tied to the mechanism: the server's
+`DeprecationNotice` refuses to construct a deprecation whose deprecation-to-sunset gap is
+shorter than that, so a `Sunset`/`Deprecation` pair can never promise less notice than the
+policy states. The two headers are advisory metadata about the route itself — they
 carry no tenant, principal or resource content, so they leak nothing (threat T7 in
 `docs/07_SECURITY_THREAT_MODEL.md`). They are **exposed via CORS**
 (`Access-Control-Expose-Headers`, CORE-DX-005) so a cross-origin browser/PWA SDK can read

@@ -149,6 +149,93 @@ them: a new route plus its SDK method is a **MINOR** addition (a new resource-cl
 method), classified by the same rule above, and the gate forces the SDK method into the
 same commit as the route.
 
+## API and SDK stability policy and the path to 1.0 (CORE-REL-002)
+
+The SemVer rules above say how a version *number* changes. This section is the single
+**stability commitment** an adopter reads before building on the Core: what the
+commitment covers, how much it can still change today, the advance notice a retirement
+carries, and what declaring **1.0** will change. It is deliberately concrete and dated so
+the pre-1.0 risk is **bounded**, not open-ended (the PO finding this story closes: the
+SemVer rules existed but the what-1.0-means and deprecation-window length did not, so an
+adopter building on `0.1.0` took an unbounded API-instability risk).
+
+### The public surface this policy covers
+
+The commitment covers exactly two surfaces, together the **public surface**:
+
+- **the four published packages' typed surface** — every export of
+  `@livecore/contracts`, `@livecore/sdk-ts`, `@livecore/design-tokens` and
+  `@livecore/ui-core` (DTOs, enums, transport constants, the SDK resource-client methods,
+  the design-token and UI-primitive contracts); and
+- **the runtime `/api/v1` HTTP + realtime contract** the packages are generated from and
+  typed against — the routes, request/response shapes, enum/event vocabularies and the
+  realtime hub contract (`docs/08_API_CONTRACTS.md`, `docs/02_ARCHITECTURE.md`).
+
+Everything else is explicitly **outside** the public surface and may change at any time
+without a SemVer event: the .NET API/worker **internals** and database schema, the private
+`examples/minimal-consumer`, and the `/openapi/v1.json` discovery endpoint (served outside
+Production only). The boundary matters because the stability promises below apply to the
+public surface and *only* to it.
+
+### Pre-1.0 posture (the current `0.y.z` releases)
+
+While the packages are pre-1.0 (`0.y.z`; today `0.1.0`), the public surface is **still
+stabilizing and may carry a breaking change**. The risk is bounded by four rules, not left
+to chance:
+
+- a breaking change is released as a **MINOR** bump (the SemVer-for-`0.y.z` rule under
+  "Semantic Versioning" above), **never** an in-place edit, and is always called out under
+  a `### Changed` or `### Removed` changelog heading;
+- the Core still evolves **additive-only between those breaking versions** — a new optional
+  field, export, endpoint or enum/event member is a normal additive (**MINOR**) change that
+  a pinned consumer absorbs without action;
+- a consumer should **pin a caret range** (for example `^0.1.0`) and **read the changelog
+  before upgrading**;
+- a retiring runtime route or field still emits the advance signal below, so even pre-1.0 a
+  removal is **not** a silent surprise.
+
+### The deprecation window — a concrete, enforced length
+
+A retirement is never immediate. When a runtime route or field is flagged deprecated it
+emits the RFC 8594 `Sunset` and `Deprecation` headers (the mechanism documented in
+`docs/02_ARCHITECTURE.md` — "Evolution, deprecation and sunset" — and
+`docs/08_API_CONTRACTS.md` — "API evolution"), and the deprecation carries a **minimum
+window of 180 days (six months)** between the deprecation taking effect (the `Deprecation`
+date) and the sunset instant (the `Sunset` date). That fixed length is the dated commitment
+an adopter plans a migration against.
+
+The window is **tied to the mechanism, not merely written here**: the server's
+`DeprecationNotice` (`apps/api/Hosting/ApiDeprecation.cs`,
+`ApiDeprecation.MinimumDeprecationWindow` / `MinimumDeprecationWindowDays = 180`) **refuses
+to construct** a deprecation whose deprecation-to-sunset gap is shorter than 180 days, so a
+route can never emit a `Sunset`/`Deprecation` pair promising a shorter window than this
+policy states. This is the **machine-checkable policy value** for the story: a unit test
+(`ApiStabilityPolicyDocTests`) asserts the code constant equals the 180-day value written
+here, and the `DeprecationNotice` tests assert a shorter window is rejected and a compliant
+one accepted — so the documented number and the enforced number cannot drift apart. On the
+package surface, the counterpart of the `Deprecation` header is a `### Deprecated` changelog
+heading (Keep a Changelog, below), entered at least one release before the breaking
+`### Removed` entry.
+
+### What declaring 1.0 means
+
+Declaring **1.0** is the commitment that the **public surface above is stable**. From 1.0
+on, full Semantic Versioning applies to it:
+
+- a **breaking change requires a MAJOR bump** (`2.0.0`) for the packages and a **new
+  runtime API version** (`/api/v2`) — never an in-place break of a `1.x` package surface or
+  of `/api/v1`;
+- **additive-only** evolution continues to ship as **MINOR** releases that a `1.x` / `v1`
+  consumer keeps compiling and running against unchanged;
+- the **deprecation window and the RFC 8594 headers become the guaranteed migration path**
+  for any retirement: a `1.x` surface or a `v1` route is deprecated, emits the headers and
+  is held for at least the documented window before a future MAJOR / `/api/v2` removes it.
+
+Until 1.0 is declared the **pre-1.0 posture above is in force**. Cutting the 1.0 release is
+mechanically the same as any release ("How to cut a release" below, paired with the
+release-cut story CORE-REL-001); this policy is what that version number will *mean* for an
+adopter.
+
 ## Lockstep releases
 
 The four packages are released **together** and always share a single version.
