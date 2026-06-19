@@ -45,10 +45,10 @@ namespace LiveCore.Api.IntegrationTests;
 /// The conflict semantics are PostgreSQL-specific (the <c>xmin</c> row-version token is mapped only on Npgsql, and
 /// a unique-violation rolls back only an in-flight transaction — see <see cref="LiveCoreDbContext"/>), so the
 /// truly-concurrent race runs only when the suite is on PostgreSQL (<see cref="PostgresTestDatabase.IsConfigured"/>).
-/// On the default SQLite path the same writers run SEQUENTIALLY (the shared connection cannot truly overlap): the
-/// second insert still collides with the first's committed unique row, so the same re-read branch is exercised —
-/// only without the true concurrency the PostgreSQL leg adds — keeping every test green on both providers. This
-/// mirrors <see cref="OptimisticConcurrencyTokenTests"/> and <see cref="RemainingAggregatesOptimisticConcurrencyTokenTests"/>.
+/// On a default local run (in-memory SQLite) these tests are reported as skipped-with-reason rather than silently
+/// passing green (CORE-TST-011), since the shared SQLite connection cannot truly overlap two writers; the CI
+/// integration-postgres leg supplies real concurrency and runs them for real. This mirrors
+/// <see cref="OptimisticConcurrencyTokenTests"/> and <see cref="RemainingAggregatesOptimisticConcurrencyTokenTests"/>.
 /// </para>
 ///
 /// <para>
@@ -76,9 +76,13 @@ public sealed class MoneyPathWriteConcurrencyTests
 
     // --- billing_account_link: two writers race the same purchase --------------
 
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_writers_racing_one_billing_account_link_resolve_to_a_single_link()
     {
+        // The truly-concurrent write race needs real PostgreSQL; on a default local run (SQLite) this is
+        // skipped-with-reason rather than silently passing green (CORE-TST-011). The CI leg runs it for real.
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
         using var client = factory.CreateClient();
 
@@ -114,9 +118,11 @@ public sealed class MoneyPathWriteConcurrencyTests
 
     // --- subject entitlement: two writers race the same (subject, entitlement) grant ---
 
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_writers_racing_one_subject_entitlement_grant_resolve_to_a_single_grant()
     {
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
         using var client = factory.CreateClient();
 
@@ -149,9 +155,11 @@ public sealed class MoneyPathWriteConcurrencyTests
 
     // --- purchase transaction: two writers race the same recording --------------
 
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_writers_racing_one_purchase_recording_resolve_to_a_single_transaction()
     {
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
         using var client = factory.CreateClient();
 
@@ -185,9 +193,11 @@ public sealed class MoneyPathWriteConcurrencyTests
 
     // --- purchase transaction: two writers race the same status change ----------
 
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_writers_racing_one_purchase_status_change_make_exactly_one_conflict_and_converge()
     {
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
         using var client = factory.CreateClient();
 
@@ -206,27 +216,17 @@ public sealed class MoneyPathWriteConcurrencyTests
         Assert.True(first.ChangeStatus(PurchaseTransactionStatus.Refunded, _at));
         Assert.True(second.ChangeStatus(PurchaseTransactionStatus.Refunded, _at));
 
-        if (PostgresTestDatabase.IsConfigured)
-        {
-            // Truly concurrent: the stale xmin no longer matches for the loser, so exactly one SaveChanges wins and
-            // exactly one fails loudly (a DbUpdateConcurrencyException, which UpdateAsync detaches-and-rethrows) —
-            // never a silent double-apply.
-            var committed = await Task.WhenAll(
-                Task.Run(() => AttemptStatusChangeAsync(contextA, first)),
-                Task.Run(() => AttemptStatusChangeAsync(contextB, second)));
+        // Truly concurrent: the stale xmin no longer matches for the loser, so exactly one SaveChanges wins and
+        // exactly one fails loudly (a DbUpdateConcurrencyException, which UpdateAsync detaches-and-rethrows) —
+        // never a silent double-apply.
+        var committed = await Task.WhenAll(
+            Task.Run(() => AttemptStatusChangeAsync(contextA, first)),
+            Task.Run(() => AttemptStatusChangeAsync(contextB, second)));
 
-            Assert.Single(committed, didCommit => didCommit);
-            Assert.Single(committed, didCommit => !didCommit);
-        }
-        else
-        {
-            // SQLite carries no xmin token, so the interleaving is last-write-wins and does not throw — confirming
-            // the Npgsql-only mapping does not break the default test provider.
-            await new PurchaseTransactionRepository(contextA).UpdateAsync(first, CancellationToken.None);
-            await new PurchaseTransactionRepository(contextB).UpdateAsync(second, CancellationToken.None);
-        }
+        Assert.Single(committed, didCommit => didCommit);
+        Assert.Single(committed, didCommit => !didCommit);
 
-        // Whatever the provider, the status changed EXACTLY ONCE: a fresh reader sees the single committed refund,
+        // The status changed EXACTLY ONCE: a fresh reader sees the single committed refund,
         // and the loser re-reading that row converges — a convergent retry of the same change is an idempotent
         // no-op (already Refunded), so no second revocation is ever applied.
         using var verifyScope = factory.Services.CreateScope();
@@ -238,9 +238,11 @@ public sealed class MoneyPathWriteConcurrencyTests
 
     // --- money path over HTTP: two buyers race the same receipt -----------------
 
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_apple_verifications_of_one_receipt_never_double_grant()
     {
+        ProviderGate.RequirePostgres();
+
         await using var factory = new FakeAppleVerifierApiFactory();
         await SeedPremiumPlanAsync(factory, _premiumProduct);
 
@@ -250,24 +252,11 @@ public sealed class MoneyPathWriteConcurrencyTests
         // Two DIFFERENT buyers submit the SAME receipt at the same time. The fake verifier derives the provider
         // transaction id from the proof alone, so both verify to the SAME purchase — a true cross-subject race
         // through the endpoint's explicit record + link + grant transaction (the money path end to end).
-        HttpStatusCode? statusA;
-        HttpStatusCode? statusB;
-        if (PostgresTestDatabase.IsConfigured)
-        {
-            var results = await Task.WhenAll(
-                Task.Run(() => SubmitAppleAsync(clientA, "shared-receipt", _premiumProduct)),
-                Task.Run(() => SubmitAppleAsync(clientB, "shared-receipt", _premiumProduct)));
-            statusA = results[0];
-            statusB = results[1];
-        }
-        else
-        {
-            // SQLite shares one connection, so two truly-concurrent HTTP requests cannot run; submit them
-            // sequentially (the existing cross-subject path). The no-double-grant invariant is identical; the TRUE
-            // race is exercised on the PostgreSQL CI leg.
-            statusA = await SubmitAppleAsync(clientA, "shared-receipt", _premiumProduct);
-            statusB = await SubmitAppleAsync(clientB, "shared-receipt", _premiumProduct);
-        }
+        var results = await Task.WhenAll(
+            Task.Run(() => SubmitAppleAsync(clientA, "shared-receipt", _premiumProduct)),
+            Task.Run(() => SubmitAppleAsync(clientB, "shared-receipt", _premiumProduct)));
+        var statusA = results[0];
+        var statusB = results[1];
 
         // Exactly one buyer won the receipt and was granted (200 OK). The other was denied — a clean 409 (its
         // link resolved to a cross-subject conflict), or, when the duplicate insert aborted its in-flight
@@ -294,23 +283,16 @@ public sealed class MoneyPathWriteConcurrencyTests
     // =====================================================================
 
     /// <summary>
-    /// Runs two colliding writers and returns both outcomes. On the PostgreSQL leg they run TRULY concurrently —
-    /// each on its own Npgsql connection — so the loser genuinely races the winner's committed unique row and its
-    /// <c>DbUpdateException -&gt; re-read -&gt; resolve</c> branch fires under real concurrency. On SQLite (one
-    /// shared connection that cannot overlap) they run sequentially; the second insert still collides with the
-    /// first's committed row, so the same branch is exercised without the true concurrency.
+    /// Runs two colliding writers TRULY concurrently — each on its own Npgsql connection — and returns both
+    /// outcomes, so the loser genuinely races the winner's committed unique row and its
+    /// <c>DbUpdateException -&gt; re-read -&gt; resolve</c> branch fires under real concurrency. The suite only
+    /// reaches this on the PostgreSQL leg; a default local run (in-memory SQLite) skips these tests with a
+    /// reason (CORE-TST-011).
     /// </summary>
     private static async Task<(T First, T Second)> RaceAsync<T>(Func<Task<T>> first, Func<Task<T>> second)
     {
-        if (PostgresTestDatabase.IsConfigured)
-        {
-            var results = await Task.WhenAll(Task.Run(first), Task.Run(second)).ConfigureAwait(false);
-            return (results[0], results[1]);
-        }
-
-        var firstResult = await first().ConfigureAwait(false);
-        var secondResult = await second().ConfigureAwait(false);
-        return (firstResult, secondResult);
+        var results = await Task.WhenAll(Task.Run(first), Task.Run(second)).ConfigureAwait(false);
+        return (results[0], results[1]);
     }
 
     /// <summary>

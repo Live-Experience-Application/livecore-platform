@@ -24,10 +24,10 @@ namespace LiveCore.Api.IntegrationTests;
 /// column, so the token is mapped ONLY on Npgsql (see
 /// <see cref="LiveCoreDbContext"/>). These tests therefore assert the conflict only
 /// when the suite runs against PostgreSQL (the CI <c>integration-postgres</c> job,
-/// <see cref="PostgresTestDatabase.IsConfigured"/>); on the SQLite path they instead
-/// assert that the same interleaving does NOT throw — proving the provider-conditional
-/// mapping leaves the SQLite path fully working — and that the single-writer happy
-/// path succeeds on both providers. The HTTP translation of the resulting
+/// <see cref="PostgresTestDatabase.IsConfigured"/>); on a default local run (in-memory
+/// SQLite) they are reported as skipped-with-reason rather than silently passing green
+/// (CORE-TST-011), since the read-modify-write conflict the token guards cannot occur
+/// without the Npgsql-only <c>xmin</c> mapping. The HTTP translation of the resulting
 /// <see cref="DbUpdateConcurrencyException"/> into a 409 is covered by the
 /// <c>ConcurrencyConflictMiddleware</c> unit tests; forcing a real conflict through
 /// the HTTP layer is inherently racy because each request loads and saves within one
@@ -39,9 +39,13 @@ public sealed class OptimisticConcurrencyTokenTests
 {
     private static readonly DateTimeOffset _commandTime = TestData.SeedTime.AddMinutes(5);
 
-    [Fact]
+    [SkippableFact]
     public async Task Interleaved_session_lifecycle_writes_make_the_second_writer_conflict()
     {
+        // The interleaved conflict needs the Npgsql-only xmin token; on a default local run (SQLite) this is
+        // skipped-with-reason rather than silently passing green (CORE-TST-011). The CI leg runs it for real.
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
 
         // Creating the client builds the host and provisions the test database.
@@ -79,22 +83,12 @@ public sealed class OptimisticConcurrencyTokenTests
         // silently overwriting the first.
         secondSession.Start(_commandTime);
 
-        if (PostgresTestDatabase.IsConfigured)
-        {
-            // The stale xmin no longer matches, so the second SaveChanges fails loudly
-            // instead of losing the first writer's update.
-            await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => secondContext.SaveChangesAsync());
-        }
-        else
-        {
-            // SQLite carries no xmin token, so the interleaving is last-write-wins and
-            // does not throw — confirming the Npgsql-only mapping does not break the
-            // default test provider.
-            await secondContext.SaveChangesAsync();
-        }
+        // The stale xmin no longer matches, so the second SaveChanges fails loudly
+        // instead of losing the first writer's update.
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => secondContext.SaveChangesAsync());
 
-        // Whatever the provider, the single-writer happy path is unaffected: a fresh
-        // reader can end the live session and commit successfully.
+        // The single-writer happy path is unaffected: a fresh reader can end the live
+        // session and commit successfully.
         using var thirdScope = factory.Services.CreateScope();
         var thirdContext = thirdScope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
         var liveSession = await thirdContext.Sessions.SingleAsync(session => session.Id == sessionId);
@@ -109,9 +103,11 @@ public sealed class OptimisticConcurrencyTokenTests
         Assert.Equal(SessionStatus.Ended, endedSession.Status);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Interleaved_reveal_and_hide_on_one_rule_make_the_second_writer_conflict()
     {
+        ProviderGate.RequirePostgres();
+
         await using var factory = new WorkspaceApiFactory();
 
         using var client = factory.CreateClient();
@@ -144,20 +140,15 @@ public sealed class OptimisticConcurrencyTokenTests
         // The hide raced on the stale snapshot.
         hideRule.ChangeVisibility(VisibilityState.Hidden, _commandTime);
 
-        if (PostgresTestDatabase.IsConfigured)
-        {
-            await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => hideContext.SaveChangesAsync());
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => hideContext.SaveChangesAsync());
 
-            // The conflict means the hide did NOT silently overwrite the reveal: the
-            // resource is left in the reveal's committed state, not stale-hidden.
-            using var verifyScope = factory.Services.CreateScope();
+        // The conflict means the hide did NOT silently overwrite the reveal: the
+        // resource is left in the reveal's committed state, not stale-hidden.
+        using (var verifyScope = factory.Services.CreateScope())
+        {
             var verifyContext = verifyScope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
             var rule = await verifyContext.VisibilityRules.SingleAsync(r => r.Id == ruleId);
             Assert.Equal(VisibilityState.Visible, rule.Visibility);
-        }
-        else
-        {
-            await hideContext.SaveChangesAsync();
         }
 
         // Single-writer happy path: a fresh reader can hide the resource and commit.

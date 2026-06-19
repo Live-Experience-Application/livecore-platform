@@ -55,19 +55,14 @@ public sealed class RedisBackplanePropagationTests
     private static readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    // The propagation test needs BOTH a shared PostgreSQL system of record (so every modeled instance sees the
-    // same seeded data) and a Redis/Valkey backplane (so a group send fans out across instances). With either
-    // absent it is skipped, exactly as the PostgreSQL-only coverage is skipped on a default local run.
-    private static bool ConfiguredForCrossInstance =>
-        PostgresTestDatabase.IsConfigured && RedisBackplaneTestServer.IsConfigured;
-
-    [Fact]
+    [SkippableFact]
     public async Task An_event_published_on_one_instance_reaches_a_client_connected_to_another_instance()
     {
-        if (!ConfiguredForCrossInstance)
-        {
-            return;
-        }
+        // The propagation test needs BOTH a shared PostgreSQL system of record (so every modeled instance sees
+        // the same seeded data) and a Redis/Valkey backplane (so a group send fans out across instances). With
+        // either absent this is skipped-with-reason on a default local run rather than silently passing green
+        // (CORE-TST-011); the CI integration-postgres leg supplies both and runs it for real.
+        ProviderGate.RequirePostgresAndRedisBackplane();
 
         RedisBackplaneTestServer.EnsureReachable();
 
@@ -108,13 +103,10 @@ public sealed class RedisBackplanePropagationTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_reveal_does_not_reach_an_instance_configured_with_a_different_channel_prefix()
     {
-        if (!ConfiguredForCrossInstance)
-        {
-            return;
-        }
+        ProviderGate.RequirePostgresAndRedisBackplane();
 
         RedisBackplaneTestServer.EnsureReachable();
 

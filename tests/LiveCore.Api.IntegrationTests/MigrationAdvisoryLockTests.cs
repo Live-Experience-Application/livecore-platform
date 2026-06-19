@@ -19,23 +19,21 @@ namespace LiveCore.Api.IntegrationTests;
 /// calls (the in-process analogue of two migrate processes); completing without throwing is each process
 /// "exiting 0". The tests run only when the suite is configured against real PostgreSQL
 /// (<see cref="PostgresTestDatabase.IsConfigured"/>, the CI <c>integration-postgres</c> job): a session
-/// advisory lock is a genuine PostgreSQL feature with no SQLite equivalent, so on the default SQLite path the
-/// tests no-op rather than asserting a behaviour the provider cannot exhibit — the same provider-gating the
-/// other PostgreSQL-only integration tests use. No credential lives in source: the database is a throwaway
+/// advisory lock is a genuine PostgreSQL feature with no SQLite equivalent, so on a default local run
+/// (in-memory SQLite) the tests are reported as skipped-with-reason rather than silently passing green
+/// (CORE-TST-011) — the same provider-gating the other PostgreSQL-only integration tests use. No credential
+/// lives in source: the database is a throwaway
 /// provisioned from the environment-supplied admin connection (threat T7).
 /// </para>
 /// </summary>
 public sealed class MigrationAdvisoryLockTests
 {
-    [Fact]
+    [SkippableFact]
     public async Task Two_concurrent_runners_against_an_empty_database_apply_the_schema_exactly_once()
     {
-        if (!PostgresTestDatabase.IsConfigured)
-        {
-            // SQLite path: PostgreSQL session advisory locks do not exist, so there is nothing to assert. The
-            // real concurrency behaviour is covered by the CI integration-postgres job.
-            return;
-        }
+        // SQLite has no PostgreSQL session advisory lock to assert against, so skip-with-reason on a default
+        // local run instead of silently passing green; the CI integration-postgres job runs it for real.
+        ProviderGate.RequirePostgres();
 
         var connectionString = PostgresTestDatabase.CreateEmptyDatabase();
         try
@@ -66,13 +64,10 @@ public sealed class MigrationAdvisoryLockTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_second_runner_blocks_until_the_first_holder_releases_the_advisory_lock()
     {
-        if (!PostgresTestDatabase.IsConfigured)
-        {
-            return;
-        }
+        ProviderGate.RequirePostgres();
 
         var connectionString = PostgresTestDatabase.CreateEmptyDatabase();
         using var cancellation = new CancellationTokenSource();

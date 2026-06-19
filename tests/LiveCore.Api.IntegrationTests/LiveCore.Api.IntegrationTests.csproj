@@ -25,6 +25,16 @@
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
+    <!-- Test-only: dynamic skip-with-reason for the provider-gated integration tests
+         (CORE-TST-011). xunit v2 (the line this suite pins) has no Assert.Skip - that
+         is an xunit v3 API - so a test that needs a real PostgreSQL/Redis provider could
+         only short-circuit with an early return, which a default local `dotnet test`
+         reports as a silent green PASS, hiding that the provider assertions never ran.
+         Xunit.SkippableFact is the standard xunit-ecosystem package for v2 dynamic skip
+         ([SkippableFact] + Skip.IfNot), so these tests report as Skipped-with-reason
+         locally and still run on the CI integration-postgres leg. It is test-only
+         (IsPackable=false) and adds no runtime/product dependency. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 
