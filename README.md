@@ -394,9 +394,18 @@ generated EF migrations excluded) and checks it against the floor. The gate is
 line-coverage regression below the floor fails the build. The enforced floor is
 **`-MinimumLineCoverage 90`**, set just below the **92.79%** production coverage
 measured when the gate was made blocking; ratchet it up toward the current
-coverage over time, never down. The gate logic — and that the CI job runs it
-blocking at the documented floor — is tested by `scripts/test-coverage-gate.ps1`.
-See `docs/14_TESTING_STRATEGY.md` ("Coverage measurement and the CI gate") and
+coverage over time, never down.
+
+The job also collects coverage on a **real Postgres + Valkey leg** so the
+provider-divergent branches that only run there — the Npgsql `xmin`
+optimistic-concurrency token, the advisory-lock migration runner and the
+Redis/Valkey realtime backplane — are coverage-counted instead of no-ops: it
+re-runs the integration and unit suites against service containers and the gate
+**merges** their reports with the SQLite-leg ones (CORE-TST-010). Merging only flips
+no-op lines to covered, so the floor stays blocking and unchanged. The gate logic —
+the Postgres-leg merge, and that the CI job runs the gate blocking at the documented
+floor — is tested by `scripts/test-coverage-gate.ps1`. See
+`docs/14_TESTING_STRATEGY.md` ("Coverage measurement and the CI gate") and
 `docs/17_DEFINITION_OF_DONE.md`.
 
 ### TypeScript packages

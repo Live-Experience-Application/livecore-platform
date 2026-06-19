@@ -154,6 +154,27 @@ in `scripts/LiveCoreCoverage.psm1`):
 The gate is **fail-closed**: no reports found, or a missing/malformed report,
 blocks rather than passing silently.
 
+### The Postgres/Redis leg (CORE-TST-010)
+
+`dotnet test LiveCore.slnx` (the local run and the SQLite collection step) runs on
+in-memory SQLite, so the **provider-divergent branches that only run on real
+PostgreSQL/Redis** — the Npgsql `xmin` optimistic-concurrency token, the
+advisory-lock migration runner and the Redis/Valkey realtime backplane — execute as
+**no-ops** and report *uncovered* there. They run blocking in the
+`integration-postgres` and `unit-smoke-postgres` jobs, but those legs collected no
+coverage, so the gated number understated the real exercise.
+
+The CI `coverage` job now also collects coverage on a **real Postgres + Valkey leg**:
+it re-runs the integration suite (the advisory-lock migration runner and the
+Redis/Valkey backplane propagation) and the unit suite (the `xmin` token,
+`ProviderDivergentConcurrencyTests`) against service containers with
+`LIVECORE_TEST_DB_PROVIDER=Postgres` and `LIVECORE_TEST_REDIS` set, writing their
+Cobertura reports into the same `TestResults/`. The gate then **merges** them with
+the SQLite-leg reports — a line covered on *either* leg counts once — so those
+branches are coverage-counted instead of no-ops. Merging only flips no-op lines to
+covered, so the gated number can rise, never fall: the floor stays **blocking** and
+**unchanged** (`-MinimumLineCoverage 90`); ratchet it up over time, never down.
+
 ### Staged enforcement: report-only, now blocking at the floor (CORE-TST-009)
 
 The gate followed the same staged posture as the supply-chain image scan: it
@@ -178,12 +199,17 @@ to raise over time.
 The gate logic is itself tested (`scripts/test-coverage-gate.ps1`, run first in
 the CI `coverage` job): a deliberately-untested new handler trips the threshold
 once blocking is enabled, coverage from several reports merges without double
-counting, and test/generated code is excluded. The same test also **asserts the
-enforced floor and the blocking posture** — coverage exactly at the floor passes
-and a hair below fails, and the CI `coverage` job invokes `assert-coverage.ps1`
-with no `-ReportOnly` and pins `-MinimumLineCoverage` to the documented `90` — so
-re-adding `-ReportOnly`, or moving the floor in `ci.yml` without updating the
-test and these docs, fails CI.
+counting, and test/generated code is excluded. It also proves the
+**Postgres/Redis-leg merge** (CORE-TST-010): a SQLite-leg report that leaves the
+provider-divergent lines uncovered would fail the gate alone, and merging the
+Postgres-leg report that covers them passes it — with the merge staying fail-closed
+— and it asserts the `coverage` job wires the Postgres + Valkey services and the
+`--collect` Postgres legs, so removing that collection (regressing the branches
+back to no-ops) fails CI. The same test also **asserts the enforced floor and the
+blocking posture** — coverage exactly at the floor passes and a hair below fails,
+and the CI `coverage` job invokes `assert-coverage.ps1` with no `-ReportOnly` and
+pins `-MinimumLineCoverage` to the documented `90` — so re-adding `-ReportOnly`, or
+moving the floor in `ci.yml` without updating the test and these docs, fails CI.
 
 ## Static analysis (SAST) and the CI gate (CORE-SEC-006)
 

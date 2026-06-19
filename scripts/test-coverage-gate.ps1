@@ -2,11 +2,13 @@
 
 <#
 .SYNOPSIS
-    Tests the code-coverage gate (CORE-TST-001, CORE-TST-009): a
+    Tests the code-coverage gate (CORE-TST-001, CORE-TST-009, CORE-TST-010): a
     deliberately-untested new handler trips the threshold once blocking is
     enabled, coverage from several reports is merged without double counting,
-    test/generated code is excluded from the production number, and the CI
-    coverage job runs the gate BLOCKING at the documented line-coverage floor.
+    test/generated code is excluded from the production number, the CI coverage
+    job MERGES a real Postgres/Redis leg so the provider-divergent branches are no
+    longer counted as no-ops, and the gate runs BLOCKING at the documented
+    line-coverage floor.
 
 .DESCRIPTION
     Pure-PowerShell assertions over LiveCoreCoverage.psm1 and assert-coverage.ps1
@@ -251,6 +253,79 @@ AssertTrue (-not $testOnlyGate.Passed) 'a report measuring no production line ne
 # --- Fail-closed: a malformed report is rejected, never waved through. ---
 AssertThrows { Get-LiveCoreCoverageModel -Content 'not xml <' } 'a malformed coverage report is rejected (fail-closed)'
 
+# --- CORE-TST-010: the gate merges the Postgres/Redis-leg coverage, so the
+# provider-divergent branches (xmin optimistic concurrency, advisory-lock migration,
+# Redis/Valkey backplane) that only run on real Postgres/Redis are no longer counted
+# as no-ops. The SQLite CI leg runs on a runner with no Postgres/Redis, so those
+# branches report UNCOVERED there; the integration-postgres / unit-smoke-postgres
+# legs exercise them. These two fixtures model the same production assembly across the
+# two legs. ---
+
+# SQLite leg: the provider-agnostic base (80 lines) is covered; the provider-divergent
+# token class (20 lines) is UNCOVERED, because its Postgres-only branch never runs
+# without a real Postgres/Redis. 80 of 100 -> 80%.
+$sqliteLegReport = @"
+<?xml version="1.0"?>
+<coverage version="1.9">
+  <packages>
+    <package name="LiveCore.Api">
+      <classes>
+        <class name="LiveCore.Api.SampleAggregate" filename="Sample/SampleAggregate.cs">
+          <lines>
+$(Get-CoberturaLineXml -From 1 -To 80 -Hits 1)
+          </lines>
+        </class>
+        <class name="LiveCore.Api.ProviderDivergentToken" filename="Persistence/ProviderDivergentToken.cs">
+          <lines>
+$(Get-CoberturaLineXml -From 1 -To 20 -Hits 0)
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"@
+
+# Postgres/Redis leg: the SAME provider-divergent token class is now COVERED, because
+# the xmin/advisory-lock/backplane branches actually run against real Postgres/Redis.
+$postgresLegReport = @"
+<?xml version="1.0"?>
+<coverage version="1.9">
+  <packages>
+    <package name="LiveCore.Api">
+      <classes>
+        <class name="LiveCore.Api.ProviderDivergentToken" filename="Persistence/ProviderDivergentToken.cs">
+          <lines>
+$(Get-CoberturaLineXml -From 1 -To 20 -Hits 1)
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"@
+
+$sqliteLegModel = Get-LiveCoreCoverageModel -Content $sqliteLegReport
+AssertEqual 100 $sqliteLegModel.LinesValid 'the SQLite leg measures all 100 production lines'
+AssertEqual 80 $sqliteLegModel.LinesCovered 'the SQLite leg leaves the 20 provider-divergent lines uncovered (no-ops without Postgres/Redis)'
+AssertEqual 80 $sqliteLegModel.LineCoveragePercent 'the SQLite leg alone reports 80% - the provider-divergent branches understate real exercise'
+
+$mergedLegModel = Get-LiveCoreCoverageModel -Content @($sqliteLegReport, $postgresLegReport)
+AssertEqual 100 $mergedLegModel.LinesValid 'merging the Postgres leg adds no new denominator lines (same assembly, de-duplicated)'
+AssertEqual 100 $mergedLegModel.LinesCovered 'merging the Postgres leg flips the provider-divergent lines to covered'
+AssertEqual 100 $mergedLegModel.LineCoveragePercent 'the merged number reflects the provider-divergent branches (no longer no-ops)'
+
+# The provider-divergent branches move the gated number across the floor: the SQLite
+# leg ALONE would fail a 90% gate; merging the Postgres-leg coverage passes it.
+$sqliteOnlyGate = Test-LiveCoreCoverageGate -Model $sqliteLegModel -MinimumLineCoveragePercent 90
+$mergedLegGate = Test-LiveCoreCoverageGate -Model $mergedLegModel -MinimumLineCoveragePercent 90
+AssertTrue (-not $sqliteOnlyGate.Passed) 'the SQLite leg alone fails the 90% gate (provider-divergent branches counted as no-ops)'
+AssertTrue ($mergedLegGate.Passed) 'merging the Postgres-leg coverage passes the 90% gate (the branches are exercised, not no-ops)'
+
+# Fail-closed survives the merge: a malformed Postgres-leg report blocks rather than
+# silently falling back to the SQLite-only number.
+AssertThrows { Get-LiveCoreCoverageModel -Content @($sqliteLegReport, 'not xml <') } 'a malformed Postgres-leg report is rejected alongside a good SQLite-leg report (fail-closed)'
+
 # --- End to end: the assert-coverage.ps1 CLI enforces the gate. ---
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("livecore-coverage-" + [System.Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $tempDir
@@ -325,6 +400,34 @@ if (Test-Path -LiteralPath $ciWorkflowPath) {
     }
 }
 
+# CORE-TST-010: the CI coverage job collects coverage on the Postgres/Redis leg and
+# the gate merges it, so the provider-divergent branches are coverage-counted, not
+# no-ops. Assert that wiring inside the `coverage:` job block (scoped so a Postgres
+# service in another job is not mistaken for it), so removing it - regressing those
+# branches back to no-ops in the gated number - fails CI.
+if (Test-Path -LiteralPath $ciWorkflowPath) {
+    $ciAllLines = @(Get-Content -LiteralPath $ciWorkflowPath)
+    $coverageStart = -1
+    for ($i = 0; $i -lt $ciAllLines.Count; $i++) {
+        if ($ciAllLines[$i] -match '^\s{2}coverage:\s*$') { $coverageStart = $i; break }
+    }
+    AssertTrue ($coverageStart -ge 0) 'ci.yml declares a coverage job'
+    if ($coverageStart -ge 0) {
+        # The block runs to the next top-level job header (a line indented exactly two
+        # spaces then a non-space); deeper-indented step/comment lines do not end it.
+        $coverageEnd = $ciAllLines.Count
+        for ($i = $coverageStart + 1; $i -lt $ciAllLines.Count; $i++) {
+            if ($ciAllLines[$i] -match '^\s{2}\S') { $coverageEnd = $i; break }
+        }
+        $coverageBlock = ($ciAllLines[$coverageStart..($coverageEnd - 1)]) -join "`n"
+        AssertTrue ($coverageBlock -match '(?m)^\s{6}postgres:\s*$') 'the coverage job declares a Postgres service so the provider-divergent branches run (CORE-TST-010)'
+        AssertTrue ($coverageBlock -match 'LIVECORE_TEST_DB_PROVIDER:\s*Postgres') 'the coverage job selects the PostgreSQL provider for the Postgres-leg coverage collection'
+        AssertTrue ($coverageBlock -match 'LIVECORE_TEST_REDIS') 'the coverage job points at a Redis/Valkey backplane so the backplane branch is coverage-counted'
+        AssertTrue ($coverageBlock -match 'IntegrationTests[^\r\n]*--collect') 'the coverage job collects coverage on the Postgres integration leg (advisory-lock + backplane branches)'
+        AssertTrue ($coverageBlock -match 'UnitTests[^\r\n]*--collect') 'the coverage job collects coverage on the Postgres unit leg (the xmin optimistic-concurrency branch)'
+    }
+}
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Coverage gate tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -333,5 +436,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, test/generated code is excluded, and the CI gate is blocking at the documented floor.' -ForegroundColor Green
+Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, test/generated code is excluded, the Postgres/Redis leg merges so the provider-divergent branches are coverage-counted, and the CI gate is blocking at the documented floor.' -ForegroundColor Green
 exit 0
