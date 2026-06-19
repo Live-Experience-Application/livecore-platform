@@ -60,6 +60,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [TypeScript design tokens package](#typescript-design-tokens-package)
     - [TypeScript UI core package](#typescript-ui-core-package)
     - [Worked consumer example (CORE-PUB-003)](#worked-consumer-example-core-pub-003)
+    - [Vertical adopter integration guide (CORE-DX-007)](#vertical-adopter-integration-guide-core-dx-007)
     - [Package versioning and changelog](#package-versioning-and-changelog)
     - [Boundary scan](#boundary-scan)
     - [Spec consistency check](#spec-consistency-check)
@@ -197,6 +198,12 @@ For configuration, the coverage/boundary/spec gates, the health and metrics
 endpoints, migrations and the full runtime reference, continue with
 [Build, format, lint, test and boundary scan](#build-format-lint-test-and-boundary-scan)
 and [Run the hosts locally](#run-the-hosts-locally).
+
+Building a **vertical app** on top of the Core? Start with the
+[Vertical adopter integration guide](docs/26_VERTICAL_ADOPTER_GUIDE.md) — a
+self-contained walk from installing the `@livecore` packages to authenticating,
+creating a workspace and session and driving a reveal end to end, without reading the
+full spec set.
 
 ## Owns
 
@@ -672,6 +679,25 @@ example can never reach internal `src/`. The `typescript` job's
 only the public entry points and that the compiled output is loadable. The example
 is `private` and never published — it is not one of the four released `@livecore`
 packages.
+
+### Vertical adopter integration guide (CORE-DX-007)
+
+The worked example above is the known-good _starting point_; the
+[Vertical adopter integration guide](docs/26_VERTICAL_ADOPTER_GUIDE.md) is the
+_self-contained getting-started path_ that builds on it. It walks a new vertical author
+end to end — install the `@livecore` packages, authenticate with an OIDC bearer token,
+construct the typed client, create an organization/workspace/session, and **drive a
+reveal** — so an adopter can succeed **without assembling the picture from the full spec
+set** first.
+
+The guide also states the disclosures an adopter must know up front: the
+AGPL/dual-license implication of importing any package (CORE-LIC-002, above), the
+operator-supplied adapters that **fail closed with `503` until configured** (the
+object-storage adapter for assets, and the receipt-verification adapter for purchases),
+the operator-owned at-rest-encryption and controller-owned consent/legal-basis
+responsibilities (`docs/25_PRIVACY_AND_DATA_PROTECTION.md`), and the documented
+deferrals (`docs/24_SPEC_CONSISTENCY.md`). It links the deeper specs for when depth is
+needed, not before.
 
 ### Package versioning and changelog
 

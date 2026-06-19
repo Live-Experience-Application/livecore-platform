@@ -13,6 +13,13 @@ LiveCore Core Platform. It does exactly what the documented quick start describe
 It exists so a vertical author has a known-good starting point — there was none
 before. Keep it minimal: it is a client/integration sample, **not** a product UI.
 
+> **Building a vertical on the Core?** This example is your _starting point_; the
+> self-contained [Vertical adopter integration guide](../../docs/26_VERTICAL_ADOPTER_GUIDE.md)
+> (CORE-DX-007) extends it end to end — from these install/authenticate steps through
+> creating a workspace and session to **driving a reveal** — and states the AGPL
+> implication, the operator-supplied adapters that fail closed with `503` until
+> configured, and the documented deferrals.
+
 ## Install (in your own repository)
 
 A vertical app in another repository installs the packages from the registry with
