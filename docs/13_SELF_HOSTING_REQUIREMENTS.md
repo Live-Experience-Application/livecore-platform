@@ -1388,6 +1388,7 @@ connection string lives in the repository** — it is runtime configuration only
 | --------------------------------------- | -------- | ------- | ------------------------------------------------------------------------------------ |
 | `Realtime__Backplane__ConnectionString` | for multi-instance | — | The Redis/Valkey connection string (StackExchange.Redis format). Unset = single-instance in-process backplane. |
 | `Realtime__Backplane__ChannelPrefix`    | no       | —       | Namespaces this deployment's SignalR pub/sub channels, so one Redis/Valkey instance can be shared (e.g. backplane + cache) without collisions. |
+| `Realtime__CrossInstanceEviction`       | no       | `true`  | Opt-out toggle for propagating realtime-connection evictions across replicas over this same backplane (CORE-RES-008); `false` reverts to the single-instance reconnect window. |
 
 Example (the self-hosted Valkey in the local Compose stack):
 
@@ -1399,6 +1400,31 @@ Realtime__Backplane__ChannelPrefix=livecore
 A managed/secured server uses the full StackExchange.Redis connection-string form, e.g.
 `Realtime__Backplane__ConnectionString="redis.example.com:6380,password=<secret>,ssl=true"`. All API
 instances must point at the **same** server (and the same channel prefix) for cross-instance delivery to work.
+
+### Cross-instance realtime-connection eviction (CORE-RES-008)
+
+When a user is demoted or removed mid-session their live realtime socket is **aborted** so it stops receiving
+events they are no longer authorized to see, not only when it reconnects (CORE-RTC-002, `docs/11_REALTIME_SYNC.md`).
+The connection registry that performs the abort is **per-process**, so on its own it tears down only the sockets
+held by the replica that handled the change; a socket the same user holds on **another** replica would linger until
+it reconnects (and with the collapsed audience delivery, CORE-PERF-001, that residual socket keeps receiving the
+shared audience deliveries).
+
+When a realtime backplane is configured (`Realtime:Backplane:ConnectionString`, above), the API also **propagates
+each eviction across the replicas** over that same Valkey/Redis server, on a dedicated pub/sub channel (namespaced by
+`Realtime:Backplane:ChannelPrefix` like the SignalR channels, and separate from both them and the
+authorization-cache invalidation channel). Every replica applies a received eviction to its own registry, so the
+demoted/removed user's socket is aborted across **all** replicas within a bounded window. This needs **no extra
+configuration** — it reuses the realtime backplane connection — and is on by default; set
+`Realtime:CrossInstanceEviction=false` to disable it and fall back to the single-instance reconnect window. The
+broadcast is **best-effort**: the local eviction always happens first, a dropped message only falls back to that
+reconnect window, and it can only ever evict **more** connections, never widen an audience (eviction only ever
+**removes** a connection, and a reconnecting client is re-authorized from scratch — fail-closed, **no new fail-open
+path**). A received eviction is applied locally only and never re-published (no echo), and the message carries only
+opaque surrogate ids (the tenant/workspace/session and the participant or subject id), never a display name, token or
+content (threat T7). A single-instance deployment configures no backplane and evicts its own held sockets exactly as
+before. It is the realtime-connection counterpart of the cross-instance authorization-cache invalidation
+(CORE-RES-007, above).
 
 ## Graceful shutdown and SignalR sticky-session affinity (CORE-DEP-002)
 
@@ -1600,6 +1626,7 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Assets:Storage:AccessKeyId`        | `Assets__Storage__AccessKeyId`     |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Assets:Storage:SecretAccessKey`    | `Assets__Storage__SecretAccessKey` |  yes   | for any media feature   | API, worker | Storage fail-closed; asset ops `503`                    |
 | `Realtime:Backplane:ConnectionString` | `Realtime__Backplane__ConnectionString` | yes | for multi-instance   | API         | In-process backplane (single instance only, CORE-OPS-007) |
+| `Realtime:CrossInstanceEviction`    | `Realtime__CrossInstanceEviction`  |   no   | no (tunable)            | API         | `true`; propagate realtime-connection evictions across replicas over the configured backplane (CORE-RES-008); `false` reverts to the single-instance reconnect window |
 | `Tracing:Otlp:Endpoint`             | `Tracing__Otlp__Endpoint`          |   no   | for trace export        | API         | Spans produced but not exported (no collector, CORE-OBS-003) |
 | `HealthChecks:Readiness:ProbeTimeout` | `HealthChecks__Readiness__ProbeTimeout` | no | no (tunable)         | API         | `00:00:02` per-probe bound for the live `/health/ready` dependency reachability probes; fail-closed (CORE-OBS-009) |
 | `Worker:Heartbeat:FilePath`         | `Worker__Heartbeat__FilePath`      |   no   | no                      | worker      | `<temp>/livecore-worker.heartbeat` (per-loop base path, CORE-DR-003) |

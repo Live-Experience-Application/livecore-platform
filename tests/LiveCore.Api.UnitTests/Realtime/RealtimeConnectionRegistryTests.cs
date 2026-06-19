@@ -224,6 +224,159 @@ public sealed class RealtimeConnectionRegistryTests
             () => registry.Register("conn", ParticipantSubject(Guid.NewGuid(), Guid.NewGuid()), null!));
     }
 
+    // --- Cross-instance propagation (CORE-RES-008) -------------------------------
+
+    [Fact]
+    public async Task Evicting_a_participant_broadcasts_the_participant_descriptor()
+    {
+        var backplane = new FakeEvictionBackplane();
+        var registry = new RealtimeConnectionRegistry(backplane);
+        var participantId = Guid.NewGuid();
+
+        await registry.EvictParticipantAsync(_org, _workspace, _session, participantId, CancellationToken.None);
+
+        // The local eviction is broadcast so a socket the same participant holds on another replica is aborted too.
+        Assert.Equal(
+            new[] { RealtimeConnectionEviction.ForParticipant(_org, _workspace, _session, participantId).Serialize() },
+            backplane.Published);
+    }
+
+    [Fact]
+    public async Task Evicting_a_member_broadcasts_the_member_descriptor()
+    {
+        var backplane = new FakeEvictionBackplane();
+        var registry = new RealtimeConnectionRegistry(backplane);
+        var userProfileId = Guid.NewGuid();
+
+        await registry.EvictWorkspaceMemberAsync(_org, _workspace, userProfileId, CancellationToken.None);
+
+        Assert.Equal(
+            new[] { RealtimeConnectionEviction.ForWorkspaceMember(_org, _workspace, userProfileId).Serialize() },
+            backplane.Published);
+    }
+
+    [Fact]
+    public async Task Evicting_an_empty_id_broadcasts_nothing()
+    {
+        var backplane = new FakeEvictionBackplane();
+        var registry = new RealtimeConnectionRegistry(backplane);
+
+        // An empty id can never address a real connection on any replica, so it is neither evicted nor broadcast.
+        await registry.EvictParticipantAsync(_org, _workspace, _session, Guid.Empty, CancellationToken.None);
+        await registry.EvictWorkspaceMemberAsync(_org, _workspace, Guid.Empty, CancellationToken.None);
+
+        Assert.Empty(backplane.Published);
+    }
+
+    [Fact]
+    public async Task A_demotion_on_one_instance_aborts_the_target_socket_on_a_second_instance()
+    {
+        // Two API replicas modeled as two registries sharing one backplane (an in-memory fake standing in for the
+        // Valkey/Redis pub/sub server). The demoted host's socket is held by instance B only.
+        var backplane = new FakeEvictionBackplane();
+        var instanceA = new RealtimeConnectionRegistry(backplane);
+        var instanceB = new RealtimeConnectionRegistry(backplane);
+
+        // Each replica's listener applies a peer's eviction to its OWN registry (the production wiring).
+        backplane.Subscribe(instanceA.ApplyRemoteEviction);
+        backplane.Subscribe(instanceB.ApplyRemoteEviction);
+
+        var demoted = Guid.NewGuid();
+        var target = Track(instanceB, "conn-host", MemberSubject(demoted));
+        // Precision bystander on B: the demoted subject's OWN participant connection is unchanged by a role change.
+        var bystander = Track(instanceB, "conn-participant", ParticipantSubject(Guid.NewGuid(), demoted));
+
+        // The demotion is handled on instance A, which holds no matching socket; the broadcast crosses to B.
+        await instanceA.EvictWorkspaceMemberAsync(_org, _workspace, demoted, CancellationToken.None);
+
+        Assert.True(target.Aborted);
+        Assert.False(bystander.Aborted);
+    }
+
+    [Fact]
+    public async Task A_participant_removal_on_one_instance_aborts_the_target_socket_on_a_second_instance()
+    {
+        var backplane = new FakeEvictionBackplane();
+        var instanceA = new RealtimeConnectionRegistry(backplane);
+        var instanceB = new RealtimeConnectionRegistry(backplane);
+        backplane.Subscribe(instanceA.ApplyRemoteEviction);
+        backplane.Subscribe(instanceB.ApplyRemoteEviction);
+
+        var participantId = Guid.NewGuid();
+        var target = Track(instanceB, "conn-target", ParticipantSubject(participantId, Guid.NewGuid()));
+        var bystander = Track(instanceB, "conn-other", ParticipantSubject(Guid.NewGuid(), Guid.NewGuid()));
+
+        await instanceA.EvictParticipantAsync(_org, _workspace, _session, participantId, CancellationToken.None);
+
+        Assert.True(target.Aborted);
+        Assert.False(bystander.Aborted);
+    }
+
+    [Fact]
+    public void A_received_eviction_is_applied_locally_and_never_rebroadcast()
+    {
+        var backplane = new FakeEvictionBackplane();
+        var registry = new RealtimeConnectionRegistry(backplane);
+        backplane.Subscribe(registry.ApplyRemoteEviction);
+
+        registry.ApplyRemoteEviction(
+            RealtimeConnectionEviction.ForWorkspaceMember(_org, _workspace, Guid.NewGuid()).Serialize());
+
+        // Applying a peer's eviction must NOT publish anything, or it would echo across the backplane forever.
+        Assert.Empty(backplane.Published);
+    }
+
+    [Fact]
+    public void A_received_participant_eviction_aborts_the_matching_local_socket()
+    {
+        var registry = new RealtimeConnectionRegistry();
+        var participantId = Guid.NewGuid();
+        var target = Track(registry, "conn-target", ParticipantSubject(participantId, Guid.NewGuid()));
+        var bystander = Track(registry, "conn-other", ParticipantSubject(Guid.NewGuid(), Guid.NewGuid()));
+
+        registry.ApplyRemoteEviction(
+            RealtimeConnectionEviction.ForParticipant(_org, _workspace, _session, participantId).Serialize());
+
+        Assert.True(target.Aborted);
+        Assert.False(bystander.Aborted);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-token")]
+    [InlineData("x:00000000000000000000000000000000")] // unknown kind prefix
+    [InlineData("m:00000000000000000000000000000000")] // member token missing segments
+    public void A_malformed_remote_eviction_aborts_nothing(string? token)
+    {
+        var registry = new RealtimeConnectionRegistry();
+        var connection = Track(registry, "conn", MemberSubject(Guid.NewGuid()));
+
+        registry.ApplyRemoteEviction(token!);
+
+        // A malformed/unrecognized token must never abort an unintended connection.
+        Assert.False(connection.Aborted);
+    }
+
+    [Theory]
+    [InlineData(true, false)] // foreign tenant
+    [InlineData(false, true)] // foreign workspace
+    public void A_received_member_eviction_for_a_foreign_scope_aborts_nothing(bool foreignOrg, bool foreignWorkspace)
+    {
+        var registry = new RealtimeConnectionRegistry();
+        var userProfileId = Guid.NewGuid();
+        var connection = Track(registry, "conn", MemberSubject(userProfileId));
+
+        // The descriptor carries the scope, so a token for another tenant/workspace aborts nothing (threats T1/T5).
+        registry.ApplyRemoteEviction(
+            RealtimeConnectionEviction.ForWorkspaceMember(
+                foreignOrg ? Guid.NewGuid() : _org,
+                foreignWorkspace ? Guid.NewGuid() : _workspace,
+                userProfileId).Serialize());
+
+        Assert.False(connection.Aborted);
+    }
+
     // --- Helpers -----------------------------------------------------------------
 
     private static RealtimeConnectionSubject ParticipantSubject(Guid participantId, Guid userProfileId)
@@ -244,6 +397,29 @@ public sealed class RealtimeConnectionRegistryTests
         var probe = new AbortProbe(throwOnAbort: true);
         registry.Register(connectionId, subject, probe.Abort);
         return probe;
+    }
+
+    /// <summary>
+    /// An in-memory stand-in for the Valkey/Redis pub/sub server shared by the modeled replicas (CORE-RES-008): a
+    /// publish records the descriptor and fans it out to every subscribed handler (as Redis delivers a published
+    /// message to every subscriber, including the publisher's own instance).
+    /// </summary>
+    private sealed class FakeEvictionBackplane : IRealtimeConnectionEvictionBackplane
+    {
+        private readonly List<Action<string>> _handlers = [];
+
+        public List<string> Published { get; } = [];
+
+        public void Publish(string evictionToken)
+        {
+            Published.Add(evictionToken);
+            foreach (var handler in _handlers.ToArray())
+            {
+                handler(evictionToken);
+            }
+        }
+
+        public void Subscribe(Action<string> onRemoteEviction) => _handlers.Add(onRemoteEviction);
     }
 
     /// <summary>A stand-in for a connection's abort handle that records whether (and how often) it was invoked.</summary>

@@ -85,6 +85,32 @@ public static class RealtimeServiceCollectionExtensions
         // forward now reaches connections on other instances; without it, only this instance's connections.
         services.AddSingleton<IRealtimeBackplane, InProcessRealtimeBackplane>();
 
+        // Cross-instance connection eviction (CORE-RES-008, the "Multi-Instance Runtime Correctness" epic). The
+        // registry's abort handle is an in-process HubCallerContext.Abort, so on its own an eviction aborts only the
+        // sockets THIS instance holds — a demoted/removed user keeps a live socket on another replica until it
+        // reconnects. When a Valkey/Redis backplane is configured (the SAME Realtime:Backplane:* connection the
+        // realtime fan-out uses) the registry PUBLISHES each eviction over a dedicated pub/sub channel and a
+        // RealtimeConnectionEvictionListener on every replica applies it to its own registry, so the socket is aborted
+        // across all replicas within a bounded window. It only ever causes MORE eviction (never less), the broadcast
+        // is best-effort (a failure falls back to the reconnect window — no new fail-open path), a received eviction
+        // is applied locally only and never re-published (no echo), and the descriptor carries only opaque surrogate
+        // ids (threat T7). With no backplane configured the no-op backplane is wired and single-instance behaviour is
+        // unchanged. It is the realtime-connection counterpart of the authorization-cache invalidation (CORE-RES-007).
+        var evictionOptions = RealtimeConnectionEvictionOptions.FromConfiguration(configuration);
+        if (evictionOptions.IsActive)
+        {
+            services.AddSingleton(evictionOptions);
+            services.AddSingleton<RedisRealtimeConnectionEvictionBackplane>();
+            services.AddSingleton<IRealtimeConnectionEvictionBackplane>(
+                sp => sp.GetRequiredService<RedisRealtimeConnectionEvictionBackplane>());
+            services.AddHostedService<RealtimeConnectionEvictionListener>();
+        }
+        else
+        {
+            services.AddSingleton<IRealtimeConnectionEvictionBackplane>(
+                NullRealtimeConnectionEvictionBackplane.Instance);
+        }
+
         // Connection re-authorization / eviction (CORE-RTC-002). The registry is the singleton record of the
         // live connections THIS instance holds: the SessionHub writes an admitted connection on connect and
         // clears it on disconnect, and the IRealtimeConnectionEvictor it implements aborts exactly the
@@ -92,8 +118,10 @@ public static class RealtimeServiceCollectionExtensions
         // receiving events they are no longer authorized to see, not only on reconnect). It only ever removes
         // a connection, so it can never widen an audience (threat T3). Registered UNCONDITIONALLY (no database
         // dependency) so the evictor seam is available to the persistence-conditional Sessions command that
-        // raises it; the same singleton instance backs both registrations.
-        services.AddSingleton<RealtimeConnectionRegistry>();
+        // raises it; the same singleton instance backs both registrations and propagates evictions over the
+        // eviction backplane selected above (CORE-RES-008).
+        services.AddSingleton<RealtimeConnectionRegistry>(
+            sp => new RealtimeConnectionRegistry(sp.GetRequiredService<IRealtimeConnectionEvictionBackplane>()));
         services.AddSingleton<IRealtimeConnectionEvictor>(sp => sp.GetRequiredService<RealtimeConnectionRegistry>());
 
         return options.IsConfigured;

@@ -3331,12 +3331,24 @@ Eviction **only ever removes** a connection — it never adds one to a group and
 can never widen an audience (threat T3). The authoritative re-admission stays the **same** connection resolver:
 an evicted client that reconnects is authorized from scratch (a demoted host re-joins only its new role's
 groups; a removed participant is denied), so this reuses the single authorization path rather than duplicating
-it. The registry tracks the connections of the instance it runs on (the abort handle is an in-process
-`HubCallerContext.Abort`), so it evicts on **that** instance immediately; propagating the eviction signal
-across instances (for the shared `:audience` group and for host/observer connections alike) is a documented
-follow-up — the same single-instance posture as the in-process backplane (`docs/11_REALTIME_SYNC.md`). The
-session-keyed groups and the per-event visibility gate still bound delivery to the correct session and rules
-on every instance, so a hidden event is never delivered regardless of instance count.
+it.
+
+**Cross-instance eviction (CORE-RES-008).** The abort handle is an in-process `HubCallerContext.Abort`, so each
+instance can only abort the connections **it** holds — without propagation a demoted/removed user keeps a live
+socket on another replica (including in the shared `:audience` group) until it reconnects. So after evicting its
+**own** held connections (always first and unconditionally), the registry **propagates** the eviction over the
+deployment's configured Valkey/Redis backplane — the **same** `Realtime:Backplane:*` connection the realtime
+fan-out uses — as an opaque descriptor (the tenant/workspace/session and the participant or subject id, surrogate
+ids only, never content — threat T7), and every replica's `RealtimeConnectionEvictionListener` applies it to its
+own registry, so the socket is aborted on **every** replica within a bounded window. The broadcast can only ever
+cause **more** eviction, never less (a dropped/best-effort-failed broadcast falls back to the previous reconnect
+window — never a widened audience and never a request error: **no new fail-open path**); a received eviction is
+applied **locally only** and never re-published (no echo); and with **no backplane configured** the no-op backplane
+is wired and single-instance behaviour is unchanged (the feature is on by default, revertible with
+`Realtime:CrossInstanceEviction=false`). It is the realtime-connection counterpart of the cross-instance
+authorization-cache invalidation (CORE-RES-007). The session-keyed groups and the per-event visibility gate still
+bound delivery to the correct session and rules on every instance, so a hidden event is never delivered regardless
+of instance count.
 
 ## Assets, storage and background jobs
 

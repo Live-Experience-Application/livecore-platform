@@ -227,16 +227,44 @@ the `RealtimeConnectionRegistry`):
   groups and a removed participant is denied (fail-closed) — the single authorization path, reused, not a
   parallel one.
 
-**Single-instance scope.** The registry holds only the connections of the instance it runs on (the abort
-handle is an in-process `HubCallerContext.Abort`), so it evicts a connection on **that** instance immediately.
-In a multi-instance deployment a connection held by another instance is evicted when that instance handles the
-same command. With the collapsed audience delivery (CORE-PERF-001) a departed participant is taken out of the
-audience by **eviction** (immediate on the instance holding the socket) rather than by a per-event
-active-participant re-gate, so cross-instance eviction — propagating the eviction signal over the backplane —
-is the documented follow-up for the shared `:audience` group as well as for host/observer connections, the
-same single-instance posture as the in-process backplane above. The session-keyed groups still bound delivery
-to the correct session on every instance, and the per-event visibility gate still bounds it to the rules of
-that session, so a hidden event is never delivered regardless of instance count.
+**Cross-instance eviction (CORE-RES-008).** The abort handle is an in-process `HubCallerContext.Abort`, so each
+instance can only abort the connections **it** holds. Without propagation a demoted/removed user keeps a live
+socket on **another** replica until it reconnects — and with the collapsed audience delivery (CORE-PERF-001) a
+departed participant is taken out of the shared `:audience` group by **eviction**, not by a per-event
+active-participant re-gate, so that residual socket would keep receiving audience deliveries it is no longer
+entitled to. So after evicting its **own** held connections (always first and unconditionally), the registry
+**propagates** the eviction over the deployment's configured Valkey/Redis backplane — the **same**
+`Realtime:Backplane:*` connection the realtime fan-out uses — as an opaque eviction descriptor
+(`RealtimeConnectionEviction`: the tenant/workspace/session and the participant or subject id, surrogate ids only,
+never content — threat T7). Every replica's `RealtimeConnectionEvictionListener` feeds received descriptors into
+`RealtimeConnectionRegistry.ApplyRemoteEviction`, which aborts the matching sockets **it** holds, so the
+demoted/removed user's socket is torn down on **every** replica within a bounded window. The properties that keep
+it fail-closed and unchanged for a single instance:
+
+- **The broadcast can only ever cause *more* eviction, never less.** The local eviction happens first and
+  unconditionally, so a dropped/failed broadcast merely falls back to the previous reconnect window — never a
+  widened audience and never a stale serve forever. The publish is **best-effort** and never throws, so a
+  backplane failure can never turn a successful demotion/removal into a request error (**no new fail-open path**).
+- **A received eviction is applied *locally only* and never re-published**, so it cannot echo across the backplane,
+  and a malformed/unrecognized descriptor is rejected defensively (it can never abort an unintended connection).
+- **Eviction still only ever *removes* a connection** — the authoritative re-admission stays the same resolver — so
+  propagating it never widens an audience (threat T3).
+- **With no backplane configured** (a single-instance deployment) the no-op eviction backplane is wired and
+  behaviour is **exactly as before**: the registry evicts its own held sockets and nothing is broadcast. The
+  feature is on by default and can be reverted to that posture with `Realtime:CrossInstanceEviction=false`
+  (`docs/13_SELF_HOSTING_REQUIREMENTS.md`).
+
+It is the realtime-connection counterpart of the cross-instance authorization-cache invalidation (CORE-RES-007),
+reusing the same backplane and the same fail-closed shape. The session-keyed groups still bound delivery to the
+correct session on every instance, and the per-event visibility gate still bounds it to the rules of that session,
+so a hidden event is never delivered regardless of instance count.
+
+**Cross-instance eviction is behaviorally tested.** The deterministic two-replica contract (a demotion/removal on
+one registry aborts the target socket on a second registry sharing one backplane; an unrelated connection is
+untouched; a received eviction is never re-published) is proven by the in-memory unit tests, and the production
+path is exercised end-to-end over the **real** Valkey/Redis backplane by `RedisRealtimeConnectionEvictionPropagationTests`
+(two API instances sharing one PostgreSQL system of record and the real backplane), which runs only when a backplane
+server is configured (the CI `integration-postgres` job, `LIVECORE_TEST_REDIS`); a default local run skips it.
 
 ## Offline/reconnect
 

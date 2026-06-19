@@ -5,6 +5,7 @@ using LiveCore.Api.Realtime;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace LiveCore.Api.UnitTests.Realtime;
 
@@ -122,5 +123,55 @@ public class RealtimeServiceCollectionExtensionsTests
         Assert.Throws<ArgumentNullException>(() => services.AddLiveCoreRealtime(null!));
         Assert.Throws<ArgumentNullException>(
             () => RealtimeServiceCollectionExtensions.AddLiveCoreRealtime(null!, new ConfigurationBuilder().Build()));
+    }
+
+    // --- Cross-instance connection eviction (CORE-RES-008) -----------------------
+
+    [Fact]
+    public void AddLiveCoreRealtime_uses_the_null_eviction_backplane_when_unconfigured()
+    {
+        var services = new ServiceCollection();
+
+        services.AddLiveCoreRealtime(new ConfigurationBuilder().Build());
+
+        // Single-instance default: the no-op eviction backplane is wired and no listener runs, so eviction stays
+        // local-only and nothing is broadcast (single-instance behaviour is unchanged).
+        var backplane = services.Single(d => d.ServiceType == typeof(IRealtimeConnectionEvictionBackplane));
+        Assert.Same(NullRealtimeConnectionEvictionBackplane.Instance, backplane.ImplementationInstance);
+        Assert.DoesNotContain(
+            services,
+            d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(RealtimeConnectionEvictionListener));
+    }
+
+    [Fact]
+    public void AddLiveCoreRealtime_wires_the_redis_eviction_backplane_and_listener_when_configured()
+    {
+        var services = new ServiceCollection();
+
+        services.AddLiveCoreRealtime(Configuration(new Dictionary<string, string?>
+        {
+            ["Realtime:Backplane:ConnectionString"] = "valkey:6379",
+        }));
+
+        // With a backplane configured the Redis-backed eviction backplane and the receive-side listener are wired, so
+        // a demotion/removal on one replica propagates to the others (CORE-RES-008). Descriptors are inspected without
+        // building the provider, so no Redis client is constructed and no connection is attempted.
+        Assert.Contains(services, d => d.ServiceType == typeof(RedisRealtimeConnectionEvictionBackplane));
+        Assert.Contains(services, d => d.ServiceType == typeof(IRealtimeConnectionEvictionBackplane));
+        Assert.Contains(
+            services,
+            d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(RealtimeConnectionEvictionListener));
+    }
+
+    [Fact]
+    public void AddLiveCoreRealtime_rejects_a_malformed_cross_instance_eviction_toggle()
+    {
+        var services = new ServiceCollection();
+
+        // A present-but-malformed toggle is rejected at startup rather than silently ignored.
+        Assert.Throws<InvalidOperationException>(() => services.AddLiveCoreRealtime(Configuration(new Dictionary<string, string?>
+        {
+            ["Realtime:CrossInstanceEviction"] = "maybe",
+        })));
     }
 }

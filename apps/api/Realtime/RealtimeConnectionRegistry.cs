@@ -18,12 +18,19 @@ namespace LiveCore.Api.Realtime;
 /// new role's groups; a removed participant is denied) — the single authorization path, reused. Eviction only
 /// ever REMOVES a connection, so it can never widen an audience (threat T3 in docs/07_SECURITY_THREAT_MODEL.md).
 ///
-/// SINGLE-INSTANCE SCOPE. The registry holds only the connections of the instance it runs on (the abort handle
-/// is an in-process <c>HubCallerContext.Abort</c>), so it evicts a connection on THIS instance immediately. In
-/// a multi-instance deployment a connection on another instance is evicted when that instance handles the same
-/// command, or — as the always-on backstop — by the per-event recipient computation that already re-gates the
-/// participant audience fan-out; cross-instance host/observer eviction is a documented follow-up, the same
-/// single-instance posture as the in-process backplane (docs/11_REALTIME_SYNC.md "Scale-out").
+/// CROSS-INSTANCE PROPAGATION (CORE-RES-008). The abort handle is an in-process <c>HubCallerContext.Abort</c>, so
+/// each instance can only abort the connections IT holds — without propagation a demoted/removed user keeps a live
+/// socket on another replica until it reconnects. So after evicting its OWN held connections (always first and
+/// unconditionally), the registry PUBLISHES an opaque eviction descriptor (<see cref="RealtimeConnectionEviction"/>)
+/// over the configured <see cref="IRealtimeConnectionEvictionBackplane"/> — the same Valkey/Redis backplane the
+/// realtime fan-out uses — and every replica's <see cref="RealtimeConnectionEvictionListener"/> feeds received
+/// descriptors into <see cref="ApplyRemoteEviction"/>, so the socket is aborted on every replica within a bounded
+/// window. The broadcast is best-effort and can only ever cause MORE eviction (never less), so a dropped message
+/// merely falls back to the pre-CORE-RES-008 reconnect window and never widens an audience (no new fail-open path).
+/// A received eviction is applied LOCALLY ONLY and never re-published, so it cannot echo across the backplane. With
+/// no backplane configured the <see cref="NullRealtimeConnectionEvictionBackplane"/> no-op keeps single-instance
+/// behaviour unchanged (docs/11_REALTIME_SYNC.md "Connection re-authorization and eviction"). It is the
+/// realtime-connection counterpart of the authorization-cache invalidation backplane (CORE-RES-007).
 ///
 /// It is registered as a SINGLETON (it outlives any request) and is safe for concurrent access from hub
 /// connect/disconnect callbacks and command threads (a <see cref="ConcurrentDictionary{TKey,TValue}"/> keyed
@@ -35,6 +42,18 @@ internal sealed class RealtimeConnectionRegistry : IRealtimeConnectionEvictor
     // Keyed by SignalR connection id (unique per live connection). The value carries the connection's
     // authorized facts (the match key for eviction) and an in-process abort handle.
     private readonly ConcurrentDictionary<string, Entry> _connections = new(StringComparer.Ordinal);
+
+    // The cross-instance propagation seam (CORE-RES-008). The no-op default means a registry constructed without a
+    // backplane (single-instance / unit tests) behaves exactly as before: local eviction only, nothing broadcast.
+    private readonly IRealtimeConnectionEvictionBackplane _backplane;
+
+    /// <summary>
+    /// Creates the registry over the given cross-instance eviction <paramref name="backplane"/>. A null backplane
+    /// (the single-instance default, and the unit-test default) uses the <see cref="NullRealtimeConnectionEvictionBackplane"/>
+    /// no-op, so eviction stays local-only and nothing is broadcast.
+    /// </summary>
+    public RealtimeConnectionRegistry(IRealtimeConnectionEvictionBackplane? backplane = null)
+        => _backplane = backplane ?? NullRealtimeConnectionEvictionBackplane.Instance;
 
     /// <summary>
     /// The number of live connections currently tracked on this instance. A diagnostic accessor only — never
@@ -83,20 +102,19 @@ internal sealed class RealtimeConnectionRegistry : IRealtimeConnectionEvictor
         Guid participantId,
         CancellationToken cancellationToken)
     {
-        // A participant connection is matched by the full tenant/workspace/session/participant tuple, so a
-        // participant with the same id under another session/workspace/tenant (which cannot share a row but
-        // guards the caller's intent) is never evicted (threats T1/T5). An empty id can never address a real
-        // participant, so it matches nothing.
+        // An empty id can never address a real participant on any replica, so it matches nothing and is not
+        // broadcast (a peer would only reject it defensively anyway).
         if (participantId == Guid.Empty)
         {
             return Task.CompletedTask;
         }
 
-        EvictWhere(entry =>
-            entry.Subject.ParticipantId == participantId
-            && entry.Subject.SessionId == sessionId
-            && entry.Subject.WorkspaceId == workspaceId
-            && entry.Subject.OrganizationId == organizationId);
+        // Evict the sockets THIS instance holds first and unconditionally, then broadcast best-effort so a socket
+        // the same participant holds on another replica is aborted too (CORE-RES-008). A failed/dropped broadcast
+        // only falls back to the pre-CORE-RES-008 reconnect window — never a widened audience.
+        EvictParticipantLocal(organizationId, workspaceId, sessionId, participantId);
+        _backplane.Publish(
+            RealtimeConnectionEviction.ForParticipant(organizationId, workspaceId, sessionId, participantId).Serialize());
 
         return Task.CompletedTask;
     }
@@ -108,12 +126,74 @@ internal sealed class RealtimeConnectionRegistry : IRealtimeConnectionEvictor
         Guid userProfileId,
         CancellationToken cancellationToken)
     {
-        // A member connection is matched by tenant + workspace + subject AND only when it is NOT a participant
-        // connection (a membership role change does not affect the subject's separate participant standing).
-        // An empty subject id can never address a real member, so it matches nothing.
+        // An empty subject id can never address a real member on any replica, so it matches nothing and is not
+        // broadcast.
         if (userProfileId == Guid.Empty)
         {
             return Task.CompletedTask;
+        }
+
+        // Local eviction first and unconditionally, then best-effort cross-instance propagation (CORE-RES-008): a
+        // demoted member's host/observer socket held by another replica is aborted there too.
+        EvictWorkspaceMemberLocal(organizationId, workspaceId, userProfileId);
+        _backplane.Publish(
+            RealtimeConnectionEviction.ForWorkspaceMember(organizationId, workspaceId, userProfileId).Serialize());
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Applies an eviction a PEER replica broadcast (CORE-RES-008): aborts only the matching connections THIS
+    /// instance holds. It deliberately does NOT re-publish (that would echo forever across the backplane), and it
+    /// ignores a malformed or unrecognized token defensively, so a stray message can never abort an unintended
+    /// connection. Called by the <see cref="RealtimeConnectionEvictionListener"/> on every message received from the
+    /// backplane.
+    /// </summary>
+    public void ApplyRemoteEviction(string evictionToken)
+    {
+        if (!RealtimeConnectionEviction.TryParse(evictionToken, out var eviction))
+        {
+            return;
+        }
+
+        // Local-only: do NOT publish, or a received eviction would echo back across the backplane forever.
+        switch (eviction.Kind)
+        {
+            case RealtimeConnectionEvictionKind.Participant:
+                EvictParticipantLocal(
+                    eviction.OrganizationId, eviction.WorkspaceId, eviction.SessionId, eviction.SubjectId);
+                break;
+            case RealtimeConnectionEvictionKind.WorkspaceMember:
+                EvictWorkspaceMemberLocal(eviction.OrganizationId, eviction.WorkspaceId, eviction.SubjectId);
+                break;
+        }
+    }
+
+    // Aborts the participant's connections held by THIS instance. A participant connection is matched by the full
+    // tenant/workspace/session/participant tuple, so a participant with the same id under another
+    // session/workspace/tenant is never evicted (threats T1/T5). An empty id matches nothing.
+    private void EvictParticipantLocal(Guid organizationId, Guid workspaceId, Guid sessionId, Guid participantId)
+    {
+        if (participantId == Guid.Empty)
+        {
+            return;
+        }
+
+        EvictWhere(entry =>
+            entry.Subject.ParticipantId == participantId
+            && entry.Subject.SessionId == sessionId
+            && entry.Subject.WorkspaceId == workspaceId
+            && entry.Subject.OrganizationId == organizationId);
+    }
+
+    // Aborts the member's host/observer connections held by THIS instance. Matched by tenant + workspace + subject
+    // AND only when NOT a participant connection (a membership role change does not affect the subject's separate
+    // participant standing). An empty subject id matches nothing.
+    private void EvictWorkspaceMemberLocal(Guid organizationId, Guid workspaceId, Guid userProfileId)
+    {
+        if (userProfileId == Guid.Empty)
+        {
+            return;
         }
 
         EvictWhere(entry =>
@@ -121,8 +201,6 @@ internal sealed class RealtimeConnectionRegistry : IRealtimeConnectionEvictor
             && entry.Subject.UserProfileId == userProfileId
             && entry.Subject.WorkspaceId == workspaceId
             && entry.Subject.OrganizationId == organizationId);
-
-        return Task.CompletedTask;
     }
 
     /// <summary>
