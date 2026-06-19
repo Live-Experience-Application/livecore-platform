@@ -8,7 +8,7 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
-## [Unreleased]
+## [0.2.0] - 2026-06-19
 
 ### Changed
 

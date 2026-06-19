@@ -12,7 +12,14 @@ detail; this root file is the workspace-level summary. The .NET API and worker
 hosts are not published packages and are not versioned here. See
 `docs/23_PACKAGE_VERSIONING.md` for the full versioning and changelog process.
 
-## [Unreleased]
+## [0.2.0] - 2026-06-19
+
+This release cuts the large body of work merged since `0.1.0` into one dated,
+lockstepped version across all four `@livecore/*` packages (CORE-REL-001). The
+operator publishes it by pushing the matching `v0.2.0` git tag, which triggers
+the tag-gated CI publish pipeline (`publish` and `publish-packages`); the gates
+assert the tag equals this shared package version before anything ships
+(`docs/23_PACKAGE_VERSIONING.md`, "How to cut a release").
 
 ### Added
 

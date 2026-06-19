@@ -5,7 +5,7 @@
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4.svg)](https://dotnet.microsoft.com/)
 [![Node.js](https://img.shields.io/badge/Node.js-22-339933.svg)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10-F69220.svg)](https://pnpm.io/)
-[![Packages](https://img.shields.io/badge/packages-0.1.0-blue.svg)](CHANGELOG.md)
+[![Packages](https://img.shields.io/badge/packages-0.2.0-blue.svg)](CHANGELOG.md)
 
 Generic Core Platform for live, role-aware, scene-based interactive sessions.
 

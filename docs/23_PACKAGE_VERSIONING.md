@@ -277,9 +277,20 @@ vertical domain language (`AGENTS.md`).
 3. Update the `VERSION` constant in each `packages/*/src/index.ts` to match.
 4. Add a `## [<version>] - <date>` entry to each affected package's
    `CHANGELOG.md` and to the root `CHANGELOG.md`.
-5. Run the full local CI-equivalent (`README.md`). The package-build tests fail
-   if `VERSION`, `package.json` and the changelog top entry disagree, so version
-   drift cannot ship.
+5. Regenerate the third-party attribution inventory
+   (`pwsh -NoProfile -File scripts/generate-third-party-notices.ps1 -Write`) so
+   `THIRD-PARTY-NOTICES.md` and the per-package copies stay current with the
+   shipping dependency set, and run the full local CI-equivalent (`README.md`).
+   The package-build tests fail if `VERSION`, `package.json` and the changelog top
+   entry disagree, so version drift cannot ship.
+6. Commit the bump and merge it to `main`. The commit is the release cut
+   (CORE-REL-001); it prepares everything but pushes no tag. **The operator then
+   pushes the matching `v<MAJOR>.<MINOR>.<PATCH>` git tag** (for example
+   `git tag v0.2.0 && git push origin v0.2.0`), which is the single manual step
+   that triggers the tag-gated CI `publish` and `publish-packages` jobs. Those
+   jobs run `scripts/assert-release-version.ps1` first, so a tag that does not
+   equal the shared package version fails the publish before anything ships
+   ("Release-tag and package-version consistency" above).
 
 ## Enforcement
 

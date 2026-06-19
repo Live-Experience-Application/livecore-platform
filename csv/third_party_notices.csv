@@ -1,6 +1,6 @@
 ecosystem,component,version,license,copyright,source_url,kind,notes
-nuget,AWSSDK.S3,3.7.305.22,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,direct,S3-compatible asset storage SigV4 pre-signing and object delete (CORE-OPS-006).
-nuget,AWSSDK.Core,3.7.x,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,transitive,Core runtime of the AWS SDK pulled in by AWSSDK.S3.
+nuget,AWSSDK.S3,4.0.25.1,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,direct,S3-compatible asset storage SigV4 pre-signing and object delete (CORE-OPS-006).
+nuget,AWSSDK.Core,4.0.x,Apache-2.0,"Amazon.com, Inc. or its affiliates",https://github.com/aws/aws-sdk-net,transitive,Core runtime of the AWS SDK pulled in by AWSSDK.S3.
 nuget,Microsoft.AspNetCore.Authentication.JwtBearer,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,OIDC JWT bearer validation (docs/adr/0005).
 nuget,Microsoft.AspNetCore.OpenApi,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,OpenAPI document generation for the v1 API (CORE-OAS-001).
 nuget,Microsoft.AspNetCore.SignalR.StackExchangeRedis,10.0.9,MIT,Microsoft Corporation,https://github.com/dotnet/aspnetcore,direct,SignalR Redis/Valkey backplane for realtime scale-out (CORE-OPS-007).

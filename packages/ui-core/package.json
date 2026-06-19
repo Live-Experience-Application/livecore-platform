@@ -1,6 +1,6 @@
 {
   "name": "@livecore/ui-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Generic, product-neutral UI primitive contracts for LiveCore vertical apps: the variant vocabularies (tone, size, emphasis, surface level, layout), the typed prop shape of each generic primitive and the pure variant-resolution defaults. Framework-agnostic and types-first; verticals render the actual components.",
   "license": "AGPL-3.0-or-later",
   "repository": {

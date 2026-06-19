@@ -138,7 +138,13 @@ test("a single-package version bump is rejected (seeded drift)", () => {
   // new version (its OWN triple stays self-consistent) while the others stay
   // behind. The cross-package check must catch the disagreement.
   const seeded = structuredClone(actual);
-  const bumped = "0.2.0";
+  // A synthetic "next" version for the one bumped package, derived to ALWAYS
+  // differ from whatever shared version the packages are really on today (bump the
+  // major), so this seeded-drift case can never collide with the actual release
+  // version (it previously hard-coded "0.2.0", which broke once the real release
+  // reached 0.2.0).
+  const [major] = seeded.packages[1].manifestVersion.split(".");
+  const bumped = `${Number(major) + 1}.0.0`;
   assert.notEqual(seeded.packages[1].manifestVersion, bumped);
   seeded.packages[1].manifestVersion = bumped;
   seeded.packages[1].exportedVersion = bumped;

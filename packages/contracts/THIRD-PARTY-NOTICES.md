@@ -12,14 +12,14 @@ Upstream source: https://github.com/Live-Experience-Application/livecore-platfor
 
 ## NuGet (.NET) runtime dependencies
 
-### AWSSDK.Core 3.7.x
+### AWSSDK.Core 4.0.x
 
 - License: Apache-2.0
 - Copyright: Amazon.com, Inc. or its affiliates
 - Source: https://github.com/aws/aws-sdk-net
 - Notes: Core runtime of the AWS SDK pulled in by AWSSDK.S3.
 
-### AWSSDK.S3 3.7.305.22
+### AWSSDK.S3 4.0.25.1
 
 - License: Apache-2.0
 - Copyright: Amazon.com, Inc. or its affiliates
