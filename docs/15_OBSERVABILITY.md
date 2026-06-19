@@ -561,8 +561,8 @@ is *configured*), readiness makes a **live, short-bounded probe** of each
 
 | Probe                | What it checks                                                        |
 | -------------------- | -------------------------------------------------------------------- |
-| `oidc-discovery`     | a GET of the OIDC provider's `.well-known/openid-configuration` answers |
-| `object-storage`     | the S3-compatible backend answers (an account-level call round-trips) |
+| `oidc-discovery`     | a GET of the OIDC provider's `.well-known/openid-configuration` answers with success |
+| `object-storage`     | an account-level call to the S3-compatible backend answers **with success** (a `403`/`5xx` fails closed, CORE-OBS-014) |
 | `realtime-backplane` | the Redis/Valkey backplane answers a `PING`                          |
 
 So a host with a healthy database but a **dead** critical dependency reports
@@ -594,6 +594,24 @@ and **fails closed** — a read that errors or times out is counted not-ready. T
 response stays **status-only**, so which migrations are missing never leaks
 (threat T7), and `/health/live` stays shallow and unaffected (a stale schema never
 restarts a live process).
+
+### The object-storage probe fails closed on a 403/5xx (CORE-OBS-014)
+
+The `object-storage` reachability probe (table above) issues an account-level call
+and **fails closed**, the same semantics as the `oidc-discovery` probe: only a
+**successful** answer keeps the host Ready, while a non-success answer — an **auth
+error** (`403`, for example expired or revoked credentials) or a **server error**
+(`5xx`) — counts the host **not-ready** exactly as a transport failure does, so a
+*reachable-but-broken* backend leaves the rotation rather than advertising Ready
+while every asset upload/download would fail. Before CORE-OBS-014 the probe failed
+**open** on any HTTP answer — it treated only a no-response transport failure (HTTP
+status `0`) as not-ready — so a host whose storage credentials had **expired** kept
+taking traffic it could not serve, inconsistent with the fail-closed OIDC probe. The
+probe reads **only when storage is configured** (it is registered only for a
+configured backend; the fail-closed unconfigured storage is never read against), the
+read stays bounded by the short readiness timeout (CORE-RES-005) and the
+unauthenticated response stays **status-only**, so which dependency is unreachable
+never leaks (threat T7).
 
 ### The worker's liveness and readiness (CORE-OBS-013)
 
