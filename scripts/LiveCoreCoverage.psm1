@@ -5,7 +5,8 @@
     Code-coverage gate logic for the LiveCore test suite (CORE-TST-001): merges
     one or more Cobertura coverage reports into a single production
     line-coverage number and decides whether it meets a configured minimum
-    threshold.
+    threshold. It also surfaces a production branch-coverage number alongside the
+    line number (CORE-TST-012), report-only.
 
 .DESCRIPTION
     CI collects coverage with the already-referenced coverlet.collector
@@ -24,6 +25,16 @@
         (a path under a Migrations directory) are excluded from the denominator,
         so the gate measures hand-written production code rather than generated or
         test code.
+
+    Branch coverage (CORE-TST-012) is merged the same way: a Cobertura branch
+    point is a `<line branch="true" condition-coverage="P% (covered/total)">`, so
+    the (covered/total) fraction is summed across the same de-duplicated production
+    lines (taking the maximum covered count per line across reports). This exposes
+    an untested branch on an otherwise line-covered line - a covered multi-condition
+    `if` that the line number alone hides. The branch number is REPORT-ONLY: it is
+    surfaced on the model but the gate decision (Test-LiveCoreCoverageGate) stays
+    line-only, so the line gate is unchanged and still fail-closed; a follow-up can
+    ratchet a branch floor once a baseline is set.
 
     Fail-closed: a missing or malformed report throws, and a report set that
     measures no production line is never a pass.
@@ -57,8 +68,12 @@ function Get-LiveCoreCoverageModel {
         a single de-duplicated, production-focused line-coverage model.
     .OUTPUTS
         A PSCustomObject with LinesCovered (int), LinesValid (int),
-        LineCoveragePercent (double, 0..100) and Assemblies (the measured
-        assembly names).
+        LineCoveragePercent (double, 0..100), BranchesCovered (int),
+        BranchesValid (int), BranchCoveragePercent (double, 0..100),
+        BranchesMeasured (bool, false when the reports carry no branch data) and
+        Assemblies (the measured assembly names). The branch numbers are
+        report-only (CORE-TST-012); the gate (Test-LiveCoreCoverageGate) reads
+        only the line numbers.
     #>
     [CmdletBinding(DefaultParameterSetName = 'Path')]
     [OutputType([psobject])]
@@ -106,6 +121,11 @@ function Get-LiveCoreCoverageModel {
     # the file once per path form. The basename still distinguishes the files of a
     # partial type, which share a type name but live in different files.
     $mergedHits = @{}
+    # Branch coverage (CORE-TST-012), keyed identically so it de-duplicates with the
+    # line merge: per line, the covered/total branches taking the maximum covered
+    # count across reports (the branch total is invariant for a given source line).
+    $mergedBranchCovered = @{}
+    $mergedBranchValid = @{}
     $assemblies = New-Object System.Collections.Generic.HashSet[string]
 
     foreach ($document in $documents) {
@@ -134,6 +154,29 @@ function Get-LiveCoreCoverageModel {
                     elseif ($hits -gt $mergedHits[$key]) {
                         $mergedHits[$key] = $hits
                     }
+
+                    # Branch coverage: a Cobertura branch point carries
+                    # branch="true" and condition-coverage="P% (covered/total)".
+                    # Parse the (covered/total) fraction; a non-branch line
+                    # contributes nothing. Merge by the maximum covered count per
+                    # line across reports - a branch covered on either leg counts.
+                    $branchCovered = 0
+                    $branchValid = 0
+                    if (([string]$line.branch) -eq 'true') {
+                        $conditionCoverage = [string]$line.'condition-coverage'
+                        if ($conditionCoverage -match '\((\d+)/(\d+)\)') {
+                            $branchCovered = [int]$Matches[1]
+                            $branchValid = [int]$Matches[2]
+                        }
+                    }
+                    if (-not $mergedBranchValid.ContainsKey($key)) {
+                        $mergedBranchValid[$key] = $branchValid
+                        $mergedBranchCovered[$key] = $branchCovered
+                    }
+                    else {
+                        if ($branchValid -gt $mergedBranchValid[$key]) { $mergedBranchValid[$key] = $branchValid }
+                        if ($branchCovered -gt $mergedBranchCovered[$key]) { $mergedBranchCovered[$key] = $branchCovered }
+                    }
                 }
             }
         }
@@ -152,11 +195,27 @@ function Get-LiveCoreCoverageModel {
         $percent = 0
     }
 
+    $branchesValid = 0
+    $branchesCovered = 0
+    foreach ($value in $mergedBranchValid.Values) { $branchesValid += $value }
+    foreach ($value in $mergedBranchCovered.Values) { $branchesCovered += $value }
+
+    if ($branchesValid -gt 0) {
+        $branchPercent = [math]::Round(($branchesCovered / [double]$branchesValid) * 100, 2)
+    }
+    else {
+        $branchPercent = 0
+    }
+
     return [pscustomobject]@{
-        LinesCovered        = $linesCovered
-        LinesValid          = $linesValid
-        LineCoveragePercent = $percent
-        Assemblies          = @($assemblies)
+        LinesCovered          = $linesCovered
+        LinesValid            = $linesValid
+        LineCoveragePercent   = $percent
+        BranchesCovered       = $branchesCovered
+        BranchesValid         = $branchesValid
+        BranchCoveragePercent = $branchPercent
+        BranchesMeasured      = ($branchesValid -gt 0)
+        Assemblies            = @($assemblies)
     }
 }
 

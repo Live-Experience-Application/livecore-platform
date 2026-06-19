@@ -211,6 +211,43 @@ and the CI `coverage` job invokes `assert-coverage.ps1` with no `-ReportOnly` an
 pins `-MinimumLineCoverage` to the documented `90` — so re-adding `-ReportOnly`, or
 moving the floor in `ci.yml` without updating the test and these docs, fails CI.
 
+### The branch-coverage signal (report-only, CORE-TST-012)
+
+The line gate above measures whether each production *line* was executed, but a
+single line can hide an **untested branch**: a covered multi-condition `if`
+(`if (a && b)`) counts as one fully-covered line even when only one side of the
+condition ever ran. To surface that, the coverage report now exposes a
+**production branch-coverage figure alongside the line number**.
+
+The number is computed the same way as the line number, in the same pure module
+(`scripts/LiveCoreCoverage.psm1`) over the same de-duplicated, production-focused
+lines (test assemblies and generated EF migrations excluded). A Cobertura branch
+point is a `<line branch="true" condition-coverage="P% (covered/total)">`, so the
+`(covered/total)` fraction is summed across the merged lines — taking the
+**maximum covered count per line across reports**, so a branch exercised on
+*either* leg (SQLite or Postgres/Redis) counts once, exactly like the line merge.
+`assert-coverage.ps1` prints it (`Production branch coverage (report-only, not
+gated): …`), so the CI `coverage` job reports it on every run.
+
+It is **report-only and never blocks** — the same staged report-only → blocking
+posture the line gate (CORE-TST-009) and the supply-chain image scan followed:
+
+- the gate decision (`Test-LiveCoreCoverageGate`) stays **line-only** — it reads
+  only the line numbers and carries no branch figure, so the **line gate is
+  unchanged and still fail-closed**; branch coverage cannot fail the build;
+- a report with no branch data reports *branches not measured* (the signal is
+  absent, never fabricated), which is fine precisely because it does not gate.
+
+This first establishes the visible baseline; a **follow-up can ratchet a branch
+floor** once that baseline is set, promoting the signal from report-only to
+blocking the same way the line floor was. The same gate-logic test
+(`scripts/test-coverage-gate.ps1`) proves it: a fixture whose lines are 100%
+covered but whose branches are only 75% covered surfaces the `75%` branch figure
+while the line gate still passes at a `100%` line floor (branch is report-only,
+the line gate is line-only), branch coverage merges across reports (a branch
+covered on either leg counts), and the CLI prints the branch figure alongside the
+line number.
+
 ## Static analysis (SAST) and the CI gate (CORE-SEC-006)
 
 Coverage and the test suite prove the first-party code does what it should; SAST

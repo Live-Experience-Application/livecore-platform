@@ -2,13 +2,15 @@
 
 <#
 .SYNOPSIS
-    Tests the code-coverage gate (CORE-TST-001, CORE-TST-009, CORE-TST-010): a
-    deliberately-untested new handler trips the threshold once blocking is
-    enabled, coverage from several reports is merged without double counting,
-    test/generated code is excluded from the production number, the CI coverage
-    job MERGES a real Postgres/Redis leg so the provider-divergent branches are no
-    longer counted as no-ops, and the gate runs BLOCKING at the documented
-    line-coverage floor.
+    Tests the code-coverage gate (CORE-TST-001, CORE-TST-009, CORE-TST-010,
+    CORE-TST-012): a deliberately-untested new handler trips the threshold once
+    blocking is enabled, coverage from several reports is merged without double
+    counting, test/generated code is excluded from the production number, the CI
+    coverage job MERGES a real Postgres/Redis leg so the provider-divergent
+    branches are no longer counted as no-ops, the report surfaces a branch-coverage
+    number alongside the line number (report-only, CORE-TST-012) while the line
+    gate stays unchanged and fail-closed, and the gate runs BLOCKING at the
+    documented line-coverage floor.
 
 .DESCRIPTION
     Pure-PowerShell assertions over LiveCoreCoverage.psm1 and assert-coverage.ps1
@@ -211,11 +213,97 @@ $(Get-CoberturaLineXml -From 1 -To 20 -Hits 1)
 </coverage>
 "@
 
+# CORE-TST-012: a branch-coverage fixture. Every line is HIT (100% line coverage),
+# but two of the lines are branch points (a multi-condition `if`): line 2 covers 1
+# of its 2 branches, line 3 covers both. So branches are 3 covered of 4 -> 75%. The
+# line number alone (100%) would hide the untested branch on the covered line 2 -
+# exactly the QA finding this story surfaces.
+$branchReport = @"
+<?xml version="1.0"?>
+<coverage line-rate="1" branch-rate="0.75" version="1.9">
+  <packages>
+    <package name="LiveCore.Sample">
+      <classes>
+        <class name="LiveCore.Sample.BranchService" filename="Sample/BranchService.cs">
+          <lines>
+            <line number="1" hits="1" />
+            <line number="2" hits="1" branch="true" condition-coverage="50% (1/2)">
+              <conditions>
+                <condition number="0" type="jump" coverage="50%" />
+              </conditions>
+            </line>
+            <line number="3" hits="1" branch="true" condition-coverage="100% (2/2)">
+              <conditions>
+                <condition number="0" type="jump" coverage="100%" />
+              </conditions>
+            </line>
+            <line number="4" hits="1" />
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"@
+
+# Two reports over the SAME branch line with complementary branch coverage: report A
+# covers 1 of the 2 branches, report B covers both. Merging must take the better leg
+# (max covered per line) - a branch covered on either leg counts - so the merged line
+# reports 2 of 2.
+$branchMergeReportA = @"
+<?xml version="1.0"?>
+<coverage version="1.9">
+  <packages>
+    <package name="LiveCore.Sample">
+      <classes>
+        <class name="LiveCore.Sample.BranchService" filename="Sample/BranchService.cs">
+          <lines>
+            <line number="2" hits="1" branch="true" condition-coverage="50% (1/2)">
+              <conditions>
+                <condition number="0" type="jump" coverage="50%" />
+              </conditions>
+            </line>
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"@
+
+$branchMergeReportB = @"
+<?xml version="1.0"?>
+<coverage version="1.9">
+  <packages>
+    <package name="LiveCore.Sample">
+      <classes>
+        <class name="LiveCore.Sample.BranchService" filename="Sample/BranchService.cs">
+          <lines>
+            <line number="2" hits="3" branch="true" condition-coverage="100% (2/2)">
+              <conditions>
+                <condition number="0" type="jump" coverage="100%" />
+              </conditions>
+            </line>
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>
+"@
+
 # --- Model: a fully covered baseline reports 100%. ---
 $baselineModel = Get-LiveCoreCoverageModel -Content $baselineReport
 AssertEqual 10 $baselineModel.LinesValid 'the baseline measures 10 production lines'
 AssertEqual 10 $baselineModel.LinesCovered 'the baseline covers all 10 lines'
 AssertEqual 100 $baselineModel.LineCoveragePercent 'the baseline reports 100% line coverage'
+
+# CORE-TST-012: a report with no branch data measures zero branches and reports
+# branches not measured - the branch signal is absent, never fabricated.
+AssertEqual 0 $baselineModel.BranchesValid 'a report with no branch data measures zero branches (CORE-TST-012)'
+AssertEqual 0 $baselineModel.BranchesCovered 'a report with no branch data covers zero branches'
+AssertEqual 0 $baselineModel.BranchCoveragePercent 'a report with no branch data reports 0% branch coverage (not fabricated)'
+AssertTrue (-not $baselineModel.BranchesMeasured) 'a report with no branch data reports branches not measured'
 
 # --- Gate: an untested new handler drops coverage and trips the threshold. ---
 $untestedModel = Get-LiveCoreCoverageModel -Content $untestedHandlerReport
@@ -252,6 +340,33 @@ AssertTrue (-not $testOnlyGate.Passed) 'a report measuring no production line ne
 
 # --- Fail-closed: a malformed report is rejected, never waved through. ---
 AssertThrows { Get-LiveCoreCoverageModel -Content 'not xml <' } 'a malformed coverage report is rejected (fail-closed)'
+
+# --- CORE-TST-012: the report surfaces a branch-coverage number alongside the line
+# number, the line gate stays line-only (unchanged and still fail-closed), and
+# branch coverage merges across reports the same way line coverage does. ---
+$branchModel = Get-LiveCoreCoverageModel -Content $branchReport
+# Every line is hit, so the LINE number is a clean 100% - it alone hides the untested branch.
+AssertEqual 4 $branchModel.LinesValid 'the branch fixture measures 4 production lines'
+AssertEqual 4 $branchModel.LinesCovered 'every line in the branch fixture is hit'
+AssertEqual 100 $branchModel.LineCoveragePercent 'line coverage is 100% - the line number alone hides the untested branch'
+# The BRANCH number surfaces what the line number hides: 3 of 4 branches -> 75%.
+AssertTrue ($branchModel.BranchesMeasured) 'the branch fixture reports branch coverage measured (CORE-TST-012)'
+AssertEqual 4 $branchModel.BranchesValid 'the two branch lines contribute 4 branches to the denominator'
+AssertEqual 3 $branchModel.BranchesCovered 'one branch of the 50% line is uncovered, so 3 of 4 branches are covered'
+AssertEqual 75 $branchModel.BranchCoveragePercent 'branch coverage (75%) is below line coverage (100%): an untested branch on a covered line is visible (CORE-TST-012)'
+
+# The line gate is LINE-ONLY and unchanged: poor branch coverage never affects it,
+# and the gate result surfaces no branch figure (branch coverage stays report-only).
+$branchLineGate = Test-LiveCoreCoverageGate -Model $branchModel -MinimumLineCoveragePercent 100
+AssertTrue ($branchLineGate.Passed) 'the line gate passes at a 100% floor even though branch coverage is only 75% (the line gate is line-only; branch is report-only)'
+AssertTrue (-not ($branchLineGate.PSObject.Properties.Name -contains 'BranchCoveragePercent')) 'the line gate verdict is line-only: it carries no branch figure (the line gate is unchanged by CORE-TST-012)'
+
+# Branch coverage merges across reports just like line coverage: a branch covered on
+# either leg counts (max covered per line), so the better-covered leg wins.
+$branchMergedModel = Get-LiveCoreCoverageModel -Content @($branchMergeReportA, $branchMergeReportB)
+AssertEqual 2 $branchMergedModel.BranchesValid 'the same branch line across two reports is not double counted in the branch denominator'
+AssertEqual 2 $branchMergedModel.BranchesCovered 'a branch covered in either report counts after the merge (max covered per line)'
+AssertEqual 100 $branchMergedModel.BranchCoveragePercent 'complementary branch coverage from two reports merges to 100%'
 
 # --- CORE-TST-010: the gate merges the Postgres/Redis-leg coverage, so the
 # provider-divergent branches (xmin optimistic concurrency, advisory-lock migration,
@@ -356,6 +471,19 @@ try {
     $null = New-Item -ItemType Directory -Path $emptyDir
     & $psExe -NoProfile -File $assertScript -ReportDirectory $emptyDir -MinimumLineCoverage 80 *> $null
     AssertTrue ($LASTEXITCODE -ne 0) 'no coverage reports found blocks (fail-closed)'
+
+    # CORE-TST-012: the CLI surfaces a branch-coverage figure alongside the line
+    # number, report-only - it passes the LINE gate at a 100% floor even though
+    # branch coverage is only 75% (branch coverage never blocks; the line gate is
+    # unchanged and still fail-closed). A dedicated subdirectory keeps the report
+    # out of the directory-search assertions above.
+    $branchDir = Join-Path $tempDir 'branch'
+    $null = New-Item -ItemType Directory -Path $branchDir
+    $branchPath = Join-Path $branchDir 'branch.cobertura.xml'
+    [System.IO.File]::WriteAllText($branchPath, $branchReport)
+    $branchCliOutput = (& $psExe -NoProfile -File $assertScript -ReportPath $branchPath -MinimumLineCoverage 100 2>&1) | Out-String
+    AssertTrue ($LASTEXITCODE -eq 0) 'the CLI passes the 100% line gate even though branch coverage is only 75% (branch coverage is report-only; the line gate is line-only)'
+    AssertTrue (($branchCliOutput -match 'branch coverage') -and ($branchCliOutput -match '75')) 'the CLI reports the branch-coverage figure (75%) alongside line coverage (CORE-TST-012)'
 }
 finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -436,5 +564,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, test/generated code is excluded, the Postgres/Redis leg merges so the provider-divergent branches are coverage-counted, and the CI gate is blocking at the documented floor.' -ForegroundColor Green
+Write-Host 'Coverage gate tests passed: an untested new handler trips the threshold, coverage merges without double counting, test/generated code is excluded, the Postgres/Redis leg merges so the provider-divergent branches are coverage-counted, the report surfaces a report-only branch-coverage number while the line gate stays line-only and fail-closed, and the CI gate is blocking at the documented floor.' -ForegroundColor Green
 exit 0

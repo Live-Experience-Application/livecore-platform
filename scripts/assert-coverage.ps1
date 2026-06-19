@@ -25,6 +25,14 @@
     report-only run. This followed the same staged report-only -> blocking posture
     as the supply-chain dry-run (assert-image-scan.ps1).
 
+    It ALSO prints a production branch-coverage figure alongside the line number
+    (CORE-TST-012), so an untested branch on an otherwise line-covered line is
+    visible (a covered multi-condition `if` the line number alone hides). The
+    branch figure is REPORT-ONLY: it never fails the build. Only the LINE gate
+    blocks - it is unchanged and still fail-closed. This is the same staged
+    report-only -> blocking posture the line gate and the image scan followed; a
+    follow-up can ratchet a branch floor once a baseline is set.
+
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
 .EXAMPLE
@@ -109,6 +117,20 @@ catch {
 Write-Host "Measured assemblies: $((@($model.Assemblies) | Sort-Object) -join ', ')"
 Write-Host ("Production line coverage: {0}% ({1}/{2} lines), minimum {3}%" -f `
         $model.LineCoveragePercent, $model.LinesCovered, $model.LinesValid, $MinimumLineCoverage)
+
+# Branch coverage is surfaced alongside the line number but is NOT gated yet
+# (CORE-TST-012): it makes an untested branch on an otherwise line-covered line
+# visible. Report-only first - the same staged report-only -> blocking posture the
+# line gate (CORE-TST-009) and the supply-chain image scan followed; a follow-up
+# can ratchet a branch floor once a baseline is set. The LINE gate below stays
+# blocking and is the only thing that can fail this script.
+if ($model.BranchesMeasured) {
+    Write-Host ("Production branch coverage (report-only, not gated): {0}% ({1}/{2} branches)" -f `
+            $model.BranchCoveragePercent, $model.BranchesCovered, $model.BranchesValid) -ForegroundColor Cyan
+}
+else {
+    Write-Host 'Production branch coverage (report-only, not gated): not measured (no branch data in the reports)' -ForegroundColor Cyan
+}
 
 $gate = Test-LiveCoreCoverageGate -Model $model -MinimumLineCoveragePercent $MinimumLineCoverage
 
