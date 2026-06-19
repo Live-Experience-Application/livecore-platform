@@ -37,8 +37,9 @@ namespace LiveCore.Worker;
 ///   — the Store module owns the reconciliation logic (<see cref="StoreNotificationReconciliationService"/>,
 ///   reusing <see cref="StoreNotificationService"/>) and this host schedules it through
 ///   <see cref="StoreNotificationReconciliationBackgroundService"/>. Unlike the others it is GATED ON BILLING:
-///   it runs only when a deployment has enabled it (<c>Store:Reconciliation:Enabled=true</c>), because store
-///   receipts/billing are out of scope for Core v1 (docs/01_PRODUCT_VISION_AND_SCOPE.md).</item>
+///   billing/monetization is in scope for Core v1 (docs/01_PRODUCT_VISION_AND_SCOPE.md) but requires
+///   deployment-supplied store adapters and credentials, so it runs only when a deployment has enabled it
+///   (<c>Store:Reconciliation:Enabled=true</c>).</item>
 /// </list>
 /// Each job's logic lives in its owning domain module in <c>apps/api</c>; this host only handles timing,
 /// scoping and resilience.
@@ -148,7 +149,8 @@ public static class WorkerHostFactory
 
         // CORE-JOB-003: gated on a configured database AND an explicit billing/store-reconciliation opt-in
         // (Store:Reconciliation:Enabled=true). With billing not configured this returns false and registers no
-        // loop — "only runs when billing is configured" (fail-closed; billing is out of scope for Core v1).
+        // loop — "only runs when billing is configured" (fail-closed; monetization is in scope for Core v1 but
+        // needs deployment-supplied store adapters/credentials, so reconciliation is opt-in per deployment).
         var storeReconciliationConfigured = builder.Services.AddStoreNotificationReconciliation(builder.Configuration);
 
         // CORE-PRIV-003: gated on a configured database. The data-retention sweep expires and purges terminal/old

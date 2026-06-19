@@ -20,8 +20,9 @@ namespace LiveCore.Worker;
 /// <para>
 /// GATED ON BILLING. Unlike the other loops, this one is registered only when a deployment has explicitly enabled
 /// reconciliation (<c>Store:Reconciliation:Enabled=true</c>) on top of a configured database
-/// (see <see cref="WorkerHostFactory"/>) — store receipts/billing are out of scope for Core v1
-/// (docs/01_PRODUCT_VISION_AND_SCOPE.md), so the loop never runs unless billing is configured (fail-closed).
+/// (see <see cref="WorkerHostFactory"/>) — billing/monetization is in scope for Core v1
+/// (docs/01_PRODUCT_VISION_AND_SCOPE.md) but requires deployment-supplied store adapters and credentials, so the
+/// loop never runs unless billing is configured (fail-closed).
 /// </para>
 ///
 /// <para>

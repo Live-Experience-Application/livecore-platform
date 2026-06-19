@@ -3958,8 +3958,9 @@ persisted converges nothing (`TransactionNotFound`): nothing is fabricated, so n
 a real verified purchase behind it. Purchases are **global** (keyed only by provider + provider transaction id,
 no tenant or buyer column, CORE-STORE-002), so there is no tenant boundary to scope on this system job.
 
-Crucially, unlike the other worker jobs it is **gated on billing**. Store receipts/billing are **out of scope
-for Core v1** (`docs/01_PRODUCT_VISION_AND_SCOPE.md`), so the job runs **only when a deployment explicitly
+Crucially, unlike the other worker jobs it is **gated on billing**. Billing/monetization is **in scope for
+Core v1** (`docs/01_PRODUCT_VISION_AND_SCOPE.md`) but requires deployment-supplied store adapters and
+credentials, so the job runs **only when a deployment explicitly
 enables it** — both a configured database connection string **and** `Store:Reconciliation:Enabled=true`. With
 the flag unset (the default) the worker registers no reconciliation loop — **"only runs when billing is
 configured"**, the same fail-closed posture as the store verification/notification parser resolvers that

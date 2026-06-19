@@ -392,10 +392,12 @@ HTTP route.
   registers no reconciliation loop — the same fail-closed posture as the verification/notification parser
   resolvers, which register no adapter until a deployment supplies one. The worker schedules it every
   `Store:Reconciliation:SweepInterval` in bounded `Store:Reconciliation:BatchSize` batches.
-- **Out of scope (later stories).** Granting/revoking the linked `SubjectEntitlement` from the converged purchase
-  status (which needs the buyer linkage, the separate `billing_account_links` table) is deferred, as is a SQL
-  window-function candidate query for high-volume deployments (the candidate scan computes the latest-per-purchase
-  client-side, which suits this off-by-default, low-volume job).
+- **Delivered: entitlement revocation from the converged status (CORE-MON-004).** When reconciliation converges a
+  purchase to a revoked state — the missed refund only reconciliation can apply — the sweep also revokes the
+  buyer-linked `SubjectEntitlement` (the buyer linkage is the now-implemented `billing_account_links` table,
+  CORE-MON-002), the inverse of the CORE-MON-003 grant chain. What remains a follow-up is a SQL window-function
+  candidate query for high-volume deployments (the candidate scan computes the latest-per-purchase client-side,
+  which suits this off-by-default, low-volume job).
 
 ## Purchase-to-entitlement grant chain — in scope for Core v1 (CORE-MON-001)
 

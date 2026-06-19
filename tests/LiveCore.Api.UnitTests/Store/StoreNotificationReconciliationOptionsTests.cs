@@ -45,7 +45,8 @@ public class StoreNotificationReconciliationOptionsTests
 
         var options = StoreNotificationReconciliationOptions.FromConfiguration(configuration);
 
-        // Fail-closed: billing is out of scope for v1, so the job does not run unless explicitly enabled.
+        // Fail-closed: monetization is in scope for v1 but store billing is opt-in per deployment, so the job does
+        // not run unless explicitly enabled.
         Assert.False(options.Enabled);
         Assert.Equal(StoreNotificationReconciliationOptions.DefaultSweepInterval, options.SweepInterval);
         Assert.Equal(StoreNotificationReconciliationOptions.DefaultBatchSize, options.BatchSize);

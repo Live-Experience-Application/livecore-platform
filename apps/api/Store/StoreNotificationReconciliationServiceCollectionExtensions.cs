@@ -19,8 +19,9 @@ namespace LiveCore.Api.Store;
 /// <para>
 /// GATED ON BILLING, FAIL-CLOSED — the key difference from the other jobs. The job is registered ONLY when BOTH a
 /// database connection string is configured (like every job) AND the deployment has explicitly enabled
-/// reconciliation (<c>Store:Reconciliation:Enabled=true</c>). Store receipts/billing are out of scope for Core v1
-/// (docs/01_PRODUCT_VISION_AND_SCOPE.md), so with the flag unset this registers NOTHING and returns
+/// reconciliation (<c>Store:Reconciliation:Enabled=true</c>). Billing/monetization is in scope for Core v1
+/// (docs/01_PRODUCT_VISION_AND_SCOPE.md) but requires deployment-supplied store adapters and credentials, so with
+/// the flag unset this registers NOTHING and returns
 /// <see langword="false"/>: the worker runs without a reconciliation loop — "only runs when billing is configured"
 /// (the story's acceptance criterion), the same fail-closed posture as the store verification/notification parser
 /// resolvers that register no adapter until a deployment supplies one.
@@ -66,8 +67,9 @@ public static class StoreNotificationReconciliationServiceCollectionExtensions
         var options = StoreNotificationReconciliationOptions.FromConfiguration(configuration);
         if (!options.Enabled)
         {
-            // Billing is out of scope for v1 and not configured for this deployment: the reconciliation job stays
-            // off (fail-closed). Nothing is registered, so the worker schedules no reconciliation loop.
+            // Billing/monetization is in scope for v1 but store billing is not configured for this deployment: the
+            // reconciliation job stays off (fail-closed). Nothing is registered, so the worker schedules no
+            // reconciliation loop.
             return false;
         }
 

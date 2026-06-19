@@ -17,8 +17,8 @@ namespace LiveCore.Api.Store;
 ///
 /// <para>
 /// GATED ON BILLING, FAIL-CLOSED. Unlike the other worker jobs, this one is OFF BY DEFAULT
-/// (<see cref="Enabled"/> defaults to <see langword="false"/>). Store receipts/billing are out of scope for Core
-/// v1 (docs/01_PRODUCT_VISION_AND_SCOPE.md "Out of scope": billing), and a store notification is only ever
+/// (<see cref="Enabled"/> defaults to <see langword="false"/>). Billing/monetization is in scope for Core
+/// v1 (docs/01_PRODUCT_VISION_AND_SCOPE.md), but a store notification is only ever
 /// produced when a deployment has wired the store integration, so the reconciliation job runs ONLY when a
 /// deployment explicitly turns it on (<c>Store:Reconciliation:Enabled=true</c>). With it unset the job is never
 /// scheduled (<see cref="StoreNotificationReconciliationServiceCollectionExtensions.AddStoreNotificationReconciliation"/>

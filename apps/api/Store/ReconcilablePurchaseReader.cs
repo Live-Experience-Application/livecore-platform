@@ -21,9 +21,9 @@ namespace LiveCore.Api.Store;
 /// here: the SQLite provider used in the unit-test harness cannot ORDER BY or aggregate a DateTimeOffset column,
 /// and a triply-correlated "no later notification" subquery does not translate. So the reader runs two translatable
 /// single-level queries (the purchases that have notifications, and those purchases' notifications) and picks the
-/// latest per purchase in memory. Store receipts/billing are out of scope for Core v1 and this job is OFF by
-/// default (gated on <c>Store:Reconciliation:Enabled</c>), so the ledger is low-volume; a SQL window-function form
-/// for high-volume deployments is a documented follow-up.
+/// latest per purchase in memory. This job is OFF by default (gated on <c>Store:Reconciliation:Enabled</c>;
+/// monetization is in scope for Core v1 but store billing is opt-in per deployment), so the ledger is low-volume;
+/// a SQL window-function form for high-volume deployments is a documented follow-up.
 /// </para>
 ///
 /// <para>
@@ -59,9 +59,9 @@ internal sealed class ReconcilablePurchaseReader : IReconcilablePurchaseReader
         // out-of-order delivery leaves behind. The fold cannot be pushed into SQL here: the SQLite provider used in
         // the test harness cannot ORDER BY or aggregate a DateTimeOffset column, and the monotonic fold is a
         // sequential reduction, not a single aggregate. So the converged-per-purchase status is computed client-side
-        // from two translatable single-level queries. Store receipts/billing are out of scope for Core v1 and this
-        // job is off by default (gated on Store:Reconciliation:Enabled), so the ledger is low-volume; a SQL form for
-        // high-volume deployments is a documented follow-up.
+        // from two translatable single-level queries. This job is off by default (gated on
+        // Store:Reconciliation:Enabled; monetization is in scope for Core v1 but store billing is opt-in per
+        // deployment), so the ledger is low-volume; a SQL form for high-volume deployments is a documented follow-up.
 
         // Purchases that have at least one recorded notification, with their current status (single-level EXISTS).
         var purchases = await _dbContext.PurchaseTransactions
