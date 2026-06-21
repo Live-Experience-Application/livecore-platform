@@ -228,6 +228,34 @@ degrades to an empty string, never an error. This composes with CORE-APROJ-002, 
 (which names its resource by `resourceType` + `resourceId`) can be tied to its entity's kind through the entity
 projection.
 
+### Visibility-rule projection: the audience-safe resource label (CORE-APROJ-004)
+
+The visibility-rule response (`VisibilityRuleResponse`, returned by the create command and by
+`GET /api/v1/sessions/{sessionId}/visibility-rules` and `.../visibility-rules/{ruleId}`) carries a
+**denormalized, audience-safe `resourceLabel`** for the governed resource alongside `resourceType` + `resourceId`:
+
+| Field | Meaning |
+|---|---|
+| `resourceType` | the kind of resource the rule governs (`Scene`/`ContentBlock`/`Entity`), the stable enum name |
+| `resourceId` | the surrogate id of the governed resource |
+| `resourceLabel` | the resource's **audience-safe label** — a scene's title, an entity's name, a content block's generic kind — or `null` when the resource no longer resolves in the rule's own workspace (a dangling rule) |
+| `visibility` | the base audience visibility state (`Hidden`/`Visible`) |
+| `participantId` | the selected-participant target, or `null` for an audience-wide rule |
+| `createdAt` / `updatedAt` | server timestamps |
+
+`resourceLabel` lets a host render a **per-resource visibility matrix from `listRules` alone** — naming each row
+with **no per-resource host read** (raised by vertical adopter ARC-GAP-006). It is the resource's audience-safe
+**name**, **not** its full content: it is produced **only** through the resource kind's existing role-based
+**audience** projection (the same `Participant{Scene,ContentBlock,Entity}Response` shapes the feed item uses), so it
+can never disclose host-only content even to an authoring caller (threats T2/T7) — most importantly a content
+block's host body is never surfaced (its label is the generic kind `Text`/`Media`/`Data`). The label is resolved
+server-side through a **Visibility-owned same-workspace resource port whose adapter lives in the composition root**,
+because the central security module may not reference the Scenes/Content/Entities modules (CORE-ARCH-001); the
+lookup is the rule's **own** `(organization, workspace)`, so it never borrows another workspace's resource name, and
+a rule whose resource was **deleted** degrades to a `null` label **without error** (the row's identity and state
+still render). The list and read stay restricted to the authoring roles and fail closed — a participant can neither
+author nor enumerate rules — and a foreign or unknown rule stays an indistinguishable hidden `404`.
+
 ## Idempotency
 
 Reveal and hide (un-reveal) execution must be idempotent for client retry.

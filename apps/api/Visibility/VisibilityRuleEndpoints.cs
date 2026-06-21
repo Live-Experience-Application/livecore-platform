@@ -182,26 +182,37 @@ internal static class VisibilityRuleEndpoints
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return result.Status switch
+        switch (result.Status)
         {
             // The referenced resource is not in the session's workspace (an unknown id, or one belonging to
             // another workspace/tenant — indistinguishable): the same-workspace invariant rejection. A 400,
             // exactly as the entity create rejects an unresolved type reference (the body-supplied resource
             // reference does not resolve in the caller's authorized workspace; leaks nothing, threats T1/T5).
-            VisibilityRuleCreationStatus.ResourceNotInWorkspace =>
-                ValidationError("The referenced resource does not exist in the session's workspace."),
+            case VisibilityRuleCreationStatus.ResourceNotInWorkspace:
+                return ValidationError("The referenced resource does not exist in the session's workspace.");
 
             // The selected-participant target is not in the session's workspace: hidden as 404, exactly as the
             // reveal command hides a cross-workspace participant target (threat T5).
-            VisibilityRuleCreationStatus.ParticipantNotInWorkspace => HiddenRule(),
+            case VisibilityRuleCreationStatus.ParticipantNotInWorkspace:
+                return HiddenRule();
 
             // A rule already exists for the same (session, resource, dimension): 409 duplicate (CORE-SVIS-002).
-            VisibilityRuleCreationStatus.Duplicate => DuplicateRule(),
+            case VisibilityRuleCreationStatus.Duplicate:
+                return DuplicateRule();
 
-            _ => Results.Created(
-                $"/api/v1/sessions/{session.Id}/visibility-rules/{result.Rule!.Id}",
-                VisibilityRuleResponse.From(result.Rule)),
-        };
+            default:
+                // Resolve the created rule's governed resource to its audience-safe label so the create
+                // response carries the same denormalized name the list/read rows do (CORE-APROJ-004). The
+                // resource was just verified to live in the session's workspace, so this normally resolves;
+                // it still degrades to a null label without error if it cannot.
+                var createdRule = result.Rule!;
+                var createdLabel = await ResolveResourceLabelAsync(
+                        deps, context!.OrganizationId, session!.WorkspaceId, createdRule, cancellationToken)
+                    .ConfigureAwait(false);
+                return Results.Created(
+                    $"/api/v1/sessions/{session.Id}/visibility-rules/{createdRule.Id}",
+                    VisibilityRuleResponse.From(createdRule, createdLabel));
+        }
     }
 
     // GET /api/v1/sessions/{sessionId}/visibility-rules?organizationSlug={slug}&limit={n}&offset={n}
@@ -264,7 +275,22 @@ internal static class VisibilityRuleEndpoints
 
         var hasMore = rows.Count > pageLimit;
         var pageRows = hasMore ? rows.Take(pageLimit).ToArray() : rows;
-        var items = pageRows.Select(VisibilityRuleResponse.From).ToArray();
+
+        // Name each row from the rule list ALONE (CORE-APROJ-004): resolve every governed resource to its
+        // denormalized, audience-safe label through the Visibility-owned port, so a host can render a
+        // per-resource visibility matrix with NO per-resource host read. The per-row resolution is bounded by
+        // the (bounded) page; a rule whose resource no longer resolves in the session's workspace — a dangling
+        // rule — degrades to a null label without error. The label is the resource's audience-safe NAME, never
+        // its host content (threats T2/T7).
+        var items = new VisibilityRuleResponse[pageRows.Count];
+        for (var index = 0; index < pageRows.Count; index++)
+        {
+            var rule = pageRows[index];
+            var label = await ResolveResourceLabelAsync(
+                    deps, context.OrganizationId, session.WorkspaceId, rule, cancellationToken)
+                .ConfigureAwait(false);
+            items[index] = VisibilityRuleResponse.From(rule, label);
+        }
 
         return Results.Ok(PageResponse.From<VisibilityRuleResponse>(items, pageOffset, pageLimit, hasMore));
     }
@@ -323,7 +349,41 @@ internal static class VisibilityRuleEndpoints
             return HiddenRule();
         }
 
-        return Results.Ok(VisibilityRuleResponse.From(rule));
+        // Name the row from the rule alone (CORE-APROJ-004): resolve the governed resource to its
+        // denormalized, audience-safe label through the Visibility-owned port; a dangling rule degrades to a
+        // null label without error.
+        var label = await ResolveResourceLabelAsync(
+                deps, context.OrganizationId, session.WorkspaceId, rule, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(VisibilityRuleResponse.From(rule, label));
+    }
+
+    /// <summary>
+    /// Resolves a rule's governed resource to its denormalized, AUDIENCE-SAFE label (CORE-APROJ-004) through
+    /// the Visibility-owned <see cref="IVisibleResourceAudienceProjector"/> port (CORE-APROJ-002) — the same
+    /// hexagonal same-workspace resource port family CORE-SVIS-005 introduced, whose composition-root adapter
+    /// consults the owning resource module's AUDIENCE projection. The label is the resource's audience-safe
+    /// NAME (a scene's title, an entity's name, a content block's generic kind), never its full/host content,
+    /// so it can never leak host-only content even to an authoring caller (threats T2/T7). The lookup is the
+    /// rule's OWN (organization, workspace), so a resource outside the rule's workspace is never read; a rule
+    /// whose resource no longer resolves — a dangling rule — yields <see langword="null"/> WITHOUT error. The
+    /// central security module never references the Scenes/Content/Entities modules directly (CORE-ARCH-001).
+    /// </summary>
+    private static async Task<string?> ResolveResourceLabelAsync(
+        VisibilityRuleEndpointDependencies deps,
+        Guid organizationId,
+        Guid workspaceId,
+        VisibilityRule rule,
+        CancellationToken cancellationToken)
+    {
+        var projection = await deps.AudienceProjector
+            .ProjectAudienceSafeAsync(organizationId, workspaceId, rule.ResourceType, rule.ResourceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        // The audience-safe label is the resource's audience title (scene title / content-block kind / entity
+        // name); the audience body is intentionally not part of a rule row's projection.
+        return projection?.Title;
     }
 
     /// <summary>
@@ -442,19 +502,21 @@ internal static class VisibilityRuleEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var visibilityRules = services.GetService<VisibilityRuleService>();
         var rules = services.GetService<IVisibilityRuleRepository>();
+        var audienceProjector = services.GetService<IVisibleResourceAudienceProjector>();
 
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
             || visibilityRules is null
-            || rules is null)
+            || rules is null
+            || audienceProjector is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new VisibilityRuleEndpointDependencies(
-            resolver, sessions, workspaceMembers, visibilityRules, rules);
+            resolver, sessions, workspaceMembers, visibilityRules, rules, audienceProjector);
         return true;
     }
 
@@ -530,5 +592,6 @@ internal static class VisibilityRuleEndpoints
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         VisibilityRuleService VisibilityRules,
-        IVisibilityRuleRepository Rules);
+        IVisibilityRuleRepository Rules,
+        IVisibleResourceAudienceProjector AudienceProjector);
 }

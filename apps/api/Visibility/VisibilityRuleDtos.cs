@@ -46,16 +46,36 @@ public sealed record CreateVisibilityRuleRequest(
 /// Response body of a visibility rule (CORE-SVIS-005) — the shape returned by the create command and by the
 /// list and by-id read routes (<c>GET /api/v1/sessions/{sessionId}/visibility-rules</c> and
 /// <c>.../visibility-rules/{ruleId}</c>). It is a generic, product-neutral projection of a
-/// <see cref="VisibilityRule"/>: the rule's id, the governed resource (kind + id), the base audience
-/// visibility state, the optional selected-participant target and the server timestamps. Every field is an
-/// identifier, an enum name or a timestamp — no resolved content and no internal authorization rationale
-/// (docs/08_API_CONTRACTS.md; threat T7). The visibility rule is itself an authoring artifact (a host
-/// configures it), so there is no host-vs-participant projection split — the routes are restricted to the
-/// authoring roles, so a participant never receives this shape.
+/// <see cref="VisibilityRule"/>: the rule's id, the governed resource (kind + id + a denormalized,
+/// audience-safe <see cref="ResourceLabel"/>), the base audience visibility state, the optional
+/// selected-participant target and the server timestamps. Every field is an identifier, an enum name, an
+/// audience-safe label or a timestamp — no resolved (host-only) content and no internal authorization
+/// rationale (docs/08_API_CONTRACTS.md; threats T2/T7). The visibility rule is itself an authoring artifact
+/// (a host configures it), so there is no host-vs-participant projection split — the routes are restricted to
+/// the authoring roles, so a participant never receives this shape, but the label is nonetheless drawn from
+/// the resource's AUDIENCE projection so it can never disclose host-only content even to an authoring caller.
+///
+/// THE AUDIENCE-SAFE RESOURCE LABEL (CORE-APROJ-004, raised by vertical adopter ARC-GAP-006). A
+/// <see cref="VisibilityRule"/> names its governed resource only by (<see cref="ResourceType"/>,
+/// <see cref="ResourceId"/>), so a host rendering a per-resource visibility matrix from
+/// <c>listRules</c> previously had to read each resource individually to NAME its row.
+/// <see cref="ResourceLabel"/> denormalizes that name onto the rule projection — a scene's title, an
+/// entity's name, a content block's generic kind — so each row can be named from the rule list ALONE, with no
+/// per-resource host read. It is resolved server-side through the Visibility-owned, same-workspace resource
+/// port whose composition-root adapter consults the owning resource module's AUDIENCE projection (the central
+/// security module may not reference Scenes/Content/Entities — CORE-ARCH-001), so the label is the resource's
+/// audience-safe NAME, never its full content. A rule whose resource no longer resolves — a dangling rule
+/// whose resource was deleted, or a resource that does not live in the rule's own workspace — degrades to a
+/// <see langword="null"/> label WITHOUT error (the rule's identity and state still render).
 /// </summary>
 /// <param name="Id">The surrogate id of the visibility rule.</param>
 /// <param name="ResourceType">The kind of resource the rule governs (the enum name).</param>
 /// <param name="ResourceId">The surrogate id of the resource the rule governs.</param>
+/// <param name="ResourceLabel">
+/// The governed resource's denormalized, audience-safe label (a scene's title, an entity's name, a content
+/// block's generic kind), or <see langword="null"/> when the resource no longer resolves in the rule's own
+/// workspace (a dangling rule). Never the resource's full/host content (threats T2/T7).
+/// </param>
 /// <param name="Visibility">The base audience visibility state of the rule (the enum name, Hidden/Visible).</param>
 /// <param name="ParticipantId">
 /// The participant a selected-participant rule applies to, or <see langword="null"/> for an audience-wide
@@ -67,13 +87,20 @@ public sealed record VisibilityRuleResponse(
     Guid Id,
     string ResourceType,
     Guid ResourceId,
+    string? ResourceLabel,
     string Visibility,
     Guid? ParticipantId,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
 {
-    /// <summary>Projects a <see cref="VisibilityRule"/> into its response DTO.</summary>
-    public static VisibilityRuleResponse From(VisibilityRule rule)
+    /// <summary>
+    /// Projects a <see cref="VisibilityRule"/> into its response DTO, denormalizing the governed resource's
+    /// audience-safe label (<paramref name="resourceLabel"/>, resolved by the endpoint through the
+    /// Visibility-owned <see cref="IVisibleResourceAudienceProjector"/> port, or <see langword="null"/> when
+    /// the resource no longer resolves) onto the row. The factory is shared by the create, list and by-id read
+    /// routes so the three shapes can never diverge.
+    /// </summary>
+    public static VisibilityRuleResponse From(VisibilityRule rule, string? resourceLabel)
     {
         ArgumentNullException.ThrowIfNull(rule);
 
@@ -81,6 +108,7 @@ public sealed record VisibilityRuleResponse(
             rule.Id,
             rule.ResourceType.ToString(),
             rule.ResourceId,
+            resourceLabel,
             rule.Visibility.ToString(),
             rule.TargetParticipantId,
             rule.CreatedAt,

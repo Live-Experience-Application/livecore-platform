@@ -117,10 +117,17 @@ export interface CreateVisibilityRuleRequest {
 }
 
 /**
- * Response body of a visibility rule (CORE-SVIS-005) — returned by the create
- * command and by the list and by-id read routes. A visibility rule is an authoring
- * artifact, so there is no host-vs-participant projection: the routes are restricted
- * to the authoring roles, so a participant never receives this shape.
+ * Response body of a visibility rule (CORE-SVIS-005; ENRICHED with an audience-safe
+ * resource label in CORE-APROJ-004) — returned by the create command and by the list
+ * and by-id read routes. A visibility rule is an authoring artifact, so there is no
+ * host-vs-participant projection: the routes are restricted to the authoring roles, so
+ * a participant never receives this shape.
+ *
+ * It carries a denormalized, audience-safe {@link resourceLabel} for the governed
+ * resource, so a host rendering a per-resource visibility matrix from `listRules` can
+ * name each row from the rule list ALONE, with no per-resource host read. The label is
+ * the resource's audience-safe NAME (a scene's title, an entity's name, a content
+ * block's generic kind), never its full host content (threats T2/T7).
  */
 export interface VisibilityRuleResponse {
   /** The surrogate id of the visibility rule. */
@@ -129,6 +136,14 @@ export interface VisibilityRuleResponse {
   resourceType: VisibilityResourceType;
   /** The surrogate id of the resource the rule governs. */
   resourceId: Uuid;
+  /**
+   * The governed resource's denormalized, audience-safe label (a scene's title, an
+   * entity's name, a content block's generic kind), or `null` when the resource no
+   * longer resolves in the rule's own workspace (a dangling rule whose resource was
+   * deleted). Produced only through the resource kind's audience projection — never
+   * its full host content.
+   */
+  resourceLabel: string | null;
   /** The base audience visibility state of the rule (`Hidden`/`Visible`). */
   visibility: VisibilityState;
   /**

@@ -2609,6 +2609,20 @@ the reveal/hide commands' job. The list is **bounded** (`limit`/`offset`,
 selected-participant dimensions; the by-id read is **session-scoped**, so a rule of
 another session, workspace or tenant is an indistinguishable hidden `404`.
 
+Each rule row carries, beyond the governed resource's **identity** (`resourceType` +
+`resourceId`), a denormalized, **audience-safe** `resourceLabel` — a scene's title, an
+entity's name, a content block's generic kind (CORE-APROJ-004, raised by vertical
+adopter ARC-GAP-006). So a host can render a **per-resource visibility matrix** from
+`listRules` **alone**, naming each row with **no per-resource host read**. The label is
+the resource's audience-safe **name**, **never** its full host content: it is produced
+**only** through the resource kind's existing **audience** projection (so a content
+block's host body is never surfaced — its label is the generic kind), resolved through a
+Visibility-owned same-workspace resource port whose adapter lives in the composition
+root (the central security module may not reference the Scenes/Content/Entities modules,
+CORE-ARCH-001). The lookup is the rule's **own** workspace, so it never borrows another
+workspace's resource name, and a rule whose resource was **deleted** degrades to a
+`null` label **without error**.
+
 ### Scene and content lifecycle session events
 
 Activating a scene and changing a resource's visibility now surface as the documented

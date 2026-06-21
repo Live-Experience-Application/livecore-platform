@@ -52,6 +52,7 @@ import type {
   StoreNotificationAck,
   UpdateWorkspaceRequest,
   VisibilityResourceType,
+  VisibilityRuleResponse,
   WorkspaceResponse,
 } from "../src/index.js";
 import {
@@ -252,6 +253,36 @@ export type EntityResponseKeepsHostOnlyFields = Assert<
       : false,
     true
   >
+>;
+
+// --- The visibility-rule projection carries the audience-safe resource label. --
+// (CORE-APROJ-004.) The rule response names its governed resource by `resourceType` +
+// `resourceId` AND a denormalized, audience-safe `resourceLabel`, so a host rendering a
+// per-resource visibility matrix from `listRules` can name each row from the rule list
+// alone, with no per-resource host read. The label is the resource's audience-safe name
+// (a scene's title, an entity's name, a content block's generic kind) or `null` for a
+// dangling rule — never the resource's full host content (threats T2/T7). It mirrors the
+// server DTO (apps/api/Visibility/VisibilityRuleDtos.cs `VisibilityRuleResponse(Guid Id,
+// string ResourceType, Guid ResourceId, string? ResourceLabel, string Visibility,
+// Guid? ParticipantId, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)`). Pinning the
+// property set keeps the published contract from silently growing or dropping a field.
+
+export type VisibilityRuleResponseKeysAreExact = Assert<
+  Equal<
+    keyof VisibilityRuleResponse,
+    | "id"
+    | "resourceType"
+    | "resourceId"
+    | "resourceLabel"
+    | "visibility"
+    | "participantId"
+    | "createdAt"
+    | "updatedAt"
+  >
+>;
+
+export type VisibilityRuleResponseResourceLabelIsNullableString = Assert<
+  Equal<VisibilityRuleResponse["resourceLabel"], string | null>
 >;
 
 // --- Request DTOs require exactly the documented fields. -----------------------

@@ -82,6 +82,9 @@ public sealed class VisibilityRuleEndpointTests
         Assert.NotEqual(Guid.Empty, created.Id);
         Assert.Equal("Scene", created.ResourceType);
         Assert.Equal(sceneId, created.ResourceId);
+        // The create response already carries the governed resource's denormalized, audience-safe label
+        // (CORE-APROJ-004) — the seeded scene's title (SeedSceneAsync titles it "Scene").
+        Assert.Equal("Scene", created.ResourceLabel);
         Assert.Equal(nameof(VisibilityState.Hidden), created.Visibility);
         Assert.Null(created.ParticipantId);
 
@@ -113,13 +116,17 @@ public sealed class VisibilityRuleEndpointTests
         Assert.False(page.HasMore);
         var listed = Assert.Single(page.Items);
         Assert.Equal(created.Id, listed.Id);
+        // Each listed row carries the resolved audience-safe label, so a host can name the row from the rule
+        // list alone — no per-resource host read (CORE-APROJ-004).
+        Assert.Equal("Scene", listed.ResourceLabel);
 
-        // READ by id returns the created rule.
+        // READ by id returns the created rule, also carrying the resolved label.
         var readResponse = await client.GetAsync(ReadUrl(seed.SessionId, created.Id, _orgA));
         Assert.Equal(HttpStatusCode.OK, readResponse.StatusCode);
         var read = await readResponse.Content.ReadFromJsonAsync<RuleDto>(_json);
         Assert.Equal(created.Id, read!.Id);
         Assert.Equal(sceneId, read.ResourceId);
+        Assert.Equal("Scene", read.ResourceLabel);
     }
 
     [Theory]
@@ -285,6 +292,126 @@ public sealed class VisibilityRuleEndpointTests
 
         // Exactly one rule: the duplicate created nothing.
         Assert.Equal(1, await RuleCountAsync(factory, seed.OrganizationId, seed.WorkspaceId, VisibilityResourceType.Scene, sceneId));
+    }
+
+    // =====================================================================
+    // Audience-safe resource label projection (CORE-APROJ-004).
+    // =====================================================================
+
+    [Fact]
+    public async Task List_rows_carry_the_audience_safe_resource_label_per_kind()
+    {
+        // Each listed rule names its governed resource with a denormalized, audience-safe label resolved
+        // WITHIN the session's workspace (the same-workspace resolution): a scene -> its title, a content block
+        // -> its generic kind (never its body), an entity -> its name. So a host can render a per-resource
+        // visibility matrix from the rule list ALONE, with no per-resource host read.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+
+        Guid sceneId = Guid.Empty;
+        Guid contentBlockId = Guid.Empty;
+        Guid entityId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var scene = await db.AddSceneAsync(seed.OrganizationId, seed.WorkspaceId, "Opening", 0);
+            sceneId = scene.Id;
+            var block = await db.AddContentBlockAsync(
+                seed.OrganizationId, seed.WorkspaceId, scene.Id, LiveCore.Api.Content.ContentBlockType.Text, "secret host body");
+            contentBlockId = block.Id;
+            var entityType = await db.AddEntityTypeAsync(seed.OrganizationId, seed.WorkspaceId);
+            var entity = await db.AddEntityAsync(seed.OrganizationId, seed.WorkspaceId, entityType.Id, "Hero");
+            entityId = entity.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        Assert.Equal(HttpStatusCode.Created, (await PostRuleAsync(client, seed.SessionId, Body(_orgA, "Scene", sceneId, "Visible"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await PostRuleAsync(client, seed.SessionId, Body(_orgA, "ContentBlock", contentBlockId, "Visible"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Created, (await PostRuleAsync(client, seed.SessionId, Body(_orgA, "Entity", entityId, "Visible"))).StatusCode);
+
+        var listResponse = await client.GetAsync(ListUrl(seed.SessionId, _orgA));
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var page = await listResponse.Content.ReadFromJsonAsync<PageDto<RuleDto>>(_json);
+        Assert.NotNull(page);
+        var byResource = page.Items.ToDictionary(rule => rule.ResourceId);
+
+        Assert.Equal("Opening", byResource[sceneId].ResourceLabel);
+        // The content block's audience label is its generic kind (Text), NEVER its host body (threat T2).
+        Assert.Equal(nameof(LiveCore.Api.Content.ContentBlockType.Text), byResource[contentBlockId].ResourceLabel);
+        Assert.NotEqual("secret host body", byResource[contentBlockId].ResourceLabel);
+        Assert.Equal("Hero", byResource[entityId].ResourceLabel);
+    }
+
+    [Fact]
+    public async Task List_row_for_a_rule_whose_resource_was_deleted_degrades_to_a_null_label()
+    {
+        // A dangling rule — its governed resource was deleted after the rule was created — degrades to a null
+        // label WITHOUT error: the row still renders (id, kind, state), only the name is absent.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        var sceneId = await SeedSceneAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var createResponse = await PostRuleAsync(client, seed.SessionId, Body(_orgA, "Scene", sceneId, "Visible"));
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var created = await createResponse.Content.ReadFromJsonAsync<RuleDto>(_json);
+
+        // Delete the underlying scene, leaving the rule dangling (resource_id is intentionally not a FK).
+        await factory.SeedAsync(async db =>
+        {
+            var scene = await db.Scenes.FindAsync(sceneId);
+            db.Scenes.Remove(scene!);
+            await db.SaveChangesAsync();
+        });
+
+        var listResponse = await client.GetAsync(ListUrl(seed.SessionId, _orgA));
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var page = await listResponse.Content.ReadFromJsonAsync<PageDto<RuleDto>>(_json);
+        var listed = Assert.Single(page!.Items);
+        Assert.Equal(created!.Id, listed.Id);
+        Assert.Equal(sceneId, listed.ResourceId);
+        Assert.Null(listed.ResourceLabel);
+
+        // The by-id read degrades identically.
+        var readResponse = await client.GetAsync(ReadUrl(seed.SessionId, created.Id, _orgA));
+        Assert.Equal(HttpStatusCode.OK, readResponse.StatusCode);
+        var read = await readResponse.Content.ReadFromJsonAsync<RuleDto>(_json);
+        Assert.Null(read!.ResourceLabel);
+    }
+
+    [Fact]
+    public async Task Label_resolution_does_not_borrow_a_resource_from_another_workspace()
+    {
+        // The label resolution is WORKSPACE-scoped: a rule whose resource id happens to match a resource in
+        // ANOTHER workspace of the same org never borrows that workspace's name. (Such a rule cannot be
+        // created through the API — the same-workspace invariant rejects it — so it is seeded directly to
+        // prove the read-side projection is also workspace-scoped; threats T1/T5.)
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+
+        Guid foreignSceneId = Guid.Empty;
+        Guid ruleId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var otherWorkspace = await db.AddWorkspaceAsync(seed.OrganizationId, "other-ws", "Other");
+            var foreignScene = await db.AddSceneAsync(seed.OrganizationId, otherWorkspace.Id, "Foreign Title", 0);
+            foreignSceneId = foreignScene.Id;
+            var rule = await db.AddVisibilityRuleAsync(
+                seed.OrganizationId, seed.WorkspaceId, seed.SessionId, VisibilityResourceType.Scene, foreignScene.Id, VisibilityState.Visible);
+            ruleId = rule.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var readResponse = await client.GetAsync(ReadUrl(seed.SessionId, ruleId, _orgA));
+
+        Assert.Equal(HttpStatusCode.OK, readResponse.StatusCode);
+        var read = await readResponse.Content.ReadFromJsonAsync<RuleDto>(_json);
+        Assert.Equal(foreignSceneId, read!.ResourceId);
+        // The foreign workspace's scene title is NOT borrowed; the label is null because the scene does not
+        // live in the rule's own workspace.
+        Assert.Null(read.ResourceLabel);
     }
 
     // =====================================================================
@@ -678,6 +805,7 @@ public sealed class VisibilityRuleEndpointTests
         Guid Id,
         string ResourceType,
         Guid ResourceId,
+        string? ResourceLabel,
         string Visibility,
         Guid? ParticipantId,
         DateTimeOffset CreatedAt,
