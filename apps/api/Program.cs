@@ -866,6 +866,15 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IVisibilityResourceWorkspaceLocator, VisibilityResourceWorkspaceLocator>();
     builder.Services.AddScoped<VisibilityRuleService>();
 
+    // Visible-resource audience projector (CORE-APROJ-002): the Visibility-owned IVisibleResourceAudienceProjector
+    // PORT that resolves each visible feed resource's AUDIENCE-SAFE label/body so the participant-visible feed can
+    // be rendered from the feed alone. Like the locator above, the central security module may not reference the
+    // Scenes/Content/Entities modules (CORE-ARCH-001), so the adapter (VisibleResourceAudienceProjector) lives in
+    // this composition root and resolves the label/body ONLY through each resource kind's existing AUDIENCE
+    // projection (never the raw host title/body — threats T2/T7). Registered here, inside the persistence
+    // conditional, because it depends on the scene, content-block and entity repositories above.
+    builder.Services.AddScoped<IVisibleResourceAudienceProjector, VisibleResourceAudienceProjector>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities

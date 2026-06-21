@@ -27,6 +27,7 @@ import type {
   CreateUploadIntentRequest,
   CreateVisibilityRuleRequest,
   CreateWorkspaceRequest,
+  FeedRevealScope,
   GoogleTokenVerificationRequest,
   HideRequest,
   InviteWorkspaceMemberRequest,
@@ -160,18 +161,28 @@ export type RevealParticipantIsOptional = Assert<
   Equal<RevealRequest["participantId"], string | undefined>
 >;
 
-// --- The participant visible-feed item is the participant-safe resource identity. ---
-// (CORE-APROJ-001.) The feed item names a visible resource by its kind and id ONLY —
-// never its resolved content (threat T7) — exactly as the server DTO
-// (apps/api/Visibility/ParticipantFeedDtos.cs `ParticipantVisibleFeedItem(string
-// ResourceType, Guid ResourceId)`) and the wire item the participant-visible-feed
-// integration test asserts is exactly resourceType plus resourceId. Pinning the
-// property set to exactly { resourceType, resourceId } makes a host-only or content
-// field a compile error here, so the published contract can never drift back to the
-// empty object it used to be, nor grow a leaking field.
+// --- The participant visible-feed item is the AUDIENCE-SAFE projected shape. ---
+// (CORE-APROJ-001 aligned it; CORE-APROJ-002 enriched it.) The feed item names a visible
+// resource by its kind and id and adds the audience-safe projected fields — a title (and,
+// where applicable, a short body), the reveal time and the audience-wide/selected marker —
+// produced ONLY through the existing audience projection, never the raw host title/body
+// (threats T2/T7). It mirrors the server DTO (apps/api/Visibility/ParticipantFeedDtos.cs
+// `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
+// string? Body, DateTimeOffset RevealedAt, string RevealScope)`) and the wire item the
+// participant-visible-feed integration test pins. Pinning the property set to exactly this
+// audience-safe shape makes a host-only or content field a compile error here, so the
+// published contract can never grow a leaking field.
 
 export type ParticipantVisibleFeedItemKeysAreExact = Assert<
-  Equal<keyof ParticipantVisibleFeedItem, "resourceType" | "resourceId">
+  Equal<
+    keyof ParticipantVisibleFeedItem,
+    | "resourceType"
+    | "resourceId"
+    | "title"
+    | "body"
+    | "revealedAt"
+    | "revealScope"
+  >
 >;
 
 export type ParticipantVisibleFeedItemResourceTypeIsEnum = Assert<
@@ -180,6 +191,22 @@ export type ParticipantVisibleFeedItemResourceTypeIsEnum = Assert<
 
 export type ParticipantVisibleFeedItemResourceIdIsUuid = Assert<
   Equal<ParticipantVisibleFeedItem["resourceId"], string>
+>;
+
+export type ParticipantVisibleFeedItemTitleIsNullableString = Assert<
+  Equal<ParticipantVisibleFeedItem["title"], string | null>
+>;
+
+export type ParticipantVisibleFeedItemBodyIsNullableString = Assert<
+  Equal<ParticipantVisibleFeedItem["body"], string | null>
+>;
+
+export type ParticipantVisibleFeedItemRevealedAtIsIsoDateTime = Assert<
+  Equal<ParticipantVisibleFeedItem["revealedAt"], string>
+>;
+
+export type ParticipantVisibleFeedItemRevealScopeIsEnum = Assert<
+  Equal<ParticipantVisibleFeedItem["revealScope"], FeedRevealScope>
 >;
 
 // --- Request DTOs require exactly the documented fields. -----------------------

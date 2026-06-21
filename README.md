@@ -2865,15 +2865,23 @@ per-resource access (the visibility decision lives in exactly one place). A part
 sees a resource when an **audience-wide** visible rule, or a visible rule scoped to
 **exactly them** (a selected-participant private reveal), applies; a resource revealed
 only to a **different** participant is excluded — the selected-participant guarantee, so
-a participant never sees another participant's private reveal. Each feed item carries
-only the participant-safe resource **identity** (the resource kind name and id),
-matching the realtime audience event payload (`SessionEventEnvelope.ForAudience`) — never
-resolved content. The feed is empty only when the participant currently has nothing
-visible.
+a participant never sees another participant's private reveal. The feed is empty only when the participant
+currently has nothing visible.
 
-Resolving each visible-resource identity into rendered, participant-safe content
-(text/media/data), and broad external/anonymous participant feed delivery over the
-realtime hub, remain Realtime-epic follow-ups.
+Each feed item carries, beyond the resource **identity** (`resourceType` + `resourceId`), the audience-safe
+projected fields a consumer needs to render the revealed item from the feed alone, with no host read
+(CORE-APROJ-002): an audience-safe `title` (and, where the kind has one, a short `body`), the `revealedAt`
+reveal time and a `revealScope` marker (`AudienceWide` vs `SelectedParticipant`). The `title`/`body` are
+produced **only** through the resource kind's existing role-based **audience** projection (a scene's title, an
+entity's name, a content block's generic kind), **never** the raw host title/body — so the item never leaks
+host-only content (threats T2/T7), and the content block's host body is never disclosed. The reveal time and
+scope are derived by the central `VisibilityPolicy` from the same rules that decide the participant may see
+the resource, so the feed's reveal metadata never diverges from the visibility decision; visibility is never
+recomputed for the projection (the feed stays already-filtered and fail-closed). Because the central security
+module may not reference the Scenes/Content/Entities modules (CORE-ARCH-001), the label/body is resolved
+through a Visibility-owned port whose adapter lives in the composition root.
+
+Broad external/anonymous participant feed delivery over the realtime hub remains a Realtime-epic follow-up.
 
 ### Scene content APIs
 

@@ -499,6 +499,58 @@ internal sealed class VisibilityPolicy
         Guid sessionId,
         Guid participantId,
         IEnumerable<VisibilityRule> workspaceRules)
+        // The bare-identity result is the reveal-enriched result projected down to (kind, id), so the
+        // visibility decision and the dedup/order live in exactly ONE place — the reveal computation below
+        // (docs/05_MODULE_CONTRACTS.md). Identity-only consumers (audience entity search, the realtime
+        // identity parity) keep this shape unchanged.
+        => ComputeVisibleResourceRevealsForParticipant(sessionId, participantId, workspaceRules)
+            .Select(reveal => new VisibleResource(reveal.ResourceType, reveal.ResourceId))
+            .ToArray();
+
+    /// <summary>
+    /// Computes the FULL set of resources a SPECIFIC participant may see IN THE GIVEN SESSION, each ENRICHED
+    /// with its audience-safe REVEAL metadata (CORE-APROJ-002) — the participant-feed companion of
+    /// <see cref="ComputeVisibleResourcesForParticipant"/>, from the SAME pre-loaded workspace rule set
+    /// (CORE-PERF-004) so the per-feed rule-lookup count stays one. It selects, over the rules already in
+    /// memory, the resources whose rules of <paramref name="sessionId"/> make them visible to the participant
+    /// — exactly the predicate
+    /// <see cref="CanParticipantViewResourceAsync(Guid, Guid, Guid, Guid, VisibilityResourceType, Guid, CancellationToken)"/>
+    /// applies (<see cref="VisibilityRule.BelongsToSession"/> + <see cref="VisibilityRule.IsVisibleTo"/>) — and
+    /// for each derives, from the SAME granting rules, the audience-safe reveal metadata
+    /// (<see cref="VisibleResourceReveal"/>): the reveal SCOPE marker and the reveal TIME. So the feed's
+    /// reveal metadata can never diverge from the visibility decision — visibility lives in exactly ONE place
+    /// (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic elsewhere").
+    ///
+    /// The per-resource reveal metadata (audience-safe, never content; threats T2/T7):
+    /// <list type="bullet">
+    ///   <item>SCOPE — <see cref="VisibleResourceRevealScope.AudienceWide"/> when ANY granting rule is
+    ///   audience-wide (the broader disclosure: the participant sees it as the audience does), otherwise
+    ///   <see cref="VisibleResourceRevealScope.SelectedParticipant"/> (visible to them ONLY through a reveal
+    ///   scoped to exactly them).</item>
+    ///   <item>REVEALED-AT — the reveal time (the granting rule's <see cref="VisibilityRule.UpdatedAt"/>, its
+    ///   last visibility transition) of the EARLIEST granting rule of the effective scope: when the resource
+    ///   first became visible to the participant in that scope.</item>
+    /// </list>
+    ///
+    /// SESSION-, TENANT- AND WORKSPACE-SCOPED, FAIL-CLOSED, DETERMINISTIC exactly as
+    /// <see cref="ComputeVisibleResourcesForParticipant"/>: only this session's rules contribute (the
+    /// cross-session leak excluded; threat T5/T3), the rules are passed already tenant- and workspace-scoped
+    /// by the caller (threat T5), a hidden rule or a reveal scoped to a DIFFERENT participant grants nothing
+    /// (the selected-participant guarantee), and the result is one entry per resource in (kind, id) order so a
+    /// resource carrying several granting rules appears exactly once.
+    /// </summary>
+    /// <param name="sessionId">The session the feed is bounded by; only this session's rules contribute.</param>
+    /// <param name="participantId">The participant whose visible set is computed.</param>
+    /// <param name="workspaceRules">
+    /// The workspace's visibility rules, already tenant- and workspace-scoped by the caller's load. Never null.
+    /// </param>
+    /// <returns>The distinct visible resources, each with its audience-safe reveal metadata, in deterministic order.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="workspaceRules"/> is null.</exception>
+    /// <exception cref="ArgumentException">The session id or participant id is empty.</exception>
+    public IReadOnlyList<VisibleResourceReveal> ComputeVisibleResourceRevealsForParticipant(
+        Guid sessionId,
+        Guid participantId,
+        IEnumerable<VisibilityRule> workspaceRules)
     {
         ArgumentNullException.ThrowIfNull(workspaceRules);
 
@@ -517,15 +569,42 @@ internal sealed class VisibilityPolicy
 
         // A resource is visible iff SOME of its session-scoped rules grants it to THIS participant — the same
         // aggregate predicate the per-resource decision uses, evaluated over the rules already in memory.
-        // Selecting the granting rules and taking their DISTINCT resources yields exactly the resources where
-        // a granting rule exists (the old per-candidate "Any" decision, batched in memory). Deterministic
-        // order so the feed is stable.
+        // Grouping by (kind, id) yields exactly the distinct visible resources (the old per-candidate "Any"
+        // decision, batched in memory); each group's granting rules then derive the reveal metadata.
+        // Deterministic order so the feed is stable.
         return workspaceRules
             .Where(rule => rule.BelongsToSession(sessionId) && rule.IsVisibleTo(participantId))
-            .Select(rule => new VisibleResource(rule.ResourceType, rule.ResourceId))
-            .Distinct()
-            .OrderBy(resource => resource.ResourceType)
-            .ThenBy(resource => resource.ResourceId)
+            .GroupBy(rule => (rule.ResourceType, rule.ResourceId))
+            .Select(ProjectReveal)
+            .OrderBy(reveal => reveal.ResourceType)
+            .ThenBy(reveal => reveal.ResourceId)
             .ToArray();
+    }
+
+    /// <summary>
+    /// Derives a resource's audience-safe <see cref="VisibleResourceReveal"/> from the rules that grant THIS
+    /// participant visibility of it (the group's members all satisfy <see cref="VisibilityRule.IsVisibleTo"/>).
+    /// An AUDIENCE-WIDE reveal is the broader disclosure, so its presence sets the scope; the reveal time is
+    /// the earliest granting rule's last visibility transition within the effective scope. Audience-safe
+    /// metadata only — never content (threats T2/T7).
+    /// </summary>
+    private static VisibleResourceReveal ProjectReveal(
+        IGrouping<(VisibilityResourceType ResourceType, Guid ResourceId), VisibilityRule> grantingRules)
+    {
+        var audienceWide = grantingRules.Where(rule => rule.IsAudienceWide).ToArray();
+        var scope = audienceWide.Length > 0
+            ? VisibleResourceRevealScope.AudienceWide
+            : VisibleResourceRevealScope.SelectedParticipant;
+
+        // Within the effective scope (audience-wide when any audience-wide rule applies, else the
+        // participant-scoped granting rules), the resource first became visible at the EARLIEST reveal time.
+        var effective = audienceWide.Length > 0 ? audienceWide : grantingRules.AsEnumerable();
+        var revealedAt = effective.Min(rule => rule.UpdatedAt);
+
+        return new VisibleResourceReveal(
+            grantingRules.Key.ResourceType,
+            grantingRules.Key.ResourceId,
+            revealedAt,
+            scope);
     }
 }

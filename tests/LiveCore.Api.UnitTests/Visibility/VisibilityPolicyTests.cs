@@ -747,6 +747,64 @@ public sealed class VisibilityPolicyTests : IDisposable
         Assert.Throws<ArgumentNullException>(() => policy.ComputeVisibleResourcesForParticipant(Guid.NewGuid(), Guid.NewGuid(), null!));
     }
 
+    // =====================================================================
+    // The reveal-ENRICHED gate (CORE-APROJ-002): the same visibility decision, plus the audience-safe reveal
+    // scope marker and reveal time, derived from the SAME granting rules.
+    // =====================================================================
+
+    [Fact]
+    public void RevealGate_marks_an_audience_wide_resource_as_audience_wide_with_its_reveal_time()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var rules = new[] { AudienceWideRule(session, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible) };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, Guid.NewGuid(), rules));
+
+        Assert.Equal(VisibilityResourceType.Scene, reveal.ResourceType);
+        Assert.Equal(resourceId, reveal.ResourceId);
+        Assert.Equal(VisibleResourceRevealScope.AudienceWide, reveal.Scope);
+        Assert.Equal(_createdAt, reveal.RevealedAt);
+    }
+
+    [Fact]
+    public void RevealGate_marks_a_private_reveal_as_selected_participant_for_its_target_only()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var selected = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var rules = new[] { ParticipantRule(session, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible) };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, selected, rules));
+        Assert.Equal(resourceId, reveal.ResourceId);
+        Assert.Equal(VisibleResourceRevealScope.SelectedParticipant, reveal.Scope);
+
+        // The non-selected participant never sees it (the selected-participant guarantee; threat T5).
+        Assert.Empty(InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, other, rules));
+    }
+
+    [Fact]
+    public void RevealGate_prefers_audience_wide_when_a_resource_has_both_kinds_of_rule()
+    {
+        // A resource visible to the participant by BOTH an audience-wide and a participant-scoped rule appears
+        // ONCE, marked AudienceWide — the broader disclosure: the participant sees it as the audience does.
+        var session = Guid.NewGuid();
+        var participant = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var rules = new[]
+        {
+            AudienceWideRule(session, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible),
+            ParticipantRule(session, VisibilityResourceType.Entity, resourceId, participant, VisibilityState.Visible),
+        };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, participant, rules));
+        Assert.Equal(VisibleResourceRevealScope.AudienceWide, reveal.Scope);
+    }
+
     [Fact]
     public async Task Gate_matches_the_per_candidate_computation_over_the_same_rules()
     {

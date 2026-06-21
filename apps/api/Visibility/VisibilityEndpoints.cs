@@ -246,17 +246,18 @@ internal static class VisibilityEndpoints
         }
 
         // Compute the participant's ACTUALLY-VISIBLE set server-side for THIS SESSION (CORE-API-005 +
-        // CORE-SVIS-001) through the participant-aware preview query (CORE-API-004), which routes every
-        // candidate resource through the central session-scoped VisibilityPolicy — so this REST feed, the
-        // realtime recipient calculation and per-resource access can never diverge and the visibility
-        // decision lives in exactly one place (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility
-        // logic elsewhere"). The set is the resources visible to THIS participant IN THIS SESSION: an
-        // audience-wide reveal OR a reveal scoped to exactly them, never one revealed only to a different
-        // participant (the selected-participant guarantee) and never one revealed in a concurrent session
-        // (the session-scope guarantee), decided fail-closed by the policy; threat T5/T3. It is scoped to
-        // the participant's own tenant and workspace, both already enforced above.
-        var visibleResources = await deps.Preview
-            .GetVisibleResourcesForParticipantAsync(
+        // CORE-SVIS-001), now ENRICHED with audience-safe reveal metadata (CORE-APROJ-002), through the
+        // participant-aware preview query (CORE-API-004), which routes every candidate resource through the
+        // central session-scoped VisibilityPolicy — so this REST feed, the realtime recipient calculation and
+        // per-resource access can never diverge and the visibility decision lives in exactly one place
+        // (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic elsewhere"). The set is the
+        // resources visible to THIS participant IN THIS SESSION: an audience-wide reveal OR a reveal scoped to
+        // exactly them, never one revealed only to a different participant (the selected-participant guarantee)
+        // and never one revealed in a concurrent session (the session-scope guarantee), decided fail-closed by
+        // the policy; threat T5/T3. It is scoped to the participant's own tenant and workspace, both already
+        // enforced above.
+        var visibleReveals = await deps.Preview
+            .GetVisibleResourceRevealsForParticipantAsync(
                 context.OrganizationId,
                 participant.WorkspaceId,
                 session.Id,
@@ -264,14 +265,36 @@ internal static class VisibilityEndpoints
                 cancellationToken)
             .ConfigureAwait(false);
 
-        // Project each visible resource to its participant-safe item (kind + id only,
-        // never resolved content — threat T7) and return the participant-safe envelope
-        // with a server timestamp from the injected TimeProvider (docs/08: "Include
-        // server timestamps").
+        // Build each participant-safe feed item: combine the engine's audience-safe reveal metadata (kind, id,
+        // reveal time and scope) with the resource's AUDIENCE-SAFE label/body resolved through the
+        // Visibility-owned IVisibleResourceAudienceProjector port (CORE-APROJ-002 + CORE-ARCH-001) — produced
+        // ONLY through the resource kind's existing audience projection, never the raw host title/body, so no
+        // host-only content leaks (threats T2/T7). Visibility is NEVER recomputed here; the resource was
+        // already decided visible above. The per-resource resolution is bounded by the (already-filtered)
+        // visible set; a resource that no longer resolves (a dangling rule) degrades to a null label/body
+        // without error. The participant only ever sees items it may see (the feed is fail-closed).
+        var items = new ParticipantVisibleFeedItem[visibleReveals.Count];
+        for (var index = 0; index < visibleReveals.Count; index++)
+        {
+            var reveal = visibleReveals[index];
+            var projection = await deps.AudienceProjector
+                .ProjectAudienceSafeAsync(
+                    context.OrganizationId,
+                    participant.WorkspaceId,
+                    reveal.ResourceType,
+                    reveal.ResourceId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            items[index] = ParticipantVisibleFeedItem.From(reveal, projection);
+        }
+
+        // Return the participant-safe envelope with a server timestamp from the injected TimeProvider
+        // (docs/08: "Include server timestamps").
         var feed = ParticipantVisibleFeedResponse.From(
             participant.Id,
             participant.WorkspaceId,
-            visibleResources,
+            items,
             timeProvider.GetUtcNow());
 
         return Results.Ok(feed);
@@ -346,18 +369,21 @@ internal static class VisibilityEndpoints
         var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var preview = services.GetService<VisibilityPreviewService>();
+        var audienceProjector = services.GetService<IVisibleResourceAudienceProjector>();
 
         if (resolver is null
             || participants is null
             || sessions is null
             || workspaceMembers is null
-            || preview is null)
+            || preview is null
+            || audienceProjector is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new VisibilityEndpointDependencies(resolver, participants, sessions, workspaceMembers, preview);
+        dependencies = new VisibilityEndpointDependencies(
+            resolver, participants, sessions, workspaceMembers, preview, audienceProjector);
         return true;
     }
 
@@ -428,5 +454,6 @@ internal static class VisibilityEndpoints
         IParticipantRepository Participants,
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
-        VisibilityPreviewService Preview);
+        VisibilityPreviewService Preview,
+        IVisibleResourceAudienceProjector AudienceProjector);
 }

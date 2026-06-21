@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The LiveCore Platform contributors
 
 import type {
+  FeedRevealScope,
   HideOutcome,
   RevealOutcome,
   VisibilityResourceType,
@@ -142,19 +143,21 @@ export interface VisibilityRuleResponse {
 }
 
 /**
- * A single participant-visible feed item (CORE-API-005; contract aligned to the
- * server DTO in CORE-APROJ-001). It names a resource the participant may currently
- * see by its kind and surrogate id — exactly as a {@link RevealResponse} and the
- * realtime audience event address their resource — so the REST feed and the
- * realtime stream describe a visible resource with the SAME
- * `(resourceType, resourceId)` shape and can never diverge.
+ * A single participant-visible feed item (CORE-API-005; aligned to the server DTO in
+ * CORE-APROJ-001; ENRICHED with audience-safe projected fields in CORE-APROJ-002). It
+ * names a resource the participant may currently see by its kind and surrogate id —
+ * exactly as a {@link RevealResponse} and the realtime audience event address their
+ * resource — and additionally carries the audience-safe fields that let a consumer
+ * render the revealed item from the feed ALONE, with no host read: an audience-safe
+ * {@link title} (and, where the kind has one, a short {@link body}), the
+ * {@link revealedAt} reveal time and the {@link revealScope} marker.
  *
- * It carries ONLY the resource IDENTITY, never the resolved content, payload or any
- * host-only field, so projecting an item can never leak hidden content
- * (docs/08_API_CONTRACTS.md DTO rules; threats T2/T7). Resolving an identity into the
- * participant-safe rendered content is a later story's concern; this item is the
- * visible-resource handle the participant feed returns. Mirrors the server DTO
- * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId)`.
+ * It is audience-SAFE by construction (docs/08_API_CONTRACTS.md DTO rules; threats
+ * T2/T7): the title/body are produced ONLY through the resource kind's existing
+ * role-based audience projection, never the raw host title/body, so projecting an item
+ * can never leak hidden content. Mirrors the server DTO
+ * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
+ * string? Body, DateTimeOffset RevealedAt, string RevealScope)`.
  */
 export interface ParticipantVisibleFeedItem {
   /**
@@ -164,6 +167,25 @@ export interface ParticipantVisibleFeedItem {
   resourceType: VisibilityResourceType;
   /** The surrogate id of the visible resource. */
   resourceId: Uuid;
+  /**
+   * The resource's audience-safe label (a scene's title, an entity's name, a content
+   * block's generic kind), or `null` when the resource no longer resolves. Produced
+   * only through the kind's audience projection — never the raw host title.
+   */
+  title: string | null;
+  /**
+   * The resource's audience-safe short body, or `null` when the kind's audience
+   * projection exposes none (the case for every current Core resource kind — a content
+   * block's host body is never disclosed here). Never the raw host body.
+   */
+  body: string | null;
+  /** When the resource became visible to the participant (the reveal time). */
+  revealedAt: IsoDateTimeString;
+  /**
+   * Whether the resource is visible through an audience-wide reveal or only a reveal
+   * scoped to exactly this participant ({@link FeedRevealScope}).
+   */
+  revealScope: FeedRevealScope;
 }
 
 /**

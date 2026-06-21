@@ -119,6 +119,21 @@ export const VisibilityStates = ["Hidden", "Visible"] as const;
 export type VisibilityState = (typeof VisibilityStates)[number];
 
 /**
+ * How a resource is visible to a participant in their visible feed (CORE-APROJ-002):
+ * `AudienceWide` when it was revealed to the whole audience, or `SelectedParticipant`
+ * when it was revealed only to that participant (a private reveal). For a participant's
+ * own feed the marker describes only their OWN view; it never names or counts the other
+ * participants a private reveal might target.
+ */
+export const FeedRevealScopes = [
+  "AudienceWide",
+  "SelectedParticipant",
+] as const;
+
+/** A participant feed reveal-scope marker name. */
+export type FeedRevealScope = (typeof FeedRevealScopes)[number];
+
+/**
  * Whether a reveal command newly applied the change or recognized an idempotent
  * retry. Both outcomes leave the resource visible (the command is idempotent).
  */

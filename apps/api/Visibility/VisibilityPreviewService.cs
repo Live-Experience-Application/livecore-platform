@@ -105,6 +105,50 @@ internal sealed class VisibilityPreviewService
         Guid participantId,
         CancellationToken cancellationToken)
     {
+        // The bare-identity set is the reveal-enriched set projected down to (kind, id), so the single rule
+        // load and the in-memory visibility gate live in exactly ONE place (the reveal query below).
+        // Identity-only consumers (the audience entity-search filter) keep this shape unchanged.
+        var reveals = await GetVisibleResourceRevealsForParticipantAsync(
+                organizationId, workspaceId, sessionId, participantId, cancellationToken)
+            .ConfigureAwait(false);
+
+        var result = new VisibleResource[reveals.Count];
+        for (var index = 0; index < reveals.Count; index++)
+        {
+            result[index] = new VisibleResource(reveals[index].ResourceType, reveals[index].ResourceId);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Computes the resources the given participant may currently see in the given session, each ENRICHED
+    /// with its audience-safe REVEAL metadata (CORE-APROJ-002) — the participant-feed companion of
+    /// <see cref="GetVisibleResourcesForParticipantAsync"/>. The workspace's rules are loaded ONCE
+    /// (CORE-PERF-004) and the enriched visible set is computed IN MEMORY by the central policy's
+    /// <see cref="VisibilityPolicy.ComputeVisibleResourceRevealsForParticipant"/>, which applies the SAME
+    /// session-scoped, fail-closed visibility decision the bare-identity set uses and derives each resource's
+    /// reveal scope and reveal time from the SAME granting rules — so the feed's reveal metadata can never
+    /// diverge from the visibility decision (docs/05_MODULE_CONTRACTS.md). The audience-safe label/body of each
+    /// resource is NOT resolved here (the central security module may not reference the resource modules,
+    /// CORE-ARCH-001); the calling endpoint resolves it through the
+    /// <see cref="IVisibleResourceAudienceProjector"/> port and combines it with each reveal. The set is
+    /// tenant-, workspace- and session-scoped and fails closed exactly as the bare-identity set.
+    /// </summary>
+    /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
+    /// <param name="workspaceId">The participant's workspace whose visible set is computed.</param>
+    /// <param name="sessionId">The session the feed is scoped to (CORE-SVIS-001).</param>
+    /// <param name="participantId">The participant whose visible set is computed.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The distinct visible resources, each with its audience-safe reveal metadata, in deterministic order.</returns>
+    /// <exception cref="ArgumentException">The organization id, workspace id, session id or participant id is empty.</exception>
+    public async Task<IReadOnlyList<VisibleResourceReveal>> GetVisibleResourceRevealsForParticipantAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sessionId,
+        Guid participantId,
+        CancellationToken cancellationToken)
+    {
         // Empty ids can never address a stored workspace's rules, a real session or a real participant, so
         // the query fails fast instead of computing over an arbitrary set (mirrors the repository/policy
         // empty-id guards; fail-closed).
@@ -137,14 +181,15 @@ internal sealed class VisibilityPreviewService
             .ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken)
             .ConfigureAwait(false);
 
-        // Compute the participant's visible set in memory through the central policy's in-memory gate
+        // Compute the participant's enriched visible set in memory through the central policy's in-memory gate
         // (CORE-PERF-004): a resource is visible iff some SESSION-SCOPED rule makes it visible to THIS
         // participant — the SAME decision CanParticipantViewResourceAsync makes (rules.Any(IsVisibleTo)),
-        // applied over the pre-loaded rules. So this REST feed, per-resource access and the realtime recipient
-        // gate can never diverge and the visibility decision lives in exactly one place (docs/05). A reveal to
-        // a different participant, or a reveal in a different session, is excluded (fail-closed; the
-        // selected-participant and session-scope guarantees), and the result is distinct and deterministically
-        // ordered.
-        return _policy.ComputeVisibleResourcesForParticipant(sessionId, participantId, workspaceRules);
+        // applied over the pre-loaded rules — and each visible resource carries the audience-safe reveal scope
+        // and time derived from the SAME granting rules. So this REST feed, per-resource access and the
+        // realtime recipient gate can never diverge and the visibility decision lives in exactly one place
+        // (docs/05). A reveal to a different participant, or a reveal in a different session, is excluded
+        // (fail-closed; the selected-participant and session-scope guarantees), and the result is distinct and
+        // deterministically ordered.
+        return _policy.ComputeVisibleResourceRevealsForParticipant(sessionId, participantId, workspaceRules);
     }
 }

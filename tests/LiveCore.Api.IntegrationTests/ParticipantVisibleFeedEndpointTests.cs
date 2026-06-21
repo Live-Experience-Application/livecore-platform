@@ -4,6 +4,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using LiveCore.Api.Content;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Sessions;
 using LiveCore.Api.Visibility;
@@ -640,8 +641,10 @@ public sealed class ParticipantVisibleFeedEndpointTests
             var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             sessionId = session.Id;
 
-            // The resource is revealed ONLY to Q.
-            privateToQResourceId = Guid.CreateVersion7();
+            // The resource is a REAL scene with a distinctive host title, revealed ONLY to Q (CORE-APROJ-002:
+            // its audience-safe title must never reach a non-target participant).
+            var secretScene = await db.AddSceneAsync(org.Id, workspace.Id, "Q Only Secret Scene", 1);
+            privateToQResourceId = secretScene.Id;
             await db.AddParticipantVisibilityRuleAsync(
                 org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, privateToQResourceId,
                 participantQ.Id, VisibilityState.Visible);
@@ -654,6 +657,10 @@ public sealed class ParticipantVisibleFeedEndpointTests
         // P is authorized (own feed) but sees NOTHING — the reveal belongs to Q.
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(response, participantPId, workspaceId);
+
+        // The non-targeted resource's audience-safe title must NOT leak to P either (threats T2/T7).
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("Q Only Secret Scene", payload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -680,7 +687,9 @@ public sealed class ParticipantVisibleFeedEndpointTests
             var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
             sessionId = session.Id;
 
-            privateToQResourceId = Guid.CreateVersion7();
+            // A REAL scene, so the selected participant's feed item carries its audience-safe title.
+            var secretScene = await db.AddSceneAsync(org.Id, workspace.Id, "Q Only Secret Scene", 1);
+            privateToQResourceId = secretScene.Id;
             await db.AddParticipantVisibilityRuleAsync(
                 org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, privateToQResourceId,
                 participantQ.Id, VisibilityState.Visible);
@@ -693,6 +702,13 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(
             response, participantQId, workspaceId, ("Scene", privateToQResourceId));
+
+        // The selected participant DOES receive the resource's audience-safe title, marked as a
+        // selected-participant reveal (the other half of the crown-jewel; CORE-APROJ-002).
+        var items = await ReadFeedItemsByIdAsync(response);
+        var item = Assert.Contains(privateToQResourceId, items);
+        Assert.Equal("Q Only Secret Scene", item.GetProperty("title").GetString());
+        Assert.Equal("SelectedParticipant", item.GetProperty("revealScope").GetString());
     }
 
     [Fact]
@@ -735,6 +751,122 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await AssertFeedContainsExactlyAsync(
             response, participantQId, workspaceId, ("Entity", privateToQResourceId));
+    }
+
+    // =====================================================================
+    // AUDIENCE-SAFE PROJECTED FIELDS (CORE-APROJ-002) — each item carries an
+    // audience-safe title, a revealedAt time and the audience-wide/selected-participant
+    // marker, produced ONLY through the existing audience projection; the host-only
+    // body of a content block never appears.
+    // =====================================================================
+
+    [Fact]
+    public async Task Audience_wide_feed_items_carry_audience_safe_title_revealed_at_and_scope()
+    {
+        // For an audience-wide reveal of each resource KIND, the feed item carries the audience-safe title
+        // resolved through the kind's existing audience projection (Scene -> Title, Entity -> Name,
+        // ContentBlock -> generic kind), revealScope=AudienceWide and the reveal time — and the content
+        // block's host-only BODY never appears anywhere in the feed (threats T2/T7).
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        const string hostOnlyBody = "HOST-ONLY-BODY-DO-NOT-LEAK";
+        Guid participantId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        Guid sceneId = Guid.Empty;
+        Guid contentId = Guid.Empty;
+        Guid entityId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+
+            // REAL resources with distinctive host content, so the audience-safe title can be resolved and a
+            // host-only body-leak can be detected.
+            var scene = await db.AddSceneAsync(org.Id, workspace.Id, "Opening Scene", 1);
+            sceneId = scene.Id;
+            var content = await db.AddContentBlockAsync(
+                org.Id, workspace.Id, scene.Id, ContentBlockType.Text, hostOnlyBody);
+            contentId = content.Id;
+            var entityType = await db.AddEntityTypeAsync(org.Id, workspace.Id);
+            var entity = await db.AddEntityAsync(org.Id, workspace.Id, entityType.Id, "The Hero");
+            entityId = entity.Id;
+
+            // Reveal all three to the WHOLE audience in this session.
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, scene.Id, VisibilityState.Visible);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.ContentBlock, content.Id, VisibilityState.Visible);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entity.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // The host-only content-block body must never appear anywhere in the feed (threat T2).
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(hostOnlyBody, payload, StringComparison.Ordinal);
+
+        var items = await ReadFeedItemsByIdAsync(response);
+        Assert.Equal(3, items.Count);
+        AssertAudienceWideItem(items[sceneId], "Scene", "Opening Scene");
+        AssertAudienceWideItem(items[entityId], "Entity", "The Hero");
+        // The content block's audience-safe label is its generic kind, NOT its body.
+        AssertAudienceWideItem(items[contentId], "ContentBlock", "Text");
+    }
+
+    [Fact]
+    public async Task Own_selected_participant_reveal_item_is_marked_selected_and_carries_audience_safe_title()
+    {
+        // A resource revealed privately to the participant appears in their own feed marked
+        // SelectedParticipant, carrying the audience-safe title resolved through the entity audience
+        // projection and the reveal time.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        Guid entityId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+            var entityType = await db.AddEntityTypeAsync(org.Id, workspace.Id);
+            var entity = await db.AddEntityAsync(org.Id, workspace.Id, entityType.Id, "Private Clue");
+            entityId = entity.Id;
+            await db.AddParticipantVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entity.Id, participant.Id,
+                VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var items = await ReadFeedItemsByIdAsync(response);
+        var item = Assert.Contains(entityId, items);
+        Assert.Equal("Entity", item.GetProperty("resourceType").GetString());
+        Assert.Equal("Private Clue", item.GetProperty("title").GetString());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("body").ValueKind);
+        Assert.Equal("SelectedParticipant", item.GetProperty("revealScope").GetString());
+        Assert.Equal(TestData.SeedTime, item.GetProperty("revealedAt").GetDateTimeOffset());
     }
 
     // =====================================================================
@@ -886,13 +1018,10 @@ public sealed class ParticipantVisibleFeedEndpointTests
         var actual = new HashSet<(string, Guid)>();
         foreach (var item in feed.Items)
         {
-            // Each item carries ONLY the participant-safe identity fields.
-            var itemProperties = item.EnumerateObject()
-                .Select(property => property.Name)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            Assert.Equal(
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "resourceType", "resourceId" },
-                itemProperties);
+            // Each item carries ONLY the audience-safe shape (CORE-APROJ-002): the resource identity
+            // (resourceType + resourceId), the audience-safe title/body, the reveal time and the reveal-scope
+            // marker — NO host-only field. Pinning the exact set catches a future host-only/content field.
+            AssertItemPropertySet(item);
 
             var resourceType = item.GetProperty("resourceType").GetString();
             Assert.NotNull(resourceType);
@@ -907,6 +1036,65 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Assert.True(
             actual.SetEquals(expected),
             $"feed items [{string.Join(", ", actual)}] did not match expected [{string.Join(", ", expected)}]");
+    }
+
+    /// <summary>
+    /// Asserts a single feed item's top-level JSON property set is EXACTLY the documented audience-safe shape
+    /// (CORE-APROJ-002): the resource identity, the audience-safe title/body, the reveal time and the
+    /// reveal-scope marker — and nothing else, so a future host-only/content field cannot slip in (docs/08
+    /// DTO rules; threats T2/T7).
+    /// </summary>
+    /// <summary>
+    /// Asserts a feed item is an audience-WIDE reveal of the expected resource kind carrying the expected
+    /// audience-safe title, no body, the AudienceWide marker and the seed reveal time.
+    /// </summary>
+    private static void AssertAudienceWideItem(JsonElement item, string expectedResourceType, string expectedTitle)
+    {
+        Assert.Equal(expectedResourceType, item.GetProperty("resourceType").GetString());
+        Assert.Equal(expectedTitle, item.GetProperty("title").GetString());
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("body").ValueKind);
+        Assert.Equal("AudienceWide", item.GetProperty("revealScope").GetString());
+        Assert.Equal(TestData.SeedTime, item.GetProperty("revealedAt").GetDateTimeOffset());
+    }
+
+    private static void AssertItemPropertySet(JsonElement item)
+    {
+        var itemProperties = item.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "resourceType",
+                "resourceId",
+                "title",
+                "body",
+                "revealedAt",
+                "revealScope",
+            },
+            itemProperties);
+    }
+
+    /// <summary>
+    /// Reads the feed body, asserts the documented envelope shape and returns the items keyed by resource id,
+    /// each already pinned to the audience-safe property set. Used by the enrichment tests to assert the
+    /// per-item audience-safe fields (title, revealedAt, revealScope) without re-parsing.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<Guid, JsonElement>> ReadFeedItemsByIdAsync(
+        HttpResponseMessage response)
+    {
+        var payload = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+
+        var items = new Dictionary<Guid, JsonElement>();
+        foreach (var item in root.GetProperty("items").EnumerateArray())
+        {
+            AssertItemPropertySet(item);
+            items[item.GetProperty("resourceId").GetGuid()] = item.Clone();
+        }
+
+        return items;
     }
 
     private sealed record FeedDto(

@@ -213,6 +213,26 @@ is decided in exactly one place (`docs/05_MODULE_CONTRACTS.md`; `docs/02_ARCHITE
 not computed ad hoc in many places). No new schema, route or event: the single-resource read index and the
 `ListByWorkspaceAsync` load CORE-PERF-004 already established back this path unchanged.
 
+## Audience-safe enrichment of the participant visible-feed item (CORE-APROJ-002)
+
+Each item of the participant-visible feed (`GET /api/v1/participants/{participantId}/visible-feed`) carries,
+beyond the resource identity (`resourceType` + `resourceId`), the **audience-safe** projected fields a
+consumer needs to render the revealed item from the feed alone, with no host read: an audience-safe `title`
+(and, where the kind has one, a short `body`), the `revealedAt` reveal time and a `revealScope` marker
+distinguishing an **audience-wide** reveal from a **selected-participant** (private) reveal. The reveal time
+and scope are derived by the central `VisibilityPolicy` from the **same** rules that decide the participant
+may see the resource (`VisibilityPolicy.ComputeVisibleResourceRevealsForParticipant`, over the single
+`ListByWorkspaceAsync` load above), so the feed's reveal metadata can never diverge from the visibility
+decision. The `title`/`body` are resolved **only** through the resource kind's existing role-based **audience**
+projection (`Participant{Scene,ContentBlock,Entity}Response`), never the raw host title/body, so no host-only
+content leaks (threats T2/T7) — most importantly the content block's host body is never disclosed. Because the
+central security module may not reference the Scenes/Content/Entities modules (CORE-ARCH-001), the label/body
+is resolved through a Visibility-owned port whose adapter lives in the composition root (the same pattern as
+CORE-SVIS-005). Visibility is never recomputed for the projection; the feed stays already-filtered and
+fail-closed (the participant only ever sees items it may see). Like the realtime audience event
+(`SessionEventEnvelope.ForAudience`), the item never carries the resolved host content. No new route, schema
+or event: the route shape is unchanged.
+
 ## Per-session event sequence (CORE-RTC-001)
 
 Every session event carries a **per-session, gap-free, strictly monotonic** `sequence` number, and both live

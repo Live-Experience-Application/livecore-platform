@@ -178,6 +178,31 @@ this document** with a drift gate in CORE-OAS-002.
 - Include resource version where concurrent updates matter.
 - Include server timestamps.
 
+### Participant visible-feed item: the audience-safe projected shape (CORE-APROJ-002)
+
+Each item of `GET /api/v1/participants/{participantId}/visible-feed` carries the audience-safe projection of
+one resource the participant may currently see, so a consumer can render the revealed item from the feed
+alone, with **no host read**:
+
+| Field | Meaning |
+|---|---|
+| `resourceType` | the resource kind (`Scene`/`ContentBlock`/`Entity`), the stable enum name |
+| `resourceId` | the surrogate id of the visible resource |
+| `title` | the resource's **audience-safe label** — a scene's title, an entity's name, a content block's generic kind — or `null` when the resource no longer resolves |
+| `body` | the resource's **audience-safe short body**, or `null` when the kind's audience projection exposes none (the case for every current resource kind) |
+| `revealedAt` | when the resource became visible to the participant (the reveal time) |
+| `revealScope` | the marker distinguishing an `AudienceWide` reveal from a `SelectedParticipant` (private) reveal |
+
+The `title`/`body` are produced **only** through the resource kind's existing role-based **audience**
+projection (the same `Participant{Scene,ContentBlock,Entity}Response` shapes the list/read routes use),
+**never** the raw host title/body — so the feed item never leaks host-only content (threats T2/T7), most
+importantly the content block's host body is never disclosed here. Visibility is **not recomputed** for the
+projection: an item is built only for a resource the central `VisibilityPolicy` has already decided the
+participant may see, so the feed stays already-filtered and fail-closed (a participant only ever sees items it
+may see). The resource label/body is resolved through a Visibility-owned port whose adapter lives in the
+composition root, because the central security module may not reference the Scenes/Content/Entities modules
+(CORE-ARCH-001).
+
 ## Idempotency
 
 Reveal and hide (un-reveal) execution must be idempotent for client retry.
