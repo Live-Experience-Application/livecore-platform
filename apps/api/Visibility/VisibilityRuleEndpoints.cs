@@ -190,7 +190,10 @@ internal static class VisibilityRuleEndpoints
                 request.ParticipantId,
                 context.UserProfileId,
                 now,
-                cancellationToken)
+                cancellationToken,
+                // Optional scheduled-reveal time (CORE-VSEAL-002): the worker's sweep auto-reveals a Hidden rule
+                // once this time arrives, through the central reveal engine. Null leaves the rule unscheduled.
+                request.ScheduledRevealAt)
             .ConfigureAwait(false);
 
         switch (result.Status)

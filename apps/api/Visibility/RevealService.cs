@@ -67,7 +67,7 @@ namespace LiveCore.Api.Visibility;
 /// (<c>ContentRevealed</c> / <c>ContentHidden</c>, docs/09_EVENT_CATALOG.md) is emitted by the endpoint on
 /// the SAME change signal and is distinct from this audit record.
 /// </summary>
-internal sealed class RevealService
+public sealed class RevealService
 {
     private readonly IVisibilityRuleRepository _rules;
     private readonly IIdempotencyKeyStore _idempotency;
@@ -109,15 +109,18 @@ internal sealed class RevealService
     /// </param>
     /// <param name="actorUserProfileId">
     /// The authenticated user who executed the reveal — the audited actor (CORE-VIS-006,
-    /// docs/09_EVENT_CATALOG.md <c>createdBy</c>). The caller (the endpoint) supplies it from the
-    /// resolved tenant context. Must be non-empty.
+    /// docs/09_EVENT_CATALOG.md <c>createdBy</c>). The HTTP endpoint supplies it from the resolved tenant
+    /// context (non-empty). It is <see langword="null"/> for a SYSTEM reveal — the worker's scheduled
+    /// auto-reveal (CORE-VSEAL-002), which the platform performs with no live user, exactly as the
+    /// retention/recap background jobs record a system action — and the audit fact is then recorded with no
+    /// actor. A SET actor must be non-empty.
     /// </param>
-    /// <param name="idempotencyKey">The client <c>Idempotency-Key</c> header value.</param>
+    /// <param name="idempotencyKey">The client <c>Idempotency-Key</c> header value, or the worker's deterministic per-rule key.</param>
     /// <param name="now">The command timestamp.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="ArgumentException">
-    /// The organization id, workspace id, session id, resource id or actor id is empty, the target
-    /// participant id is empty, or the idempotency key is blank.
+    /// The organization id, workspace id, session id or resource id is empty, the target participant id or a
+    /// SET actor id is explicitly empty, or the idempotency key is blank.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">The resource type is not defined.</exception>
     public async Task<RevealResult> RevealAsync(
@@ -127,7 +130,7 @@ internal sealed class RevealService
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
-        Guid actorUserProfileId,
+        Guid? actorUserProfileId,
         string idempotencyKey,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -249,7 +252,7 @@ internal sealed class RevealService
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
-        Guid actorUserProfileId,
+        Guid? actorUserProfileId,
         string idempotencyKey,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -289,10 +292,13 @@ internal sealed class RevealService
                 nameof(targetParticipantId));
         }
 
+        // A null actor is a SYSTEM reveal (the worker's scheduled auto-reveal, CORE-VSEAL-002); a SET actor
+        // must address a real user. So only an EXPLICIT empty Guid is rejected — null passes through and is
+        // recorded as a system action.
         if (actorUserProfileId == Guid.Empty)
         {
             throw new ArgumentException(
-                "Actor user profile id must not be empty.",
+                "Actor user profile id must not be empty; pass null for a system (scheduled) reveal.",
                 nameof(actorUserProfileId));
         }
 
@@ -338,16 +344,34 @@ internal sealed class RevealService
         // (docs/07_SECURITY_THREAT_MODEL.md: "audit creation for visibility changes").
         if (change is { } appliedChange)
         {
-            var entry = AuditLogEntry.ForVisibilityRuleChange(
-                organizationId,
-                workspaceId,
-                actorUserProfileId,
-                resourceType.ToString(),
-                resourceId,
-                targetParticipantId,
-                appliedChange.PreviousVisibility?.ToString(),
-                appliedChange.NewVisibility.ToString(),
-                now);
+            // A USER reveal records the authenticated actor through the visibility producer's strict
+            // specialization; a SYSTEM reveal (the worker's scheduled auto-reveal, CORE-VSEAL-002 — a null
+            // actor) records the SAME VisibilityRuleChanged fact with NO actor through the generic factory,
+            // exactly as the retention/recap background jobs record a system action (a null actor). Either way
+            // the row carries only identifiers, an enum and the generic state names — never resolved content
+            // (threat T7).
+            var entry = actorUserProfileId is { } actor
+                ? AuditLogEntry.ForVisibilityRuleChange(
+                    organizationId,
+                    workspaceId,
+                    actor,
+                    resourceType.ToString(),
+                    resourceId,
+                    targetParticipantId,
+                    appliedChange.PreviousVisibility?.ToString(),
+                    appliedChange.NewVisibility.ToString(),
+                    now)
+                : AuditLogEntry.Create(
+                    organizationId,
+                    workspaceId,
+                    AuditAction.VisibilityRuleChanged,
+                    actorUserProfileId: null,
+                    resourceType.ToString(),
+                    resourceId,
+                    targetParticipantId,
+                    appliedChange.PreviousVisibility?.ToString(),
+                    appliedChange.NewVisibility.ToString(),
+                    now);
             await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
         }
 

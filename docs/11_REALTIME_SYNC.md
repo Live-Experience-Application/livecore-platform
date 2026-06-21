@@ -34,6 +34,23 @@ Flow:
 command -> authorize -> persist event -> compute recipients -> project payload -> send to recipient groups
 ```
 
+### Worker-driven scheduled auto-reveal (CORE-VSEAL-002)
+
+A visibility rule can carry an optional `scheduledRevealAt` time; a **Hidden** rule whose time has arrived is
+**automatically revealed** by a background **worker sweep**. The sweep does **not** open a second, duplicated
+reveal path: it drives the **same central reveal command** (`RevealService`) a live host reveal uses — as a
+**system** action (no actor) — and emits the **same** durable session events through the **same shared composer**
+(`ContentRevealed` + `VisibilityRuleChanged`, and `SceneActivated` for a Scene). Each event carries the revealed
+resource as its **visibility subject**, so the recipient resolver gates delivery through the central Visibility
+engine to **exactly the authorized audience** — a non-authorized audience never receives it, and a
+selected-participant scheduled rule reaches only that participant (threats T2/T3/T5). The worker process holds no
+realtime connections, so — exactly like the recap-generation job — it **appends** the durable events (the source
+of truth) and the recipient-gated **reconnect replay** delivers them; the gate re-runs on replay, so live and
+replayed delivery cannot diverge. The sweep is **idempotent** (an auto-revealed rule is no longer Hidden, plus a
+deterministic per-rule reveal idempotency key, so overlapping sweeps and worker replicas never double-reveal) and
+**tenant-safe** (each auto-reveal is scoped to the rule's own session). It is an **off-by-default** worker loop
+(`Visibility:ScheduledReveal:Enabled`, docs/13_SELF_HOSTING_REQUIREMENTS.md).
+
 ## Participant payload projection
 
 Participant events must contain only data visible to that participant.

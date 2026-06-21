@@ -101,8 +101,9 @@ public sealed record ParticipantVisibleFeedResponse(
 /// (<see cref="Realtime.SessionEventEnvelope.ForAudience"/>) address their resource — and additionally
 /// carries the AUDIENCE-SAFE projected fields that let a consumer render the revealed item from the feed
 /// ALONE, with no host read: an audience-safe <see cref="Title"/> (and, where the kind has one, a short
-/// <see cref="Body"/>), the <see cref="RevealedAt"/> reveal time, the <see cref="RevealScope"/> marker and the
-/// sealed/locked <see cref="Locked"/> presentation flag (CORE-VSEAL-001).
+/// <see cref="Body"/>), the <see cref="RevealedAt"/> reveal time, the <see cref="RevealScope"/> marker, the
+/// sealed/locked <see cref="Locked"/> presentation flag (CORE-VSEAL-001) and the optional
+/// <see cref="ScheduledRevealAt"/> scheduled-reveal time (CORE-VSEAL-002).
 ///
 /// AUDIENCE-SAFE BY CONSTRUCTION (docs/08 DTO rules; threats T2/T7 in docs/07_SECURITY_THREAT_MODEL.md):
 /// <list type="bullet">
@@ -164,6 +165,13 @@ public sealed record ParticipantVisibleFeedResponse(
 /// resource), never host content and never an authorization rationale (threats T2/T7). <see langword="false"/>
 /// for a normally-revealed (unlocked) resource.
 /// </param>
+/// <param name="ScheduledRevealAt">
+/// The optional SCHEDULED-REVEAL time (UTC) of the granting rule in the way this participant sees the resource
+/// (CORE-VSEAL-002), or <see langword="null"/> when the granting rule carries no schedule. It lets an audience
+/// surface render a scheduled presentation state (when the resource was scheduled to appear). It is
+/// AUDIENCE-SAFE: a timestamp server fact about a resource the participant is ALREADY allowed to see (the item
+/// is built only for an already-visible resource), never host content (threats T2/T7).
+/// </param>
 /// <param name="Attachments">
 /// The audience-safe list of assets attached to this resource (CORE-ALC-002), each an assetId plus an
 /// audience-safe name and content type. Empty when the resource has no attachments or cannot carry them.
@@ -176,6 +184,7 @@ public sealed record ParticipantVisibleFeedItem(
     DateTimeOffset RevealedAt,
     string RevealScope,
     bool Locked,
+    DateTimeOffset? ScheduledRevealAt,
     IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)
 {
     /// <summary>
@@ -212,6 +221,7 @@ public sealed record ParticipantVisibleFeedItem(
             reveal.RevealedAt,
             reveal.Scope.ToString(),
             reveal.Locked,
+            reveal.ScheduledRevealAt,
             projectedAttachments);
     }
 }

@@ -606,11 +606,22 @@ internal sealed class VisibilityPolicy
         // about an already-visible resource, never host content; threat T7).
         var locked = effective.Any(rule => rule.Locked);
 
+        // SCHEDULED-REVEAL presentation state (CORE-VSEAL-002): the earliest scheduled-reveal time among the
+        // granting rules of the effective scope that carry one (most carry none, so this is usually null).
+        // Audience-safe (a timestamp server fact about an already-visible resource, never host content; threat
+        // T7); a feed item is only ever built for a resource the participant may already see.
+        var scheduledRevealAt = effective
+            .Where(rule => rule.ScheduledRevealAt is not null)
+            .Select(rule => rule.ScheduledRevealAt)
+            .DefaultIfEmpty(null)
+            .Min();
+
         return new VisibleResourceReveal(
             grantingRules.Key.ResourceType,
             grantingRules.Key.ResourceId,
             revealedAt,
             scope,
-            locked);
+            locked,
+            scheduledRevealAt);
     }
 }

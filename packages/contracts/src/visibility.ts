@@ -114,6 +114,16 @@ export interface CreateVisibilityRuleRequest {
    * `404`).
    */
   participantId?: Uuid;
+  /**
+   * Optional scheduled-reveal time (UTC) for the rule (CORE-VSEAL-002). When set on
+   * a Hidden rule, the resource stays hidden until this time and is then
+   * AUTOMATICALLY revealed by the worker's background sweep through the central reveal
+   * engine — so the auto-reveal is gated through the Visibility engine and emits the
+   * normal session events to exactly the authorized audience. When omitted, the rule
+   * has no schedule and behaves exactly as before; a time in the past schedules an
+   * immediate auto-reveal on the next sweep.
+   */
+  scheduledRevealAt?: IsoDateTimeString;
 }
 
 /**
@@ -134,6 +144,12 @@ export interface CreateVisibilityRuleRequest {
  * targeting a locked rule is refused with `409`. The flag is ORTHOGONAL to the
  * Hidden/Visible {@link visibility} state — not a third state — and is set/cleared only by
  * the authoring roles through the lock/unlock commands.
+ *
+ * It also carries the optional scheduled-reveal time (CORE-VSEAL-002): when set on a Hidden
+ * rule, the resource stays hidden until that time and is then AUTOMATICALLY revealed by the
+ * worker's background sweep through the central reveal engine. It is projected so a consumer
+ * can render a scheduled presentation state (the WHEN of visibility) — a server fact, never
+ * host content.
  */
 export interface VisibilityRuleResponse {
   /** The surrogate id of the visibility rule. */
@@ -166,6 +182,14 @@ export interface VisibilityRuleResponse {
    * unlocked rule.
    */
   locked: boolean;
+  /**
+   * The optional scheduled-reveal time (UTC) of the rule (CORE-VSEAL-002), or `null` when
+   * the rule has no schedule. When set on a Hidden rule, the resource stays hidden until this
+   * time and is then automatically revealed by the worker's background sweep through the
+   * central reveal engine. Projected so a consumer can render a scheduled presentation state;
+   * a server fact about when the resource is/was scheduled to appear, never host content.
+   */
+  scheduledRevealAt: IsoDateTimeString | null;
   /** Server timestamp (UTC) at which the rule was first created. */
   createdAt: IsoDateTimeString;
   /** Server timestamp (UTC) at which the rule was last updated. */
@@ -223,12 +247,12 @@ export interface ParticipantVisibleFeedAttachment {
  * It is audience-SAFE by construction (docs/08_API_CONTRACTS.md DTO rules; threats
  * T2/T7): the title/body are produced ONLY through the resource kind's existing
  * role-based audience projection, never the raw host title/body, so projecting an item
- * can never leak hidden content. The {@link locked} flag (CORE-VSEAL-001) is an
- * audience-safe boolean server fact about a resource the participant is already allowed to
- * see — never host content. Mirrors the server DTO
- * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
+ * can never leak hidden content. The {@link locked} flag (CORE-VSEAL-001) and the optional
+ * {@link scheduledRevealAt} time (CORE-VSEAL-002) are audience-safe server facts about a
+ * resource the participant is already allowed to see — never host content. Mirrors the server
+ * DTO `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
  * string? Body, DateTimeOffset RevealedAt, string RevealScope, bool Locked,
- * IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)`.
+ * DateTimeOffset? ScheduledRevealAt, IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)`.
  */
 export interface ParticipantVisibleFeedItem {
   /**
@@ -265,6 +289,14 @@ export interface ParticipantVisibleFeedItem {
    * content. `false` for a normally-revealed (unlocked) resource.
    */
   locked: boolean;
+  /**
+   * The optional scheduled-reveal time (UTC) of the granting rule in the way this participant
+   * sees the resource (CORE-VSEAL-002), or `null` when the granting rule carries no schedule.
+   * Lets an audience surface render a scheduled presentation state (when the resource was
+   * scheduled to appear). Audience-safe: a timestamp server fact about a resource the
+   * participant is already allowed to see, never host content.
+   */
+  scheduledRevealAt: IsoDateTimeString | null;
   /**
    * The audience-safe list of assets attached to this resource (CORE-ALC-002), each an
    * assetId plus an audience-safe name and content type. Empty (never absent) when the

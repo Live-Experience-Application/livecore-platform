@@ -189,6 +189,7 @@ export type ParticipantVisibleFeedItemKeysAreExact = Assert<
     | "revealedAt"
     | "revealScope"
     | "locked"
+    | "scheduledRevealAt"
     | "attachments"
   >
 >;
@@ -222,6 +223,11 @@ export type ParticipantVisibleFeedItemRevealScopeIsEnum = Assert<
 export type ParticipantVisibleFeedItemLockedIsBoolean = Assert<
   Equal<ParticipantVisibleFeedItem["locked"], boolean>
 >;
+
+// The scheduled-reveal time (CORE-VSEAL-002) is an audience-safe nullable timestamp server fact —
+// a consumer renders a scheduled presentation state from it, never any host content.
+export type ParticipantVisibleFeedItemScheduledRevealAtIsNullableIsoDateTime =
+  Assert<Equal<ParticipantVisibleFeedItem["scheduledRevealAt"], string | null>>;
 
 // --- The participant visible-feed attachment is the AUDIENCE-SAFE attachment shape. ---
 // (CORE-ALC-002.) Each feed item carries an attachments list of the assets linked to the
@@ -311,9 +317,10 @@ export type EntityResponseKeepsHostOnlyFields = Assert<
 // dangling rule — never the resource's full host content (threats T2/T7). It mirrors the
 // server DTO (apps/api/Visibility/VisibilityRuleDtos.cs `VisibilityRuleResponse(Guid Id,
 // string ResourceType, Guid ResourceId, string? ResourceLabel, string Visibility,
-// Guid? ParticipantId, bool Locked, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)` —
-// the CORE-VSEAL-001 sealed/locked flag added). Pinning the property set keeps the published
-// contract from silently growing or dropping a field.
+// Guid? ParticipantId, bool Locked, DateTimeOffset? ScheduledRevealAt, DateTimeOffset CreatedAt,
+// DateTimeOffset UpdatedAt)` — the CORE-VSEAL-001 sealed/locked flag and the CORE-VSEAL-002
+// scheduled-reveal time added). Pinning the property set keeps the published contract from
+// silently growing or dropping a field.
 
 export type VisibilityRuleResponseKeysAreExact = Assert<
   Equal<
@@ -325,6 +332,7 @@ export type VisibilityRuleResponseKeysAreExact = Assert<
     | "visibility"
     | "participantId"
     | "locked"
+    | "scheduledRevealAt"
     | "createdAt"
     | "updatedAt"
   >
@@ -339,6 +347,11 @@ export type VisibilityRuleResponseResourceLabelIsNullableString = Assert<
 export type VisibilityRuleResponseLockedIsBoolean = Assert<
   Equal<VisibilityRuleResponse["locked"], boolean>
 >;
+
+// The scheduled-reveal time (CORE-VSEAL-002) is a server-asserted nullable timestamp on the rule
+// projection — when set on a Hidden rule the worker auto-reveals it once that time arrives.
+export type VisibilityRuleResponseScheduledRevealAtIsNullableIsoDateTime =
+  Assert<Equal<VisibilityRuleResponse["scheduledRevealAt"], string | null>>;
 
 // --- Request DTOs require exactly the documented fields. -----------------------
 

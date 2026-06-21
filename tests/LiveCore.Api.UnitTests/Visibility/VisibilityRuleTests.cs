@@ -42,6 +42,35 @@ public sealed class VisibilityRuleTests
         Assert.Equal(VisibilityState.Hidden, rule.Visibility);
         Assert.Equal(_createdAt, rule.CreatedAt);
         Assert.Equal(_createdAt, rule.UpdatedAt);
+        // A new rule has no schedule unless one is supplied (CORE-VSEAL-002).
+        Assert.Null(rule.ScheduledRevealAt);
+    }
+
+    [Fact]
+    public void Create_stores_an_optional_scheduled_reveal_time_normalized_to_utc()
+    {
+        // CORE-VSEAL-002: an optional scheduled-reveal time supplied at creation is stored, normalized to UTC so
+        // the persisted value is offset-independent (docs/10_DATABASE_SCHEMA.md).
+        var scheduledLocal = new DateTimeOffset(2026, 6, 21, 18, 30, 0, TimeSpan.FromHours(2));
+        var rule = VisibilityRule.Create(
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId,
+            VisibilityState.Hidden, _createdAt, scheduledLocal);
+
+        Assert.NotNull(rule.ScheduledRevealAt);
+        Assert.Equal(scheduledLocal.ToUniversalTime(), rule.ScheduledRevealAt);
+        Assert.Equal(TimeSpan.Zero, rule.ScheduledRevealAt!.Value.Offset);
+    }
+
+    [Fact]
+    public void CreateForParticipant_stores_an_optional_scheduled_reveal_time()
+    {
+        var participantId = Guid.Parse("00000000-0000-0000-0000-0000000000e1");
+        var rule = VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, participantId,
+            VisibilityState.Hidden, _createdAt, _createdAt + TimeSpan.FromHours(1));
+
+        Assert.Equal(_createdAt + TimeSpan.FromHours(1), rule.ScheduledRevealAt);
+        Assert.Equal(participantId, rule.TargetParticipantId);
     }
 
     [Fact]

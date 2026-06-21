@@ -14,7 +14,7 @@ entity_types,Entities/Templates,workspace/template,Template-defined types
 entity_relationships,Entities,workspace,Graph edges
 assets,Assets,workspace,Metadata only
 asset_links,Assets,workspace,Asset-to-content/entity links
-visibility_rules,Visibility,session,Session-scoped audience rules (reveals); carries a server-asserted sealed/locked flag that gates reveal/hide/change (CORE-VSEAL-001)
+visibility_rules,Visibility,session,Session-scoped audience rules (reveals); carries a server-asserted sealed/locked flag that gates reveal/hide/change (CORE-VSEAL-001) and an optional scheduled_reveal_at time for worker-driven auto-reveal (CORE-VSEAL-002)
 session_events,Realtime,session,Append-only event stream
 session_event_sequences,Realtime,session,Per-session monotonic event sequence allocator counter
 audit_logs,Audit,organization,Append-only audit (tamper-evident per-tenant hash chain: sequence + previous_hash + entry_hash)

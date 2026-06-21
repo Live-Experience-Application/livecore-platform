@@ -35,4 +35,7 @@ internal static class WorkerJobNames
 
     /// <summary>The data-retention sweep loop (CORE-PRIV-003).</summary>
     public const string DataRetention = "data-retention";
+
+    /// <summary>The off-by-default scheduled-reveal sweep loop (CORE-VSEAL-002).</summary>
+    public const string ScheduledReveal = "scheduled-reveal";
 }

@@ -108,6 +108,12 @@ internal sealed class VisibilityRuleService
     /// </param>
     /// <param name="now">The command timestamp (the rule's created/updated time and the audit record's time).</param>
     /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="scheduledRevealAt">
+    /// The optional SCHEDULED-REVEAL time (UTC) for the rule (CORE-VSEAL-002): when set on a Hidden rule, the
+    /// worker's background sweep automatically reveals it once that time arrives, through the central reveal
+    /// engine. <see langword="null"/> (the default) means no schedule, so the rule behaves exactly as before. It
+    /// is stored as-is on the aggregate; it is never an authorization input.
+    /// </param>
     /// <exception cref="ArgumentException">
     /// The organization id, workspace id, session id, resource id or actor id is empty, or the target
     /// participant id is explicitly empty (pass null for an audience-wide rule).
@@ -123,7 +129,8 @@ internal sealed class VisibilityRuleService
         Guid? targetParticipantId,
         Guid actorUserProfileId,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateTimeOffset? scheduledRevealAt = null)
     {
         if (organizationId == Guid.Empty)
         {
@@ -220,7 +227,8 @@ internal sealed class VisibilityRuleService
                         resourceId,
                         selectedParticipantId,
                         visibility,
-                        now)
+                        now,
+                        scheduledRevealAt)
                     : VisibilityRule.Create(
                         organizationId,
                         workspaceId,
@@ -228,7 +236,8 @@ internal sealed class VisibilityRuleService
                         resourceType,
                         resourceId,
                         visibility,
-                        now);
+                        now,
+                        scheduledRevealAt);
 
                 // SINGLE-RULE-PER-DIMENSION (CORE-SVIS-002): a second rule in the same (session, resource,
                 // dimension) is rejected by the filtered unique index and surfaces as Duplicate; nothing is

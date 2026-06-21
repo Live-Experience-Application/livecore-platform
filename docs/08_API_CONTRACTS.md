@@ -198,6 +198,7 @@ alone, with **no host read**:
 | `revealedAt` | when the resource became visible to the participant (the reveal time) |
 | `revealScope` | the marker distinguishing an `AudienceWide` reveal from a `SelectedParticipant` (private) reveal |
 | `locked` | whether the resource is **sealed (locked)** in the way this participant sees it (CORE-VSEAL-001) — a server-asserted authoring lock marking it permanently-restricted, so a consumer can render a locked presentation state. Audience-safe (a boolean fact about an already-visible resource, never host content). `false` for a normally-revealed resource |
+| `scheduledRevealAt` | the **scheduled-reveal time** (UTC) of the granting rule in the way this participant sees the resource (CORE-VSEAL-002), or `null` when it has none — so a consumer can render a scheduled presentation state. Audience-safe (a timestamp fact about an already-visible resource, never host content) |
 | `attachments` | the audience-safe list of assets attached to the resource (CORE-ALC-002); each entry is an `assetId`, an audience-safe `name` and a `contentType`. Empty (never absent) when the resource has no attachments |
 
 The `title`/`body` are produced **only** through the resource kind's existing role-based **audience**
@@ -306,6 +307,7 @@ The visibility-rule response (`VisibilityRuleResponse`, returned by the create c
 | `visibility` | the base audience visibility state (`Hidden`/`Visible`) |
 | `participantId` | the selected-participant target, or `null` for an audience-wide rule |
 | `locked` | whether the rule is **sealed (locked)** — the server-asserted authoring lock (CORE-VSEAL-001) that makes the governed resource permanently-restricted; `true` while a reveal/hide/change targeting the rule is refused with `409`. Orthogonal to `visibility` (not a third state) |
+| `scheduledRevealAt` | the optional **scheduled-reveal time** (UTC) of the rule (CORE-VSEAL-002), or `null` when it has none. When set on a Hidden rule the resource stays hidden until then and is automatically revealed by the worker's sweep through the central engine; projected so a consumer can render a scheduled presentation state |
 | `createdAt` / `updatedAt` | server timestamps |
 
 `resourceLabel` lets a host render a **per-resource visibility matrix from `listRules` alone** — naming each row
@@ -344,6 +346,31 @@ POST   /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock   ?organiza
 - A real lock change is recorded as a `VisibilityRuleLockChanged` audit fact (actor + governed resource +
   before/after lock-state, by id only — never content).
 - The `409` a reveal/hide returns when it targets a locked rule carries the generic `conflict` problem code.
+
+### Scheduled reveal (CORE-VSEAL-002)
+
+A visibility rule can carry an optional **`scheduledRevealAt`** timestamp (the "WHEN" half of controlling
+visibility, docs/01_PRODUCT_VISION_AND_SCOPE.md), supplied on the create command
+(`POST /api/v1/sessions/{sessionId}/visibility-rules`, an optional body field). A **Hidden** rule with a
+**future** `scheduledRevealAt` stays Hidden until that time and is then **automatically revealed** by a
+background **worker sweep** — which drives the **same central reveal command** as a live host reveal, so the
+auto-reveal is gated through the Visibility engine and emits the **normal session events**
+(`ContentRevealed`/`VisibilityRuleChanged`, and `SceneActivated` for a Scene) to **exactly the authorized
+audience** — it never reveals to an unauthorized participant, and a selected-participant scheduled rule reveals
+only to that participant (threats T2/T3/T5). The auto-reveal is recorded as a **system** action (no actor) in
+the audit log and the session events, exactly as the recap/retention background jobs record a system action.
+
+- A rule with **no** `scheduledRevealAt` behaves **exactly as before**; a time in the **past** schedules an
+  immediate auto-reveal on the next sweep.
+- The sweep is **idempotent** (a rule is auto-revealed **at most once** — an auto-revealed rule is no longer
+  Hidden, and the auto-reveal uses a deterministic per-rule reveal idempotency key, so overlapping sweeps,
+  multiple worker replicas and a manual re-hide can never double-reveal) and **tenant-safe** (each auto-reveal
+  is driven scoped to its rule's own tenant/workspace/session).
+- `scheduledRevealAt` is projected on the rule and, where audience-safe, on the participant visible-feed item, so
+  a consumer can render a scheduled presentation state — a server fact about WHEN the resource is/was scheduled
+  to appear, never host content.
+- The sweep is an **off-by-default** worker loop, enabled per deployment with
+  `Visibility:ScheduledReveal:Enabled=true` (docs/13_SELF_HOSTING_REQUIREMENTS.md).
 
 ## Idempotency
 

@@ -188,6 +188,50 @@ public sealed class VisibilityRuleEndpointTests
     }
 
     // =====================================================================
+    // Scheduled reveal (CORE-VSEAL-002).
+    // =====================================================================
+
+    [Fact]
+    public async Task Create_round_trips_an_optional_scheduled_reveal_time()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        var sceneId = await SeedSceneAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+        var scheduledRevealAt = new DateTimeOffset(2026, 12, 31, 18, 0, 0, TimeSpan.Zero);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRuleAsync(
+            client, seed.SessionId, BodyScheduled(_orgA, "Scene", sceneId, "Hidden", scheduledRevealAt));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var created = await response.Content.ReadFromJsonAsync<RuleDto>(_json);
+        // The scheduled-reveal time is projected on the rule so a consumer can render a scheduled state.
+        Assert.Equal(scheduledRevealAt, created!.ScheduledRevealAt);
+
+        // It is also returned on the by-id read.
+        var read = await (await client.GetAsync(ReadUrl(seed.SessionId, created.Id, _orgA)))
+            .Content.ReadFromJsonAsync<RuleDto>(_json);
+        Assert.Equal(scheduledRevealAt, read!.ScheduledRevealAt);
+    }
+
+    [Fact]
+    public async Task Create_without_a_scheduled_reveal_time_projects_null()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        var seed = await SeedSessionAsync(factory, subject, MembershipRole.Host);
+        var sceneId = await SeedSceneAsync(factory, seed.OrganizationId, seed.WorkspaceId);
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await PostRuleAsync(client, seed.SessionId, Body(_orgA, "Scene", sceneId, "Hidden"));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var created = await response.Content.ReadFromJsonAsync<RuleDto>(_json);
+        Assert.Null(created!.ScheduledRevealAt);
+    }
+
+    // =====================================================================
     // Same-workspace invariant (the story headline).
     // =====================================================================
 
@@ -696,6 +740,10 @@ public sealed class VisibilityRuleEndpointTests
     private static object Body(string? organizationSlug, string resourceType, Guid resourceId, string visibility)
         => new { organizationSlug, resourceType, resourceId, visibility };
 
+    private static object BodyScheduled(
+        string? organizationSlug, string resourceType, Guid resourceId, string visibility, DateTimeOffset scheduledRevealAt)
+        => new { organizationSlug, resourceType, resourceId, visibility, scheduledRevealAt };
+
     private static object BodyForParticipant(
         string? organizationSlug, string resourceType, Guid resourceId, string visibility, Guid participantId)
         => new { organizationSlug, resourceType, resourceId, visibility, participantId };
@@ -808,6 +856,8 @@ public sealed class VisibilityRuleEndpointTests
         string? ResourceLabel,
         string Visibility,
         Guid? ParticipantId,
+        bool Locked,
+        DateTimeOffset? ScheduledRevealAt,
         DateTimeOffset CreatedAt,
         DateTimeOffset UpdatedAt);
 

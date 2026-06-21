@@ -2700,6 +2700,11 @@
             "type": "string",
             "format": "uuid",
             "nullable": true
+          },
+          "scheduledRevealAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           }
         }
       },

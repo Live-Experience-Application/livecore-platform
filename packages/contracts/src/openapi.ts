@@ -2687,6 +2687,8 @@ export interface components {
             visibility: string | null;
             /** Format: uuid */
             participantId?: string | null;
+            /** Format: date-time */
+            scheduledRevealAt?: string | null;
         };
         CreateWorkspaceRequest: {
             organizationSlug: string | null;

@@ -37,9 +37,17 @@ namespace LiveCore.Api.Visibility;
 /// resource the participant already sees, never host content (threat T7). <see langword="false"/> when no
 /// granting rule of the effective scope is locked.
 /// </param>
+/// <param name="ScheduledRevealAt">
+/// The optional SCHEDULED-REVEAL time (UTC) of the granting rule of the effective <see cref="Scope"/>
+/// (CORE-VSEAL-002), or <see langword="null"/> when no granting rule of that scope carries a schedule. It lets a
+/// consumer render a scheduled presentation state (the WHEN the resource was scheduled to appear). It is
+/// audience-safe — a timestamp server fact about a resource the participant already sees, never host content
+/// (threat T7).
+/// </param>
 internal sealed record VisibleResourceReveal(
     VisibilityResourceType ResourceType,
     Guid ResourceId,
     DateTimeOffset RevealedAt,
     VisibleResourceRevealScope Scope,
-    bool Locked);
+    bool Locked,
+    DateTimeOffset? ScheduledRevealAt);

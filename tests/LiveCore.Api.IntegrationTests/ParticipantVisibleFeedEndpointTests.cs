@@ -1108,6 +1108,9 @@ public sealed class ParticipantVisibleFeedEndpointTests
         // An ordinary (never-sealed) reveal is unlocked, so the feed item is not in a locked presentation
         // state (CORE-VSEAL-001; the default is unchanged for an unlocked rule).
         Assert.False(item.GetProperty("locked").GetBoolean());
+        // An ordinary reveal carries no scheduled-reveal time, so the feed item's scheduled presentation state
+        // is null (CORE-VSEAL-002; the default is unchanged for a rule with no schedule).
+        Assert.Equal(JsonValueKind.Null, item.GetProperty("scheduledRevealAt").ValueKind);
     }
 
     private static void AssertItemPropertySet(JsonElement item)
@@ -1125,6 +1128,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 "revealedAt",
                 "revealScope",
                 "locked",
+                "scheduledRevealAt",
                 "attachments",
             },
             itemProperties);

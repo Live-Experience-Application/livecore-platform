@@ -173,6 +173,14 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
             .HasDefaultValue(false)
             .IsRequired();
 
+        // Scheduled-reveal time (CORE-VSEAL-002): the optional UTC time at which a Hidden rule is to be
+        // AUTOMATICALLY revealed by the worker's background sweep. A real, NULLABLE timestamptz column (not
+        // JSON — a server fact, never an authorization field inside arbitrary JSON, docs/10_DATABASE_SCHEMA.md),
+        // defaulting to null so every pre-existing row has no schedule and behaves exactly as before. It is
+        // orthogonal to the binary visibility column and reshapes no existing index.
+        builder.Property(rule => rule.ScheduledRevealAt)
+            .HasColumnName("scheduled_reveal_at");
+
         // Documented critical index visibility_rules(session_id, resource_type, resource_id)
         // (CORE-SVIS-001; docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped, so "find the rule(s)
         // for this resource in this session" leads with the session column — the lookup the
@@ -234,6 +242,19 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
         // CORE-SVIS-001's swap).
         builder.HasIndex(rule => new { rule.WorkspaceId, rule.ResourceType, rule.ResourceId })
             .HasDatabaseName("ix_visibility_rules_workspace_id_resource_type_resource_id");
+
+        // Scheduled-reveal sweep index (CORE-VSEAL-002): the worker's background sweep finds rules DUE for an
+        // automatic reveal — Hidden rules whose scheduled_reveal_at has arrived — across all tenants (a system
+        // job, not a tenant actor; each due rule carries its own tenant and the auto-reveal is driven scoped to
+        // it). A FILTERED (partial) index on scheduled_reveal_at restricted to the rows that actually carry a
+        // schedule (the vast majority do not) keeps that periodic sweep cheap without bloating the index for
+        // every scheduleless rule — the same partial-index technique the dimension-uniqueness indexes use. NOT
+        // unique: many rules may share a scheduled time. The filter SQL is portable across PostgreSQL and SQLite
+        // (plain column name + IS NOT NULL), so EnsureCreated builds it for the SQLite test schema and the
+        // migration builds it for PostgreSQL identically.
+        builder.HasIndex(rule => rule.ScheduledRevealAt)
+            .HasDatabaseName("ix_visibility_rules_scheduled_reveal_at")
+            .HasFilter("\"scheduled_reveal_at\" IS NOT NULL");
 
         // Tenant foreign key: every visibility rule hangs off exactly one organization (the owner of
         // its workspace). Cascade delete removes rules with their tenant.

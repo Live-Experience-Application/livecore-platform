@@ -75,6 +75,7 @@ public sealed class VisibilityRule
         VisibilityState visibility,
         Guid? targetParticipantId,
         bool locked,
+        DateTimeOffset? scheduledRevealAt,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt)
     {
@@ -145,6 +146,9 @@ public sealed class VisibilityRule
         Visibility = visibility;
         TargetParticipantId = targetParticipantId;
         Locked = locked;
+        // A set scheduled-reveal time is normalized to UTC so the persisted timestamptz value is
+        // offset-independent (docs/10_DATABASE_SCHEMA.md); a null schedule (the default) stays null.
+        ScheduledRevealAt = scheduledRevealAt?.ToUniversalTime();
         // Timestamps are normalized to UTC so the persisted timestamptz values are
         // offset-independent (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -243,6 +247,27 @@ public sealed class VisibilityRule
     /// </summary>
     public bool Locked { get; private set; }
 
+    /// <summary>
+    /// The optional SCHEDULED-REVEAL time of this rule (UTC), or <see langword="null"/> when the rule has no
+    /// schedule (CORE-VSEAL-002, the "Scheduled and Sealed Visibility" epic, raised by a vertical adopter,
+    /// ARC-GAP-002). When set on a <see cref="VisibilityState.Hidden"/> rule, the resource is meant to stay
+    /// hidden until this time and then be AUTOMATICALLY revealed by the worker's background sweep
+    /// (<c>ScheduledRevealService</c>) — which drives the SAME central reveal command
+    /// (<see cref="RevealService"/>) as a live host reveal, so the auto-reveal is gated through the Visibility
+    /// engine and emits the normal session events to exactly the authorized audience (it never reveals to an
+    /// unauthorized participant). The "WHEN" half of controlling visibility (docs/01_PRODUCT_VISION_AND_SCOPE.md).
+    ///
+    /// It is set ONLY at creation time (the create command's optional <c>scheduledRevealAt</c>); it is never an
+    /// authorization input (the binary <see cref="Visibility"/> state and the rule's tenant/workspace/session
+    /// boundaries decide access exactly as before) and is left UNCHANGED by the auto-reveal — the sweep relies on
+    /// the binary state flip (Hidden -&gt; Visible) plus a deterministic reveal idempotency key for its
+    /// at-most-once guarantee, so a rule with no schedule behaves exactly as a pre-CORE-VSEAL-002 rule. The
+    /// timestamp is projected on the rule (and, where audience-safe, on the participant visible-feed item) so a
+    /// consumer can render a scheduled presentation state — it is a server fact about WHEN a resource is/was
+    /// scheduled to appear, never host content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// </summary>
+    public DateTimeOffset? ScheduledRevealAt { get; }
+
     /// <summary>When this rule was first created (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
 
@@ -272,7 +297,8 @@ public sealed class VisibilityRule
         VisibilityResourceType resourceType,
         Guid resourceId,
         VisibilityState visibility,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        DateTimeOffset? scheduledRevealAt = null)
         => new(
             Guid.CreateVersion7(),
             organizationId,
@@ -285,6 +311,9 @@ public sealed class VisibilityRule
             // A new rule is UNLOCKED: locking is an explicit, separately-authorized authoring action
             // (CORE-VSEAL-001), so a freshly created rule behaves exactly as a pre-seal rule.
             locked: false,
+            // An optional scheduled-reveal time (CORE-VSEAL-002): null (the default) means no schedule, so the
+            // rule behaves exactly as a pre-CORE-VSEAL-002 rule.
+            scheduledRevealAt,
             createdAt,
             createdAt);
 
@@ -309,7 +338,8 @@ public sealed class VisibilityRule
         Guid resourceId,
         Guid targetParticipantId,
         VisibilityState visibility,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        DateTimeOffset? scheduledRevealAt = null)
     {
         if (targetParticipantId == Guid.Empty)
         {
@@ -327,6 +357,8 @@ public sealed class VisibilityRule
             targetParticipantId,
             // A new selected-participant rule is UNLOCKED, exactly like an audience-wide one (CORE-VSEAL-001).
             locked: false,
+            // An optional scheduled-reveal time (CORE-VSEAL-002), exactly like an audience-wide rule.
+            scheduledRevealAt,
             createdAt,
             createdAt);
     }
@@ -515,5 +547,6 @@ public sealed class VisibilityRule
     public override string ToString()
         => $"VisibilityRule {Id} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
             + $"resource={ResourceType}:{ResourceId} visibility={Visibility} locked={Locked} "
+            + $"scheduledRevealAt={(ScheduledRevealAt is { } scheduled ? scheduled.ToString("O") : "none")} "
             + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")}";
 }

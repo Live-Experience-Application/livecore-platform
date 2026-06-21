@@ -35,12 +35,20 @@ namespace LiveCore.Api.Visibility;
 /// present-but-empty value is a 400; a set value must be a participant of the session's workspace (otherwise
 /// hidden as 404).
 /// </param>
+/// <param name="ScheduledRevealAt">
+/// Optional SCHEDULED-REVEAL time (UTC) for the rule (CORE-VSEAL-002): when set on a Hidden rule, the resource
+/// stays hidden until this time and is then AUTOMATICALLY revealed by the worker's background sweep through the
+/// central reveal engine (so the auto-reveal is gated through the Visibility engine and emits the normal session
+/// events to exactly the authorized audience). When omitted/<see langword="null"/>, the rule has no schedule and
+/// behaves exactly as before. A time in the past schedules an immediate auto-reveal on the next sweep.
+/// </param>
 public sealed record CreateVisibilityRuleRequest(
     string? OrganizationSlug,
     string? ResourceType,
     Guid ResourceId,
     string? Visibility,
-    Guid? ParticipantId = null);
+    Guid? ParticipantId = null,
+    DateTimeOffset? ScheduledRevealAt = null);
 
 /// <summary>
 /// Response body of a visibility rule (CORE-SVIS-005) — the shape returned by the create command and by the
@@ -88,6 +96,13 @@ public sealed record CreateVisibilityRuleRequest(
 /// state, so a consumer can render a locked presentation state bound to this server fact while the binary
 /// Hidden/Visible state is unchanged. <see langword="false"/> for an unlocked rule (the default).
 /// </param>
+/// <param name="ScheduledRevealAt">
+/// The optional SCHEDULED-REVEAL time (UTC) of the rule (CORE-VSEAL-002), or <see langword="null"/> when the
+/// rule has no schedule. When set on a Hidden rule, the resource stays hidden until this time and is then
+/// AUTOMATICALLY revealed by the worker's background sweep through the central reveal engine. It is projected so
+/// a consumer can render a scheduled presentation state (the WHEN of visibility) — a server fact about when the
+/// resource is/was scheduled to appear, never host content (threat T7).
+/// </param>
 /// <param name="CreatedAt">Server timestamp (UTC) at which the rule was first created.</param>
 /// <param name="UpdatedAt">Server timestamp (UTC) at which the rule was last updated.</param>
 public sealed record VisibilityRuleResponse(
@@ -98,6 +113,7 @@ public sealed record VisibilityRuleResponse(
     string Visibility,
     Guid? ParticipantId,
     bool Locked,
+    DateTimeOffset? ScheduledRevealAt,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
 {
@@ -106,8 +122,8 @@ public sealed record VisibilityRuleResponse(
     /// audience-safe label (<paramref name="resourceLabel"/>, resolved by the endpoint through the
     /// Visibility-owned <see cref="IVisibleResourceAudienceProjector"/> port, or <see langword="null"/> when
     /// the resource no longer resolves) onto the row and carrying the rule's sealed/locked flag
-    /// (CORE-VSEAL-001). The factory is shared by the create, list, by-id read and lock/unlock routes so the
-    /// shapes can never diverge.
+    /// (CORE-VSEAL-001) and its optional scheduled-reveal time (CORE-VSEAL-002). The factory is shared by the
+    /// create, list, by-id read and lock/unlock routes so the shapes can never diverge.
     /// </summary>
     public static VisibilityRuleResponse From(VisibilityRule rule, string? resourceLabel)
     {
@@ -121,6 +137,7 @@ public sealed record VisibilityRuleResponse(
             rule.Visibility.ToString(),
             rule.TargetParticipantId,
             rule.Locked,
+            rule.ScheduledRevealAt,
             rule.CreatedAt,
             rule.UpdatedAt);
     }

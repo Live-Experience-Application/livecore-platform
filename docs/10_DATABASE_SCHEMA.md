@@ -88,6 +88,7 @@ visibility_rules(session_id, resource_type, resource_id)
 visibility_rules(session_id, resource_type, resource_id) unique where target_participant_id is null
 visibility_rules(session_id, resource_type, resource_id, target_participant_id) unique where target_participant_id is not null
 visibility_rules(workspace_id, resource_type, resource_id)
+visibility_rules(scheduled_reveal_at) where scheduled_reveal_at is not null
 session_events(session_id, sequence) unique
 session_events(session_id, created_at, event_id)
 session_event_sequences(session_id)
@@ -312,6 +313,18 @@ leaves the binary Hidden/Visible enforcement and the recipient resolver exactly 
 `false` means every pre-existing row is unlocked, so an unlocked rule behaves exactly as before. The flag is
 set/cleared only by the authoring roles (the lock/unlock commands) and is projected on `VisibilityRuleResponse`
 and, where audience-safe, on the participant visible-feed item.
+
+`visibility_rules` also carries an optional **`scheduled_reveal_at`** `timestamptz` column (CORE-VSEAL-002,
+**nullable**, no default): the time at which a **Hidden** rule is to be **automatically revealed** by the worker's
+background sweep, which drives the **same central reveal command** as a live host reveal. It is a first-class
+server-fact column (never inside arbitrary JSON), **orthogonal** to the `visibility` column; `null` (the default)
+means no schedule, so a rule without it behaves exactly as before. A **filtered (partial)** index
+`visibility_rules(scheduled_reveal_at)` **where `scheduled_reveal_at IS NOT NULL`** backs the worker's periodic
+due-rule sweep cheaply (the vast majority of rules carry no schedule, so the partial index stays small) — the
+same partial-index technique the dimension-uniqueness indexes use. The sweep is **idempotent** (an auto-revealed
+rule is no longer Hidden, plus a deterministic per-rule reveal idempotency key) and **tenant-safe** (each
+auto-reveal is driven scoped to the rule's own tenant/workspace/session); the column is projected on
+`VisibilityRuleResponse` and, where audience-safe, on the participant visible-feed item.
 
 ## Single rule per dimension (CORE-SVIS-002)
 

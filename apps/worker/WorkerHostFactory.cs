@@ -8,6 +8,7 @@ using LiveCore.Api.Observability;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Retention;
 using LiveCore.Api.Store;
+using LiveCore.Api.Visibility;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -160,6 +161,14 @@ public static class WorkerHostFactory
         // so liveness can observe it even when only the default invitation-email window runs.
         var dataRetentionConfigured = builder.Services.AddDataRetention(builder.Configuration);
 
+        // CORE-VSEAL-002: gated on a configured database AND an explicit opt-in (Visibility:ScheduledReveal:Enabled=true).
+        // The scheduled-reveal sweep automatically reveals every Hidden visibility rule whose scheduledRevealAt time
+        // has arrived, driving the SAME central reveal command as a live host reveal (so the auto-reveal is gated
+        // through the Visibility engine and emits the normal session events to exactly the authorized audience). It is
+        // OFF BY DEFAULT — server-enforced scheduled reveal is opt-in per deployment — so with it not enabled this
+        // returns false and registers no loop (fail-safe).
+        var scheduledRevealConfigured = builder.Services.AddScheduledReveal(builder.Configuration);
+
         // The exact set of loops that are actually scheduled, so the per-loop liveness check (below) expects a
         // beat from precisely those loops — no more (a loop the deployment did not configure must not read as
         // "stalled") and no fewer (a configured loop that hangs must read as stalled).
@@ -187,6 +196,11 @@ public static class WorkerHostFactory
         if (dataRetentionConfigured)
         {
             activeJobNames.Add(WorkerJobNames.DataRetention);
+        }
+
+        if (scheduledRevealConfigured)
+        {
+            activeJobNames.Add(WorkerJobNames.ScheduledReveal);
         }
 
         // Per-loop liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003). Each loop beats its OWN file
@@ -258,6 +272,11 @@ public static class WorkerHostFactory
         if (dataRetentionConfigured)
         {
             builder.Services.AddHostedService<DataRetentionSweepBackgroundService>();
+        }
+
+        if (scheduledRevealConfigured)
+        {
+            builder.Services.AddHostedService<ScheduledRevealBackgroundService>();
         }
 
         var app = builder.Build();

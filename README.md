@@ -1156,8 +1156,9 @@ dependency** — bound to a configurable listen URL (`Worker:Metrics:Url`, defau
 | `/health/live`  | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                                                                                                                                                          |
 | `/health/ready` | The **readiness** endpoint, DISTINCT from liveness (CORE-OBS-013): in Production it reports **not-ready** (`503`) when the worker can do no work (persistence unconfigured or **zero** active loops) or its configuration is malformed, so the worker is **not vacuously healthy**.                                                                                                                                  |
 
-Each of the (up to five) loops (asset cleanup, recap generation, export processing, the
-billing-gated store-notification reconciliation, and the data-retention sweep) writes
+Each of the (up to six) loops (asset cleanup, recap generation, export processing, the
+billing-gated store-notification reconciliation, the data-retention sweep, and the
+off-by-default scheduled-reveal sweep) writes
 the current UTC timestamp to its **own** heartbeat file each tick; `/health/live` is
 healthy only when every active loop's file is fresh (within `Worker:Heartbeat:StaleAfter`,
 default 2 hours). Before this, all loops shared **one** file, so a single healthy loop
@@ -2658,6 +2659,27 @@ unknown rule or a non-member is a hidden `404`; a non-authoring member is `403`)
 (`VisibilityRuleLockChanged`, by id only). The flag is projected as `locked` on
 `VisibilityRuleResponse` and, where audience-safe, on the participant visible-feed item,
 so a consumer can render a locked presentation state bound to the server fact.
+
+#### Scheduled reveal with worker-driven auto-reveal
+
+A visibility rule can also carry an optional **`scheduledRevealAt`** time (CORE-VSEAL-002,
+the second half of ARC-GAP-002 — the product vision explicitly includes controlling
+visibility **WHEN**). A **Hidden** rule with a **future** `scheduledRevealAt` (set on the
+create command) stays Hidden until that time and is then **automatically revealed** by a
+background **worker sweep** — which drives the **same central reveal command**
+(`RevealService`) a live host reveal uses, as a **system** action, so the auto-reveal is
+gated through the Visibility engine and **emits the normal session events**
+(`ContentRevealed`/`VisibilityRuleChanged`, and `SceneActivated` for a Scene) to **exactly
+the authorized audience** — it never reveals to an unauthorized participant, and a
+selected-participant scheduled rule reaches only that participant. There is **no duplicated
+reveal path**: the sweep reuses the central engine and a shared event composer. A rule with
+**no** `scheduledRevealAt` behaves exactly as before; the sweep is **idempotent** (a rule is
+auto-revealed at most once — it is no longer Hidden once revealed, plus a deterministic
+per-rule reveal idempotency key) and **tenant-safe** (each auto-reveal is scoped to its
+rule's own session). `scheduledRevealAt` is projected on `VisibilityRuleResponse` and, where
+audience-safe, on the participant visible-feed item, so a consumer can render a scheduled
+presentation state. The sweep is an **off-by-default** worker loop
+(`Visibility:ScheduledReveal:Enabled`, `docs/13_SELF_HOSTING_REQUIREMENTS.md`).
 
 ### Scene and content lifecycle session events
 
