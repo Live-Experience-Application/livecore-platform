@@ -12,6 +12,18 @@ detail; this root file is the workspace-level summary. The .NET API and worker
 hosts are not published packages and are not versioned here. See
 `docs/23_PACKAGE_VERSIONING.md` for the full versioning and changelog process.
 
+## [Unreleased]
+
+### Added
+
+- `@livecore/sdk-ts` surfaces the correlation ids the Core API echoes on every
+  response (CORE-SDX-001): `LiveCoreApiError` and the success `SdkResponse` envelope
+  now both carry `requestId` (`X-Request-Id`) and `traceparent` (the W3C trace
+  context), so a vertical can log `request_id` with every call and show it in an
+  error state without wrapping the injected `fetch`. The ids are `undefined` only
+  when Core sent none — never fabricated. An additive (MINOR) change to the SDK's
+  typed surface; no route, contract or dependency change.
+
 ## [0.2.0] - 2026-06-19
 
 This release cuts the large body of work merged since `0.1.0` into one dated,

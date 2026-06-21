@@ -1723,9 +1723,16 @@ authenticated per-principal surface — the surface a browser SDK consumes, read
 same limiter that enforces it) and the `429` (where remaining is `0` and reset matches
 `Retry-After`), so a browser consumer can back off **before** it is throttled. These
 headers are numeric ceilings/counts only — never a tenant, principal or resource
-identifier (threat T7) — and the CORS policy exposes them (with `ETag`, `Location` and the
-`X-Request-Id` correlation header) so a cross-origin SDK can read them; the typed SDK
-surfaces them on `LiveCoreApiError` (`retryAfter`, `rateLimit`). Rate limiting is a coarse
+identifier (threat T7) — and the CORS policy exposes them (with `ETag`, `Location`, the
+`X-Request-Id` correlation header and the W3C `traceparent`) so a cross-origin SDK can read
+them; the typed SDK surfaces them on `LiveCoreApiError` (`retryAfter`, `rateLimit`). The SDK
+likewise surfaces the correlation ids the Core API echoes on **every** response — its
+`X-Request-Id` and `traceparent` (CORE-SDX-001) — which it previously discarded: it reads
+both on the success and the fail-closed error path and exposes them as `requestId`/
+`traceparent` on `LiveCoreApiError` and on the success `SdkResponse` envelope, so a consumer
+can log `request_id` with every call and show it in an error state without wrapping the
+injected `fetch` (they are `undefined` only when Core sent none, never fabricated). Rate
+limiting is a coarse
 abuse ceiling layered **on top of** the OIDC/tenant authorization every endpoint already
 enforces server-side; it never widens authorization
 (`docs/07_SECURITY_THREAT_MODEL.md`), exactly like the CORS allow-list. See

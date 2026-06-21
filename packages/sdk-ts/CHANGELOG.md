@@ -8,6 +8,22 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+### Added
+
+- The echoed correlation ids on the SDK (CORE-SDX-001): the Core API already echoes
+  `X-Request-Id` and the W3C `traceparent` on every response (its
+  `CorrelationHeaderMiddleware`, exposed via CORS), and the SDK now surfaces both
+  instead of discarding them. `LiveCoreApiError` carries `readonly requestId` and
+  `traceparent`, and the success `SdkResponse` envelope exposes the same two
+  alongside `data` and `etag`, so a consumer can log `request_id` with every call and
+  show it in an error state without wrapping the injected `fetch` transport. The ids
+  are populated on both the success and the fail-closed error path, and are
+  `undefined` only when Core sent none — never fabricated (a blank header is treated
+  as absent). No new runtime dependency and no route/method change; the new optional
+  fields are an additive change to the typed surface.
+
 ## [0.2.0] - 2026-06-19
 
 ### Added

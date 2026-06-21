@@ -305,6 +305,42 @@ export type RateLimitInfoShape = Assert<
   >
 >;
 
+// --- The API error surfaces the echoed correlation ids (CORE-SDX-001). ----------
+// The Core API echoes X-Request-Id and the W3C traceparent on every response; the
+// error carries them as optional strings (undefined only when Core sent none).
+
+export type ApiErrorRequestId = Assert<
+  Equal<LiveCoreApiError["requestId"], string | undefined>
+>;
+
+export type ApiErrorTraceparent = Assert<
+  Equal<LiveCoreApiError["traceparent"], string | undefined>
+>;
+
+// --- The success envelope surfaces the SAME correlation ids (CORE-SDX-001). ------
+// They sit alongside data and etag on SdkResponse, so a consumer can log request_id
+// with every successful call exactly as it reads it off a thrown error.
+
+export type SdkResponseRequestId = Assert<
+  Equal<SdkResponse<WorkspaceResponse>["requestId"], string | undefined>
+>;
+
+export type SdkResponseTraceparent = Assert<
+  Equal<SdkResponse<WorkspaceResponse>["traceparent"], string | undefined>
+>;
+
+export type SdkResponseShape = Assert<
+  Equal<
+    SdkResponse<WorkspaceResponse>,
+    {
+      readonly data: WorkspaceResponse;
+      readonly etag: string | null;
+      readonly requestId?: string;
+      readonly traceparent?: string;
+    }
+  >
+>;
+
 // --- The client exposes each resource group as a typed property. ----------------
 
 export type ClientHasWorkspaces = Assert<

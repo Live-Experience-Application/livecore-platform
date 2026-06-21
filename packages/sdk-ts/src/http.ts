@@ -57,12 +57,28 @@ export interface RequestSpec {
  * or mutation. Pass {@link etag} back as `ifMatch` on a later write to make that
  * write conditional, so a GET-then-PUT across HTTP cannot silently clobber a
  * concurrent change.
+ *
+ * It also surfaces the correlation ids the Core API echoes on every response
+ * (CORE-SDX-001): {@link requestId} (`X-Request-Id`) and {@link traceparent}, so a
+ * consumer can log `request_id` with every successful call exactly as it can read
+ * it off a thrown {@link LiveCoreApiError} — without wrapping the injected `fetch`.
  */
 export interface SdkResponse<TResponse> {
   /** The parsed JSON response body. */
   readonly data: TResponse;
   /** The weak `ETag` from the response, or `null` when the response carried none. */
   readonly etag: string | null;
+  /**
+   * The `X-Request-Id` correlation id the Core API echoed on the response, or
+   * `undefined` when the response carried none (CORE-SDX-001). It is never
+   * fabricated — it surfaces only what Core sent.
+   */
+  readonly requestId?: string;
+  /**
+   * The W3C `traceparent` correlation id the Core API echoed on the response, or
+   * `undefined` when the response carried none (CORE-SDX-001).
+   */
+  readonly traceparent?: string;
 }
 
 /** Resolves the global `fetch`, or throws a clear error when none exists. */
@@ -101,11 +117,51 @@ function readNonNegativeInt(
 }
 
 /**
- * Reads the transport details the Core API exposes on a throttled response
- * (CORE-DX-005): the `Retry-After` delay and the `RateLimit-*` window info. The
- * Core API emits `Retry-After` as a delta in seconds; any non-integer (HTTP-date)
- * value is treated as absent rather than guessed. Returns `undefined` for each
- * field that was not present, so a non-rate-limited error carries neither.
+ * Reads an opaque string header (a correlation id) as its trimmed value, or
+ * `undefined` when the header is absent or blank. Header lookup is case-insensitive
+ * per the WHATWG fetch `Headers` contract. An absent or empty value stays
+ * `undefined` so a correlation id is never fabricated (CORE-SDX-001).
+ */
+function readStringHeader(
+  headers: HeaderReader,
+  name: string,
+): string | undefined {
+  const raw = headers.get(name);
+  if (raw === null) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** The correlation ids the Core API echoes on every response (CORE-SDX-001). */
+interface CorrelationIds {
+  readonly requestId?: string;
+  readonly traceparent?: string;
+}
+
+/**
+ * Reads the correlation ids the Core API echoes on EVERY response (CORE-SDX-001):
+ * the `X-Request-Id` it assigns or echoes and the W3C `traceparent` trace context.
+ * Both are exposed via CORS (the server's `CorrelationHeaderMiddleware`), so even an
+ * injected browser `fetch` can read them. Each is `undefined` when the response
+ * carried none — the SDK surfaces what Core sent and never fabricates an id.
+ */
+function readCorrelationIds(headers: HeaderReader): CorrelationIds {
+  return {
+    requestId: readStringHeader(headers, "x-request-id"),
+    traceparent: readStringHeader(headers, "traceparent"),
+  };
+}
+
+/**
+ * Reads the transport details the Core API exposes on a non-success response: the
+ * `Retry-After` delay and the `RateLimit-*` window info a throttled response carries
+ * (CORE-DX-005), plus the `X-Request-Id`/`traceparent` correlation ids it echoes on
+ * every response (CORE-SDX-001). The Core API emits `Retry-After` as a delta in
+ * seconds; any non-integer (HTTP-date) value is treated as absent rather than
+ * guessed. Returns `undefined` for each field that was not present, so a
+ * non-rate-limited error carries neither rate-limit signal.
  */
 function readApiErrorDetails(headers: HeaderReader): ApiErrorDetails {
   const retryAfter = readNonNegativeInt(headers, "retry-after");
@@ -118,7 +174,7 @@ function readApiErrorDetails(headers: HeaderReader): ApiErrorDetails {
     rateLimit = { limit, remaining, reset };
   }
 
-  return { retryAfter, rateLimit };
+  return { retryAfter, rateLimit, ...readCorrelationIds(headers) };
 }
 
 /** Best-effort parse of an error body as RFC 7807 Problem Details. */
@@ -226,11 +282,14 @@ export class HttpClient {
       });
     }
 
-    // Read the validator before consuming the body; header lookup is
-    // case-insensitive per the WHATWG fetch Headers contract.
+    // Read the validator and the echoed correlation ids before consuming the body;
+    // header lookup is case-insensitive per the WHATWG fetch Headers contract. The
+    // ids ride on the success envelope here and on the LiveCoreApiError the error
+    // path throws (CORE-SDX-001), so a consumer can log request_id on either.
     const etag = response.headers.get("etag");
+    const correlation = readCorrelationIds(response.headers);
     const data = await this.readResponse<TResponse>(response);
-    return { data, etag };
+    return { data, etag, ...correlation };
   }
 
   private buildUrl(spec: RequestSpec): string {

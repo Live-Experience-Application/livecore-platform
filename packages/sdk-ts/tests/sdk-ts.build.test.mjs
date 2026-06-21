@@ -627,6 +627,135 @@ test("a non-integer Retry-After (HTTP-date) is treated as absent, not guessed", 
   assert.equal(captured.rateLimit, undefined);
 });
 
+// --- CORE-SDX-001: the echoed correlation ids surface on BOTH paths. ------------
+// The Core API echoes X-Request-Id and the W3C traceparent on every response
+// (CorrelationHeaderMiddleware, CORS-exposed). The SDK surfaces them on the success
+// envelope and on the thrown LiveCoreApiError, so a consumer logs request_id with
+// every call and shows it in an error state without wrapping the injected fetch.
+// They are undefined only when Core sent none — never fabricated.
+
+const REQUEST_ID = "req-abc-123";
+const TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+function correlatedResponse(status, body, headers) {
+  const text = body === undefined ? "" : JSON.stringify(body);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+    text: () => Promise.resolve(text),
+  };
+}
+
+test("the echoed X-Request-Id and traceparent surface on the success envelope (CORE-SDX-001)", async () => {
+  const { client } = makeClient({
+    handler: () =>
+      correlatedResponse(
+        200,
+        {
+          id: "ws-1",
+          organizationId: "org-1",
+          slug: "demo",
+          name: "Demo",
+          status: "Active",
+          createdAt: "2026-06-13T00:00:00+00:00",
+          updatedAt: "2026-06-13T00:00:00+00:00",
+          version: "7",
+        },
+        {
+          "x-request-id": REQUEST_ID,
+          traceparent: TRACEPARENT,
+          etag: 'W/"7"',
+        },
+      ),
+  });
+
+  const read = await client.workspaces.getWithETag("ws-1", {
+    organizationSlug: "acme",
+  });
+
+  assert.equal(read.requestId, REQUEST_ID);
+  assert.equal(read.traceparent, TRACEPARENT);
+  // The existing envelope fields are unchanged.
+  assert.equal(read.etag, 'W/"7"');
+  assert.equal(read.data.version, "7");
+});
+
+test("the echoed X-Request-Id and traceparent surface on the thrown error (CORE-SDX-001)", async () => {
+  const { client } = makeClient({
+    handler: () =>
+      correlatedResponse(
+        403,
+        { title: "Forbidden", status: 403 },
+        { "x-request-id": REQUEST_ID, traceparent: TRACEPARENT },
+      ),
+  });
+
+  let captured;
+  try {
+    await client.workspaces.list({ organizationSlug: "acme" });
+  } catch (error) {
+    captured = error;
+  }
+
+  assert.ok(isLiveCoreApiError(captured));
+  assert.equal(captured.requestId, REQUEST_ID);
+  assert.equal(captured.traceparent, TRACEPARENT);
+  // The correlation ids are non-sensitive identifiers; the token is still never embedded.
+  assert.ok(!String(captured.message).includes(TOKEN));
+});
+
+test("a response without correlation headers leaves requestId/traceparent undefined on both paths — never fabricated (CORE-SDX-001)", async () => {
+  // The jsonResponse helper's headers.get always returns null (no headers set).
+  const body = {
+    id: "ws-1",
+    organizationId: "org-1",
+    slug: "demo",
+    name: "Demo",
+    status: "Active",
+    createdAt: "2026-06-13T00:00:00+00:00",
+    updatedAt: "2026-06-13T00:00:00+00:00",
+    version: "7",
+  };
+  const { client } = makeClient({ handler: () => jsonResponse(200, body) });
+
+  const read = await client.workspaces.getWithETag("ws-1", {
+    organizationSlug: "acme",
+  });
+  assert.equal(read.requestId, undefined);
+  assert.equal(read.traceparent, undefined);
+
+  const { client: denying } = makeClient({
+    handler: () => jsonResponse(403, { title: "Forbidden", status: 403 }),
+  });
+  let captured;
+  try {
+    await denying.workspaces.list({ organizationSlug: "acme" });
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(isLiveCoreApiError(captured));
+  assert.equal(captured.requestId, undefined);
+  assert.equal(captured.traceparent, undefined);
+});
+
+test("a blank correlation header is treated as absent, not surfaced as an empty id (CORE-SDX-001)", async () => {
+  const { client } = makeClient({
+    handler: () =>
+      correlatedResponse(
+        200,
+        { id: "ws-1", version: "7" },
+        { "x-request-id": "   ", traceparent: "" },
+      ),
+  });
+
+  const read = await client.workspaces.getWithETag("ws-1", {
+    organizationSlug: "acme",
+  });
+  assert.equal(read.requestId, undefined);
+  assert.equal(read.traceparent, undefined);
+});
+
 test("generateRequestId is sent as the X-Request-Id header", async () => {
   const { client, calls } = makeClient({
     generateRequestId: () => "req-42",

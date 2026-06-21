@@ -137,7 +137,12 @@ export interface LiveCoreClientOptions {
   fetch?: FetchLike;
   /**
    * Optional correlation-id generator. When set, its non-empty value is sent as
-   * the `X-Request-Id` header so a call can be traced in server logs.
+   * the `X-Request-Id` header so a call can be traced in server logs. Independently
+   * of this option, the id the Core API echoes back on the response — its
+   * `X-Request-Id` and the W3C `traceparent` — is surfaced as `requestId` and
+   * `traceparent` on the `SdkResponse` envelope and on `LiveCoreApiError`
+   * (CORE-SDX-001), so a call can be correlated without wrapping the `fetch`
+   * transport.
    */
   generateRequestId?: () => string;
   /**

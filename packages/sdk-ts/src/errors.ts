@@ -40,14 +40,19 @@ export interface RateLimitInfo {
 
 /**
  * The transport details parsed from a non-success response's headers, surfaced on
- * {@link LiveCoreApiError} so a caller can back off correctly instead of the SDK
- * discarding the response headers (CORE-DX-005).
+ * {@link LiveCoreApiError} so a caller can back off correctly and correlate the
+ * failed call with the server, instead of the SDK discarding the response headers
+ * (CORE-DX-005, CORE-SDX-001).
  */
 export interface ApiErrorDetails {
   /** Parsed `Retry-After` delay in seconds, when the header was present. */
   readonly retryAfter?: number;
   /** Parsed `RateLimit-*` signals, when any were present. */
   readonly rateLimit?: RateLimitInfo;
+  /** The echoed `X-Request-Id` correlation id, when the response carried one. */
+  readonly requestId?: string;
+  /** The W3C `traceparent` correlation id, when the response carried one. */
+  readonly traceparent?: string;
 }
 
 /**
@@ -64,6 +69,13 @@ export interface ApiErrorDetails {
  * carry sensitive or hidden content (threat T7), so they are safe to surface to a
  * user; the SDK deliberately keeps the access token and request body out of this
  * error.
+ *
+ * It also carries the correlation ids the Core API echoes on EVERY response
+ * (CORE-SDX-001): the {@link requestId} from `X-Request-Id` and the
+ * {@link traceparent} W3C trace context, so a caller can log the failing call's
+ * `request_id` and look it up in the server logs/traces. Both are non-sensitive
+ * identifiers (threat T7) and are `undefined` only when the response carried none
+ * — the SDK surfaces what Core sent and never fabricates one.
  */
 export class LiveCoreApiError extends LiveCoreError {
   /** The HTTP status code of the failed response. */
@@ -80,6 +92,18 @@ export class LiveCoreApiError extends LiveCoreError {
    * when the response carried none (CORE-DX-005).
    */
   readonly rateLimit?: RateLimitInfo;
+  /**
+   * The `X-Request-Id` correlation id the Core API echoed on the response, or
+   * `undefined` when the response carried none (CORE-SDX-001). Log it to correlate
+   * the failed call with the matching server log lines; it is never fabricated.
+   */
+  readonly requestId?: string;
+  /**
+   * The W3C `traceparent` correlation id the Core API echoed on the response, or
+   * `undefined` when the response carried none (CORE-SDX-001). Use it to look the
+   * request up in a trace backend.
+   */
+  readonly traceparent?: string;
 
   constructor(
     status: number,
@@ -92,6 +116,8 @@ export class LiveCoreApiError extends LiveCoreError {
     this.problem = problem;
     this.retryAfter = details?.retryAfter;
     this.rateLimit = details?.rateLimit;
+    this.requestId = details?.requestId;
+    this.traceparent = details?.traceparent;
   }
 
   private static composeMessage(
