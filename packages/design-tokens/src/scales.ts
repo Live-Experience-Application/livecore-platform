@@ -31,6 +31,13 @@ export type ColorScheme = (typeof ColorSchemes)[number];
  * roles describe a UI purpose (surface, foreground, primary action, status),
  * never a literal hue, so a vertical can re-skin every role without changing
  * any consuming component.
+ *
+ * Every filled role that carries text is paired with a `*Foreground` role for
+ * readable on-color text: `primary`/`primaryForeground`, `secondary`/…, `accent`/…
+ * and each status (`success`/`successForeground`, `warning`/…, `danger`/…,
+ * `info`/…). A vertical rendering an accessible status surface — a destructive
+ * button, a status badge or alert — reads the foreground straight from the
+ * contract instead of deriving an on-status text color itself.
  */
 export const ColorRoles = [
   "background",
@@ -46,9 +53,13 @@ export const ColorRoles = [
   "accent",
   "accentForeground",
   "success",
+  "successForeground",
   "warning",
+  "warningForeground",
   "danger",
+  "dangerForeground",
   "info",
+  "infoForeground",
 ] as const;
 
 /** A semantic color role name. */

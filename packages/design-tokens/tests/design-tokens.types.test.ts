@@ -68,9 +68,13 @@ export type ColorRoleIsExact = Assert<
     | "accent"
     | "accentForeground"
     | "success"
+    | "successForeground"
     | "warning"
+    | "warningForeground"
     | "danger"
+    | "dangerForeground"
     | "info"
+    | "infoForeground"
   >
 >;
 

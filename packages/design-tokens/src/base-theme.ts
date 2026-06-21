@@ -12,6 +12,14 @@
  * primary, violet accent and conventional status hues); it carries no vertical
  * visual identity. The values are plain CSS strings/numbers so they drop
  * straight into a stylesheet, CSS custom properties or inline styles.
+ *
+ * Each `*Foreground` value is the readable on-color text for its paired role and
+ * is chosen to clear the WCAG 2.1 AA contrast threshold for body text (>= 4.5:1)
+ * against that role's background in its scheme: in the light scheme the saturated
+ * status fills take a near-black foreground (`#020617`) except the darker `danger`
+ * red, which takes white; in the dark scheme the lighter status fills take the
+ * slate foreground (`#0f172a`), matching the existing primary/secondary/accent
+ * foregrounds.
  */
 import { defineTheme, type Theme } from "./tokens.js";
 
@@ -37,9 +45,13 @@ export const baseTheme: Theme = defineTheme({
         accent: "#7c3aed",
         accentForeground: "#ffffff",
         success: "#16a34a",
+        successForeground: "#020617",
         warning: "#d97706",
+        warningForeground: "#020617",
         danger: "#dc2626",
+        dangerForeground: "#ffffff",
         info: "#0284c7",
+        infoForeground: "#020617",
       },
       dark: {
         background: "#0f172a",
@@ -55,9 +67,13 @@ export const baseTheme: Theme = defineTheme({
         accent: "#a78bfa",
         accentForeground: "#0f172a",
         success: "#22c55e",
+        successForeground: "#0f172a",
         warning: "#f59e0b",
+        warningForeground: "#0f172a",
         danger: "#ef4444",
+        dangerForeground: "#0f172a",
         info: "#38bdf8",
+        infoForeground: "#0f172a",
       },
     },
     spacing: {

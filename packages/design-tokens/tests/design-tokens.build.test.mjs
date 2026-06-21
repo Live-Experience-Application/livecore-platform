@@ -47,9 +47,13 @@ test("the color vocabulary is the stable generic role/scheme set", () => {
       "accent",
       "accentForeground",
       "success",
+      "successForeground",
       "warning",
+      "warningForeground",
       "danger",
+      "dangerForeground",
       "info",
+      "infoForeground",
     ],
   );
 });
