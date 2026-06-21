@@ -142,25 +142,43 @@ export interface VisibilityRuleResponse {
 }
 
 /**
- * A single participant-visible feed item. The feed is a skeleton today and is
- * always empty, so this item has no fields yet; its full, participant-safe shape
- * (a projected, already-filtered view) is defined by later Visibility/Reveal
- * stories. Modeled as an object with no members so it can never carry a
- * host-only or hidden field (docs/08_API_CONTRACTS.md; threats T2/T7).
+ * A single participant-visible feed item (CORE-API-005; contract aligned to the
+ * server DTO in CORE-APROJ-001). It names a resource the participant may currently
+ * see by its kind and surrogate id — exactly as a {@link RevealResponse} and the
+ * realtime audience event address their resource — so the REST feed and the
+ * realtime stream describe a visible resource with the SAME
+ * `(resourceType, resourceId)` shape and can never diverge.
+ *
+ * It carries ONLY the resource IDENTITY, never the resolved content, payload or any
+ * host-only field, so projecting an item can never leak hidden content
+ * (docs/08_API_CONTRACTS.md DTO rules; threats T2/T7). Resolving an identity into the
+ * participant-safe rendered content is a later story's concern; this item is the
+ * visible-resource handle the participant feed returns. Mirrors the server DTO
+ * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId)`.
  */
-export type ParticipantVisibleFeedItem = Record<string, never>;
+export interface ParticipantVisibleFeedItem {
+  /**
+   * The kind of the visible resource — the stable name of a
+   * {@link VisibilityResourceType} (`Scene`/`ContentBlock`/`Entity`).
+   */
+  resourceType: VisibilityResourceType;
+  /** The surrogate id of the visible resource. */
+  resourceId: Uuid;
+}
 
 /**
  * Participant-safe response of `GET
- * /api/v1/participants/{participantId}/visible-feed`. The {@link items} list is
- * always empty in the current skeleton.
+ * /api/v1/participants/{participantId}/visible-feed`. The {@link items} list is the
+ * participant's currently visible resources — each the participant-safe identity of
+ * a resource they may see — in the server's deterministic order; it is empty only
+ * when the participant has nothing visible yet.
  */
 export interface ParticipantVisibleFeedResponse {
   /** Surrogate id of the participant whose feed this is. */
   participantId: Uuid;
   /** Workspace the participant belongs to (a non-sensitive boundary id). */
   workspaceId: Uuid;
-  /** The participant's currently visible feed items (always empty for now). */
+  /** The participant's currently visible feed items, in deterministic order. */
   items: ParticipantVisibleFeedItem[];
   /** Server timestamp (UTC) at which this feed view was generated. */
   generatedAt: IsoDateTimeString;
