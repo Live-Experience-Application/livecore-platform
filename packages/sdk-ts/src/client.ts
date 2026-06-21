@@ -27,6 +27,7 @@ import { EntityTypesClient } from "./resources/entity-types.js";
 import { EntitlementsClient } from "./resources/entitlements.js";
 import { ExportsClient } from "./resources/exports.js";
 import { IdentityClient } from "./resources/identity.js";
+import { InvitationsClient } from "./resources/invitations.js";
 import { OrganizationsClient } from "./resources/organizations.js";
 import { RealtimeClient } from "./resources/realtime.js";
 import { RecapsClient } from "./resources/recaps.js";
@@ -48,6 +49,8 @@ export class LiveCoreClient {
   readonly templates: TemplatesClient;
   /** Workspace create/read/update, archive, member and invitation routes. */
   readonly workspaces: WorkspacesClient;
+  /** The authenticated caller's own pending-invitation self-discovery read. */
+  readonly invitations: InvitationsClient;
   /** Session list/create/read, lifecycle commands and participant presence. */
   readonly sessions: SessionsClient;
   /** Scene list, create, read, reorder and delete routes. */
@@ -80,6 +83,7 @@ export class LiveCoreClient {
     this.audit = new AuditClient(http);
     this.templates = new TemplatesClient(http);
     this.workspaces = new WorkspacesClient(http);
+    this.invitations = new InvitationsClient(http);
     this.sessions = new SessionsClient(http);
     this.scenes = new ScenesClient(http);
     this.content = new ContentClient(http);

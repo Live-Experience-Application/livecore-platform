@@ -17,6 +17,7 @@ Roles are generic. Verticals may rename them in UI.
 | Send private content | yes | yes | yes | yes | no | no | no |
 | View own participant feed | no | no | no | no | yes | no | no |
 | Resolve own session participant context | own | own | own | own | own | own | own |
+| Discover own pending invitations | own | own | own | own | own | own | own |
 | View observer feed | yes | yes | yes | yes | no | yes | no |
 | View audit log | yes | yes | optional | no | no | no | yes |
 | Export workspace | yes | yes | optional | no | no | no | optional |
@@ -38,6 +39,7 @@ Roles are generic. Verticals may rename them in UI.
   existing route — it is a trustworthy server-side key for features that must match on the email (the invitation
   self-discovery in CORE-INV-002), where keying on the bare unverified email would be an email-enumeration /
   invitation-hijack vector (threats T5/T6 in docs/07_SECURITY_THREAT_MODEL.md).
+- A caller discovering its OWN pending invitations (`GET /api/v1/me/invitations`, CORE-INV-002, the "Discover own pending invitations" row above) is a self-service onboarding read: it returns the authenticated caller's own PENDING workspace invitations so an onboarding flow can discover then accept an invitation (`POST /api/v1/workspaces/{workspaceId}/invitations/accept`) without the host handing over a workspace id out of band and without enumerating workspaces. It is the FIRST consumer of the CORE-INV-001 verified-email fact: matching is ONLY ever on the caller's trustworthy `OidcPrincipal.EmailVerified` email — invitations are keyed by a raw invited-email string plus a token hash with no user-id link, so the verified email is the only safe server-side key — and a caller with no verified email gets an EMPTY list, never an error and never a guess. The match is additionally scoped to the caller's CLAIMED tenants: the organizations the caller both holds a membership in AND the token asserts a claim for (the same intersection `GET /api/v1/me` exposes and the tenant context resolver requires), so an invitation is only ever discoverable in a tenant the caller can actually resolve and accept against, and an invitation in a foreign tenant is never returned (threat T5). The email is still NEVER an authorization input — it does not grant or deny access; it only selects which of the caller's own invitations to return. The projection carries the organization slug, workspace id, role, status and expiry (the fields the accept flow needs) and NEVER the token hash, the one-time token or any person's data, not even the caller's own invited email (threats T6/T7). The "own" cells mean the read is keyed to the caller's own verified email regardless of workspace role. Accepted, revoked and expired invitations are excluded; a service-account principal (no profile, membership or verified email) is denied `403`; the read is otherwise fail-closed.
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.

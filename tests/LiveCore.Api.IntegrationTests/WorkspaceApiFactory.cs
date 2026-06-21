@@ -285,6 +285,28 @@ internal class WorkspaceApiFactory : WebApplicationFactory<Program>
         return client;
     }
 
+    /// <summary>
+    /// Creates an HttpClient acting as the given authenticated caller WITH an email and its
+    /// <c>email_verified</c> assertion (CORE-INV-001), on top of the iss/sub and organization claims
+    /// <see cref="CreateClientFor"/> sets. Used by the invitation self-discovery tests (CORE-INV-002), which
+    /// match ONLY on the caller's verified email: pass <paramref name="emailVerified"/> false to present a
+    /// caller whose email the provider did NOT verify (so the match must fail closed to an empty result).
+    /// </summary>
+    public HttpClient CreateClientForWithEmail(
+        string subject,
+        string issuer,
+        string email,
+        bool emailVerified,
+        params string[] organizationClaims)
+    {
+        var client = CreateClientFor(subject, issuer, organizationClaims);
+        client.DefaultRequestHeaders.Add(TestAuthenticationHandler.EmailHeader, email);
+        client.DefaultRequestHeaders.Add(
+            TestAuthenticationHandler.EmailVerifiedHeader,
+            emailVerified ? "true" : "false");
+        return client;
+    }
+
     /// <summary>Creates an HttpClient with no token (no auth headers).</summary>
     public HttpClient CreateAnonymousClient() => CreateClient();
 

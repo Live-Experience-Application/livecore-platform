@@ -125,6 +125,41 @@ export interface PendingWorkspaceInvitationResponse {
 }
 
 /**
+ * PII-safe response projection of one of the CALLER'S OWN pending workspace
+ * invitations, returned by the user-scoped invitation self-discovery read
+ * `GET /api/v1/me/invitations` (CORE-INV-002). It is the audience-safe answer to
+ * "which workspaces have invited ME?", so an onboarding flow can discover then accept
+ * an invitation without the host handing over a workspace id out of band and without
+ * enumerating workspaces.
+ *
+ * It is the user-scoped sibling of {@link PendingWorkspaceInvitationResponse} (the
+ * host-facing manage-members list): it adds the organization {@link organizationSlug}
+ * (which, with {@link workspaceId}, is exactly what an onboarding flow echoes back to
+ * drive `acceptInvitation`) and it carries NO invited email or any other personal
+ * datum — the only person it concerns is the caller, who already knows their own
+ * email. The token hash is never projected and the one-time plaintext token is never
+ * returned on a read (threats T6/T7).
+ */
+export interface MyPendingWorkspaceInvitationResponse {
+  /** Surrogate id of the invitation. */
+  id: Uuid;
+  /** Tenant the invitation belongs to. */
+  organizationId: Uuid;
+  /** Canonical slug of the tenant; echo it as the accept request's `organizationSlug`. */
+  organizationSlug: string;
+  /** Workspace the invite grants admission to; the accept route's workspace id. */
+  workspaceId: Uuid;
+  /** Generic role the invite will grant on redemption. */
+  role: MembershipRole;
+  /** Lifecycle status of the invitation (always `Pending` for this list). */
+  status: WorkspaceInvitationStatus;
+  /** When the scoped token expires (UTC). */
+  expiresAt: IsoDateTimeString;
+  /** When the invitation was created (UTC). */
+  createdAt: IsoDateTimeString;
+}
+
+/**
  * Request body for `POST /api/v1/workspaces/{workspaceId}/invitations/accept`
  * (CORE-SDK-006). The scoped invite token is a BEARER grant: the authenticated
  * caller becomes the member with the invited role. The plaintext token is carried

@@ -21,6 +21,7 @@ import type {
   HideResponse,
   LiveSessionEvent,
   MeEntitlementsResponse,
+  MyPendingWorkspaceInvitationResponse,
   OrganizationResponse,
   PageResponse,
   ParticipantContentBlockResponse,
@@ -56,6 +57,7 @@ import type {
   HideOptions,
   HubConnectionFactory,
   IdentityClient,
+  InvitationsClient,
   LiveCoreApiError,
   LiveCoreClient,
   LiveCoreClientOptions,
@@ -426,6 +428,19 @@ export type AcceptInvitationReturn = Assert<
 >;
 export type RemoveWorkspaceMemberReturn = Assert<
   Equal<Awaited<ReturnType<WorkspacesClient["removeMember"]>>, void>
+>;
+
+// Invitations (CORE-INV-002): the caller's own pending-invitation self-discovery read
+// is a bounded page of the audience-safe self-discovery projection, and the client
+// exposes the resource group as a typed property.
+export type ClientHasInvitations = Assert<
+  Equal<LiveCoreClient["invitations"], InvitationsClient>
+>;
+export type ListMyInvitationsReturn = Assert<
+  Equal<
+    Awaited<ReturnType<InvitationsClient["listMine"]>>,
+    PageResponse<MyPendingWorkspaceInvitationResponse>
+  >
 >;
 
 // Sessions: list is a bounded page; create/get return a session; presence commands

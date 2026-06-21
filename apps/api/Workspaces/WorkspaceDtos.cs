@@ -260,6 +260,75 @@ public sealed record PendingWorkspaceInvitationResponse(
 }
 
 /// <summary>
+/// PII-safe response projection of one of the CALLER'S OWN pending workspace invitations, returned by the
+/// user-scoped invitation self-discovery read (CORE-INV-002,
+/// <c>GET /api/v1/me/invitations</c>). It is the audience-safe answer to "which workspaces have invited ME?",
+/// so an onboarding flow can discover then accept an invitation without the host handing over a workspace id out
+/// of band and without enumerating workspaces.
+///
+/// It is the user-scoped sibling of <see cref="PendingWorkspaceInvitationResponse"/> (the host-facing
+/// manage-members list), differing in two deliberate ways:
+/// <list type="bullet">
+///   <item>It carries the organization SLUG (<see cref="OrganizationSlug"/>) in addition to the workspace id,
+///   because those two values are exactly what the caller echoes back to drive the existing
+///   <c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c> (the slug resolves the tenant; the
+///   workspace id is the route).</item>
+///   <item>It carries NO invited email and no other personal datum. On the host list the invited email is an
+///   admin's legitimate datum; here the only person the read is about is the caller themselves, who already
+///   knows their own email, so the projection omits it entirely — it never exposes another person's data
+///   (the story's audience-safe rule).</item>
+/// </list>
+///
+/// Data minimization and the token-at-rest model (docs/08_API_CONTRACTS.md DTO rules; threats T6/T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md): the token hash is NEVER projected (there is no field for it), and the
+/// one-time plaintext token does not exist on a stored invitation, so it can never be returned on a read. No
+/// internal authorization rationale is carried (threat T7).
+/// </summary>
+/// <param name="Id">Surrogate id of the invitation (UUIDv7).</param>
+/// <param name="OrganizationId">Tenant the invitation belongs to.</param>
+/// <param name="OrganizationSlug">Canonical slug of the tenant; echo it as the accept request's organizationSlug.</param>
+/// <param name="WorkspaceId">Workspace the invite grants admission to; the accept route's workspace id.</param>
+/// <param name="Role">Generic role the invite will grant on redemption.</param>
+/// <param name="Status">Lifecycle status of the invitation (always Pending for this list).</param>
+/// <param name="ExpiresAt">When the scoped token expires (UTC).</param>
+/// <param name="CreatedAt">When the invitation was created (UTC).</param>
+public sealed record MyPendingWorkspaceInvitationResponse(
+    Guid Id,
+    Guid OrganizationId,
+    string OrganizationSlug,
+    Guid WorkspaceId,
+    string Role,
+    string Status,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>
+    /// Projects a <see cref="WorkspaceInvitation"/> aggregate (plus the resolved tenant slug, which the
+    /// aggregate does not carry) into its PII-safe self-discovery DTO. Only the generic, non-personal fields are
+    /// copied; the invited email and the token hash are DELIBERATELY never copied out (threats T6/T7). The role
+    /// and status are emitted by their stable names.
+    /// </summary>
+    public static MyPendingWorkspaceInvitationResponse From(WorkspaceInvitation invitation, string organizationSlug)
+    {
+        ArgumentNullException.ThrowIfNull(invitation);
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            throw new ArgumentException("An organization slug is required.", nameof(organizationSlug));
+        }
+
+        return new MyPendingWorkspaceInvitationResponse(
+            invitation.Id,
+            invitation.OrganizationId,
+            organizationSlug,
+            invitation.WorkspaceId,
+            invitation.Role.ToString(),
+            invitation.Status.ToString(),
+            invitation.ExpiresAt,
+            invitation.CreatedAt);
+    }
+}
+
+/// <summary>
 /// Request body for redeeming a workspace invitation (CORE-WS-006,
 /// <c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c>).
 ///

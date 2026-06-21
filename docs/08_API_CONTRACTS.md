@@ -91,6 +91,7 @@ it is a row in `csv/api_routes.csv`):
 
 ```text
 GET    /api/v1/me
+GET    /api/v1/me/invitations
 GET    /api/v1/organizations
 POST   /api/v1/organizations
 DELETE /api/v1/organizations/{organizationSlug}
@@ -342,7 +343,9 @@ audit-log read (`AuditLogPageResponse`):
   a single resource).
 
 The paginated list endpoints are the workspace list, the workspace-scoped session/scene/entity lists, the
-scene-scoped content-block list and the workspace pending-invitations list; the audit-log read was already
+scene-scoped content-block list, the workspace pending-invitations list and the caller's own
+pending-invitation self-discovery read (`GET /api/v1/me/invitations`, CORE-INV-002, matched only on the
+caller's verified email and scoped to the caller's claimed tenants); the audit-log read was already
 paged. Single-resource reads (for example `GET /api/v1/sessions/{sessionId}`) return the resource directly, not
 a page.
 

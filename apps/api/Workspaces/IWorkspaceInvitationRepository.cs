@@ -193,6 +193,56 @@ public interface IWorkspaceInvitationRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the PENDING invitations addressed to the given email ACROSS the given set of
+    /// organizations (tenants), oldest first, limited to <paramref name="take"/> rows starting at
+    /// <paramref name="skip"/>. This is the user-scoped invitation self-discovery read backing
+    /// <c>GET /api/v1/me/invitations</c> (CORE-INV-002): it generalizes
+    /// <see cref="ListByInvitedEmailInOrganizationAsync"/> from one tenant to the caller's CLAIMED tenants (the
+    /// organizations the caller both holds a token claim for AND is a member of — the same intersection
+    /// <c>GET /api/v1/me</c> exposes), so an onboarding flow can discover an invitation addressed to it without the
+    /// host handing over a workspace id and without enumerating workspaces.
+    ///
+    /// <para>
+    /// SAFE SERVER-SIDE KEY (threats T5/T6 in docs/07_SECURITY_THREAT_MODEL.md): the only key is the invited
+    /// email, matched by EXACT (ordinal) equality against the trimmed, case-preserved stored value, AND the
+    /// <paramref name="organizationIds"/> the caller is entitled to. The CALLER must only ever pass the caller's
+    /// own VERIFIED email (CORE-INV-001) and the caller's own claimed tenant ids; keying on a bare unverified
+    /// email, or on a tenant the caller does not belong to, would be an email-enumeration / invitation-hijack
+    /// vector. An empty <paramref name="organizationIds"/> matches nothing (the caller has no claimed tenant), so
+    /// the read returns an empty page WITHOUT a query.
+    /// </para>
+    ///
+    /// <para>
+    /// "Pending" is the lifecycle STATUS only (<see cref="WorkspaceInvitationStatus.Pending"/>): an accepted or
+    /// revoked invitation is never returned. The additional EXPIRY exclusion (a still-pending invitation whose
+    /// token can no longer be redeemed) is applied by the endpoint in memory against the request clock, because
+    /// the SQLite test provider cannot compare a <see cref="DateTimeOffset"/> — the same post-materialization
+    /// filtering the retention sweep (<see cref="ListTerminalForRetentionAsync"/>) uses. The read is
+    /// tracking-free and ordered oldest-first by the time-ordered surrogate id (UUIDv7), provider-independent. The
+    /// caller over-fetches one extra row (<c>take = limit + 1</c>) to decide <c>hasMore</c> without a second
+    /// COUNT; bounding the read means a single response can never materialize an unbounded array (threat T9). The
+    /// aggregates carry the token hash, but the endpoint projects to a PII-safe DTO that never emits it nor any
+    /// other person's data (threats T6/T7).
+    /// </para>
+    /// </summary>
+    /// <param name="organizationIds">The caller's claimed tenant ids to search (empty returns an empty page).</param>
+    /// <param name="invitedEmail">The caller's own verified email to match (required, non-blank).</param>
+    /// <param name="skip">The number of rows to skip (non-negative).</param>
+    /// <param name="take">The maximum number of rows to return (at least one).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The page of pending invitations addressed to the email within the tenants (empty when none).</returns>
+    /// <exception cref="ArgumentException">The invited email is blank.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is below one.
+    /// </exception>
+    Task<IReadOnlyList<WorkspaceInvitation>> ListPendingPageByInvitedEmailInOrganizationsAsync(
+        IReadOnlyCollection<Guid> organizationIds,
+        string invitedEmail,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists up to <paramref name="maxCount"/> TERMINAL invitations created before <paramref name="createdBefore"/>
     /// — the candidates for the data-retention sweep (CORE-PRIV-003, GDPR Art.5(1)(e) storage limitation). An
     /// invitation is TERMINAL (closed/expired/revoked) when it is <see cref="WorkspaceInvitationStatus.Accepted"/>,

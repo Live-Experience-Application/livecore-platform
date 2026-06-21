@@ -1747,6 +1747,13 @@ app.MapTemplateEndpoints();
 // configured, so mapping them never crashes startup.
 app.MapWorkspaceEndpoints();
 
+// User-scoped pending-invitation self-discovery (CORE-INV-002): GET /api/v1/me/invitations, mounted under the
+// existing /me family. It returns the authenticated caller's own PENDING workspace invitations - matched ONLY on
+// the caller's verified email (CORE-INV-001) and scoped to the caller's claimed tenants - so an onboarding flow
+// can discover then accept an invitation without a workspace id handed over out of band. Fails closed (503) when
+// persistence is not configured.
+app.MapMeInvitationEndpoints();
+
 // Session endpoints: the workspace-scoped create/list routes
 // (GET/POST /api/v1/workspaces/{workspaceId}/sessions, CORE-API-003) and the
 // by-session-id start/end lifecycle commands (CORE-SES-004). They live in

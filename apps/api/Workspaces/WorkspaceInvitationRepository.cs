@@ -313,6 +313,66 @@ internal sealed class WorkspaceInvitationRepository : IWorkspaceInvitationReposi
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceInvitation>> ListPendingPageByInvitedEmailInOrganizationsAsync(
+        IReadOnlyCollection<Guid> organizationIds,
+        string invitedEmail,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(organizationIds);
+
+        // A blank email can never address a stored invitation, so the read fails fast (mirrors the other
+        // email-keyed reads).
+        if (string.IsNullOrWhiteSpace(invitedEmail))
+        {
+            throw new ArgumentException("Invited email must not be blank.", nameof(invitedEmail));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // No claimed tenant means nothing to search: return an empty page WITHOUT a query, never a table scan.
+        // An empty id in the set can never address a tenant, so it is dropped (it would only ever match nothing).
+        var ids = organizationIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return [];
+        }
+
+        // USER-SCOPED self-discovery (CORE-INV-002): the predicate restricts to the caller's CLAIMED tenants
+        // (ids), matches the invited email by EXACT (ordinal) equality against the trimmed, case-preserved stored
+        // value, and keeps only the Pending lifecycle status (an accepted/revoked invitation is never returned).
+        // ids.Contains(...) translates to a parameterized SQL IN, so an invitation in a tenant the caller does not
+        // belong to is never returned (threats T1/T5), and the email key only ever resolves the caller's own
+        // invitations (the caller passes its own VERIFIED email; threats T5/T6). The status is persisted as its
+        // stable name (HasConversion<string>), so this is an EXACT Pending match, never an ordering comparison.
+        // The read is tracking-free and ordered oldest-first by the time-ordered surrogate id (UUIDv7), which is
+        // provider-independent (SQLite cannot ORDER BY a DateTimeOffset). It is bounded by Skip/Take so a single
+        // response can never materialize an unbounded array (threat T9). The expiry (redeemability) exclusion is
+        // applied by the endpoint in memory because the SQLite test provider cannot compare a DateTimeOffset. The
+        // token hash rides along on the aggregate but the endpoint projects to a PII-safe DTO that never emits it
+        // (threats T6/T7).
+        return await _dbContext.WorkspaceInvitations
+            .AsNoTracking()
+            .Where(invitation => ids.Contains(invitation.OrganizationId)
+                && invitation.InvitedEmail == invitedEmail
+                && invitation.Status == WorkspaceInvitationStatus.Pending)
+            .OrderBy(invitation => invitation.Id)
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<WorkspaceInvitation>> ListTerminalForRetentionAsync(
         DateTimeOffset createdBefore,
         DateTimeOffset asOf,

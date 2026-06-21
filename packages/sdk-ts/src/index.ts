@@ -58,6 +58,7 @@ export { AuditClient } from "./resources/audit.js";
 export { TemplatesClient } from "./resources/templates.js";
 export { WorkspacesClient } from "./resources/workspaces.js";
 export type { ConditionalWriteOptions } from "./resources/workspaces.js";
+export { InvitationsClient } from "./resources/invitations.js";
 export { SessionsClient } from "./resources/sessions.js";
 export { ScenesClient } from "./resources/scenes.js";
 export { ContentClient } from "./resources/content.js";

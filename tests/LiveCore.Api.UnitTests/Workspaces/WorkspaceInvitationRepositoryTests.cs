@@ -493,4 +493,125 @@ public sealed class WorkspaceInvitationRepositoryTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => repository.ListPendingByWorkspaceAsync(
             Guid.CreateVersion7(), Guid.Empty, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task ListPendingPageByInvitedEmailInOrganizations_returns_only_matching_pending_invitations_across_the_tenant_set()
+    {
+        // CORE-INV-002 (T1/T5/T6): the self-discovery read keys ONLY on the invited email AND restricts to the
+        // caller's claimed tenant set. A Pending invitation addressed to the email in EITHER claimed tenant is
+        // returned; an accepted/revoked one is excluded by the Pending filter; an invitation to a DIFFERENT email,
+        // or in a tenant NOT in the set, is never returned. (Expiry is excluded by the endpoint, not this read.)
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var organizationC = await SeedOrganizationAsync("globex-inc");
+        var workspaceA = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspaceB = await SeedWorkspaceAsync(organizationB.Id, "b-show");
+        var workspaceC = await SeedWorkspaceAsync(organizationC.Id, "c-show");
+        const string mine = "alice@example.test";
+
+        // Two pending invitations to the caller's email, one in each claimed tenant (A and B), distinct times.
+        var pendingInA = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, mine, MembershipRole.Host, _createdAt, out _);
+        var pendingInB = WorkspaceInvitation.Create(
+            organizationB.Id, workspaceB.Id, mine, MembershipRole.Admin, _createdAt.AddMinutes(1), out _);
+        // A revoked and an accepted invitation to the caller's email in A (excluded by the Pending filter).
+        var revoked = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, mine, MembershipRole.Host, _createdAt, out _);
+        revoked.Revoke(_createdAt.AddMinutes(2));
+        var accepted = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, mine, MembershipRole.Host, _createdAt, out _);
+        accepted.Redeem(_createdAt.AddMinutes(2));
+        // A pending invitation to a DIFFERENT email in A (excluded by the email key).
+        var someoneElse = WorkspaceInvitation.Create(
+            organizationA.Id, workspaceA.Id, "bob@example.test", MembershipRole.Host, _createdAt, out _);
+        // A pending invitation to the caller's email in tenant C, which is NOT in the claimed set (excluded).
+        var pendingInC = WorkspaceInvitation.Create(
+            organizationC.Id, workspaceC.Id, mine, MembershipRole.Host, _createdAt, out _);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceInvitationRepository(context);
+            foreach (var invitation in new[]
+                { pendingInA, pendingInB, revoked, accepted, someoneElse, pendingInC })
+            {
+                await repository.AddAsync(invitation, CancellationToken.None);
+            }
+        }
+
+        await using var read = CreateContext();
+        var repositoryRead = new WorkspaceInvitationRepository(read);
+
+        // Claimed tenants = { A, B }. Exactly the two pending caller-addressed invitations, oldest first.
+        var page = await repositoryRead.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            new[] { organizationA.Id, organizationB.Id }, mine, skip: 0, take: 50, CancellationToken.None);
+        Assert.Equal(new[] { pendingInA.Id, pendingInB.Id }, page.Select(i => i.Id).ToArray());
+        Assert.All(page, i => Assert.Equal(WorkspaceInvitationStatus.Pending, i.Status));
+
+        // Tenant C is never searched, so its caller-addressed invitation is never returned even though the email
+        // matches (threat T5).
+        Assert.DoesNotContain(page, i => i.Id == pendingInC.Id);
+    }
+
+    [Fact]
+    public async Task ListPendingPageByInvitedEmailInOrganizations_pages_with_an_over_fetch()
+    {
+        // Bounded paging (threat T9): Skip/Take return exactly the requested window in oldest-first id order, so
+        // the endpoint's over-fetch-by-one HasMore technique works.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        const string mine = "alice@example.test";
+
+        var created = new List<Guid>();
+        for (var i = 0; i < 5; i++)
+        {
+            var invitation = WorkspaceInvitation.Create(
+                organization.Id, workspace.Id, mine, MembershipRole.Host, _createdAt.AddMinutes(i), out _);
+            created.Add(invitation.Id);
+            await using var context = CreateContext();
+            await new WorkspaceInvitationRepository(context).AddAsync(invitation, CancellationToken.None);
+        }
+
+        await using var read = CreateContext();
+        var repository = new WorkspaceInvitationRepository(read);
+
+        // First page of 2 (+1 over-fetch = 3): the three oldest, in order.
+        var firstPage = await repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            new[] { organization.Id }, mine, skip: 0, take: 3, CancellationToken.None);
+        Assert.Equal(created.Take(3).ToArray(), firstPage.Select(i => i.Id).ToArray());
+
+        // Second page (skip 2, take 3): the remaining three.
+        var secondPage = await repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            new[] { organization.Id }, mine, skip: 2, take: 3, CancellationToken.None);
+        Assert.Equal(created.Skip(2).ToArray(), secondPage.Select(i => i.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task ListPendingPageByInvitedEmailInOrganizations_returns_empty_for_an_empty_tenant_set()
+    {
+        // A caller with no claimed tenant matches nothing — and the read short-circuits without a query.
+        await using var context = CreateContext();
+        var repository = new WorkspaceInvitationRepository(context);
+
+        var page = await repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            Array.Empty<Guid>(), "alice@example.test", skip: 0, take: 50, CancellationToken.None);
+
+        Assert.Empty(page);
+    }
+
+    [Fact]
+    public async Task ListPendingPageByInvitedEmailInOrganizations_rejects_a_blank_email_and_bad_paging()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceInvitationRepository(context);
+        var ids = new[] { Guid.CreateVersion7() };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            ids, "  ", skip: 0, take: 50, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentNullException>(() => repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            null!, "alice@example.test", skip: 0, take: 50, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            ids, "alice@example.test", skip: -1, take: 50, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => repository.ListPendingPageByInvitedEmailInOrganizationsAsync(
+            ids, "alice@example.test", skip: 0, take: 0, CancellationToken.None));
+    }
 }

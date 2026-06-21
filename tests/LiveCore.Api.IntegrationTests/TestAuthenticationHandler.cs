@@ -52,6 +52,12 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
     // logs the email (threat T7). End-user tokens may carry it; logging never echoes it.
     public const string EmailHeader = "X-Test-Email";
 
+    // Optional: emits the standard OIDC email_verified claim (CORE-INV-001), so a test can present a caller whose
+    // provider asserted it verified the email. Consumed fail-closed by OidcPrincipalMapper: the email is the
+    // trustworthy verified fact only when this is a boolean true for a present, valid email. Used by the
+    // invitation self-discovery tests (CORE-INV-002), which match ONLY on the verified email.
+    public const string EmailVerifiedHeader = "X-Test-EmailVerified";
+
     public const string DefaultIssuer = "https://issuer.test";
 
     public TestAuthenticationHandler(
@@ -109,6 +115,15 @@ internal sealed class TestAuthenticationHandler : AuthenticationHandler<Authenti
             && !string.IsNullOrWhiteSpace(emailValues.ToString()))
         {
             claims.Add(new Claim(OidcClaimTypes.Email, emailValues.ToString()));
+        }
+
+        // The optional OIDC email_verified claim (CORE-INV-001). Present only when a test opts in; the value is
+        // emitted verbatim (typically "true"/"false") so the mapper's fail-closed boolean parse is exercised
+        // exactly as in production. The invitation self-discovery (CORE-INV-002) keys ONLY on the verified email.
+        if (Request.Headers.TryGetValue(EmailVerifiedHeader, out var emailVerifiedValues)
+            && !string.IsNullOrWhiteSpace(emailVerifiedValues.ToString()))
+        {
+            claims.Add(new Claim(OidcClaimTypes.EmailVerified, emailVerifiedValues.ToString()));
         }
 
         var identity = new ClaimsIdentity(claims, SchemeName);

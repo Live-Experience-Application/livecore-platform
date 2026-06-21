@@ -670,6 +670,34 @@
         }
       }
     },
+    "/api/v1/me/invitations": {
+      "get": {
+        "tags": [
+          "MeInvitationEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{sessionId}": {
       "get": {
         "tags": [
@@ -2736,6 +2764,9 @@
     },
     {
       "name": "WorkspaceEndpoints"
+    },
+    {
+      "name": "MeInvitationEndpoints"
     },
     {
       "name": "SessionEndpoints"
