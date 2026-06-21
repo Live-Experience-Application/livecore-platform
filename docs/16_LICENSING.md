@@ -188,6 +188,16 @@ must carry a `Signed-off-by: Name <email>` trailer whose email matches the commi
 author (`git commit -s`), certifying the contributor's right to submit the work
 under the project license. This gives clean, auditable **provenance**.
 
+Because the trailer's email must match the **commit author**, the way a maintainer
+merges a pull request matters. A **squash merge** re-authors the resulting commit with
+the merger's GitHub commit email — the private `…@users.noreply.github.com` form when
+"Keep my email address private" is on — so a sign-off carrying the contributor's
+ordinary email no longer matches and the lint fails on the squashed commit. Merge with
+**rebase** (or a merge commit) instead: both preserve each original, already-signed
+commit verbatim, so the author and its sign-off stay in agreement. If a squash is
+preferred, sign off with the GitHub commit email the squash will carry, or turn off
+email privacy so the squash uses the verified address the sign-off already names.
+
 A bare DCO certifies provenance but does **not**, by itself, grant the project the
 right to relicense a contribution. So `CONTRIBUTING.md` pairs the DCO sign-off with
 an explicit **contribution license grant**: by signing off under the policy, the
