@@ -117,9 +117,11 @@ internal sealed class VisibleResourceAudienceProjector : IVisibleResourceAudienc
                     return null;
                 }
 
-                // The audience-safe entity label is its Name (ParticipantEntityResponse keeps it); entities
-                // carry no audience body.
-                return new VisibleResourceAudienceProjection(ParticipantEntityResponse.From(entity).Name, Body: null);
+                // The audience-safe entity label is its Name — the same field the entity's audience
+                // projection (ParticipantEntityResponse) keeps; entities carry no audience body. The feed item
+                // needs only the label, not the entity-type discriminator key the participant entity DTO also
+                // carries (CORE-APROJ-003), so the Name is read directly without resolving the type key.
+                return new VisibleResourceAudienceProjection(entity.Name, Body: null);
 
             default:
                 return null;

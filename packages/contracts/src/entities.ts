@@ -67,14 +67,25 @@ export interface EntityResponse {
 /**
  * Audience-safe response projection of an entity returned to the audience roles
  * (Participant/Observer), the audit role (Auditor) and any other role. It carries
- * only the entity's non-sensitive identity (id and name); it deliberately omits
- * the attribute-values content, the internal tenant/workspace/type ids and the
- * host preparation timestamps, and carries no hidden content or authorization
- * rationale (docs/08_API_CONTRACTS.md; threats T2/T7).
+ * only the entity's non-sensitive identity (id, name and an audience-safe
+ * entity-type discriminator); it deliberately omits the attribute-values content,
+ * the internal tenant/workspace/type-surrogate ids and the host preparation
+ * timestamps, and carries no hidden content or authorization rationale
+ * (docs/08_API_CONTRACTS.md; threats T2/T7).
  */
 export interface ParticipantEntityResponse {
   /** Surrogate id of the entity; a non-sensitive correlation handle. */
   id: Uuid;
   /** Human-readable label of the entity. */
   name: string;
+  /**
+   * Audience-safe entity-type discriminator (CORE-APROJ-003): the entity type's
+   * stable, lower-case natural key (the `EntityType.TypeKey` slug), so an audience
+   * surface can group or filter entities by kind from the list alone with no host
+   * read. It is DATA, not host content — a canonical slug, never inspected for
+   * vocabulary (the template boundary) — and is DISTINCT from the host-only
+   * surrogate `entityTypeId` ({@link EntityResponse}), which stays omitted. Empty
+   * when the type key cannot be resolved (a degrade, not an error).
+   */
+  entityTypeKey: string;
 }

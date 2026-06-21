@@ -115,15 +115,22 @@ public sealed record EntityResponse(
 /// docs/08_API_CONTRACTS.md states "Host DTOs and Participant DTOs are different" and "Participant DTOs must
 /// not contain hidden content fields", so it is a separate record type, NOT a reused/optional-field variant
 /// of the host DTO. An entity IS content (docs/06 "View host-only content"), so the audience-safe shape
-/// carries only the minimal, non-sensitive entity IDENTITY — the surrogate handle and the human label — and
-/// strips everything host-only.
+/// carries only the minimal, non-sensitive entity IDENTITY — the surrogate handle, the human label and an
+/// audience-safe entity-TYPE discriminator — and strips everything host-only.
 ///
-/// EXACT field set and the doc citation justifying each OMISSION:
+/// EXACT field set and the doc citation justifying each KEEP/OMISSION (CORE-APROJ-003):
 /// <list type="bullet">
 ///   <item><c>Id</c> — KEPT: the surrogate id is a non-sensitive correlation handle; it never authorizes
 ///   access on its own (every lookup is tenant+workspace scoped, threats T1/T5).</item>
 ///   <item><c>Name</c> — KEPT: the entity's human-readable label, the minimal audience-relevant identity of
 ///   the entity (the analogue of the scene title kept in <see cref="Scenes.ParticipantSceneResponse"/>).</item>
+///   <item><c>EntityTypeKey</c> — KEPT (CORE-APROJ-003): the entity type's stable, lower-case natural KEY
+///   (<see cref="EntityType.TypeKey"/>), an audience-safe KIND discriminator so an audience surface can group
+///   or filter entities by kind from the list alone with NO host read. It is DATA, not host content — a
+///   canonical slug the same shape as the workspace slug, never inspected for vocabulary (the template
+///   boundary, docs/04) — so it is non-sensitive and product-neutral. It is DISTINCT from the host-only
+///   <see cref="EntityResponse.EntityTypeId"/> surrogate (which stays omitted): the KEY discriminates kind
+///   without leaking the internal type id or any attribute content (threats T2/T7).</item>
 ///   <item><c>AttributeValues</c> — OMITTED: the entity's actual attribute DATA is host-only CONTENT
 ///   (docs/06 "View host-only content" = no for the audience roles, audit-only for Auditor; docs/08 forbids
 ///   hidden content fields in participant DTOs). What an audience member may actually see of an entity is
@@ -131,7 +138,9 @@ public sealed record EntityResponse(
 ///   wholesale here (threats T2/T7).</item>
 ///   <item><c>OrganizationId</c> / <c>WorkspaceId</c> / <c>EntityTypeId</c> — OMITTED: internal tenant,
 ///   workspace and type-linkage identifiers, stripped exactly as <see cref="Scenes.ParticipantSceneResponse"/>
-///   strips the tenant/workspace boundary ids (docs/06 "limited"; docs/08 no hidden/internal fields).</item>
+///   strips the tenant/workspace boundary ids (docs/06 "limited"; docs/08 no hidden/internal fields). The
+///   audience-safe KIND is the natural-key <see cref="EntityTypeKey"/>, never the surrogate
+///   <see cref="EntityResponse.EntityTypeId"/>.</item>
 ///   <item><c>CreatedAt</c> / <c>UpdatedAt</c> — OMITTED: host preparation timestamps, host-only metadata an
 ///   audience member does not receive (docs/08; the host DTO satisfies "Include server timestamps").</item>
 /// </list>
@@ -142,20 +151,30 @@ public sealed record EntityResponse(
 /// </summary>
 /// <param name="Id">Surrogate id of the entity (UUIDv7); a non-sensitive handle.</param>
 /// <param name="Name">Human-readable label of the entity.</param>
+/// <param name="EntityTypeKey">
+/// The entity type's stable, lower-case natural key (<see cref="EntityType.TypeKey"/>) — the audience-safe
+/// kind discriminator. A canonical slug (DATA, not host content); never the host-only surrogate type id. Empty
+/// when the type key cannot be resolved (a degrade, not an error — see <see cref="EntityProjection"/>).
+/// </param>
 public sealed record ParticipantEntityResponse(
     Guid Id,
-    string Name)
+    string Name,
+    string EntityTypeKey)
 {
     /// <summary>
     /// Projects an <see cref="Entity"/> aggregate into its audience-safe participant DTO. Only the minimal
-    /// audience-relevant fields (id, name) are copied; the boundary/type ids, the attribute-values content
-    /// and the host preparation timestamps are deliberately NOT copied (see the type summary).
+    /// audience-relevant fields (id, name) plus the audience-safe entity-type discriminator
+    /// (<paramref name="entityTypeKey"/>) are copied; the boundary/type SURROGATE ids, the attribute-values
+    /// content and the host preparation timestamps are deliberately NOT copied (see the type summary). The
+    /// caller resolves the type key from the entity's <see cref="Entity.EntityTypeId"/> through the
+    /// workspace's own entity types (<see cref="EntityProjection"/>); a key that cannot be resolved degrades
+    /// to the empty string, never an error.
     /// </summary>
-    public static ParticipantEntityResponse From(Entity entity)
+    public static ParticipantEntityResponse From(Entity entity, string? entityTypeKey)
     {
         ArgumentNullException.ThrowIfNull(entity);
 
-        return new ParticipantEntityResponse(entity.Id, entity.Name);
+        return new ParticipantEntityResponse(entity.Id, entity.Name, entityTypeKey ?? string.Empty);
     }
 }
 
@@ -195,6 +214,16 @@ public sealed record ParticipantEntityResponse(
 /// must never be compared with &gt;/&lt;), so the classification is an EXACT set-membership check, never an
 /// ordering comparison. Any value outside the host-content set fails closed to the stripped participant shape
 /// (deny-by-default: an unrecognized role is never granted the host-content view; threats T1/T5).
+///
+/// AUDIENCE-SAFE ENTITY-TYPE DISCRIMINATOR (CORE-APROJ-003). The participant shape carries the entity type's
+/// stable natural KEY (<see cref="EntityType.TypeKey"/>) so an audience surface can group/filter entities by
+/// kind with no host read. An entity carries only its type's SURROGATE id (<see cref="Entity.EntityTypeId"/>),
+/// not its key, so the projector resolves the key through a caller-supplied map (entity-type id -&gt; type key)
+/// that the endpoint builds from the workspace's OWN entity types (tenant- AND workspace-scoped, so no foreign
+/// type is read; threats T5/T1). The map is consulted ONLY for the participant shape — the host shape already
+/// carries the surrogate <see cref="EntityResponse.EntityTypeId"/> and needs no key — so a host-content caller
+/// may pass an empty map. A type id absent from the map (a deleted type, or the documented cross-workspace-type
+/// carve-out) resolves to the empty string: a DEGRADE, never an error.
 /// </summary>
 internal static class EntityProjection
 {
@@ -213,15 +242,21 @@ internal static class EntityProjection
     /// Projects the given entities into the role-appropriate response array, boxed as <see cref="object"/> so
     /// the endpoint can return either the host (<see cref="EntityResponse"/>) or the participant
     /// (<see cref="ParticipantEntityResponse"/>) array as the response body. The SET of entities is unchanged
-    /// — only the per-entity SHAPE differs by role.
+    /// — only the per-entity SHAPE differs by role. <paramref name="entityTypeKeysById"/> resolves the
+    /// audience-safe entity-type discriminator for the participant shape (see the type summary); it is unused
+    /// for the host shape.
     /// </summary>
-    public static object Project(IEnumerable<Entity> entities, MembershipRole role)
+    public static object Project(
+        IEnumerable<Entity> entities,
+        MembershipRole role,
+        IReadOnlyDictionary<Guid, string> entityTypeKeysById)
     {
         ArgumentNullException.ThrowIfNull(entities);
+        ArgumentNullException.ThrowIfNull(entityTypeKeysById);
 
         return ReceivesHostShape(role)
             ? entities.Select(EntityResponse.From).ToArray()
-            : entities.Select(ParticipantEntityResponse.From).ToArray();
+            : entities.Select(entity => ParticipantEntityResponse.From(entity, ResolveTypeKey(entity, entityTypeKeysById))).ToArray();
     }
 
     /// <summary>
@@ -233,19 +268,27 @@ internal static class EntityProjection
     /// the per-entity SHAPE never diverges between the bounded and unbounded list; only the SET is now bounded.
     /// The caller has already resolved the page bounds and trimmed <paramref name="entities"/> to at most
     /// <paramref name="limit"/> items and computed <paramref name="hasMore"/>.
+    /// <paramref name="entityTypeKeysById"/> resolves the participant shape's audience-safe entity-type
+    /// discriminator (see the type summary); it is unused for the host shape.
     /// </summary>
     public static object ProjectPage(
         IReadOnlyList<Entity> entities,
         MembershipRole role,
+        IReadOnlyDictionary<Guid, string> entityTypeKeysById,
         int offset,
         int limit,
         bool hasMore)
     {
         ArgumentNullException.ThrowIfNull(entities);
+        ArgumentNullException.ThrowIfNull(entityTypeKeysById);
 
         return ReceivesHostShape(role)
             ? PageResponse.From(entities.Select(EntityResponse.From).ToArray(), offset, limit, hasMore)
-            : PageResponse.From(entities.Select(ParticipantEntityResponse.From).ToArray(), offset, limit, hasMore);
+            : PageResponse.From(
+                entities.Select(entity => ParticipantEntityResponse.From(entity, ResolveTypeKey(entity, entityTypeKeysById))).ToArray(),
+                offset,
+                limit,
+                hasMore);
     }
 
     /// <summary>
@@ -253,14 +296,30 @@ internal static class EntityProjection
     /// by-id read can return either the full host shape (<see cref="EntityResponse"/>) or the stripped
     /// participant shape (<see cref="ParticipantEntityResponse"/>) — the SAME host-vs-participant DTO split
     /// the list uses (<see cref="Project"/>), so the by-id read can never diverge from the list's projection.
-    /// An undefined role falls closed to the stripped participant shape.
+    /// An undefined role falls closed to the stripped participant shape. <paramref name="entityTypeKeysById"/>
+    /// resolves the participant shape's audience-safe entity-type discriminator (see the type summary); it is
+    /// unused for the host shape.
     /// </summary>
-    public static object ProjectOne(Entity entity, MembershipRole role)
+    public static object ProjectOne(
+        Entity entity,
+        MembershipRole role,
+        IReadOnlyDictionary<Guid, string> entityTypeKeysById)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        ArgumentNullException.ThrowIfNull(entityTypeKeysById);
 
         return ReceivesHostShape(role)
             ? EntityResponse.From(entity)
-            : ParticipantEntityResponse.From(entity);
+            : ParticipantEntityResponse.From(entity, ResolveTypeKey(entity, entityTypeKeysById));
     }
+
+    /// <summary>
+    /// Resolves the audience-safe entity-type discriminator (the <see cref="EntityType.TypeKey"/> natural key)
+    /// for one entity from the supplied (entity-type id -&gt; type key) map. A type id the map does not
+    /// contain — a deleted type, or the documented cross-workspace-type carve-out — degrades to the empty
+    /// string rather than throwing, so a missing key never fails the read (threats T2/T7 are unaffected: an
+    /// empty key leaks nothing).
+    /// </summary>
+    private static string ResolveTypeKey(Entity entity, IReadOnlyDictionary<Guid, string> entityTypeKeysById)
+        => entityTypeKeysById.TryGetValue(entity.EntityTypeId, out var typeKey) ? typeKey : string.Empty;
 }

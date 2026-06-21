@@ -203,6 +203,31 @@ may see). The resource label/body is resolved through a Visibility-owned port wh
 composition root, because the central security module may not reference the Scenes/Content/Entities modules
 (CORE-ARCH-001).
 
+### Participant entity projection: the audience-safe entity-type discriminator (CORE-APROJ-003)
+
+The audience-safe entity DTO (`ParticipantEntityResponse`, returned to the audience roles
+`Participant`/`Observer`, the audit role `Auditor` and any other role on
+`GET /api/v1/workspaces/{workspaceId}/entities` and `/entities/{entityId}`) carries an audience-safe
+**entity-type discriminator** alongside the entity id and name:
+
+| Field | Meaning |
+|---|---|
+| `id` | the surrogate id of the entity — a non-sensitive correlation handle |
+| `name` | the entity's **audience-safe label** (its human-readable name) |
+| `entityTypeKey` | the entity type's **stable, lower-case natural key** (the `EntityType.TypeKey` slug) — an audience-safe **kind** discriminator |
+
+`entityTypeKey` lets an audience surface **group or filter entities by kind from the list alone, with no host
+read**. It is the type's natural **key** (DATA — a canonical slug the same shape as the workspace slug, never
+inspected for vocabulary, the template boundary docs/04), **not** the host-only surrogate `entityTypeId`: the
+key discriminates kind **without** leaking the internal type id or any attribute content (threats T2/T7). The
+full host `EntityResponse` is **unchanged** (it still carries `entityTypeId` and the `attributeValues`
+content). The fail-closed projection by role is unchanged — an entity _is_ content, so only the host-content
+roles receive the full shape and every other role receives this stripped shape. The key is resolved server-side
+from the workspace's own entity types (tenant- and workspace-scoped); a type key that cannot be resolved
+degrades to an empty string, never an error. This composes with CORE-APROJ-002, so a revealed visible-feed item
+(which names its resource by `resourceType` + `resourceId`) can be tied to its entity's kind through the entity
+projection.
+
 ## Idempotency
 
 Reveal and hide (un-reveal) execution must be idempotent for client retry.

@@ -2987,9 +2987,11 @@ entity _is_ content, so the split is the matrix's "View host-only content" row, 
 the scene-style "View workspace metadata": the host-content roles (`Owner`, `Admin`,
 `Host`, `CoHost`) receive the full entity (including its `attributeValues`), while the
 audience roles (`Participant`, `Observer`), the audit role (`Auditor`) and any
-undefined role receive a stripped, audience-safe projection (entity id and name only —
-no attribute-values content, no internal tenant/workspace/type ids, no host
-timestamps, no authorization rationale; threats T2/T7). Only the response shape differs
+undefined role receive a stripped, audience-safe projection (entity id, name and an
+audience-safe entity-type discriminator — the type's stable natural key `entityTypeKey`,
+so an audience surface can group or filter entities by kind from the list alone with no
+host read; no attribute-values content, no internal tenant/workspace/type-surrogate ids,
+no host timestamps, no authorization rationale; threats T2/T7, CORE-APROJ-003). Only the response shape differs
 by role; every member still receives the same page of the workspace's entities, since
 deciding which entities an audience may actually _see_ is the entity-search read
 (CORE-ENT-005) and the Visibility module's concern. The entity list is **bounded**

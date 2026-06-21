@@ -452,12 +452,14 @@ public sealed class EntityCreateListReadEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
 
-        // The EXACT top-level property set of the participant shape is {id, name} — and NOTHING else. This
-        // FAILS if any host-only field (the attribute-values content, the tenant/workspace/type ids, the host
-        // timestamps) or any authorization rationale is ever added to the participant DTO (T2/T7).
+        // The EXACT top-level property set of the participant shape is {id, name, entityTypeKey} — and NOTHING
+        // else. This FAILS if any host-only field (the attribute-values content, the tenant/workspace/type
+        // SURROGATE ids, the host timestamps) or any authorization rationale is ever added to the participant
+        // DTO (T2/T7). The audience-safe discriminator is the natural KEY (entityTypeKey), never the surrogate
+        // entityTypeId (CORE-APROJ-003).
         var properties = FirstElementPropertyNames(body);
         Assert.Equal(
-            new[] { "id", "name" }.OrderBy(n => n, StringComparer.Ordinal),
+            new[] { "id", "name", "entityTypeKey" }.OrderBy(n => n, StringComparer.Ordinal),
             properties.OrderBy(n => n, StringComparer.Ordinal));
         Assert.DoesNotContain("attributeValues", properties);
         Assert.DoesNotContain("organizationId", properties);
@@ -469,11 +471,14 @@ public sealed class EntityCreateListReadEndpointTests
         // The attribute-values CONTENT never appears anywhere in the body (a direct T2 content-leak guard).
         Assert.DoesNotContain(_attributeMarker, body, StringComparison.Ordinal);
 
-        // The participant still receives the entity (the SET is unchanged; only the SHAPE is stripped).
+        // The participant still receives the entity (the SET is unchanged; only the SHAPE is stripped), and it
+        // carries the audience-safe entity-type discriminator KEY (the seeded "type-alpha"), never the surrogate
+        // type id — so an audience surface can group/filter by kind from the list alone (CORE-APROJ-003).
         var entities = Deserialize<PageDto<ParticipantEntityDto>>(body).Items;
         var entity = Assert.Single(entities);
         Assert.Equal("Lantern", entity.Name);
         Assert.NotEqual(Guid.Empty, entity.Id);
+        Assert.Equal("type-alpha", entity.EntityTypeKey);
     }
 
     [Fact]
@@ -505,15 +510,19 @@ public sealed class EntityCreateListReadEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
 
+        // The by-id read projects through the SAME stripped shape as the list: {id, name, entityTypeKey}, the
+        // audience-safe discriminator being the natural KEY, never the surrogate entityTypeId (CORE-APROJ-003).
         var properties = ObjectPropertyNames(body);
         Assert.Equal(
-            new[] { "id", "name" }.OrderBy(n => n, StringComparer.Ordinal),
+            new[] { "id", "name", "entityTypeKey" }.OrderBy(n => n, StringComparer.Ordinal),
             properties.OrderBy(n => n, StringComparer.Ordinal));
+        Assert.DoesNotContain("entityTypeId", properties);
         Assert.DoesNotContain(_attributeMarker, body, StringComparison.Ordinal);
 
         var entity = Deserialize<ParticipantEntityDto>(body);
         Assert.Equal(entityId, entity.Id);
         Assert.Equal("Lantern", entity.Name);
+        Assert.Equal("type-alpha", entity.EntityTypeKey);
     }
 
     // =====================================================================
@@ -1031,5 +1040,6 @@ public sealed class EntityCreateListReadEndpointTests
 
     private sealed record ParticipantEntityDto(
         Guid Id,
-        string Name);
+        string Name,
+        string EntityTypeKey);
 }

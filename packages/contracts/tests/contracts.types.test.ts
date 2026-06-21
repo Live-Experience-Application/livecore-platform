@@ -27,6 +27,7 @@ import type {
   CreateUploadIntentRequest,
   CreateVisibilityRuleRequest,
   CreateWorkspaceRequest,
+  EntityResponse,
   FeedRevealScope,
   GoogleTokenVerificationRequest,
   HideRequest,
@@ -36,6 +37,7 @@ import type {
   MembershipRole,
   PageResponse,
   ParsedSessionEvent,
+  ParticipantEntityResponse,
   ParticipantVisibleFeedItem,
   ProblemCode,
   ProblemDetails,
@@ -207,6 +209,49 @@ export type ParticipantVisibleFeedItemRevealedAtIsIsoDateTime = Assert<
 
 export type ParticipantVisibleFeedItemRevealScopeIsEnum = Assert<
   Equal<ParticipantVisibleFeedItem["revealScope"], FeedRevealScope>
+>;
+
+// --- The participant entity projection is the AUDIENCE-SAFE entity shape. -------
+// (CORE-APROJ-003.) The audience/audit roles receive the stripped entity DTO: the
+// non-sensitive identity (id, name) PLUS the audience-safe entity-type discriminator
+// `entityTypeKey` — the stable natural key (the `EntityType.TypeKey` slug) — so an
+// audience surface can group/filter entities by kind from the list alone with no host
+// read. It mirrors the server DTO (apps/api/Entities/EntityDtos.cs
+// `ParticipantEntityResponse(Guid Id, string Name, string EntityTypeKey)`). Pinning the
+// property set to exactly this audience-safe shape makes a host-only field — most
+// importantly the surrogate `entityTypeId` or the `attributeValues` content — a compile
+// error here, so the published participant contract can never grow a leaking field
+// (threats T2/T7).
+
+export type ParticipantEntityResponseKeysAreExact = Assert<
+  Equal<keyof ParticipantEntityResponse, "id" | "name" | "entityTypeKey">
+>;
+
+export type ParticipantEntityResponseTypeKeyIsString = Assert<
+  Equal<ParticipantEntityResponse["entityTypeKey"], string>
+>;
+
+// The audience-safe discriminator is the natural KEY only: the host-only surrogate
+// `entityTypeId` (carried by the full host {@link EntityResponse}) is NOT a member of the
+// participant shape, so a consumer cannot reach it through the stripped projection.
+export type ParticipantEntityResponseHasNoSurrogateTypeId = Assert<
+  Equal<
+    "entityTypeId" extends keyof ParticipantEntityResponse ? true : false,
+    false
+  >
+>;
+
+// The full host shape is unchanged: it still carries the surrogate `entityTypeId` and the
+// `attributeValues` content (CORE-APROJ-003 leaves the host projection untouched).
+export type EntityResponseKeepsHostOnlyFields = Assert<
+  Equal<
+    "entityTypeId" extends keyof EntityResponse
+      ? "attributeValues" extends keyof EntityResponse
+        ? true
+        : false
+      : false,
+    true
+  >
 >;
 
 // --- Request DTOs require exactly the documented fields. -----------------------

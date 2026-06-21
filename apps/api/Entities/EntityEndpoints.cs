@@ -88,6 +88,14 @@ internal static class EntityEndpoints
     /// <summary>Required value naming the target organization.</summary>
     private const string _organizationSlugQuery = "organizationSlug";
 
+    /// <summary>
+    /// The empty entity-type-key map passed to the projection for a host-content caller: the host shape carries
+    /// the surrogate <see cref="EntityResponse.EntityTypeId"/> and needs no audience-safe key, so its key
+    /// lookup is skipped (CORE-APROJ-003). Only the participant shape resolves keys (see
+    /// <see cref="ResolveParticipantEntityTypeKeysAsync"/>).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<Guid, string> _noEntityTypeKeys = new Dictionary<Guid, string>();
+
     public static IEndpointRouteBuilder MapEntityEndpoints(this IEndpointRouteBuilder endpoints)
     {
         // Authenticated group: the bearer middleware authenticates the caller, so a missing/invalid token
@@ -186,7 +194,14 @@ internal static class EntityEndpoints
         var hasMore = rows.Count > pageLimit;
         var pageRows = hasMore ? rows.Take(pageLimit).ToArray() : rows;
 
-        return Results.Ok(EntityProjection.ProjectPage(pageRows, member.Role, pageOffset, pageLimit, hasMore));
+        // Resolve the audience-safe entity-type discriminator keys ONLY when the caller receives the
+        // participant shape (CORE-APROJ-003): the host shape already carries the surrogate entityTypeId.
+        var entityTypeKeys = await ResolveParticipantEntityTypeKeysAsync(
+                deps, context.OrganizationId, workspaceGuid, member.Role, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(
+            EntityProjection.ProjectPage(pageRows, member.Role, entityTypeKeys, pageOffset, pageLimit, hasMore));
     }
 
     // GET /api/v1/workspaces/{workspaceId}/entities/{entityId}?organizationSlug={slug}
@@ -256,9 +271,15 @@ internal static class EntityEndpoints
             return HiddenEntity();
         }
 
+        // Resolve the audience-safe entity-type discriminator keys ONLY when the caller receives the
+        // participant shape (CORE-APROJ-003); the host shape already carries the surrogate entityTypeId.
+        var entityTypeKeys = await ResolveParticipantEntityTypeKeysAsync(
+                deps, context.OrganizationId, workspaceGuid, member.Role, cancellationToken)
+            .ConfigureAwait(false);
+
         // PROJECT BY ROLE through the SAME projector the list uses, so the by-id read can never diverge from
         // the list's host-vs-participant DTO split (an undefined role falls closed to the stripped shape).
-        return Results.Ok(EntityProjection.ProjectOne(entity, member.Role));
+        return Results.Ok(EntityProjection.ProjectOne(entity, member.Role, entityTypeKeys));
     }
 
     // POST /api/v1/workspaces/{workspaceId}/entities
@@ -495,6 +516,41 @@ internal static class EntityEndpoints
     }
 
     /// <summary>
+    /// Resolves the audience-safe entity-type discriminator keys for the participant projection
+    /// (CORE-APROJ-003): a map of entity-type id -&gt; the type's stable natural <see cref="EntityType.TypeKey"/>.
+    /// It returns the SHARED empty map for a host-content role — the host shape carries the surrogate
+    /// <see cref="EntityResponse.EntityTypeId"/>, so it needs no key lookup and no extra query — and otherwise
+    /// reads the route workspace's OWN entity types through the tenant- AND workspace-scoped
+    /// <see cref="IEntityTypeRepository.ListByWorkspaceAsync"/>, so a foreign tenant's or workspace's type is
+    /// never read (threats T5/T1). An entity whose type is not in this map degrades to an empty key in the
+    /// projection, never an error.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<Guid, string>> ResolveParticipantEntityTypeKeysAsync(
+        EntityEndpointDependencies dependencies,
+        Guid organizationId,
+        Guid workspaceId,
+        MembershipRole role,
+        CancellationToken cancellationToken)
+    {
+        if (EntityProjection.ReceivesHostShape(role))
+        {
+            return _noEntityTypeKeys;
+        }
+
+        var types = await dependencies.EntityTypes
+            .ListByWorkspaceAsync(organizationId, workspaceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        var keysByTypeId = new Dictionary<Guid, string>(types.Count);
+        foreach (var type in types)
+        {
+            keysByTypeId[type.Id] = type.TypeKey;
+        }
+
+        return keysByTypeId;
+    }
+
+    /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. They exist only when a
     /// database connection string is configured; when absent, the endpoint fails closed with 503 instead
     /// of throwing.
@@ -504,6 +560,7 @@ internal static class EntityEndpoints
         var services = httpContext.RequestServices;
         var resolver = services.GetService<TenantContextResolver>();
         var entities = services.GetService<IEntityRepository>();
+        var entityTypes = services.GetService<IEntityTypeRepository>();
         var entityCreation = services.GetService<EntityCreationService>();
         var entityDeletion = services.GetService<EntityDeletionService>();
         var workspaces = services.GetService<IWorkspaceRepository>();
@@ -511,6 +568,7 @@ internal static class EntityEndpoints
 
         if (resolver is null
             || entities is null
+            || entityTypes is null
             || entityCreation is null
             || entityDeletion is null
             || workspaces is null
@@ -521,7 +579,7 @@ internal static class EntityEndpoints
         }
 
         dependencies = new EntityEndpointDependencies(
-            resolver, entities, entityCreation, entityDeletion, workspaces, workspaceMembers);
+            resolver, entities, entityTypes, entityCreation, entityDeletion, workspaces, workspaceMembers);
         return true;
     }
 
@@ -598,6 +656,7 @@ internal static class EntityEndpoints
     private readonly record struct EntityEndpointDependencies(
         TenantContextResolver Resolver,
         IEntityRepository Entities,
+        IEntityTypeRepository EntityTypes,
         EntityCreationService EntityCreation,
         EntityDeletionService EntityDeletion,
         IWorkspaceRepository Workspaces,

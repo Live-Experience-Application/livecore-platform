@@ -35,7 +35,16 @@ public class EntityProjectionTests
     private static readonly Guid _organizationId = Guid.CreateVersion7();
     private static readonly Guid _workspaceId = Guid.CreateVersion7();
     private static readonly Guid _entityTypeId = Guid.CreateVersion7();
+    private const string _entityTypeKey = "type-alpha";
     private static readonly DateTimeOffset _createdAt = new(2026, 6, 11, 8, 0, 0, TimeSpan.Zero);
+
+    /// <summary>
+    /// The (entity-type id -&gt; stable type key) map the projector consults to resolve the audience-safe
+    /// entity-type discriminator for the participant shape (CORE-APROJ-003). It maps the fixture's single type
+    /// id to its natural key, mirroring what the endpoint builds from the workspace's own entity types.
+    /// </summary>
+    private static readonly IReadOnlyDictionary<Guid, string> _entityTypeKeys =
+        new Dictionary<Guid, string> { [_entityTypeId] = _entityTypeKey };
 
     /// <summary>The host-only fields the participant DTO must NEVER carry.</summary>
     private static readonly string[] _hostOnlyFieldNames =
@@ -111,22 +120,39 @@ public class EntityProjectionTests
     {
         var entity = CreateEntity("Beacon");
 
-        var participant = ParticipantEntityResponse.From(entity);
+        var participant = ParticipantEntityResponse.From(entity, _entityTypeKey);
 
         Assert.Equal(entity.Id, participant.Id);
         Assert.Equal(entity.Name, participant.Name);
+        // The audience-safe entity-type discriminator is the stable natural KEY, NOT the surrogate type id
+        // (CORE-APROJ-003).
+        Assert.Equal(_entityTypeKey, participant.EntityTypeKey);
+    }
+
+    [Fact]
+    public void Participant_projection_degrades_to_an_empty_type_key_when_unresolved()
+    {
+        // An entity whose type is not in the supplied map (a deleted type, or the documented
+        // cross-workspace-type carve-out) degrades to the empty key — never an error, and the empty key leaks
+        // nothing (threats T2/T7).
+        var entity = CreateEntity();
+
+        var participant = ParticipantEntityResponse.From(entity, entityTypeKey: null);
+
+        Assert.Equal(string.Empty, participant.EntityTypeKey);
     }
 
     [Fact]
     public void Participant_dto_property_set_excludes_every_host_only_field()
     {
-        // The exact top-level property set of the participant DTO is {Id, Name}. This FAILS if a host-only
-        // field — most importantly the attribute-values CONTENT — is ever added to the participant DTO
-        // (docs/08: "Participant DTOs must not contain hidden content fields"; threats T2/T7).
+        // The exact top-level property set of the participant DTO is {Id, Name, EntityTypeKey}. This FAILS if a
+        // host-only field — most importantly the attribute-values CONTENT or the surrogate EntityTypeId — is
+        // ever added to the participant DTO (docs/08: "Participant DTOs must not contain hidden content
+        // fields"; threats T2/T7). The audience-safe discriminator is the natural KEY, not the surrogate id.
         var names = PublicPropertyNames(typeof(ParticipantEntityResponse));
 
         Assert.Equal(
-            new[] { "Id", "Name" }.OrderBy(n => n, StringComparer.Ordinal),
+            new[] { "Id", "Name", "EntityTypeKey" }.OrderBy(n => n, StringComparer.Ordinal),
             names);
 
         foreach (var hostOnly in _hostOnlyFieldNames)
@@ -158,12 +184,12 @@ public class EntityProjectionTests
     {
         Assert.True(EntityProjection.ReceivesHostShape(role));
 
-        var projected = EntityProjection.Project(new[] { CreateEntity() }, role);
+        var projected = EntityProjection.Project(new[] { CreateEntity() }, role, _entityTypeKeys);
 
         var hostArray = Assert.IsType<EntityResponse[]>(projected);
         Assert.Single(hostArray);
 
-        var one = EntityProjection.ProjectOne(CreateEntity(), role);
+        var one = EntityProjection.ProjectOne(CreateEntity(), role, _entityTypeKeys);
         Assert.IsType<EntityResponse>(one);
     }
 
@@ -175,13 +201,16 @@ public class EntityProjectionTests
         // scene projection, since an entity is content (Auditor is audit-only, not a host-content role).
         Assert.False(EntityProjection.ReceivesHostShape(role));
 
-        var projected = EntityProjection.Project(new[] { CreateEntity() }, role);
+        var projected = EntityProjection.Project(new[] { CreateEntity() }, role, _entityTypeKeys);
 
         var participantArray = Assert.IsType<ParticipantEntityResponse[]>(projected);
-        Assert.Single(participantArray);
+        var fromList = Assert.Single(participantArray);
+        // The stripped shape carries the audience-safe entity-type discriminator KEY resolved from the map.
+        Assert.Equal(_entityTypeKey, fromList.EntityTypeKey);
 
-        var one = EntityProjection.ProjectOne(CreateEntity(), role);
-        Assert.IsType<ParticipantEntityResponse>(one);
+        var one = EntityProjection.ProjectOne(CreateEntity(), role, _entityTypeKeys);
+        var fromOne = Assert.IsType<ParticipantEntityResponse>(one);
+        Assert.Equal(_entityTypeKey, fromOne.EntityTypeKey);
     }
 
     [Fact]
@@ -212,8 +241,10 @@ public class EntityProjectionTests
 
         Assert.False(EntityProjection.ReceivesHostShape(undefinedRole));
 
-        Assert.IsType<ParticipantEntityResponse[]>(EntityProjection.Project(new[] { CreateEntity() }, undefinedRole));
-        Assert.IsType<ParticipantEntityResponse>(EntityProjection.ProjectOne(CreateEntity(), undefinedRole));
+        Assert.IsType<ParticipantEntityResponse[]>(
+            EntityProjection.Project(new[] { CreateEntity() }, undefinedRole, _entityTypeKeys));
+        Assert.IsType<ParticipantEntityResponse>(
+            EntityProjection.ProjectOne(CreateEntity(), undefinedRole, _entityTypeKeys));
     }
 
     [Fact]
@@ -222,9 +253,10 @@ public class EntityProjectionTests
         // The SET of entities is unchanged by the projection — only the per-entity SHAPE differs by role.
         var entities = new[] { CreateEntity("A"), CreateEntity("B"), CreateEntity("C") };
 
-        var host = Assert.IsType<EntityResponse[]>(EntityProjection.Project(entities, MembershipRole.Host));
+        var host = Assert.IsType<EntityResponse[]>(
+            EntityProjection.Project(entities, MembershipRole.Host, _entityTypeKeys));
         var participant = Assert.IsType<ParticipantEntityResponse[]>(
-            EntityProjection.Project(entities, MembershipRole.Participant));
+            EntityProjection.Project(entities, MembershipRole.Participant, _entityTypeKeys));
 
         Assert.Equal(3, host.Length);
         Assert.Equal(3, participant.Length);
