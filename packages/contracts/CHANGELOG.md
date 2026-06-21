@@ -8,6 +8,69 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [0.3.0] - 2026-06-21
+
+### Added
+
+- An audience-safe entity-type discriminator on the audience entity projection
+  (CORE-APROJ-003): `ParticipantEntityResponse.entityTypeKey` carries the entity
+  type's stable, lower-case natural key (the `EntityType.TypeKey` slug) so an
+  audience surface can group or filter entities by kind from the list alone. It is
+  data, not host content; the host-only surrogate `entityTypeId` stays omitted. An
+  additive optional field (a MINOR change).
+- An audience-safe resource label and the authoring lock/schedule on the visibility
+  rule projection: `VisibilityRuleResponse` gains `resourceLabel` (a denormalized,
+  audience-safe name for the governed resource, or `null` for a dangling rule —
+  CORE-APROJ-004), `locked` (the server-asserted seal flag that makes a rule's
+  resource permanently-restricted, orthogonal to the Hidden/Visible state —
+  CORE-VSEAL-001) and `scheduledRevealAt` (the optional worker-driven auto-reveal
+  time — CORE-VSEAL-002). `CreateVisibilityRuleRequest` gains an optional
+  `scheduledRevealAt`. All additive (a MINOR change).
+- The reveal-scope vocabulary `FeedRevealScopes` / `FeedRevealScope`
+  (`AudienceWide`/`SelectedParticipant`, CORE-APROJ-002): the marker distinguishing an
+  audience-wide reveal from a private, selected-participant reveal on a participant's
+  own feed. A new enum tuple member set (a MINOR change).
+- The caller's own session participant context `SessionParticipantContext`
+  (CORE-PSELF-001), returned by `GET /api/v1/sessions/{sessionId}/me`: `sessionId`,
+  `participantId`, `displayName` and `present`, resolved server-side from the
+  authenticated principal so a caller can only ever resolve itself. The audience roster
+  participant (`ParticipantRosterParticipant`) gains a server-computed `isSelf` marker.
+  Additive (a MINOR change).
+- A user-scoped pending-invitation self-discovery type
+  `MyPendingWorkspaceInvitationResponse` (CORE-INV-002) for `GET /api/v1/me/invitations`:
+  the PII-safe projection of the caller's own pending workspace invitations (the
+  `organizationSlug` + `workspaceId` an onboarding flow echoes into `acceptInvitation`),
+  carrying no invited email and no token. Additive (a MINOR change).
+- The closed-app Web Push registration contracts in a new `push.ts` module
+  (CORE-PUSH-001): `RegisterPushSubscriptionRequest`, `PushSubscriptionResponse` and
+  `PushVapidPublicKeyResponse` for `GET /api/v1/push/vapid-public-key`,
+  `POST /api/v1/me/push-subscriptions` and
+  `DELETE /api/v1/me/push-subscriptions/{subscriptionId}`. The `auth` encryption secret
+  is write-only and never echoed back (threat T7). Additive (a MINOR change).
+- The asset confirm-upload contracts `ConfirmUploadRequest` / `ConfirmUploadResponse`
+  (CORE-ALC-001) for `POST /api/v1/assets/{assetId}/confirm-upload`, the `Pending` →
+  `Available` transition recording the uploaded size and checksum. Additive (a MINOR
+  change).
+- The subject's Web Push subscriptions in the personal-data export (CORE-PUSH-001):
+  `PersonalDataExportResponse.pushSubscriptions` and
+  `PersonalDataExportPushSubscriptionResponse`. The encryption keys are never projected
+  into the export. Additive (a MINOR change).
+
+### Changed
+
+- The participant visible-feed item is now a populated, audience-safe projection
+  instead of an empty placeholder. `ParticipantVisibleFeedItem` changed from
+  `Record<string, never>` to an interface carrying `resourceType` + `resourceId`
+  (CORE-APROJ-001 realigned the published type to the server DTO it had drifted from),
+  an audience-safe `title` and short `body` (produced only through the resource kind's
+  role-based audience projection, never the raw host content), the `revealedAt` reveal
+  time, the `revealScope` marker, the `locked` and `scheduledRevealAt` server facts, and
+  an `attachments` list of the new `ParticipantVisibleFeedAttachment` (`assetId`,
+  audience-safe `name`, `contentType` — CORE-APROJ-002, CORE-VSEAL-001/002, CORE-ALC-002).
+  `ParticipantVisibleFeedResponse.items` is no longer always empty. Pre-1.0 the shape
+  change ships as a MINOR bump; a consumer that depended on the empty type reads the new
+  fields.
+
 ## [0.2.0] - 2026-06-19
 
 ### Added

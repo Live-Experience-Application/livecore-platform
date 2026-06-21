@@ -8,6 +8,20 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [0.3.0] - 2026-06-21
+
+### Added
+
+- Paired `*Foreground` on-status color roles for every filled status role
+  (CORE-DTOK-001): `successForeground`, `warningForeground`, `dangerForeground` and
+  `infoForeground` are added to the `ColorRoles` tuple and to both the light and dark
+  `baseTheme` schemes. Each value is the readable on-color text for its status fill,
+  chosen to clear the WCAG 2.1 AA body-text contrast threshold (>= 4.5:1) against that
+  fill in its scheme. A vertical rendering an accessible status surface — a destructive
+  button, a status badge or an alert — reads the on-status text color straight from the
+  contract instead of deriving one itself. New tuple members plus their theme values, an
+  additive change to the typed surface (a MINOR change).
+
 ## [0.2.0] - 2026-06-19
 
 ### Changed
