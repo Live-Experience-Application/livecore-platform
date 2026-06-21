@@ -154,6 +154,144 @@ public class OidcPrincipalMapperTests
         Assert.Null(result.Principal!.Email);
     }
 
+    // ---- email_verified consumption (CORE-INV-001), fail-closed ------------
+
+    [Fact]
+    public void Map_marks_email_verified_only_when_email_verified_claim_is_true()
+    {
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "true")));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("casey@example.test", result.Principal!.Email);
+        Assert.True(result.Principal.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_marks_email_verified_case_insensitively()
+    {
+        // A JSON boolean serializes to "true"; bool.TryParse also accepts the
+        // case-insensitive forms a lenient provider might emit.
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "True")));
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.Principal!.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_marks_email_verified_when_repeated_true_claims_agree()
+    {
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "true"),
+            new Claim(OidcClaimTypes.EmailVerified, "true")));
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.Principal!.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_verified_claim_is_absent()
+    {
+        // A present email with no email_verified claim is unverified
+        // (fail-closed): the provider asserted nothing about verification.
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test")));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("casey@example.test", result.Principal!.Email);
+        Assert.False(result.Principal.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_verified_claim_is_false()
+    {
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "false")));
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Principal!.EmailVerified);
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("0")]
+    [InlineData("yes")]
+    [InlineData("verified")]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Map_leaves_email_unverified_when_email_verified_claim_is_non_boolean(
+        string emailVerifiedClaimValue)
+    {
+        // A non-boolean email_verified is not a trustworthy assertion; only a
+        // literal boolean true marks the email verified.
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, emailVerifiedClaimValue)));
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Principal!.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_verified_claims_conflict()
+    {
+        // Conflicting assertions cannot establish a verified fact (fail-closed).
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "true"),
+            new Claim(OidcClaimTypes.EmailVerified, "false")));
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Principal!.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_is_absent_even_if_email_verified_is_true()
+    {
+        // email_verified=true with no email establishes nothing; the verified
+        // fact is meaningless without an email to verify (CORE-INV-001).
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.EmailVerified, "true")));
+
+        Assert.True(result.Succeeded);
+        Assert.Null(result.Principal!.Email);
+        Assert.False(result.Principal.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_is_malformed_even_if_email_verified_is_true()
+    {
+        // A malformed email is dropped (unverified by construction), so a true
+        // email_verified cannot resurrect it.
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "not-an-email"),
+            new Claim(OidcClaimTypes.EmailVerified, "true")));
+
+        Assert.True(result.Succeeded);
+        Assert.Null(result.Principal!.Email);
+        Assert.False(result.Principal.EmailVerified);
+    }
+
+    [Fact]
+    public void Map_leaves_email_unverified_when_email_claims_conflict_even_if_email_verified_is_true()
+    {
+        // Conflicting email claims drop the email entirely, so it stays
+        // unverified regardless of email_verified.
+        var result = OidcPrincipalMapper.Map(AuthenticatedPrincipalWithRequiredClaims(
+            new Claim(OidcClaimTypes.Email, "casey@example.test"),
+            new Claim(OidcClaimTypes.Email, "other@example.test"),
+            new Claim(OidcClaimTypes.EmailVerified, "true")));
+
+        Assert.True(result.Succeeded);
+        Assert.Null(result.Principal!.Email);
+        Assert.False(result.Principal.EmailVerified);
+    }
+
     [Fact]
     public void Map_fails_for_unauthenticated_principal()
     {

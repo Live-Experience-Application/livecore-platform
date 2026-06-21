@@ -8,11 +8,22 @@ Owns:
 - OIDC claims normalization
 - user profile reference
 - service account support
+- the trustworthy verified-email fact (CORE-INV-001)
 
 May not:
 
 - implement custom password auth
 - own workspace authorization decisions
+
+The verified-email fact (CORE-INV-001) is the principal's `EmailVerified` flag,
+consumed fail-closed from the OIDC `email_verified` claim: the caller email is a
+trustworthy verified fact only when the provider asserts `email_verified=true`
+for a present, valid email; a missing, `false`, malformed or absent
+`email_verified` leaves the email unverified. It is distinct from the existing
+optional/informational `Email` metadata (which is spoofable on its own) and is
+NEVER an authorization input — it only lets later features safely key on the
+email (the invitation self-discovery in CORE-INV-002). The flag is available
+server-side on the mapped principal; the `/me` principal read is unchanged.
 
 ## Organizations
 

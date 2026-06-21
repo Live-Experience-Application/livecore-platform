@@ -172,6 +172,38 @@ public class OidcPrincipalTests
     }
 
     [Fact]
+    public void Constructor_defaults_email_to_unverified()
+    {
+        // The verified-email fact (CORE-INV-001) is fail-closed by default: a
+        // present email is unverified unless the caller explicitly marks it.
+        var principal = new OidcPrincipal(
+            PrincipalType.User, _issuer, _subject, email: "casey@example.test");
+
+        Assert.Equal("casey@example.test", principal.Email);
+        Assert.False(principal.EmailVerified);
+    }
+
+    [Fact]
+    public void Constructor_accepts_a_verified_email()
+    {
+        var principal = new OidcPrincipal(
+            PrincipalType.User, _issuer, _subject, email: "casey@example.test", emailVerified: true);
+
+        Assert.True(principal.EmailVerified);
+        Assert.Equal("casey@example.test", principal.Email);
+    }
+
+    [Fact]
+    public void Constructor_rejects_a_verified_email_without_an_email()
+    {
+        // Fail-closed (CORE-INV-001): the model can never hold the verified
+        // fact without an email, so an absent email always reads as unverified
+        // (an enumeration/invitation-hijack guard; threats T5/T6).
+        Assert.Throws<ArgumentException>(
+            () => new OidcPrincipal(PrincipalType.User, _issuer, _subject, emailVerified: true));
+    }
+
+    [Fact]
     public void ToString_exposes_identifiers_but_not_personal_metadata()
     {
         // Log-safety (threat T7): structured logs may carry identifiers, but

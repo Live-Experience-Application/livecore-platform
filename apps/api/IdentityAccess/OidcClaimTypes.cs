@@ -31,9 +31,24 @@ public static class OidcClaimTypes
 
     /// <summary>
     /// Email address (<c>email</c>, OIDC standard claim). Informational
-    /// metadata only; never used for identity or authorization decisions.
+    /// metadata only; never used for identity or authorization decisions. On
+    /// its own the value is unverified and spoofable; a feature may only key on
+    /// it once <see cref="EmailVerified"/> proves the provider verified it.
     /// </summary>
     public const string Email = "email";
+
+    /// <summary>
+    /// Email-verification flag (<c>email_verified</c>, OIDC standard claim):
+    /// the provider's assertion that it verified the end user controls the
+    /// <see cref="Email"/> address (CORE-INV-001). Consumed fail-closed — the
+    /// email is treated as a trustworthy verified fact only when the provider
+    /// asserts a boolean <c>true</c>; a missing, <c>false</c>, non-boolean or
+    /// conflicting value (and an absent email) leaves the email unverified. It
+    /// is never an authorization input on any existing route; it only enables
+    /// features that must safely key on the email (the invitation
+    /// self-discovery in CORE-INV-002).
+    /// </summary>
+    public const string EmailVerified = "email_verified";
 
     /// <summary>
     /// Full display name (<c>name</c>, OIDC standard claim). Informational

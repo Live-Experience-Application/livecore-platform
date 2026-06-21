@@ -24,6 +24,13 @@ namespace LiveCore.Api.IdentityAccess;
 /// <see cref="OidcPrincipalMappingError"/>, never a partially trusted
 /// principal. Optional display metadata is dropped when malformed or
 /// conflicting instead of failing the mapping.
+///
+/// The <c>email_verified</c> claim is consumed fail-closed (CORE-INV-001):
+/// the optional email is marked verified only when the provider unambiguously
+/// asserts a boolean <c>true</c> for it; a missing, <c>false</c>, non-boolean
+/// or conflicting claim — and an absent email — leave it unverified. The
+/// verified fact never fails the mapping; like the rest of the optional
+/// metadata it simply stays absent when not safely established.
 /// </summary>
 public static class OidcPrincipalMapper
 {
@@ -109,10 +116,11 @@ public static class OidcPrincipalMapper
         var displayName = FindOptionalValue(claims, OidcClaimTypes.Name, OidcPrincipal.IsValidDisplayName)
             ?? FindOptionalValue(claims, OidcClaimTypes.PreferredUsername, OidcPrincipal.IsValidDisplayName);
         var email = FindOptionalValue(claims, OidcClaimTypes.Email, OidcPrincipal.IsValidEmail);
+        var emailVerified = ReadEmailVerified(claims, email);
 
         var type = HasServiceAccountMarker(claims) ? PrincipalType.ServiceAccount : PrincipalType.User;
 
-        var principal = new OidcPrincipal(type, issuer, subjectId, displayName, email, organizationClaims);
+        var principal = new OidcPrincipal(type, issuer, subjectId, displayName, email, emailVerified, organizationClaims);
         return OidcPrincipalMappingResult.Success(principal);
     }
 
@@ -195,6 +203,54 @@ public static class OidcPrincipalMapper
         }
 
         return single;
+    }
+
+    /// <summary>
+    /// Consumes the <c>email_verified</c> claim fail-closed (CORE-INV-001). The
+    /// email is treated as a trustworthy verified fact ONLY when an email is
+    /// present and the provider unambiguously asserts a boolean <c>true</c>. A
+    /// missing email, a missing claim, a <c>false</c>, a non-boolean value
+    /// (e.g. <c>"1"</c>, <c>"yes"</c>) or conflicting assertions all leave the
+    /// email unverified, mirroring the fail-safe posture of optional metadata
+    /// (a questionable claim is discarded, never guessed) so a malformed claim
+    /// can never spoof the fact a feature keys on (threats T5/T6).
+    /// </summary>
+    private static bool ReadEmailVerified(Claim[] claims, string? email)
+    {
+        // No email means nothing to verify; the verified fact is meaningless.
+        if (email is null)
+        {
+            return false;
+        }
+
+        bool? single = null;
+        foreach (var claim in claims)
+        {
+            if (!string.Equals(claim.Type, OidcClaimTypes.EmailVerified, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // Only a literal boolean is a trustworthy assertion. bool.TryParse
+            // accepts exactly "true"/"false" (case-insensitive, trimmed) and
+            // rejects "1"/"yes"/"" and the like — a non-boolean fails closed.
+            if (!bool.TryParse(claim.Value.Trim(), out var parsed))
+            {
+                return false;
+            }
+
+            if (single is null)
+            {
+                single = parsed;
+            }
+            else if (single != parsed)
+            {
+                // Conflicting assertions cannot establish a verified fact.
+                return false;
+            }
+        }
+
+        return single == true;
     }
 
     private enum ClaimLookupOutcome

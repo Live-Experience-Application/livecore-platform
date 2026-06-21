@@ -134,6 +134,33 @@ Controls:
   via `Access-Control-Expose-Headers` so a cross-origin browser consumer can read them without widening any
   server-side authorization
 
+## Trusted email verification (CORE-INV-001)
+
+The caller email reaches Core as an OIDC `email` claim that, on its own, is **unverified and spoofable**: a
+provider may assert any `email` value, and Core's `OidcPrincipal.Email` is documented optional, informational
+metadata that is never an identity and never an authorization input. So keying any feature on the bare email
+would be an **email-enumeration / invitation-hijack** vector (threats T5/T6): a caller could assert a victim's
+email and have a feature match on it. Until this story Core read no `email_verified` claim at all, so there was
+no trustworthy email fact a feature could safely key on — the load-bearing prerequisite the invitation
+self-discovery (CORE-INV-002) needs.
+
+This story consumes the OIDC `email_verified` claim and exposes a fail-closed verified-email fact:
+
+- **Fail-closed consumption.** `OidcPrincipalMapper` reads `email_verified` and marks the email verified ONLY
+  when the provider unambiguously asserts a boolean `true` for a present, valid email. A missing email, a missing
+  claim, a `false`, a non-boolean value (`"1"`, `"yes"`, `""`) or conflicting assertions all leave the email
+  **unverified** — the same fail-safe posture as the other optional metadata (a questionable claim is discarded,
+  never guessed). The fact never fails the mapping; it simply stays absent when not safely established.
+- **A distinct fact on the principal model.** `OidcPrincipal.EmailVerified` is a separate, trustworthy boolean,
+  distinct from the spoofable `Email` metadata. The model invariant forbids "verified" without an email, so a
+  feature keying on the verified email can trust the pair: an absent email always reads as unverified.
+- **Email stays out of authorization.** The verified-email fact changes **no** authorization decision and adds
+  **no** behaviour to any existing route (no path keys on the email; the tenant boundary stays the token's
+  `(issuer, subject)` identity, organization claims and persisted membership — docs/06_AUTHORIZATION_MATRIX.md).
+  It is only a safe server-side key for features that must match on the email, so CORE-INV-002 can match a
+  pending invitation's invited email against the caller's **verified** email instead of the spoofable one. The
+  fact is identifier-only and the email is still never written to logs (threat T7).
+
 ## Log redaction enforced as a guardrail (CORE-OBS-006)
 
 T7's control is "structured logs with IDs, not sensitive body content". Until this story that was

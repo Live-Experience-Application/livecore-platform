@@ -78,6 +78,7 @@ public sealed class OidcPrincipal
         string subjectId,
         string? displayName = null,
         string? email = null,
+        bool emailVerified = false,
         IEnumerable<string>? organizationClaims = null)
     {
         if (!Enum.IsDefined(type))
@@ -113,6 +114,19 @@ public sealed class OidcPrincipal
                 nameof(email));
         }
 
+        // Fail-closed (CORE-INV-001): a "verified email" is only meaningful
+        // when an email is actually present. The model can never hold the
+        // verified fact without an email, so a feature keying on the verified
+        // email (CORE-INV-002) can trust the pair and an absent email always
+        // reads as unverified (an enumeration/invitation-hijack guard; threats
+        // T5/T6 in docs/07_SECURITY_THREAT_MODEL.md).
+        if (emailVerified && email is null)
+        {
+            throw new ArgumentException(
+                "Email cannot be marked verified when no email address is present.",
+                nameof(emailVerified));
+        }
+
         var normalizedOrganizationClaims = new HashSet<string>(StringComparer.Ordinal);
         if (organizationClaims is not null)
         {
@@ -134,6 +148,7 @@ public sealed class OidcPrincipal
         SubjectId = subjectId;
         DisplayName = displayName;
         Email = email;
+        EmailVerified = emailVerified;
         // Frozen so the advertised immutability cannot be defeated by casting
         // the exposed set back to a mutable implementation.
         _organizationClaims = normalizedOrganizationClaims.ToFrozenSet(StringComparer.Ordinal);
@@ -161,9 +176,25 @@ public sealed class OidcPrincipal
 
     /// <summary>
     /// Optional email address. Informational metadata only: never an
-    /// identity, never an authorization input, never written to logs.
+    /// identity, never an authorization input, never written to logs. On its
+    /// own this value is unverified and spoofable; a feature may only key on
+    /// the email once <see cref="EmailVerified"/> is true.
     /// </summary>
     public string? Email { get; }
+
+    /// <summary>
+    /// Whether the identity provider asserted that it verified the end user
+    /// controls <see cref="Email"/> (the OIDC <c>email_verified</c> claim,
+    /// CORE-INV-001). True only when the provider asserted a boolean
+    /// <c>true</c> for a present, valid email; a missing, <c>false</c>,
+    /// non-boolean or conflicting claim — and an absent email — leave this
+    /// false (fail-closed). This is the only trustworthy email fact a feature
+    /// may safely key on (the invitation self-discovery in CORE-INV-002),
+    /// because the bare <see cref="Email"/> is spoofable; keying on it would be
+    /// an email-enumeration / invitation-hijack vector (threats T5/T6). It is
+    /// NEVER an authorization input on any existing route.
+    /// </summary>
+    public bool EmailVerified { get; }
 
     /// <summary>
     /// Organization claim values the identity provider asserted for this
