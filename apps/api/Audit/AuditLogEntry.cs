@@ -1517,6 +1517,90 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records an asset upload confirmation (<see cref="AuditAction.AssetConfirmed"/>) — the audit fact written
+    /// when an authorized host confirms a successful upload, moving an asset <c>Pending</c> -&gt;
+    /// <c>Available</c> so it becomes downloadable (CORE-ALC-001, the asset confirm-upload command). It is the
+    /// lifecycle counterpart of <see cref="ForAssetDeletion"/> and, like <see cref="ForWorkspaceArchive"/>, a
+    /// thin specialization of <see cref="Create"/> that pins the action and applies the confirm producer's
+    /// stricter contract: the tenant, the workspace the asset belongs to, the authenticated actor (the host who
+    /// confirmed the upload) and the confirmed asset resource (its generic kind name and surrogate id) are all
+    /// REQUIRED, where the generic factory leaves them optional. Unlike the deletion factories, a confirmation is
+    /// a real STATE TRANSITION — the asset survives — so it records the before/after status NAMES (e.g.
+    /// <c>Pending</c> -&gt; <c>Available</c>), exactly as <see cref="ForWorkspaceArchive"/> records the archive
+    /// transition. The asset is both the scope (<paramref name="workspaceId"/> is the asset's workspace) and the
+    /// governed resource (its id), because the action is performed ON the asset. The resource kind and the state
+    /// names are passed as generic strings so the Audit module does not depend on the Assets module's types.
+    /// Every value is an identifier, an enum or a generic state name — never the uploaded checksum, the recorded
+    /// size or any storage coordinate (threats T4/T7) — and the audit row outlives any later change to the asset
+    /// it references because the reference is a recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the confirmation happened in (required).</param>
+    /// <param name="workspaceId">The workspace the confirmed asset belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The host who performed the confirmation (required; the audited actor).</param>
+    /// <param name="assetResourceType">The confirmed asset's generic kind name (e.g. Asset).</param>
+    /// <param name="assetId">The confirmed asset's surrogate id.</param>
+    /// <param name="previousState">The lifecycle status name before the confirmation (e.g. Pending; required).</param>
+    /// <param name="newState">The lifecycle status name after the confirmation (e.g. Available; required).</param>
+    /// <param name="createdAt">When the confirmation happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the asset resource type / a state name is blank.
+    /// </exception>
+    public static AuditLogEntry ForAssetConfirmation(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string assetResourceType,
+        Guid assetId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(assetResourceType))
+        {
+            throw new ArgumentException("Asset resource type must not be empty.", nameof(assetResourceType));
+        }
+
+        if (assetId == Guid.Empty)
+        {
+            throw new ArgumentException("Asset id must not be empty.", nameof(assetId));
+        }
+
+        // A confirmation is a real state transition, so both before and after status names are required even
+        // though the generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.AssetConfirmed,
+            actorUserProfileId,
+            assetResourceType,
+            assetId,
+            targetParticipantId: null,
+            previousState: previousState,
+            newState: newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a workspace archive (<see cref="AuditAction.WorkspaceArchived"/>) — the audit fact written when
     /// an authorized owner archives a workspace, taking it read-only and out of the active list (CORE-LIFE-009).
     /// A thin specialization of <see cref="Create"/> that pins the action and applies the archive producer's

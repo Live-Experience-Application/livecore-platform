@@ -121,6 +121,7 @@ TypeScript packages are released together (lockstep); see [`CHANGELOG.md`](CHANG
     - [Asset storage adapter](#asset-storage-adapter)
     - [Concrete S3-compatible storage adapter](#concrete-s3-compatible-storage-adapter)
     - [Asset upload intent](#asset-upload-intent)
+    - [Asset confirm upload](#asset-confirm-upload)
     - [Asset signed download](#asset-signed-download)
     - [Asset linking](#asset-linking)
     - [Asset cleanup job](#asset-cleanup-job)
@@ -3734,6 +3735,47 @@ row is persisted, so when no object storage is configured the fail-closed
 left behind — the private-by-default posture holds even unconfigured, exactly as the
 host denies cleanly without a database or OIDC authority. Linking to content
 blocks/entities (CORE-AST-005) and the cleanup job (CORE-AST-006) are later stories.
+
+### Asset confirm upload
+
+CORE-ALC-001 adds the Assets module's confirm flow — the "client confirms upload"
+step of the asset lifecycle (`docs/12_STORAGE_ASSETS.md`):
+
+| Method | Route                                     | Authorized callers                             |
+| ------ | ----------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/assets/{assetId}/confirm-upload` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+
+After the client uploads the object against the server-minted signed `PUT` URL
+(CORE-AST-003/008), it calls this route to drive the existing `Asset.MarkAvailable`
+domain transition: a still-`Pending` asset records its uploaded `sizeBytes` and
+`checksum`, moves to `Available` and **becomes downloadable** (CORE-AST-004). It is
+the **only `Pending`→`Available` transition** — until this story `MarkAvailable` and
+`IAssetRepository.UpdateAsync` existed but were wired to **no transport**, so an asset
+could never leave `Pending` except via the background cleanup that reclaims an
+abandoned intent (a real lifecycle gap, raised by a vertical adopter). A
+storage-event/webhook-driven transition is a documented alternative, **out of scope**
+here — the explicit confirm route needs no new inbound infrastructure.
+
+The route path carries only the asset id, so the request body carries the
+`organizationSlug` (resolved by the same token-claim-and-membership tenant check as the
+upload-intent command) and the confirmed `sizeBytes` and `checksum`. The asset is loaded
+**within** the resolved tenant, its own workspace is **discovered from the loaded row**,
+and the caller is authorized **server-side** by their role in the asset's own workspace —
+the **same host-content roles that create the upload intent**. A caller who cannot see the
+tenant, an unknown or cross-tenant asset, and a non-member of the asset's workspace are all
+hidden as `404` (never `403`); a known member who lacks the confirm role is `403`. Only
+after authorization is the request validated (a negative `sizeBytes` or a missing/malformed
+`checksum` is `400`).
+
+It is **fail-closed** on the lifecycle: confirming a **non-`Pending`** (already-confirmed)
+asset is `409 Conflict`, so a re-confirm changes nothing and never overwrites a different
+already-recorded size/checksum. The guarded transition and the **`AssetConfirmed` audit**
+append (recording the `Pending`→`Available` state names — never the checksum or any storage
+coordinate) commit in **one transaction**. The flow touches **no object storage** (the
+upload already happened against the signed `PUT`), so it never returns `503` for unconfigured
+storage. On success the route returns `200 OK` with the now-`Available` asset; a download URL,
+which stays `409` while the asset is `Pending`, then succeeds. The matching
+`client.assets.confirmUpload` SDK method calls it.
 
 ### Asset signed download
 

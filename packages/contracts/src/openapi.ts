@@ -2070,6 +2070,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/assets/{assetId}/confirm-upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": unknown | components["schemas"]["ConfirmUploadRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/assets/{assetId}/download-url": {
         parameters: {
             query?: never;
@@ -2509,6 +2548,12 @@ export interface components {
         AppleTransactionVerificationRequest: {
             transaction: string | null;
             productReference: string | null;
+        };
+        ConfirmUploadRequest: {
+            organizationSlug: string | null;
+            /** Format: int64 */
+            sizeBytes: unknown;
+            checksum: string | null;
         };
         CreateAssetLinkRequest: {
             organizationSlug: string | null;

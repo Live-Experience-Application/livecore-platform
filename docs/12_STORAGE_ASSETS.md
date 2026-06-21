@@ -151,6 +151,40 @@ binding adds only signed **request conditions**: it mints no public affordance, 
 coordinate to any caller, and leaves the private-bucket / signed-URL-after-authorization model unchanged
 (threats T4 "Asset leak"/T7). The signature crypto is the official AWS SDK's (no new dependency).
 
+### Confirm upload flow (CORE-ALC-001)
+
+The asset confirm route, `POST /api/v1/assets/{assetId}/confirm-upload` (`csv/api_routes.csv`, roles
+Host/CoHost/Owner/Admin), is the **"client confirms upload"** step of the lifecycle below. After the client
+has uploaded the object against the server-minted signed `PUT` URL (CORE-AST-003/008), it calls this route to
+drive the existing `Asset.MarkAvailable` domain transition: a still-`Pending` asset records its uploaded
+`sizeBytes` and `checksum`, moves to `Available` and **becomes downloadable** (CORE-AST-004). It is the **only
+`Pending`→`Available` transition** — until this story the `MarkAvailable` method and
+`IAssetRepository.UpdateAsync` existed but were wired to **no transport**, so an asset could never leave
+`Pending` except via the background cleanup that reclaims an abandoned, never-confirmed intent (CORE-AST-006).
+A storage-event/webhook-driven transition is a documented alternative, **out of scope** here (the explicit
+confirm route needs no new inbound infrastructure).
+
+The route path carries only the asset id, so the request body supplies the target organization
+(`organizationSlug`, resolved by the same token-claim-and-membership tenant check as the upload-intent command)
+and the confirmed upload facts (`sizeBytes`, `checksum`). The asset is loaded **within** the resolved tenant
+(`FindByIdInOrganizationAsync`, the predicate leads with `organization_id`), its own workspace is **discovered
+from the loaded row** after the tenant boundary is enforced, and the caller is authorized **server-side** by
+their role in the asset's own workspace. The confirm roles are the host-content `Owner`/`Admin`/`Host`/`CoHost`
+— the **same set that creates the upload intent** (`docs/06_AUTHORIZATION_MATRIX.md`). A caller who cannot see
+the tenant, an unknown or cross-tenant asset, and a non-member of the asset's workspace are all hidden as `404`
+(never `403`); a known member who lacks the confirm role is `403`. Only **after** authorization is the request
+validated (a negative `sizeBytes` or a missing/malformed `checksum` is `400`), so an unauthorized caller never
+receives request-shape feedback.
+
+It is **fail-closed** on the lifecycle: confirming a **non-`Pending`** (already-confirmed) asset is `409
+Conflict` — the guarded transition is the only path to `Available`, so a re-confirm changes nothing and can
+never silently overwrite a different already-recorded size/checksum (reported only to an authorized caller).
+The transition and the **audit** append (`AssetConfirmed`, recording the `Pending`→`Available` state names —
+never the checksum or any storage coordinate) commit in **one transaction**, so a confirmation is recorded as
+a fact or it does not happen. The flow touches **no object storage** (the upload already happened against the
+signed `PUT`), so it never returns `503` for unconfigured storage. On success the route returns `200 OK` with
+the now-`Available` asset; a download URL, which stays `409` while the asset is `Pending`, then succeeds.
+
 ### Signed download flow (CORE-AST-004)
 
 The asset read route, `GET /api/v1/assets/{assetId}/download-url` (`csv/api_routes.csv`,
@@ -306,6 +340,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - buckets private by default
 - no public object listing
 - upload intent requires authorization
+- confirm upload requires authorization; it is the only Pending-to-Available transition and is fail-closed (a non-Pending asset is 409) and audited (CORE-ALC-001)
 - upload intent validates the declared content type against a configurable MIME allowlist and the declared size against a configurable absolute per-object ceiling, fail-closed before any signed URL is minted (CORE-AST-007)
 - the signed upload URL binds the declared content type and content length into the SigV4 signature, so storage rejects an upload whose actual type or byte count violates what was declared/reserved (CORE-AST-008)
 - download URL requires authorization
@@ -322,8 +357,9 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 Create upload intent
   -> client uploads to storage (the signed upload URL pins the declared
      content type and content length, so storage rejects a non-conforming upload)
-  -> client confirms upload
-  -> Core stores asset metadata
+  -> client confirms upload (POST /api/v1/assets/{assetId}/confirm-upload, CORE-ALC-001:
+     drives Asset.MarkAvailable Pending->Available with the uploaded size and checksum)
+  -> Core stores asset metadata (the asset is now Available and downloadable)
   -> asset can be linked to ContentBlock or Entity
   -> visibility controls whether it can be accessed
   -> a host can delete the asset (its links and storage object are removed)

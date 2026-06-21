@@ -10,6 +10,8 @@
  */
 import type {
   AssetLinkResponse,
+  ConfirmUploadRequest,
+  ConfirmUploadResponse,
   CreateAssetLinkRequest,
   CreateUploadIntentRequest,
   DownloadUrlResponse,
@@ -32,6 +34,23 @@ export class AssetsClient {
     return this.http.send<UploadIntentResponse>({
       method: "POST",
       path: "/assets/upload-intent",
+      body: request,
+    });
+  }
+
+  /**
+   * `POST /api/v1/assets/{assetId}/confirm-upload` — confirm a successful upload:
+   * drive the `Pending` → `Available` transition with the uploaded size and
+   * checksum, so the asset becomes downloadable. Audited; a non-`Pending` asset is
+   * `409`. The organization slug travels in the body.
+   */
+  confirmUpload(
+    assetId: Uuid,
+    request: ConfirmUploadRequest,
+  ): Promise<ConfirmUploadResponse> {
+    return this.http.send<ConfirmUploadResponse>({
+      method: "POST",
+      path: `/assets/${encodeURIComponent(assetId)}/confirm-upload`,
       body: request,
     });
   }

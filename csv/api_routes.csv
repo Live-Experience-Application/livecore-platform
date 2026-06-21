@@ -59,6 +59,7 @@ POST,/api/v1/workspaces/{workspaceId}/entity-types,Entities,"Host,CoHost,Owner,A
 GET,/api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId},Entities,"Host,CoHost,Owner,Admin",Read one entity type; authoring roles only; tenant/workspace-scoped lookup; non-authoring member -> 403; foreign/unknown type hidden-404
 GET,/api/v1/participants/{participantId}/visible-feed,Visibility,Participant owner or Host,Participant-safe feed
 POST,/api/v1/assets/upload-intent,Assets,"Host,CoHost,Owner,Admin",Creates upload intent
+POST,/api/v1/assets/{assetId}/confirm-upload,Assets,"Host,CoHost,Owner,Admin",Confirm successful upload; drive Asset.MarkAvailable (Pending->Available) with the uploaded size and checksum so the asset becomes downloadable; tenant/workspace-scoped lookup; audited; only Pending-to-Available transition; non-Pending 409; hidden-404
 GET,/api/v1/assets/{assetId}/download-url,Assets,authorized viewers,Signed URL after permission check
 POST,/api/v1/assets/{assetId}/links,Assets,"Host,CoHost,Owner,Admin",Link asset to content block or entity; honors optional Idempotency-Key for retry-safe replay (CORE-DX-004)
 DELETE,/api/v1/assets/{assetId}/links/{linkId},Assets,"Host,CoHost,Owner,Admin",Unlink asset from content block or entity; remove only the link row (asset and target unaffected); tenant/workspace-scoped lookup; hidden-404

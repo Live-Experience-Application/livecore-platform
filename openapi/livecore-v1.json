@@ -2021,6 +2021,44 @@
         }
       }
     },
+    "/api/v1/assets/{assetId}/confirm-upload": {
+      "post": {
+        "tags": [
+          "AssetEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConfirmUploadRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/assets/{assetId}/download-url": {
       "get": {
         "tags": [
@@ -2338,6 +2376,28 @@
             "nullable": true
           },
           "productReference": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ConfirmUploadRequest": {
+        "required": [
+          "organizationSlug",
+          "sizeBytes",
+          "checksum"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "format": "int64"
+          },
+          "checksum": {
             "type": "string",
             "nullable": true
           }

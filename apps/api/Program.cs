@@ -1052,6 +1052,19 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (CORE-AST-005) and cleanup (CORE-AST-006) are later stories.
     builder.Services.AddScoped<AssetUploadIntentService>();
 
+    // Asset confirm-upload command (CORE-ALC-001, the "Asset Lifecycle and Attachment Completeness" epic): the
+    // Assets module's "a host confirms a successful upload" command. Registered here, inside the persistence
+    // conditional, because it composes the asset repository and the audit repository (registered above) plus the
+    // shared DbContext for a single transaction. It loads the asset through the tenant- AND workspace-scoped
+    // IAssetRepository.FindByIdAsync FIRST (an asset in another workspace/tenant is never reachable; threats
+    // T1/T5), rejects a non-Pending asset (the only Pending-to-Available transition, fail-closed 409), then
+    // drives the existing Asset.MarkAvailable domain transition (recording the uploaded size + checksum) and
+    // appends an AssetConfirmed audit record, all atomically. Unlike the upload-intent/deletion commands it
+    // touches NO object storage (the upload already happened against the signed PUT URL), so it needs no
+    // IAssetStorage and never returns 503 for unconfigured storage. Consumed by
+    // POST /api/v1/assets/{assetId}/confirm-upload (wired by MapAssetEndpoints).
+    builder.Services.AddScoped<AssetConfirmUploadService>();
+
     // Asset linking persistence + commands (CORE-AST-005, the asset-linking story of the "Asset Storage and
     // Authorization" epic): the Assets module owns the workspace-scoped, tenant-scoped asset_links table
     // that records that an asset is attached to a host-prepared resource — a content block or entity

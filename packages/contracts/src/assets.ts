@@ -43,6 +43,36 @@ export interface UploadIntentResponse {
   expiresAt: IsoDateTimeString;
 }
 
+/** Request body for `POST /api/v1/assets/{assetId}/confirm-upload`. */
+export interface ConfirmUploadRequest {
+  /** Canonical slug of the organization that owns the asset's workspace. */
+  organizationSlug: string;
+  /** The confirmed size in bytes of the uploaded object. Must be a non-negative integer. */
+  sizeBytes: number;
+  /** The confirmed checksum of the uploaded object (for example a hex SHA-256 digest). */
+  checksum: string;
+}
+
+/**
+ * Response body of `POST /api/v1/assets/{assetId}/confirm-upload`. Drives the
+ * `Pending` → `Available` transition; the asset stays private and is still reached
+ * only through an authorized signed download URL.
+ */
+export interface ConfirmUploadResponse {
+  /** Surrogate id of the confirmed asset. */
+  assetId: Uuid;
+  /** Lifecycle status — always `Available` after a successful confirm. */
+  status: AssetStatus;
+  /** The MIME content type of the stored object. */
+  contentType: string;
+  /** The confirmed, recorded object size in bytes. */
+  sizeBytes: number;
+  /** The confirmed, recorded object checksum. */
+  checksum: string;
+  /** When the upload was confirmed (UTC). */
+  updatedAt: IsoDateTimeString;
+}
+
 /** Response body of `GET /api/v1/assets/{assetId}/download-url`. */
 export interface DownloadUrlResponse {
   /** Surrogate id of the asset whose object the URL downloads. */

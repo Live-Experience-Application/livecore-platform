@@ -15,6 +15,7 @@ import type {
   AdEligibilityResponse,
   AppleTransactionVerificationRequest,
   AssetStatus,
+  ConfirmUploadRequest,
   ContentBlockType,
   CreateAssetLinkRequest,
   CreateContentBlockRequest,
@@ -397,6 +398,9 @@ export type CreateUploadIntentRequestMatchesSchema = Assert<
 export type CreateAssetLinkRequestMatchesSchema = Assert<
   SameKeys<CreateAssetLinkRequest, Schemas["CreateAssetLinkRequest"]>
 >;
+export type ConfirmUploadRequestMatchesSchema = Assert<
+  SameKeys<ConfirmUploadRequest, Schemas["ConfirmUploadRequest"]>
+>;
 export type AppleTransactionVerificationRequestMatchesSchema = Assert<
   SameKeys<
     AppleTransactionVerificationRequest,
@@ -459,6 +463,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     keyof Schemas,
     | "AcceptWorkspaceInvitationRequest"
     | "AppleTransactionVerificationRequest"
+    | "ConfirmUploadRequest"
     | "CreateAssetLinkRequest"
     | "CreateContentBlockRequest"
     | "CreateEntityRequest"

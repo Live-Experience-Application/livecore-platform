@@ -450,4 +450,22 @@ public enum AuditAction
     /// in the audit log (<see cref="AuditLogEntry.ForPersonalDataExport"/>).
     /// </summary>
     PersonalDataExported = 28,
+
+    /// <summary>
+    /// A host confirmed a successful upload, moving an asset <c>Pending</c> -&gt; <c>Available</c> so it
+    /// becomes downloadable — the asset confirm-upload command (CORE-ALC-001, the "Asset Lifecycle and
+    /// Attachment Completeness" epic). It is the lifecycle counterpart of <see cref="AssetDeleted"/>: where a
+    /// deletion removes an asset, a confirmation completes its upload. Until this story the
+    /// <see cref="LiveCore.Api.Assets.Asset.MarkAvailable"/> domain transition was wired to no transport, so an
+    /// asset could never leave <c>Pending</c> except via the background cleanup that reclaims it. Auditing the
+    /// confirmation satisfies the story's "the transition is audited" criterion: it records that an authorized
+    /// host completed an upload (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). Unlike the deletion actions
+    /// — and exactly like <see cref="WorkspaceArchived"/> and <see cref="SessionStarted"/> — a confirmation is a
+    /// real STATE TRANSITION (the asset survives), so it records the before/after status NAMES
+    /// (<c>Pending</c> -&gt; <c>Available</c>); its actor is the host who confirmed the upload and its resource
+    /// is the asset itself (its generic kind name and surrogate id). A generic, workspace-scoped audit fact whose
+    /// values are identifiers, an enum or a generic state name — never the uploaded checksum or any storage
+    /// coordinate (threats T4/T7) (<see cref="AuditLogEntry.ForAssetConfirmation"/>).
+    /// </summary>
+    AssetConfirmed = 29,
 }

@@ -143,6 +143,7 @@ POST   /api/v1/workspaces/{workspaceId}/entity-types
 GET    /api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId}
 GET    /api/v1/participants/{participantId}/visible-feed
 POST   /api/v1/assets/upload-intent
+POST   /api/v1/assets/{assetId}/confirm-upload
 GET    /api/v1/assets/{assetId}/download-url
 POST   /api/v1/assets/{assetId}/links
 DELETE /api/v1/assets/{assetId}/links/{linkId}

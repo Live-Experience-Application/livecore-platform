@@ -88,6 +88,72 @@ public sealed record UploadIntentResponse(
 }
 
 /// <summary>
+/// Request body for the asset confirm-upload command (CORE-ALC-001,
+/// <c>POST /api/v1/assets/{assetId}/confirm-upload</c>, csv/api_routes.csv "Confirm successful upload",
+/// roles Host/CoHost/Owner/Admin). The route path carries the asset id, so the body supplies the target
+/// organization (<see cref="OrganizationSlug"/>, resolved to the tenant by the same
+/// token-claim-and-membership check as the upload-intent command — defence in depth, threat T5) and the
+/// CONFIRMED upload facts: the uploaded object's <see cref="SizeBytes"/> and <see cref="Checksum"/>, which
+/// the command stamps onto the now-<see cref="AssetStatus.Available"/> asset. The body carries no vertical
+/// vocabulary (docs/04_PRODUCT_BOUNDARIES.md) and no storage coordinate (the upload already happened against
+/// the server-minted signed PUT URL; confirmation only records the result).
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the asset's workspace, used to resolve the tenant context.
+/// </param>
+/// <param name="SizeBytes">
+/// The CONFIRMED size in bytes of the uploaded object. Non-negative; a negative value is a 400.
+/// </param>
+/// <param name="Checksum">
+/// The CONFIRMED checksum of the uploaded object (for example a hex SHA-256 digest). A well-formed,
+/// single-token, bounded value is required; a missing or malformed value is a 400.
+/// </param>
+public sealed record ConfirmUploadRequest(
+    string? OrganizationSlug,
+    long SizeBytes,
+    string? Checksum);
+
+/// <summary>
+/// Response body of the asset confirm-upload command (CORE-ALC-001). It returns the now-confirmed asset's
+/// id, its lifecycle status (always <c>Available</c> after a successful confirm), its content type and the
+/// recorded size and checksum, plus the update timestamp. It carries NO storage coordinate and NO
+/// authorization rationale (docs/08_API_CONTRACTS.md; threat T7): the asset stays private and is still
+/// reached only through an authorized signed download URL (CORE-AST-004; threat T4 "Asset leak"). The
+/// echoed checksum and size are the client's own confirmed upload facts (a receipt of what was recorded),
+/// not secrets.
+/// </summary>
+/// <param name="AssetId">The surrogate id of the confirmed asset.</param>
+/// <param name="Status">The asset's lifecycle status name — always <c>Available</c> after a successful confirm.</param>
+/// <param name="ContentType">The MIME content type of the stored object.</param>
+/// <param name="SizeBytes">The confirmed, recorded object size in bytes.</param>
+/// <param name="Checksum">The confirmed, recorded object checksum.</param>
+/// <param name="UpdatedAt">When the upload was confirmed (UTC).</param>
+public sealed record ConfirmUploadResponse(
+    Guid AssetId,
+    string Status,
+    string ContentType,
+    long SizeBytes,
+    string Checksum,
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>Projects a confirmed (now <see cref="AssetStatus.Available"/>) asset into the response DTO.</summary>
+    public static ConfirmUploadResponse From(Asset asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+
+        return new ConfirmUploadResponse(
+            asset.Id,
+            asset.Status.ToString(),
+            asset.ContentType,
+            // A confirmed asset always carries its recorded size and checksum (MarkAvailable stamped them);
+            // the null-coalescing fallbacks keep the projection total without asserting on the aggregate.
+            asset.SizeBytes ?? 0,
+            asset.Checksum ?? string.Empty,
+            asset.UpdatedAt);
+    }
+}
+
+/// <summary>
 /// Response body of the signed download flow (CORE-AST-004,
 /// <c>GET /api/v1/assets/{assetId}/download-url</c>, csv/api_routes.csv "Signed URL after permission
 /// check", authorized viewers). It returns the asset's id, lifecycle status and content type plus the

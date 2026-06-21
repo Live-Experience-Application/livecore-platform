@@ -23,6 +23,16 @@ namespace LiveCore.Api.Assets;
 /// <list type="bullet">
 ///   <item><c>POST /api/v1/assets/upload-intent</c> — module <b>Assets</b>, roles
 ///   "Host,CoHost,Owner,Admin", "Creates upload intent" (CORE-AST-003).</item>
+///   <item><c>POST /api/v1/assets/{assetId}/confirm-upload</c> — module <b>Assets</b>, roles
+///   "Host,CoHost,Owner,Admin", asset confirm-upload (CORE-ALC-001): a host drives the existing
+///   <see cref="Asset.MarkAvailable"/> transition so a successfully uploaded <see cref="AssetStatus.Pending"/>
+///   asset records its uploaded size and checksum, becomes <see cref="AssetStatus.Available"/> and downloadable,
+///   and the transition is audited. The body carries the organization slug and the confirmed size/checksum; the
+///   tenant resolution and object-level authorization mirror the upload-intent route (same host-content roles).
+///   It is the only Pending-to-Available transition and is fail-closed: a non-Pending asset is 409, a
+///   foreign-tenant/unknown asset is hidden-404, an unauthorized role is denied. The flow touches no object
+///   storage (the upload already happened against the signed PUT URL), through
+///   <see cref="AssetConfirmUploadService"/>.</item>
 ///   <item><c>GET /api/v1/assets/{assetId}/download-url</c> — module <b>Assets</b>, "authorized viewers",
 ///   "Signed URL after permission check" (CORE-AST-004).</item>
 ///   <item><c>POST /api/v1/assets/{assetId}/links</c> — module <b>Assets</b>, roles
@@ -161,6 +171,7 @@ internal static class AssetEndpoints
             .RequireAuthorization();
 
         group.MapPost("/upload-intent", CreateUploadIntentAsync);
+        group.MapPost("/{assetId}/confirm-upload", ConfirmUploadAsync);
         group.MapGet("/{assetId}/download-url", CreateDownloadUrlAsync);
         group.MapPost("/{assetId}/links", CreateAssetLinkAsync);
         group.MapDelete("/{assetId}/links/{linkId}", DeleteAssetLinkAsync);
@@ -325,6 +336,167 @@ internal static class AssetEndpoints
         var intent = result.Intent!;
         var response = UploadIntentResponse.From(intent.Asset, intent.UploadUrl);
         return Results.Created($"/api/v1/assets/{intent.Asset.Id}/download-url", response);
+    }
+
+    // POST /api/v1/assets/{assetId}/confirm-upload
+    //
+    // Confirms a successful upload (CORE-ALC-001, the "Asset Lifecycle and Attachment Completeness" epic): a
+    // host drives the existing Asset.MarkAvailable domain transition so a still-Pending asset records its
+    // uploaded size and checksum, moves to Available and becomes downloadable (the "client confirms upload"
+    // step of docs/12_STORAGE_ASSETS.md). It is the ONLY Pending-to-Available transition; until this story the
+    // domain method was wired to NO transport, so an asset could never leave Pending except via the background
+    // cleanup that reclaims an abandoned intent (CORE-AST-006).
+    //
+    // The route path carries only the asset id, so the request body supplies the target organization
+    // (organizationSlug, resolved by the same token-claim-and-membership tenant check as the upload-intent
+    // command) and the confirmed upload facts (sizeBytes, checksum). The asset is loaded WITHIN the resolved
+    // tenant via FindByIdInOrganizationAsync (the predicate leads with the organization id, so a foreign-tenant
+    // asset is never found), the asset's own workspace id is discovered from the loaded row AFTER the tenant
+    // boundary has been enforced, and the caller is authorized by their WORKSPACE role in the ASSET'S own
+    // workspace — exactly the load-then-authorize shape of the asset link/download routes. The confirm roles are
+    // the host-content Owner/Admin/Host/CoHost: the SAME set that creates the upload intent (csv/api_routes.csv;
+    // docs/06_AUTHORIZATION_MATRIX.md). Load-then-authorize, fail-closed at every step and never leaking why:
+    //   * 503 when persistence is off; 401 when the principal cannot be mapped.
+    //   * A malformed body or a missing organizationSlug is 400; a malformed/empty asset id, a denied tenant
+    //     resolution, an asset not present in the resolved tenant, and a caller who is not a member of the
+    //     asset's workspace are ALL hidden as 404 (never distinguishable, never 403 for a non-member; threats
+    //     T1/T5).
+    //   * A known member of the asset's workspace who lacks the confirm role is 403. MembershipRole is
+    //     non-linear, so the role check is EXACT, never an ordering comparison.
+    //   * Only AFTER authorization is the rest of the request validated (so an unauthorized caller never receives
+    //     request-shape feedback): a negative sizeBytes or a missing/malformed checksum is 400.
+    //   * A non-Pending (already-confirmed) asset is 409: confirming is the only Pending-to-Available transition,
+    //     so a re-confirm is an out-of-state command that changes nothing and never overwrites a different
+    //     already-recorded size/checksum. Reported only to an authorized caller.
+    // On success the guarded transition + the AssetConfirmed audit append run atomically through the tenant- and
+    // workspace-scoped confirm service and the route returns 200 with the now-Available asset. The flow touches
+    // NO object storage (the upload already happened against the signed PUT URL), so it never returns 503 for
+    // unconfigured storage.
+    private static async Task<IResult> ConfirmUploadAsync(
+        HttpContext httpContext,
+        string assetId,
+        [FromBody] ConfirmUploadRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // A missing/unparseable body cannot carry the target organization or the confirmed facts; 400.
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        // The target organization is required to resolve the tenant; it is supplied in the body (the route path
+        // carries only the asset id), exactly like the asset link command.
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty asset id can never address a stored asset; hidden as 404, never echoing why.
+        if (!Guid.TryParse(assetId, out var assetGuid) || assetGuid == Guid.Empty)
+        {
+            return HiddenAsset();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the asset as 404 (threat T5).
+            return HiddenAsset();
+        }
+
+        var context = resolution.Context;
+
+        // Load the asset WITHIN the resolved tenant (org boundary leads); a cross-tenant or unknown asset is
+        // hidden as 404. The asset's own workspace is then discovered from the loaded row, AFTER the tenant
+        // boundary has been enforced (mirrors the signed download, link and delete routes).
+        var asset = await deps.Assets
+            .FindByIdInOrganizationAsync(context.OrganizationId, assetGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (asset is null)
+        {
+            return HiddenAsset();
+        }
+
+        // Object-level authorization: the caller must be a member of the ASSET'S workspace. A caller who is a
+        // member of the tenant but NOT of the asset's workspace must not learn the asset exists, so a missing
+        // membership is hidden as 404 (not 403) — the same rule as the upload-intent/download routes (threats
+        // T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, asset.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenAsset();
+        }
+
+        // The caller is a known member of the asset's workspace, so an insufficient role is 403. The confirm
+        // roles are the host-content Owner/Admin/Host/CoHost — the SAME set that creates the upload intent
+        // (csv/api_routes.csv "Host,CoHost,Owner,Admin"; the asset-write capability of
+        // docs/06_AUTHORIZATION_MATRIX.md). MembershipRole is non-linear, so this is an EXACT set membership
+        // check, never an ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized. Only now validate the rest of the request, so an unauthorized caller never receives
+        // request-shape feedback. The confirmed size must be non-negative and the checksum a valid token; both
+        // are validated here so the domain transition (which would otherwise throw inside the transaction) only
+        // ever runs on well-formed input.
+        if (request.SizeBytes < 0)
+        {
+            return ValidationError("A non-negative 'sizeBytes' value is required.");
+        }
+
+        if (!Asset.IsValidChecksum(request.Checksum?.Trim()))
+        {
+            return ValidationError("A valid checksum is required.");
+        }
+
+        var now = timeProvider.GetUtcNow();
+
+        // Drive the guarded Pending -> Available transition and append the audit fact atomically. The service
+        // re-resolves the asset through the tenant- AND workspace-scoped FindByIdAsync, so an asset in another
+        // workspace/tenant is never confirmed even when its id is known; a non-pending asset is rejected without
+        // changing anything (the only Pending-to-Available transition, fail-closed).
+        var result = await deps.ConfirmUpload
+            .ConfirmAsync(
+                context.OrganizationId,
+                asset.WorkspaceId,
+                assetGuid,
+                context.UserProfileId,
+                request.SizeBytes,
+                request.Checksum!.Trim(),
+                now,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Outcome switch
+        {
+            AssetConfirmUploadOutcome.Confirmed => Results.Ok(ConfirmUploadResponse.From(result.Asset!)),
+            // The asset is no longer pending (already confirmed): an out-of-state command. Reported as 409 only
+            // to an authorized caller, after authorization, so no asset state leaks to a non-member or an
+            // unauthorized role.
+            AssetConfirmUploadOutcome.NotPending => AssetNotPending(),
+            // A concurrent delete (or a race against the load above) left no asset to confirm: a safe hidden-404.
+            _ => HiddenAsset(),
+        };
     }
 
     // GET /api/v1/assets/{assetId}/download-url?organizationSlug={slug}&sessionId={sessionId}
@@ -1009,6 +1181,7 @@ internal static class AssetEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var participants = services.GetService<IParticipantRepository>();
         var uploadIntents = services.GetService<AssetUploadIntentService>();
+        var confirmUpload = services.GetService<AssetConfirmUploadService>();
         var assets = services.GetService<IAssetRepository>();
         var storage = services.GetService<IAssetStorage>();
         var assetLinks = services.GetService<AssetLinkService>();
@@ -1022,6 +1195,7 @@ internal static class AssetEndpoints
             || workspaceMembers is null
             || participants is null
             || uploadIntents is null
+            || confirmUpload is null
             || assets is null
             || storage is null
             || assetLinks is null
@@ -1036,7 +1210,7 @@ internal static class AssetEndpoints
         }
 
         dependencies = new AssetEndpointDependencies(
-            resolver, workspaceMembers, participants, uploadIntents, assets, storage, assetLinks, assetLinkRepository, downloadPolicy, assetDeletion, auditLog, idempotency);
+            resolver, workspaceMembers, participants, uploadIntents, confirmUpload, assets, storage, assetLinks, assetLinkRepository, downloadPolicy, assetDeletion, auditLog, idempotency);
         return true;
     }
 
@@ -1156,6 +1330,17 @@ internal static class AssetEndpoints
             title: "Conflict",
             detail: "The asset is not available for download.");
 
+    // An authorized host asked to confirm an asset that is not pending (it was already confirmed, so it is
+    // Available): confirming is the only Pending-to-Available transition, so a re-confirm is an out-of-state
+    // command (mirrors the session lifecycle's 409). Reported as 409 only to an authorized host, after
+    // authorization, so no asset state leaks to a non-member or an unauthorized role.
+    private static IResult AssetNotPending()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
+            title: "Conflict",
+            detail: "The asset is not pending confirmation.");
+
     // An authorized host asked to link an asset to a target it is already linked to (the per-workspace
     // unique key). Reported as 409 only to an authorized host, after authorization, so no link existence
     // leaks to a non-member or an unauthorized role.
@@ -1178,6 +1363,7 @@ internal static class AssetEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         IParticipantRepository Participants,
         AssetUploadIntentService UploadIntents,
+        AssetConfirmUploadService ConfirmUpload,
         IAssetRepository Assets,
         IAssetStorage Storage,
         AssetLinkService AssetLinks,
