@@ -46,4 +46,17 @@ public interface IPushSubscriptionRepository
     /// (CORE-PRIV-004). Scoped to <paramref name="userProfileId"/> — the subject's own per-device personal data.
     /// </summary>
     Task<IReadOnlyList<PushSubscription>> ListByUserAsync(Guid userProfileId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns, from the given candidate principals, the DISTINCT subset that have at least one registered push
+    /// subscription (CORE-PUSH-002). The closed-app push fan-out uses this to enqueue a content-free delivery only
+    /// for a recipient that actually has a registered subscription — "to each recipient WITH a registered
+    /// subscription" — so the outbox never fills with rows for unsubscribed recipients. It reads only the user-id
+    /// column (never an endpoint or the auth secret; threat T7) and returns an empty set for an empty candidate
+    /// list. Empty candidate ids are ignored (they can never address a stored subscription).
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The candidate collection is null.</exception>
+    Task<IReadOnlyList<Guid>> ListUserIdsWithSubscriptionsAsync(
+        IReadOnlyCollection<Guid> userProfileIds,
+        CancellationToken cancellationToken);
 }

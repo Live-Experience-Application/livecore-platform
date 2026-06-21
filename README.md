@@ -1156,9 +1156,10 @@ dependency** — bound to a configurable listen URL (`Worker:Metrics:Url`, defau
 | `/health/live`  | The **per-loop** liveness endpoint: healthy only when **every** active job loop is beating.                                                                                                                                                                                                                                                                                                                          |
 | `/health/ready` | The **readiness** endpoint, DISTINCT from liveness (CORE-OBS-013): in Production it reports **not-ready** (`503`) when the worker can do no work (persistence unconfigured or **zero** active loops) or its configuration is malformed, so the worker is **not vacuously healthy**.                                                                                                                                  |
 
-Each of the (up to six) loops (asset cleanup, recap generation, export processing, the
-billing-gated store-notification reconciliation, the data-retention sweep, and the
-off-by-default scheduled-reveal sweep) writes
+Each of the (up to seven) loops (asset cleanup, recap generation, export processing, the
+billing-gated store-notification reconciliation, the data-retention sweep, the
+off-by-default scheduled-reveal sweep, and the off-by-default closed-app push dispatch
+sweep — `web-push-dispatch`, CORE-PUSH-002) writes
 the current UTC timestamp to its **own** heartbeat file each tick; `/health/live` is
 healthy only when every active loop's file is fresh (within `Worker:Heartbeat:StaleAfter`,
 default 2 hours). Before this, all loops shared **one** file, so a single healthy loop

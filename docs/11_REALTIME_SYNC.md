@@ -410,6 +410,51 @@ the surface is inert**: the public-key route returns a null key and registration
 subscription is registrable), while deletion stays available so a stale subscription can always be cleaned up —
 the same private-by-default posture the host holds without object storage or an OIDC authority.
 
+## Closed-app content-free Web Push delivery (CORE-PUSH-002)
+
+CORE-PUSH-001 registers the subscription; **CORE-PUSH-002 delivers the push** (raised by a vertical adopter,
+ARC-GAP-005, the delivery half). When a deployment opts in (below), Core fans a **content-free** Web Push out to
+each recipient with a registered subscription for an **already-authorized, recipient-filtered session event**, so a
+user whose app is closed is signalled to open it — without anything sensitive ever reaching a lock screen.
+
+This is the first **outbound-HTTP fan-out** capability in Core, so it is built to be strictly opt-in,
+off-by-default and content-free, on the existing seams:
+
+- **It reuses the recipient resolution, so the push reaches EXACTLY the in-app audience.** The publish-time fan-out
+  (`SessionEventPushFanOut`, run from the `SessionEventPublisher.DeliverAsync` commit-then-publish seam, AFTER the
+  unit of work commits and AFTER the realtime delivery) resolves the recipients with `SessionEventPushRecipientResolver`,
+  which gates every recipient through the **same central Visibility engine** (`IEventRecipientVisibility`) and the
+  same active-participant audience the realtime `SessionEventRecipientResolver` uses. Visibility is **never
+  recomputed**; an unauthorized or non-targeted recipient is never pushed (threats T2/T3). It then keeps only the
+  recipients with a registered subscription and enqueues one row per recipient into the
+  `push_notification_deliveries` **outbox**.
+- **The payload is content-free — an identifier/signal only (threats T2/T7).** The outbox row and the delivered
+  push carry only identifiers (the source `session_event_id` and the `session_id`) — **never** a projected title,
+  body or content. The default sender delivers a **payload-less** VAPID-signed push (RFC 8030/8292), the strongest
+  lock-screen guarantee: there is nothing — not even an encrypted blob — for anything to surface. The client's
+  service worker treats the push as a signal to open the app and fetch the event through the authorized,
+  visibility-gated channel (the reconnect replay above).
+- **The worker performs the outbound send and the dead-subscription cleanup.** The off-by-default
+  `web-push-dispatch` worker loop (`PushNotificationDispatchService`) drains the outbox, signs a VAPID JWT
+  (`WebPushVapid`, BCL ES256 — no new dependency) and POSTs the payload-less push to each subscription's endpoint
+  through the `IWebPushSender` seam (`VapidWebPushSender`). A push endpoint that returns **`404`/`410` (gone)
+  deletes the stale subscription**. Each outbox row is drained whatever the per-subscription outcome.
+- **A failed push never blocks realtime delivery.** The fan-out runs best-effort: the publisher swallows any
+  enqueue failure (recording it on the event-delivery-failure signal), and the worker send is decoupled behind the
+  outbox, so a slow or failing push can never roll back or fail the committed in-session realtime delivery. A
+  missed signal is recovered when the client next opens the app and replays — exactly the realtime best-effort
+  posture (CORE-RES-001).
+- **Opt-in, off by default, inert without VAPID.** Delivery runs only when the deployment sets
+  `WebPush:Delivery:Enabled=true` AND configures the full VAPID signing material
+  (`WebPush:Vapid:PublicKey`/`PrivateKey`/`Subject`). Otherwise it is inert — no push is enqueued and the worker
+  runs no dispatch loop (`docs/13_SELF_HOSTING_REQUIREMENTS.md`). The VAPID PRIVATE key is read from configuration
+  only and never logged (threat T7).
+
+A note on scope: the fan-out is driven from the API's live commit-then-publish seam, so it covers host-driven
+reveals/hides and the session/participant lifecycle events. A worker-appended event (the scheduled auto-reveal,
+CORE-VSEAL-002, which delivers via reconnect replay rather than `DeliverAsync`) does not currently fan a push out —
+a documented follow-up.
+
 ## Scale-out
 
 Use a Valkey/Redis-compatible backplane when multiple API instances run.

@@ -5,6 +5,7 @@ using LiveCore.Api.Assets;
 using LiveCore.Api.Exports;
 using LiveCore.Api.Hosting;
 using LiveCore.Api.Observability;
+using LiveCore.Api.Realtime;
 using LiveCore.Api.Recaps;
 using LiveCore.Api.Retention;
 using LiveCore.Api.Store;
@@ -169,6 +170,14 @@ public static class WorkerHostFactory
         // returns false and registers no loop (fail-safe).
         var scheduledRevealConfigured = builder.Services.AddScheduledReveal(builder.Configuration);
 
+        // CORE-PUSH-002: gated on a configured database AND an explicit opt-in WITH VAPID configured
+        // (WebPush:Delivery:Enabled=true plus the WebPush:Vapid:* signing material). The push dispatch sweep drains
+        // the closed-app push outbox the API enqueues for already-authorized, recipient-filtered session events and
+        // sends a CONTENT-FREE Web Push to each recipient's subscriptions (deleting any the push service reports gone
+        // — the 404/410 cleanup). It introduces an OUTBOUND-HTTP fan-out, so it is strictly OFF BY DEFAULT — with it
+        // not enabled (or VAPID unconfigured) this returns false and registers no loop (fail-safe, inert).
+        var webPushDeliveryConfigured = builder.Services.AddWebPushDelivery(builder.Configuration);
+
         // The exact set of loops that are actually scheduled, so the per-loop liveness check (below) expects a
         // beat from precisely those loops — no more (a loop the deployment did not configure must not read as
         // "stalled") and no fewer (a configured loop that hangs must read as stalled).
@@ -201,6 +210,11 @@ public static class WorkerHostFactory
         if (scheduledRevealConfigured)
         {
             activeJobNames.Add(WorkerJobNames.ScheduledReveal);
+        }
+
+        if (webPushDeliveryConfigured)
+        {
+            activeJobNames.Add(WorkerJobNames.WebPushDispatch);
         }
 
         // Per-loop liveness heartbeat (CORE-OPS-005, per-loop under CORE-DR-003). Each loop beats its OWN file
@@ -277,6 +291,11 @@ public static class WorkerHostFactory
         if (scheduledRevealConfigured)
         {
             builder.Services.AddHostedService<ScheduledRevealBackgroundService>();
+        }
+
+        if (webPushDeliveryConfigured)
+        {
+            builder.Services.AddHostedService<PushNotificationDispatchBackgroundService>();
         }
 
         var app = builder.Build();

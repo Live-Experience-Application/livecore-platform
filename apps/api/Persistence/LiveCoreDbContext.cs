@@ -130,6 +130,9 @@ public sealed class LiveCoreDbContext : DbContext
     /// </summary>
     internal DbSet<SessionEventSequence> SessionEventSequences => Set<SessionEventSequence>();
 
+    /// <summary>Closed-app Web Push delivery outbox rows owned by the Realtime module (CORE-PUSH-002).</summary>
+    public DbSet<PushNotificationDelivery> PushNotificationDeliveries => Set<PushNotificationDelivery>();
+
     /// <summary>Asset metadata records owned by the Assets module.</summary>
     public DbSet<Asset> Assets => Set<Asset>();
 
@@ -201,6 +204,7 @@ public sealed class LiveCoreDbContext : DbContext
         modelBuilder.ApplyConfiguration(new AuditLogSequenceConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventConfiguration());
         modelBuilder.ApplyConfiguration(new SessionEventSequenceConfiguration());
+        modelBuilder.ApplyConfiguration(new PushNotificationDeliveryConfiguration());
         modelBuilder.ApplyConfiguration(new AssetConfiguration());
         modelBuilder.ApplyConfiguration(new AssetLinkConfiguration());
         modelBuilder.ApplyConfiguration(new ExportJobConfiguration());

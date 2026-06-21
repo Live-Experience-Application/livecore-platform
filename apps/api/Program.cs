@@ -370,6 +370,14 @@ builder.Services.AddSingleton<StoreNotificationParserResolver>();
 // it is a later story (CORE-PUSH-002). No credential lives in source (threat T7).
 builder.Services.AddSingleton(WebPushOptions.FromConfiguration(builder.Configuration));
 
+// Closed-app Web Push DELIVERY configuration (CORE-PUSH-002). WebPushDeliveryOptions carries the opt-in flag, the
+// VAPID signing material and the cadence the outbound fan-out needs. Registered UNCONDITIONALLY (it needs no
+// database or identity) so the publish-time fan-out can resolve it; it is OFF BY DEFAULT and INERT
+// (WebPushDeliveryOptions.IsActive false) unless the deployment opts in with VAPID configured, so an unconfigured
+// host attempts no push (the acceptance criterion). The VAPID PRIVATE key is read from configuration only and never
+// logged (threat T7); no credential lives in source. The OUTBOUND send itself runs in the worker (CORE-PUSH-002).
+builder.Services.AddSingleton(WebPushDeliveryOptions.FromConfiguration(builder.Configuration));
+
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
 // (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
@@ -1037,6 +1045,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // docs/11_REALTIME_SYNC.md). The reveal command is the first producer (the ContentRevealed event,
     // carrying the revealed resource as its visibility subject).
     builder.Services.AddScoped<ISessionEventRecipientResolver, SessionEventRecipientResolver>();
+
+    // Closed-app push fan-out (CORE-PUSH-002): the publish-time half of the closed-app Web Push delivery. After the
+    // in-session realtime delivery, an OPT-IN deployment also fans a CONTENT-FREE push out to the SAME audience for
+    // recipients with a registered subscription, by enqueuing the slow outbound send for the worker (the outbox
+    // pattern, so a failed/slow push never blocks realtime). The fan-out RESOLVES the recipients by reusing the SAME
+    // central recipient resolution / Visibility engine (ISessionEventPushRecipientResolver), so the push audience is
+    // EXACTLY the in-app audience and never wider (threats T2/T3). It is registered UNCONDITIONALLY here (inside the
+    // persistence conditional) and injected into the publisher, but is INERT unless the deployment opted in and
+    // configured VAPID (WebPushDeliveryOptions.IsActive). The publisher calls it best-effort and swallows any
+    // failure. The outbox repository is also consumed by the worker's dispatch sweep (CORE-PUSH-002).
+    builder.Services.AddScoped<IPushNotificationDeliveryRepository, PushNotificationDeliveryRepository>();
+    builder.Services.AddScoped<ISessionEventPushRecipientResolver, SessionEventPushRecipientResolver>();
+    builder.Services.AddScoped<ISessionEventPushFanOut, SessionEventPushFanOut>();
+
     builder.Services.AddScoped<ISessionEventPublisher, SessionEventPublisher>();
 
     // Reconnect replay filter (CORE-RT-005): the Realtime module's reconnect replay (it owns "reconnect

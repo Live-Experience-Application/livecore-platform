@@ -38,4 +38,7 @@ internal static class WorkerJobNames
 
     /// <summary>The off-by-default scheduled-reveal sweep loop (CORE-VSEAL-002).</summary>
     public const string ScheduledReveal = "scheduled-reveal";
+
+    /// <summary>The off-by-default closed-app Web Push dispatch sweep loop (CORE-PUSH-002).</summary>
+    public const string WebPushDispatch = "web-push-dispatch";
 }

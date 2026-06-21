@@ -105,7 +105,7 @@ latency), the session-event publisher (event-delivery failures), a transparent `
 (asset upload/download failures), an EF Core command interceptor (database failures) and the worker's
 background jobs (job failures, tagged by a coarse `job` name — one per loop: `asset-cleanup`,
 `recap-generation`, `export-processing`, `store-notification-reconciliation`, `data-retention` and the
-off-by-default `scheduled-reveal`).
+off-by-default `scheduled-reveal` and `web-push-dispatch`).
 
 The API host exposes a **Prometheus scrape endpoint** at `GET /metrics` (the OpenTelemetry Prometheus
 exporter). It is registered unconditionally — like the health endpoints, it needs no database or identity
@@ -316,7 +316,7 @@ burn series so a threshold is expressed once and evaluated cheaply.
 **Worker loop label.** The worker tags its `livecore_job_*` series with a
 low-cardinality `job` attribute naming the loop (`asset-cleanup`,
 `recap-generation`, `export-processing`, `store-notification-reconciliation`,
-`data-retention`, `scheduled-reveal`). When Prometheus scrapes, its **own** target `job` label
+`data-retention`, `scheduled-reveal`, `web-push-dispatch`). When Prometheus scrapes, its **own** target `job` label
 (`livecore-worker`) wins and the exposed loop label is renamed to **`exported_job`**
 (the default `honor_labels: false`), so the worker rules and dashboard panels group
 by `exported_job`.
@@ -560,7 +560,7 @@ purge/cleanup/export/recap/reconciliation work — had **no** `ActivitySource`, 
 anywhere under `apps/worker`, so it produced **zero** spans even when a deployment had configured tracing for the
 API. CORE-OBS-012 closes that blind spot by **mirroring the API tracing wiring** in the worker host.
 
-**One span per loop iteration.** Each of the worker's six background job loops produces one span per sweep on
+**One span per loop iteration.** Each of the worker's seven background job loops produces one span per sweep on
 the **same** single `LiveCore` `ActivitySource`:
 
 | Loop (irreversible operation)        | `livecore.job.name`                  | Span (operation name)  | Kind     |
@@ -571,6 +571,7 @@ the **same** single `LiveCore` `ActivitySource`:
 | Recap generation                     | `recap-generation`                  | `livecore.worker.job`  | Internal |
 | Store-notification reconciliation    | `store-notification-reconciliation` | `livecore.worker.job`  | Internal |
 | Scheduled reveal (off by default)    | `scheduled-reveal`                  | `livecore.worker.job`  | Internal |
+| Closed-app push dispatch (off by default) | `web-push-dispatch`            | `livecore.worker.job`  | Internal |
 
 Every span carries the coarse **loop name** (`livecore.job.name`) and the iteration **outcome**
 (`livecore.job.outcome` — `success`, `failure` or `canceled`; a failed sweep also sets the span status to

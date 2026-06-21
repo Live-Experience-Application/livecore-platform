@@ -1243,13 +1243,14 @@ listen URL (`Worker:Metrics:Url` / `Worker__Metrics__Url`, default `http://0.0.0
   (CORE-OBS-013). It reports not-ready (`503`) in Production when the worker can do no
   work or is misconfigured; see "Worker readiness" below.
 
-The worker runs up to **six** job loops — asset cleanup (`AssetCleanupBackgroundService`),
+The worker runs up to **seven** job loops — asset cleanup (`AssetCleanupBackgroundService`),
 recap generation (`RecapGenerationBackgroundService`, CORE-JOB-001), export processing
 (`ExportProcessingBackgroundService`, CORE-JOB-002), the billing-gated store-notification
 reconciliation (`StoreNotificationReconciliationBackgroundService`, CORE-JOB-003), the
-data-retention sweep (`DataRetentionSweepBackgroundService`, CORE-PRIV-003) and the
-**off-by-default** scheduled-reveal sweep (`ScheduledRevealBackgroundService`, CORE-VSEAL-002). A loop is
-resilient to a sweep that _throws_, but a sweep that **hangs** (a stuck database or storage
+data-retention sweep (`DataRetentionSweepBackgroundService`, CORE-PRIV-003), the
+**off-by-default** scheduled-reveal sweep (`ScheduledRevealBackgroundService`, CORE-VSEAL-002) and the
+**off-by-default** closed-app push dispatch sweep (`PushNotificationDispatchBackgroundService`, CORE-PUSH-002).
+A loop is resilient to a sweep that _throws_, but a sweep that **hangs** (a stuck database or storage
 call) would leave the process alive yet doing no work.
 
 Each loop writes the current UTC timestamp to its **own** heartbeat file on startup and
@@ -1266,8 +1267,9 @@ aggregating endpoint make a **single** hung loop detectable.
   (`Worker__Heartbeat__StaleAfter`, a `TimeSpan`); the default is **2 hours**, a few of
   every loop's default 1-hour sweep interval (`Assets:Cleanup:SweepInterval` /
   `Recaps:Generation:SweepInterval` / `Exports:Processing:SweepInterval` /
-  `Store:Reconciliation:SweepInterval` / `Retention:SweepInterval`; the scheduled-reveal sweep defaults to a
-  shorter 1-minute `Visibility:ScheduledReveal:SweepInterval` since scheduled reveals are time-sensitive). A loop whose file is older than this — or
+  `Store:Reconciliation:SweepInterval` / `Retention:SweepInterval`; the scheduled-reveal and closed-app push
+  dispatch sweeps default to a shorter 1-minute `Visibility:ScheduledReveal:SweepInterval` /
+  `WebPush:Delivery:SweepInterval` since both are time-sensitive). A loop whose file is older than this — or
   missing — reads as **stalled** (fail-closed), and the worker reports not-live so
   orchestration restarts it.
 - Prefer the HTTP probe (`httpGet: /health/live`), which aggregates all loops in one
@@ -1694,6 +1696,10 @@ environment, a Kubernetes `Secret`/`ConfigMap`, Railway variables or Docker secr
 | `Recaps:Generation:SweepInterval`   | `Recaps__Generation__SweepInterval` |  no   | no                      | worker      | `01:00:00` (recap generation cadence, CORE-JOB-001)     |
 | `Retention:<Family>:Enabled`        | `Retention__<Family>__Enabled`     |   no   | no                      | worker      | data-retention purge per family (`Sessions`/`Recaps`/`Exports` off, `Invitations`/`IdempotencyKeys` on by default, CORE-PRIV-003/006) |
 | `Visibility:ScheduledReveal:Enabled` | `Visibility__ScheduledReveal__Enabled` | no | no                    | worker      | `false`; **opt-in** server-enforced scheduled reveal — the off-by-default worker sweep that auto-reveals due Hidden rules through the central reveal engine (with optional `:SweepInterval` default `00:01:00` / `:BatchSize` default `50`), CORE-VSEAL-002 |
+| `WebPush:Vapid:PublicKey`           | `WebPush__Vapid__PublicKey`        |   no   | for closed-app push     | api, worker | VAPID application-server **public** key (base64url); also exposed to clients by `GET /api/v1/push/vapid-public-key` (CORE-PUSH-001). Unset -> push surface inert |
+| `WebPush:Vapid:PrivateKey`          | `WebPush__Vapid__PrivateKey`       |  yes   | for closed-app push     | api, worker | VAPID application-server **private** key (base64url 32-byte scalar) used to sign outbound pushes (CORE-PUSH-002). A **secret**; never logged, never shipped to a client |
+| `WebPush:Vapid:Subject`             | `WebPush__Vapid__Subject`          |   no   | for closed-app push     | api, worker | VAPID `sub` contact (e.g. `mailto:ops@example.com`), CORE-PUSH-002 |
+| `WebPush:Delivery:Enabled`          | `WebPush__Delivery__Enabled`       |   no   | no                      | api, worker | `false`; **opt-in** closed-app push **delivery** — the off-by-default outbound fan-out + worker `web-push-dispatch` sweep that sends a **content-free** push to subscribed recipients of authorized session events (with optional `:SweepInterval` default `00:01:00` / `:BatchSize` default `100` / `:TimeToLive` default `12:00:00`), CORE-PUSH-002 |
 | `Backup:Encryption:Passphrase`      | `Backup__Encryption__Passphrase` (or `Backup__Encryption__PassphraseFile`) | yes | for any backup/restore | backup scripts | Backup/restore refuse to run; nothing is written as plaintext (CORE-DR-001) |
 
 The remaining `Assets:Storage:*` keys (`Region`, `ForcePathStyle`, `UrlLifetime`, `Bucket`, `Provider`),
@@ -1709,6 +1715,14 @@ deployment sets `Visibility:ScheduledReveal:Enabled=true` (`Visibility__Schedule
 visibility rule whose `scheduledRevealAt` time has arrived by driving the **same central reveal command** as a
 live host reveal (so the auto-reveal is gated through the Visibility engine and emits the normal session events to
 exactly the authorized audience), idempotently and tenant-safe. The
+**closed-app push delivery** (CORE-PUSH-002) is likewise **off by default** and opt-in, and additionally inert
+without VAPID: it runs only when a deployment sets `WebPush:Delivery:Enabled=true` **and** configures the full VAPID
+signing material (`WebPush:Vapid:PublicKey`/`PrivateKey`/`Subject`) — on **both** the API host (which enqueues the
+content-free deliveries when an authorized, recipient-filtered session event commits) and the worker (whose
+off-by-default `web-push-dispatch` sweep signs and sends the payload-less push and deletes any subscription a push
+service reports gone with `404`/`410`). With either the flag or the VAPID material absent the surface is inert: no
+push is enqueued and the worker runs no dispatch loop. The VAPID **private** key is a secret read from
+configuration only and never logged (threat T7). The
 **data-retention sweep** (CORE-PRIV-003/CORE-PRIV-006) is configured under `Retention:*` — a global
 `SweepInterval`/`BatchSize` plus a per-family `Retention:<Family>:Enabled` flag and
 `Retention:<Family>:RetentionWindow` for each of `Sessions`, `Recaps`, `Exports`, `Invitations` and
@@ -2289,7 +2303,8 @@ threat T7), the sweep summary counts it as `dead-lettered`, and its requester se
 `GET /api/v1/exports/{id}` (disclosed only after authorization; CORE-RES-002).
 
 First identify the loop from the `exported_job` label (`asset-cleanup`, `recap-generation`,
-`export-processing`, `store-notification-reconciliation`, `data-retention`, `scheduled-reveal`), then:
+`export-processing`, `store-notification-reconciliation`, `data-retention`, `scheduled-reveal`,
+`web-push-dispatch`), then:
 
 1. **Backlog growing, success ratio healthy** — a throughput shortfall, not a fault: raise the loop's
    `BatchSize` or shorten its `SweepInterval`, or add worker replicas. Replicas are safe (CORE-RES-003) —

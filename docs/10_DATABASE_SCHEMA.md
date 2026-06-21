@@ -51,6 +51,7 @@ asset_links
 visibility_rules
 session_events
 session_event_sequences
+push_notification_deliveries
 audit_logs
 audit_log_sequences
 templates

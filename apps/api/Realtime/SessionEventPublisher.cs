@@ -54,13 +54,20 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
     // listening) span creation is a no-op and behavior is unchanged.
     private readonly LiveCoreActivitySource? _activitySource;
 
+    // The closed-app push fan-out (CORE-PUSH-002): after the in-session realtime delivery, an opt-in deployment
+    // ALSO fans a CONTENT-FREE push out to the SAME audience for recipients with a registered subscription.
+    // Optional for the SAME reason as the log context/tracer — DI injects it in the running host (where it is
+    // inert unless VAPID is configured), and it is left null in tests that exercise only realtime delivery.
+    private readonly ISessionEventPushFanOut? _pushFanOut;
+
     public SessionEventPublisher(
         ISessionEventRepository events,
         IRealtimeBackplane backplane,
         ISessionEventRecipientResolver recipients,
         LiveCoreMetrics metrics,
         RequestLogContext? requestLogContext = null,
-        LiveCoreActivitySource? activitySource = null)
+        LiveCoreActivitySource? activitySource = null,
+        ISessionEventPushFanOut? pushFanOut = null)
     {
         ArgumentNullException.ThrowIfNull(events);
         ArgumentNullException.ThrowIfNull(backplane);
@@ -72,6 +79,7 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
         _metrics = metrics;
         _requestLogContext = requestLogContext;
         _activitySource = activitySource;
+        _pushFanOut = pushFanOut;
     }
 
     /// <inheritdoc />
@@ -141,6 +149,25 @@ internal sealed class SessionEventPublisher : ISessionEventPublisher
                 // Swallowing is PER DELIVERY, so one recipient group's transport hiccup never suppresses the
                 // deliveries to the others. A genuine cancellation is NOT a transport failure and is left to
                 // propagate (the request is being torn down anyway).
+                _metrics.RecordEventDeliveryFailure();
+            }
+        }
+
+        // CLOSED-APP PUSH FAN-OUT (CORE-PUSH-002). After the in-session realtime delivery, an opt-in deployment
+        // ALSO fans a CONTENT-FREE push out to the SAME audience (for recipients with a registered subscription),
+        // by enqueuing the slow outbound send for the worker. It runs AFTER the realtime deliveries and is
+        // GENUINELY best-effort: any failure is RECORDED on the same event-delivery-failure signal and SWALLOWED,
+        // never rethrown, so a push enqueue failure can NEVER block or fail the in-session realtime delivery (the
+        // story's requirement). It is inert unless the deployment opted in and configured VAPID, and it is left
+        // null in tests that exercise only realtime delivery. A genuine cancellation is left to propagate.
+        if (_pushFanOut is not null)
+        {
+            try
+            {
+                await _pushFanOut.FanOutAsync(sessionEvent, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
                 _metrics.RecordEventDeliveryFailure();
             }
         }

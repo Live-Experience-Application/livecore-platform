@@ -42,3 +42,4 @@ migration,operations,policy
 20260621145141_AddVisibilityRuleLock,DropColumn,roll-forward-only
 20260621154858_AddVisibilityRuleScheduledReveal,DropColumn,roll-forward-only
 20260621164651_AddPushSubscriptions,DropTable,roll-forward-only
+20260621173633_AddPushNotificationDeliveries,DropTable,roll-forward-only

@@ -117,4 +117,30 @@ internal sealed class PushSubscriptionRepository : IPushSubscriptionRepository
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<Guid>> ListUserIdsWithSubscriptionsAsync(
+        IReadOnlyCollection<Guid> userProfileIds,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(userProfileIds);
+
+        // Empty ids can never address a stored subscription; drop them and short-circuit an empty candidate set.
+        var candidates = userProfileIds.Where(id => id != Guid.Empty).Distinct().ToArray();
+        if (candidates.Length == 0)
+        {
+            return [];
+        }
+
+        // Project the user-id column only (never an endpoint or the auth secret; threat T7) and DISTINCT it so a
+        // principal with several device subscriptions appears once. The IN (candidates) predicate is translated by
+        // both the SQLite test provider and PostgreSQL.
+        return await _dbContext.PushSubscriptions
+            .AsNoTracking()
+            .Where(subscription => candidates.Contains(subscription.UserProfileId))
+            .Select(subscription => subscription.UserProfileId)
+            .Distinct()
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }
