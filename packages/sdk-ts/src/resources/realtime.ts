@@ -30,6 +30,7 @@ import type {
   ParticipantRosterView,
   SessionEventReplayResponse,
   SessionHubConnectionParams,
+  SessionParticipantContext,
   SessionRosterView,
   Uuid,
 } from "@livecore/contracts";
@@ -158,6 +159,30 @@ export class RealtimeClient {
     return this.http.send<SessionRosterView | ParticipantRosterView>({
       method: "GET",
       path: `/sessions/${encodeURIComponent(sessionId)}/roster`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `GET /api/v1/sessions/{sessionId}/me` — the CALLER'S OWN participant context
+   * (its participant id, display name and presence) for the session (CORE-PSELF-001).
+   *
+   * It lets an audience surface learn its OWN surrogate participant id in-scope, so
+   * it can then call the participant-keyed reads ({@link getSessionRoster}, the
+   * visible feed) for itself — without the host passing the surrogate participant id
+   * out of band. The caller's participant is resolved entirely server-side from the
+   * authenticated principal (never a client-supplied id), so a caller can only ever
+   * resolve ITSELF. A foreign tenant, an unknown session and a caller who is not a
+   * participant of the session are hidden as `404` (a `LiveCoreApiError`),
+   * fail-closed (threats T1/T5).
+   */
+  getSessionParticipantContext(
+    sessionId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<SessionParticipantContext> {
+    return this.http.send<SessionParticipantContext>({
+      method: "GET",
+      path: `/sessions/${encodeURIComponent(sessionId)}/me`,
       query: { organizationSlug: params.organizationSlug },
     });
   }

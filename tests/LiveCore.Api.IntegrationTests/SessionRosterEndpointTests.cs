@@ -278,6 +278,56 @@ public sealed class SessionRosterEndpointTests
         Assert.False(body.Participants.Single(p => p.ParticipantId == seeded.Participant1Id).Present);
     }
 
+    // ---- isSelf marker (CORE-PSELF-001) -------------------------------------
+
+    [Fact]
+    public async Task Audience_roster_marks_only_the_callers_own_entry_isSelf()
+    {
+        // CORE-PSELF-001: a Participant-role caller who is ALSO a participant of the session reads the audience
+        // roster; isSelf is server-computed from the caller's OWN participant id, so it is true for exactly the
+        // caller's entry and false for every other participant — and it leaks no other participant's user id.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "self-participant";
+        Guid sessionId = Guid.Empty;
+        Guid ownParticipantId = Guid.Empty;
+        Guid otherParticipantId = Guid.Empty;
+        Guid otherUserId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var caller = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, caller.Id, MembershipRole.Participant);
+            var ws = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, ws.Id, caller.Id, MembershipRole.Participant);
+            var session = await db.AddSessionAsync(org.Id, ws.Id, "Opening Night", SessionStatus.Live);
+            sessionId = session.Id;
+
+            // The caller's OWN participant (linked to its user) plus another, distinct participant.
+            var own = await db.AddParticipantAsync(org.Id, ws.Id, caller.Id, "Me");
+            ownParticipantId = own.Id;
+            var otherUser = await db.AddUserAsync(_issuer, $"other-{subject}");
+            otherUserId = otherUser.Id;
+            var other = await db.AddParticipantAsync(org.Id, ws.Id, otherUser.Id, "Grace");
+            otherParticipantId = other.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/sessions/{sessionId}/roster?organizationSlug={_orgA}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // The audience projection is stripped of the host-only user link AND never carries another user's id.
+        var raw = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("userProfileId", raw, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(otherUserId.ToString(), raw, StringComparison.OrdinalIgnoreCase);
+
+        var body = await response.Content.ReadFromJsonAsync<RosterDto>(_json);
+        Assert.NotNull(body);
+        Assert.True(body.Participants.Single(p => p.ParticipantId == ownParticipantId).IsSelf);
+        Assert.False(body.Participants.Single(p => p.ParticipantId == otherParticipantId).IsSelf);
+    }
+
     // ---- 404 hidden: non-member / foreign tenant / unknown ------------------
 
     [Fact]
@@ -437,5 +487,6 @@ public sealed class SessionRosterEndpointTests
         Guid ParticipantId,
         string DisplayName,
         Guid? UserProfileId,
-        bool Present);
+        bool Present,
+        bool IsSelf);
 }

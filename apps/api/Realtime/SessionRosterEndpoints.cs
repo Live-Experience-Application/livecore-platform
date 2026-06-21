@@ -174,11 +174,22 @@ internal static class SessionRosterEndpoints
         var presentParticipantIds = deps.Connections.GetConnectedParticipantIds(
             context.OrganizationId, session.WorkspaceId, sessionGuid);
 
+        // The caller's OWN participant in this session, resolved server-side from the SAME principal-to-participant
+        // mapping the GET /sessions/{sessionId}/me self-resolution route uses (IParticipantRepository.FindByUserAsync,
+        // tenant- AND workspace-scoped), never a client-supplied id (CORE-PSELF-001). It is null when the caller is
+        // not itself a participant of the session (a host/observer with no participant record). It drives ONLY the
+        // audience view's per-entry isSelf marker, computed by comparing each participant's surrogate id to the
+        // caller's own — so the marker leaks no other participant's user id (threat T2/T7).
+        var callerParticipant = await deps.Participants
+            .FindByUserAsync(context.OrganizationId, session.WorkspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+
         // PROJECT BY ROLE: the host-content roles receive the full roster WITH the host-only participant user
         // link; every other role falls closed to the stripped audience roster WITHOUT it, so a participant sees
-        // only the roster projection allowed by visibility rules (no host-only fields; threat T2).
+        // only the roster projection allowed by visibility rules (no host-only fields; threat T2). The caller's
+        // own participant id stamps the audience view's isSelf marker.
         var response = SessionRosterProjection.Project(
-            sessionGuid, participants, presentParticipantIds, member.Role);
+            sessionGuid, participants, presentParticipantIds, member.Role, callerParticipant?.Id);
         return Results.Ok(response);
     }
 

@@ -94,6 +94,38 @@ blocks — no parallel roster engine:
   which user backs them (threat T2). The target tenant is the required `?organizationSlug=` query parameter;
   a foreign tenant, an unknown session and a non-member of the session's workspace are all hidden as `404`
   (threats T1/T5), never `403`.
+- **The audience roster entry carries a server-computed `isSelf` marker (CORE-PSELF-001).** The
+  host-only-field-stripped audience projection (`ParticipantRosterParticipant`) additionally stamps each entry
+  with an `isSelf` boolean — `true` for exactly the caller's OWN entry, `false` for every other participant — so
+  an audience surface can highlight "you are here" without learning which user backs any other participant. It is
+  the audience-safe counterpart of the host view's host-only participant user link and **leaks no other
+  participant's user id**: it is derived only from comparing each participant's surrogate id to the caller's OWN
+  server-resolved participant id (the same mapping the self-resolution route below uses), and is `false` for
+  every entry when the caller is not itself a participant of the session.
+
+## Participant self-identification read (CORE-PSELF-001)
+
+An audience surface needs to call the participant-keyed reads (`getParticipantVisibleFeed`, the roster) **for
+itself**, but it does not know its OWN surrogate participant id — `GET /api/v1/me` returns only the user profile
+plus organization memberships, no participations. So `GET /api/v1/sessions/{sessionId}/me` (module **Realtime**,
+roles "Participant (self)") returns the **caller's OWN** participant context for the session — its
+`participantId`, `displayName` and presence — built **on top of** the existing Participants/Sessions/Realtime
+building blocks, with no parallel mapping:
+
+- **Self-only, server-resolved.** The caller's participant is resolved entirely server-side from the
+  authenticated principal via the existing principal-to-participant mapping
+  (`IParticipantRepository.FindByUserAsync`, tenant- AND workspace-scoped; the unique `(workspace_id, user_id)`
+  index guarantees at most one), **never** a client-supplied participant id, so a caller can only ever resolve
+  **itself** and never address another participant (threats T1/T5). The response carries only the caller's own
+  identity, never another participant and **no host-only field** (the participant's user-account link is absent).
+- **Presence is the same per-instance signal the roster uses.** The `present` flag comes from
+  `RealtimeConnectionRegistry.GetConnectedParticipantIds` (matched on the full tenant/workspace/session tuple),
+  so it only ever under-reports across replicas and never widens access — identical to the roster's presence
+  flag.
+- **Fail-closed, hidden-404.** The target tenant is the required `?organizationSlug=` query parameter; a caller
+  who is not a participant of the session (a tenant member who never joined as a participant), a removed
+  participant, a foreign tenant and an unknown session are all hidden as an indistinguishable `404`
+  (threats T1/T5), never `403`.
 
 ## Collapsed audience delivery (CORE-PERF-001)
 

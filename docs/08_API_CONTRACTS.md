@@ -119,6 +119,7 @@ POST   /api/v1/sessions/{sessionId}/participants/{participantId}/join
 POST   /api/v1/sessions/{sessionId}/participants/{participantId}/leave
 GET    /api/v1/sessions/{sessionId}/events
 GET    /api/v1/sessions/{sessionId}/roster
+GET    /api/v1/sessions/{sessionId}/me
 POST   /api/v1/sessions/{sessionId}/reveal
 POST   /api/v1/sessions/{sessionId}/hide
 POST   /api/v1/sessions/{sessionId}/visibility-rules
@@ -202,6 +203,39 @@ participant may see, so the feed stays already-filtered and fail-closed (a parti
 may see). The resource label/body is resolved through a Visibility-owned port whose adapter lives in the
 composition root, because the central security module may not reference the Scenes/Content/Entities modules
 (CORE-ARCH-001).
+
+### Participant self-identification: own session participant context + the roster `isSelf` marker (CORE-PSELF-001)
+
+An audience surface needs to call the participant-keyed reads (`getParticipantVisibleFeed`, the roster) **for
+itself**, but it does not know its OWN surrogate participant id — `GET /api/v1/me` returns only the user
+profile plus organization memberships, no participations. The session-scoped self-resolution route closes that
+gap:
+
+`GET /api/v1/sessions/{sessionId}/me` (module **Realtime**, roles "Participant (self)", tenant via the required
+`?organizationSlug=` query) returns the **caller's OWN** participant context for the session:
+
+| Field | Meaning |
+|---|---|
+| `sessionId` | the session this context is scoped to (echoed for correlation) |
+| `participantId` | the caller's OWN surrogate participant id — the value the participant-keyed reads take |
+| `displayName` | the caller's own session-facing display identity |
+| `present` | whether the caller currently holds a live realtime connection to this session (the same per-instance presence signal the roster uses) |
+
+The caller's participant is resolved **entirely server-side** from the authenticated principal via the existing
+principal-to-participant mapping (`IParticipantRepository.FindByUserAsync`), **never** a client-supplied id, so
+a caller can only ever resolve **itself**. The response carries only the caller's own identity — never another
+participant and **no host-only field** (the participant's user-account link is absent) — and no authorization
+rationale (threats T2/T7). It is fail-closed and **hidden-404**: a caller who is not a participant of the
+session (a tenant member who never joined), a removed participant, a foreign-tenant caller and an unknown
+session are all an indistinguishable `404`, never `403`.
+
+The **audience** roster projection (`ParticipantRosterParticipant`, returned by
+`GET /api/v1/sessions/{sessionId}/roster` to the audience roles) additionally carries a server-computed
+`isSelf` boolean: `true` for exactly the caller's OWN entry, `false` for every other participant. It is the
+audience-safe counterpart of the host view's host-only `userProfileId` link (an audience member has no user link
+to recognize itself by) and leaks **no other participant's** user id — it is derived only from comparing each
+participant's id to the caller's own server-resolved participant id, and is `false` for every entry when the
+caller is not itself a participant of the session.
 
 ### Participant entity projection: the audience-safe entity-type discriminator (CORE-APROJ-003)
 

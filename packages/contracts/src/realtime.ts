@@ -121,8 +121,8 @@ export interface SessionRosterView {
 
 /**
  * One participant of the AUDIENCE-safe roster. It carries only the non-sensitive
- * id, the session-facing display name and the presence flag; the host-only
- * user-account link is deliberately absent.
+ * id, the session-facing display name, the presence flag and the server-computed
+ * {@link isSelf} marker; the host-only user-account link is deliberately absent.
  */
 export interface ParticipantRosterParticipant {
   /** Surrogate id of the participant; a non-sensitive handle. */
@@ -134,6 +134,18 @@ export interface ParticipantRosterParticipant {
    * session on this API instance (the presence signal).
    */
   present: boolean;
+  /**
+   * SERVER-COMPUTED per caller (CORE-PSELF-001): `true` for exactly the caller's
+   * OWN entry, `false` for every other participant. It lets an audience surface
+   * highlight "you are here" without the host passing the caller's surrogate
+   * participant id out of band — the audience-safe counterpart of the host view's
+   * {@link SessionRosterParticipant.userProfileId} link. It leaks no other
+   * participant's user id: it is derived only from comparing each participant's id
+   * to the caller's OWN server-resolved participant id (the same mapping
+   * `GET /api/v1/sessions/{sessionId}/me` uses), and is `false` for every entry
+   * when the caller is not itself a participant of the session (threats T2/T7).
+   */
+  isSelf: boolean;
 }
 
 /**
@@ -147,6 +159,34 @@ export interface ParticipantRosterView {
   sessionId: Uuid;
   /** The session's active participants, each with its presence flag (no host-only fields). */
   participants: ParticipantRosterParticipant[];
+}
+
+/**
+ * The calling principal's OWN session participant context (CORE-PSELF-001),
+ * returned by `GET /api/v1/sessions/{sessionId}/me`. It lets an audience surface
+ * learn its OWN surrogate participant id in-scope, so it can then call the
+ * participant-keyed reads ({@link RealtimeClient.getSessionRoster}, the visible
+ * feed) for itself — without the host passing the surrogate participant id out of
+ * band. The caller's participant is resolved entirely server-side from the
+ * authenticated principal (never a client-supplied id), so a caller can only ever
+ * resolve ITSELF; the response carries only the caller's own identity, never
+ * another participant and no host-only field (threats T2/T7).
+ */
+export interface SessionParticipantContext {
+  /** The session this participant context is scoped to (echoed for correlation). */
+  sessionId: Uuid;
+  /**
+   * The caller's OWN surrogate participant id in this session — the value the
+   * participant-keyed reads take.
+   */
+  participantId: Uuid;
+  /** The caller's own session-facing display identity. */
+  displayName: string;
+  /**
+   * Whether the caller currently holds a live realtime connection to this session
+   * on this API instance (the presence signal).
+   */
+  present: boolean;
 }
 
 /**

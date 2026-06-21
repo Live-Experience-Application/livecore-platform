@@ -78,8 +78,9 @@ public sealed record ParticipantRosterView(
 
 /// <summary>
 /// One participant of the AUDIENCE-safe roster (<see cref="ParticipantRosterView"/>). It carries only the
-/// non-sensitive id, the session-facing display identity and the presence flag; the host-only user-account
-/// link is deliberately absent (see <see cref="ParticipantRosterView"/>).
+/// non-sensitive id, the session-facing display identity, the presence flag and the server-computed
+/// <see cref="IsSelf"/> marker; the host-only user-account link is deliberately absent (see
+/// <see cref="ParticipantRosterView"/>).
 /// </summary>
 /// <param name="ParticipantId">Surrogate id of the participant (UUIDv7); a non-sensitive handle.</param>
 /// <param name="DisplayName">The participant's session-facing display identity (audience-facing metadata).</param>
@@ -87,10 +88,22 @@ public sealed record ParticipantRosterView(
 /// Whether the participant currently holds at least one live realtime connection to the session on this API
 /// instance (the presence signal; docs/11_REALTIME_SYNC.md).
 /// </param>
+/// <param name="IsSelf">
+/// SERVER-COMPUTED PER CALLER (CORE-PSELF-001): <see langword="true"/> for exactly the caller's OWN entry in the
+/// roster, <see langword="false"/> for every other participant. It lets an audience surface highlight "you are
+/// here" without the host passing the caller's surrogate participant id out of band, and it is the audience-safe
+/// counterpart of the host view's <see cref="SessionRosterParticipant.UserProfileId"/> link (an audience member
+/// has no user link to recognize itself by). It LEAKS NO OTHER PARTICIPANT'S identity: it is a boolean derived
+/// only from comparing each participant's surrogate id to the caller's OWN server-resolved participant id (the
+/// same principal-to-participant mapping the <c>GET /api/v1/sessions/{sessionId}/me</c> route uses), never from
+/// any other participant's user id (threats T2/T7). It is <see langword="false"/> for every entry when the
+/// caller is not itself a participant of the session (a host/observer with no participant record).
+/// </param>
 public sealed record ParticipantRosterParticipant(
     Guid ParticipantId,
     string DisplayName,
-    bool Present);
+    bool Present,
+    bool IsSelf);
 
 /// <summary>
 /// Role-based session-roster PROJECTOR (CORE-PRS-002) — the pure mapping that honors the host-vs-audience
@@ -110,6 +123,10 @@ public sealed record ParticipantRosterParticipant(
 /// discriminators only and must never be compared with &gt;/&lt;), so the classification is an EXACT
 /// set-membership check (inside <see cref="VisibilityRoles"/>), never an ordering comparison, and an unknown
 /// role is denied the broader host view by default (fail-closed).
+///
+/// The audience view additionally stamps each entry's <see cref="ParticipantRosterParticipant.IsSelf"/> marker
+/// (CORE-PSELF-001) from the caller's OWN server-resolved participant id, so an audience surface can recognize
+/// itself in the roster without learning any other participant's user identity (threats T2/T7).
 /// </summary>
 internal static class SessionRosterProjection
 {
@@ -120,12 +137,20 @@ internal static class SessionRosterProjection
     /// audience (<see cref="ParticipantRosterView"/>) shape as the response body. A role that
     /// <see cref="VisibilityRoles.ViewsHostOnlyContent"/> receives the full view; every other role falls closed
     /// to the stripped audience view.
+    ///
+    /// <paramref name="callerParticipantId"/> is the caller's OWN participant id in this session, resolved
+    /// server-side from the principal-to-participant mapping (or <see langword="null"/> when the caller is not a
+    /// participant of the session). It drives ONLY the audience view's
+    /// <see cref="ParticipantRosterParticipant.IsSelf"/> marker — <see langword="true"/> for exactly the entry
+    /// whose id equals it — so the marker leaks no other participant's identity; the host view ignores it (a host
+    /// recognizes itself by the user link it already sees).
     /// </summary>
     public static object Project(
         Guid sessionId,
         IReadOnlyList<Participant> participants,
         IReadOnlySet<Guid> presentParticipantIds,
-        MembershipRole role)
+        MembershipRole role,
+        Guid? callerParticipantId)
     {
         ArgumentNullException.ThrowIfNull(participants);
         ArgumentNullException.ThrowIfNull(presentParticipantIds);
@@ -146,7 +171,8 @@ internal static class SessionRosterProjection
             .Select(participant => new ParticipantRosterParticipant(
                 participant.Id,
                 participant.DisplayName,
-                presentParticipantIds.Contains(participant.Id)))
+                presentParticipantIds.Contains(participant.Id),
+                callerParticipantId is { } self && participant.Id == self))
             .ToArray();
         return new ParticipantRosterView(sessionId, audienceEntries);
     }

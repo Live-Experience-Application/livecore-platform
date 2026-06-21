@@ -1873,6 +1873,18 @@ app.MapSessionEventReplayEndpoints();
 // hidden as 404 (threats T1/T5), fail-closed.
 app.MapSessionRosterEndpoints();
 
+// Participant self-resolution read endpoint (CORE-PSELF-001, the "Participant Self-Identification" epic): the
+// Realtime module's read route GET /api/v1/sessions/{sessionId}/me. It returns the CALLER'S OWN participant
+// context (its participant id, display name and presence) for the session, so an audience surface can call the
+// participant-keyed reads (getParticipantVisibleFeed, the roster) for itself without the host passing the
+// surrogate participant id out of band. The caller's participant is resolved ENTIRELY server-side from the
+// authenticated principal (IParticipantRepository.FindByUserAsync), never a client-supplied id, so a caller can
+// only ever resolve itself. No new DI registration is required: the tenant context resolver and the
+// session/participant repositories are already registered above inside the persistence conditional, and the
+// RealtimeConnectionRegistry (presence) is registered unconditionally. A caller who is not a participant of the
+// session, a foreign tenant and an unknown session are all hidden as 404 (threats T1/T5), fail-closed.
+app.MapSessionParticipantSelfEndpoints();
+
 // Scene content endpoints (CORE-SCENE-003; CORE-API-007 adds the by-scene-id read; CORE-LIFE-005 adds the
 // DELETE; CORE-SCENE-006 adds the reorder POST): the Scenes module's HTTP routes,
 // GET/POST /api/v1/workspaces/{workspaceId}/scenes, GET /api/v1/scenes/{sceneId},

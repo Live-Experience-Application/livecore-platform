@@ -1903,6 +1903,23 @@ The response is a safe DTO of identifiers and the caller's own display metadata
 only: it carries no access token, no raw organization-claim payload and no
 authorization rationale (threat T7).
 
+`GET /api/v1/me` is the global, profile-level "who am I". The **session-scoped**
+self-resolution `GET /api/v1/sessions/{sessionId}/me` (module Realtime,
+CORE-PSELF-001) is its in-session counterpart: it returns the caller's OWN
+participant context for one session — its `participantId`, `displayName` and
+presence — so an audience surface can call the participant-keyed reads
+(`getParticipantVisibleFeed`, the roster) for itself without the host passing the
+surrogate `participantId` out of band. The caller's participant is resolved
+entirely server-side from the authenticated principal
+(`IParticipantRepository.FindByUserAsync`), never a client-supplied id, so a caller
+can only ever resolve itself; the response carries only the caller's own identity
+(no other participant, no host-only user link), and a caller who is not a
+participant of the session, a removed participant, a foreign tenant and an unknown
+session are all hidden as `404`, fail-closed. The audience roster projection
+(`GET /api/v1/sessions/{sessionId}/roster`) additionally carries a server-computed
+`isSelf` marker, true only for the caller's own entry, leaking no other
+participant's user id.
+
 ### Organization create and read
 
 The Organizations module exposes the tenant create/read API (CORE-API-001):

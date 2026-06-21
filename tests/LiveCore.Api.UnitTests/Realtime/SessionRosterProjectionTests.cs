@@ -40,7 +40,8 @@ public sealed class SessionRosterProjectionTests
         var anonymous = Participant.Create(_org, _workspace, userProfileId: null, "Guest", _now);
         var present = new HashSet<Guid> { linked.Id };
 
-        var result = SessionRosterProjection.Project(_session, [linked, anonymous], present, role);
+        var result = SessionRosterProjection.Project(
+            _session, [linked, anonymous], present, role, callerParticipantId: linked.Id);
 
         var view = Assert.IsType<SessionRosterView>(result);
         Assert.Equal(_session, view.SessionId);
@@ -60,7 +61,8 @@ public sealed class SessionRosterProjectionTests
         var linked = Participant.Create(_org, _workspace, Guid.NewGuid(), "Ada", _now);
         var present = new HashSet<Guid> { linked.Id };
 
-        var result = SessionRosterProjection.Project(_session, [linked], present, role);
+        var result = SessionRosterProjection.Project(
+            _session, [linked], present, role, callerParticipantId: null);
 
         // A ParticipantRosterParticipant has no user-link property at all — the host-only field is absent by type.
         var view = Assert.IsType<ParticipantRosterView>(result);
@@ -71,13 +73,45 @@ public sealed class SessionRosterProjectionTests
     }
 
     [Fact]
+    public void The_audience_view_marks_only_the_callers_own_entry_isSelf()
+    {
+        // CORE-PSELF-001: isSelf is server-computed per caller from the caller's OWN participant id, so it is
+        // true for exactly the caller's entry and false for every other participant — leaking no other
+        // participant's identity.
+        var caller = Participant.Create(_org, _workspace, Guid.NewGuid(), "Ada", _now);
+        var other = Participant.Create(_org, _workspace, Guid.NewGuid(), "Grace", _now);
+
+        var result = SessionRosterProjection.Project(
+            _session, [caller, other], new HashSet<Guid>(), MembershipRole.Participant, callerParticipantId: caller.Id);
+
+        var view = Assert.IsType<ParticipantRosterView>(result);
+        Assert.True(view.Participants.Single(p => p.ParticipantId == caller.Id).IsSelf);
+        Assert.False(view.Participants.Single(p => p.ParticipantId == other.Id).IsSelf);
+    }
+
+    [Fact]
+    public void The_audience_view_marks_no_entry_isSelf_when_the_caller_is_not_a_participant()
+    {
+        // A caller with no participant record of its own (a null caller participant id) sees isSelf false for
+        // every entry — fail-closed, never accidentally claiming another participant as "self".
+        var first = Participant.Create(_org, _workspace, Guid.NewGuid(), "Ada", _now);
+        var second = Participant.Create(_org, _workspace, Guid.NewGuid(), "Grace", _now);
+
+        var result = SessionRosterProjection.Project(
+            _session, [first, second], new HashSet<Guid>(), MembershipRole.Observer, callerParticipantId: null);
+
+        var view = Assert.IsType<ParticipantRosterView>(result);
+        Assert.All(view.Participants, p => Assert.False(p.IsSelf));
+    }
+
+    [Fact]
     public void An_undefined_role_falls_closed_to_the_stripped_view()
     {
         // A value outside the enum must never receive the broader host view that carries the user link.
         var participant = Participant.Create(_org, _workspace, Guid.NewGuid(), "Ada", _now);
 
         var result = SessionRosterProjection.Project(
-            _session, [participant], new HashSet<Guid>(), (MembershipRole)999);
+            _session, [participant], new HashSet<Guid>(), (MembershipRole)999, callerParticipantId: null);
 
         Assert.IsType<ParticipantRosterView>(result);
     }
@@ -86,9 +120,9 @@ public sealed class SessionRosterProjectionTests
     public void An_empty_roster_projects_an_empty_participant_list()
     {
         var hostResult = SessionRosterProjection.Project(
-            _session, [], new HashSet<Guid>(), MembershipRole.Host);
+            _session, [], new HashSet<Guid>(), MembershipRole.Host, callerParticipantId: null);
         var audienceResult = SessionRosterProjection.Project(
-            _session, [], new HashSet<Guid>(), MembershipRole.Participant);
+            _session, [], new HashSet<Guid>(), MembershipRole.Participant, callerParticipantId: null);
 
         Assert.Empty(Assert.IsType<SessionRosterView>(hostResult).Participants);
         Assert.Empty(Assert.IsType<ParticipantRosterView>(audienceResult).Participants);

@@ -1297,6 +1297,35 @@
         }
       }
     },
+    "/api/v1/sessions/{sessionId}/me": {
+      "get": {
+        "tags": [
+          "SessionParticipantSelfEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationSlug",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspaceId}/scenes": {
       "get": {
         "tags": [
@@ -2737,6 +2766,9 @@
     },
     {
       "name": "SessionRosterEndpoints"
+    },
+    {
+      "name": "SessionParticipantSelfEndpoints"
     },
     {
       "name": "SceneEndpoints"
