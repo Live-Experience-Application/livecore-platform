@@ -75,9 +75,10 @@ public sealed record ParticipantVisibleFeedResponse(
     /// audience-safe feed items (CORE-APROJ-002), at the given server time, preserving the engine's
     /// deterministic order. The items are built by the endpoint, which combines each
     /// <see cref="VisibleResourceReveal"/> the visibility engine computed with the resource's audience-safe
-    /// label/body resolved through the <see cref="IVisibleResourceAudienceProjector"/> port (the central
-    /// security module may not reference the resource modules — CORE-ARCH-001). Only the non-sensitive
-    /// boundary identifiers, the audience-safe items and the server timestamp are projected; nothing about
+    /// label/body resolved through the <see cref="IVisibleResourceAudienceProjector"/> port and its
+    /// audience-safe attachments resolved through the <see cref="IVisibleResourceAttachmentsProjector"/> port
+    /// (the central security module may not reference the resource or asset modules — CORE-ARCH-001). Only the
+    /// non-sensitive boundary identifiers, the audience-safe items and the server timestamp are projected; nothing about
     /// the participant's user link, status or display name, and no authorization rationale, is ever echoed
     /// (threats T2/T7). When the participant has nothing visible the item list is naturally empty.
     /// </summary>
@@ -122,6 +123,15 @@ public sealed record ParticipantVisibleFeedResponse(
 /// <see cref="VisibilityResourceType"/> and the <see cref="VisibleResourceRevealScope"/>), serialized by
 /// name exactly like <see cref="RevealResponse.ResourceType"/> and the realtime reveal payload, never by a
 /// numeric value.
+///
+/// ATTACHMENTS (CORE-ALC-002). The item additionally carries an audience-safe <see cref="Attachments"/> list
+/// — the assets attached to this resource through the existing <c>AssetLink</c> join (CORE-AST-005). Because
+/// the item is built only for a resource the central <see cref="VisibilityPolicy"/> has ALREADY decided the
+/// participant may see, each linked asset INHERITS the resource's audience visibility — so a hidden
+/// resource's attachments are never enumerated (threat T2). Each entry is audience-safe (an assetId plus an
+/// audience-safe name and content type), never a host-only field; the download of each listed asset still
+/// goes through the server-side <c>getDownloadUrl</c> authorization check (defence in depth). The list is
+/// EMPTY (never null, never an error) when the resource has no attachments.
 /// </summary>
 /// <param name="ResourceType">
 /// The kind of the visible resource — the name of a <see cref="VisibilityResourceType"/>
@@ -145,29 +155,44 @@ public sealed record ParticipantVisibleFeedResponse(
 /// The marker distinguishing an audience-wide reveal from a selected-participant reveal — the stable name of
 /// a <see cref="VisibleResourceRevealScope"/> (AudienceWide/SelectedParticipant).
 /// </param>
+/// <param name="Attachments">
+/// The audience-safe list of assets attached to this resource (CORE-ALC-002), each an assetId plus an
+/// audience-safe name and content type. Empty when the resource has no attachments or cannot carry them.
+/// </param>
 public sealed record ParticipantVisibleFeedItem(
     string ResourceType,
     Guid ResourceId,
     string? Title,
     string? Body,
     DateTimeOffset RevealedAt,
-    string RevealScope)
+    string RevealScope,
+    IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)
 {
     /// <summary>
     /// Projects a computed <see cref="VisibleResourceReveal"/> (the visibility engine's enriched
     /// visible-resource handle) together with the resource's audience-safe label/body
     /// (<paramref name="projection"/>, resolved through the <see cref="IVisibleResourceAudienceProjector"/>
-    /// port, or <see langword="null"/> when the resource no longer resolves) into its participant-safe feed
-    /// item: the resource kind and reveal scope as their stable names, the surrogate id, the reveal time and
-    /// the audience-safe title/body. Audience-safe only — never the raw host title/body or any host-only
-    /// field (threats T2/T7). The factory is internal because it consumes the Visibility module's internal
-    /// reveal/projection types; the DTO itself is public for serialization and the published contract.
+    /// port, or <see langword="null"/> when the resource no longer resolves) and the resource's audience-safe
+    /// <paramref name="attachments"/> (resolved through the <see cref="IVisibleResourceAttachmentsProjector"/>
+    /// port) into its participant-safe feed item: the resource kind and reveal scope as their stable names,
+    /// the surrogate id, the reveal time, the audience-safe title/body and the attachments list. Audience-safe
+    /// only — never the raw host title/body or any host-only field (threats T2/T7). The factory is internal
+    /// because it consumes the Visibility module's internal reveal/projection types; the DTO itself is public
+    /// for serialization and the published contract.
     /// </summary>
     internal static ParticipantVisibleFeedItem From(
         VisibleResourceReveal reveal,
-        VisibleResourceAudienceProjection? projection)
+        VisibleResourceAudienceProjection? projection,
+        IReadOnlyList<VisibleResourceAttachment> attachments)
     {
         ArgumentNullException.ThrowIfNull(reveal);
+        ArgumentNullException.ThrowIfNull(attachments);
+
+        var projectedAttachments = new ParticipantVisibleFeedAttachment[attachments.Count];
+        for (var index = 0; index < attachments.Count; index++)
+        {
+            projectedAttachments[index] = ParticipantVisibleFeedAttachment.From(attachments[index]);
+        }
 
         return new ParticipantVisibleFeedItem(
             reveal.ResourceType.ToString(),
@@ -175,6 +200,57 @@ public sealed record ParticipantVisibleFeedItem(
             projection?.Title,
             projection?.Body,
             reveal.RevealedAt,
-            reveal.Scope.ToString());
+            reveal.Scope.ToString(),
+            projectedAttachments);
     }
+}
+
+/// <summary>
+/// One AUDIENCE-SAFE attachment of a participant-visible feed item (CORE-ALC-002): an asset attached to the
+/// visible resource through the existing <c>AssetLink</c> join (CORE-AST-005). It lets an audience surface
+/// enumerate the attachments of content the participant has been shown and then request the authorized
+/// per-asset download (the vertical adopter gap ARC-GAP-009).
+///
+/// AUDIENCE-SAFE BY CONSTRUCTION (docs/08 DTO rules; threats T2/T4/T7 in docs/07_SECURITY_THREAT_MODEL.md):
+/// <list type="bullet">
+///   <item>It carries ONLY the asset's surrogate <see cref="AssetId"/>, an audience-safe <see cref="Name"/>
+///   and the <see cref="ContentType"/> — NEVER a host-only field. The storage coordinates (provider, bucket,
+///   object key) and the checksum are host-only and never participant-facing (threat T4 "Asset leak"), so
+///   they are never carried here.</item>
+///   <item>The attachment is listed only for a resource the central <see cref="VisibilityPolicy"/> has
+///   already decided the participant may see, so the attachment INHERITS the resource's audience visibility
+///   — a hidden resource's attachments are never enumerated (threat T2).</item>
+///   <item>Listing an attachment NEVER grants access to its bytes: the download still goes through the
+///   server-side <c>getDownloadUrl</c> authorization check (defence in depth) before any short-lived signed
+///   URL is minted.</item>
+/// </list>
+/// </summary>
+/// <param name="AssetId">
+/// The surrogate id of the attached asset — the handle a consumer passes to <c>getDownloadUrl</c> to request
+/// the authorized download.
+/// </param>
+/// <param name="Name">
+/// The asset's audience-safe display label, or <see langword="null"/> when it has none. Core stores no
+/// host-facing asset filename and its storage coordinates are host-only (threats T4/T7), so this is the
+/// forward-compatible audience-safe label slot and is null today (exactly as the feed item's audience body
+/// slot is, CORE-APROJ-002).
+/// </param>
+/// <param name="ContentType">
+/// The attached asset's MIME content type — the same non-sensitive metadata the signed download-url response
+/// already discloses to an authorized audience caller.
+/// </param>
+public sealed record ParticipantVisibleFeedAttachment(
+    Guid AssetId,
+    string? Name,
+    string ContentType)
+{
+    /// <summary>
+    /// Projects a Visibility-owned <see cref="VisibleResourceAttachment"/> (resolved through the
+    /// <see cref="IVisibleResourceAttachmentsProjector"/> port) into its participant-safe DTO. Audience-safe
+    /// only — the assetId, the audience-safe name and the content type, never a host-only field (threats
+    /// T2/T4/T7). The factory is internal because it consumes the Visibility module's internal attachment
+    /// type; the DTO itself is public for serialization and the published contract.
+    /// </summary>
+    internal static ParticipantVisibleFeedAttachment From(VisibleResourceAttachment attachment)
+        => new(attachment.AssetId, attachment.Name, attachment.ContentType);
 }

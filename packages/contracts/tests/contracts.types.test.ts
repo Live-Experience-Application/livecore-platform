@@ -39,6 +39,7 @@ import type {
   PageResponse,
   ParsedSessionEvent,
   ParticipantEntityResponse,
+  ParticipantVisibleFeedAttachment,
   ParticipantVisibleFeedItem,
   ProblemCode,
   ProblemDetails,
@@ -186,6 +187,7 @@ export type ParticipantVisibleFeedItemKeysAreExact = Assert<
     | "body"
     | "revealedAt"
     | "revealScope"
+    | "attachments"
   >
 >;
 
@@ -211,6 +213,42 @@ export type ParticipantVisibleFeedItemRevealedAtIsIsoDateTime = Assert<
 
 export type ParticipantVisibleFeedItemRevealScopeIsEnum = Assert<
   Equal<ParticipantVisibleFeedItem["revealScope"], FeedRevealScope>
+>;
+
+// --- The participant visible-feed attachment is the AUDIENCE-SAFE attachment shape. ---
+// (CORE-ALC-002.) Each feed item carries an attachments list of the assets linked to the
+// visible resource: only an assetId (the download handle), an audience-safe name (the
+// forward-compatible null slot today) and the contentType — never a host-only storage
+// coordinate (threats T2/T4/T7). Pinning the property set to exactly this audience-safe
+// shape makes a host-only field (a bucket/object key/checksum) a compile error here, so
+// the published contract can never grow a leaking field. It mirrors the server DTO
+// (apps/api/Visibility/ParticipantFeedDtos.cs `ParticipantVisibleFeedAttachment(Guid
+// AssetId, string? Name, string ContentType)`).
+
+export type ParticipantVisibleFeedItemAttachmentsIsList = Assert<
+  Equal<
+    ParticipantVisibleFeedItem["attachments"],
+    ParticipantVisibleFeedAttachment[]
+  >
+>;
+
+export type ParticipantVisibleFeedAttachmentKeysAreExact = Assert<
+  Equal<
+    keyof ParticipantVisibleFeedAttachment,
+    "assetId" | "name" | "contentType"
+  >
+>;
+
+export type ParticipantVisibleFeedAttachmentAssetIdIsUuid = Assert<
+  Equal<ParticipantVisibleFeedAttachment["assetId"], string>
+>;
+
+export type ParticipantVisibleFeedAttachmentNameIsNullableString = Assert<
+  Equal<ParticipantVisibleFeedAttachment["name"], string | null>
+>;
+
+export type ParticipantVisibleFeedAttachmentContentTypeIsString = Assert<
+  Equal<ParticipantVisibleFeedAttachment["contentType"], string>
 >;
 
 // --- The participant entity projection is the AUDIENCE-SAFE entity shape. -------

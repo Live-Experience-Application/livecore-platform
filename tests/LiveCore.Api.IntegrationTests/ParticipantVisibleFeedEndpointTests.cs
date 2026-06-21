@@ -1018,9 +1018,10 @@ public sealed class ParticipantVisibleFeedEndpointTests
         var actual = new HashSet<(string, Guid)>();
         foreach (var item in feed.Items)
         {
-            // Each item carries ONLY the audience-safe shape (CORE-APROJ-002): the resource identity
-            // (resourceType + resourceId), the audience-safe title/body, the reveal time and the reveal-scope
-            // marker — NO host-only field. Pinning the exact set catches a future host-only/content field.
+            // Each item carries ONLY the audience-safe shape (CORE-APROJ-002; CORE-ALC-002): the resource
+            // identity (resourceType + resourceId), the audience-safe title/body, the reveal time, the
+            // reveal-scope marker and the audience-safe attachments list — NO host-only field. Pinning the
+            // exact set catches a future host-only/content field.
             AssertItemPropertySet(item);
 
             var resourceType = item.GetProperty("resourceType").GetString();
@@ -1040,9 +1041,9 @@ public sealed class ParticipantVisibleFeedEndpointTests
 
     /// <summary>
     /// Asserts a single feed item's top-level JSON property set is EXACTLY the documented audience-safe shape
-    /// (CORE-APROJ-002): the resource identity, the audience-safe title/body, the reveal time and the
-    /// reveal-scope marker — and nothing else, so a future host-only/content field cannot slip in (docs/08
-    /// DTO rules; threats T2/T7).
+    /// (CORE-APROJ-002; CORE-ALC-002): the resource identity, the audience-safe title/body, the reveal time,
+    /// the reveal-scope marker and the audience-safe attachments list — and nothing else, so a future
+    /// host-only/content field cannot slip in (docs/08 DTO rules; threats T2/T7).
     /// </summary>
     /// <summary>
     /// Asserts a feed item is an audience-WIDE reveal of the expected resource kind carrying the expected
@@ -1071,6 +1072,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 "body",
                 "revealedAt",
                 "revealScope",
+                "attachments",
             },
             itemProperties);
     }

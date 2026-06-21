@@ -195,6 +195,7 @@ alone, with **no host read**:
 | `body` | the resource's **audience-safe short body**, or `null` when the kind's audience projection exposes none (the case for every current resource kind) |
 | `revealedAt` | when the resource became visible to the participant (the reveal time) |
 | `revealScope` | the marker distinguishing an `AudienceWide` reveal from a `SelectedParticipant` (private) reveal |
+| `attachments` | the audience-safe list of assets attached to the resource (CORE-ALC-002); each entry is an `assetId`, an audience-safe `name` and a `contentType`. Empty (never absent) when the resource has no attachments |
 
 The `title`/`body` are produced **only** through the resource kind's existing role-based **audience**
 projection (the same `Participant{Scene,ContentBlock,Entity}Response` shapes the list/read routes use),
@@ -205,6 +206,30 @@ participant may see, so the feed stays already-filtered and fail-closed (a parti
 may see). The resource label/body is resolved through a Visibility-owned port whose adapter lives in the
 composition root, because the central security module may not reference the Scenes/Content/Entities modules
 (CORE-ARCH-001).
+
+#### Audience-safe attachments per feed item (CORE-ALC-002)
+
+Each feed item additionally carries an audience-safe **`attachments`** list — the assets attached to the
+resource through the existing asset-link join (`AssetLink`, asset → content block / entity, CORE-AST-005), so
+an audience surface can **enumerate the attachments of content the participant has been shown and then request
+the authorized per-asset download**, with no host read (the vertical adopter gap ARC-GAP-009). Each entry is:
+
+| Field | Meaning |
+|---|---|
+| `assetId` | the surrogate id of the attached asset — the handle a consumer passes to `getDownloadUrl` |
+| `name` | the asset's **audience-safe** display label, or `null` — Core stores no host-facing asset filename and the storage coordinates are host-only (threats T4/T7), so this is the forward-compatible audience-safe slot, `null` today (exactly as the item's `body` slot is) |
+| `contentType` | the asset's MIME content type — the same non-sensitive metadata the signed download-url response already discloses to an authorized audience caller |
+
+The list **inherits the resource's audience visibility**: an item is built only for a resource the central
+`VisibilityPolicy` has already decided the participant may see, so a **hidden resource's attachments are never
+enumerated** (threat T2) — visibility is never recomputed for attachments. Only an **`Available`** (confirmed,
+downloadable) asset is listed; a still-`Pending` asset is not advertised. Each entry is audience-safe (an
+`assetId` plus an audience-safe `name` and `contentType`), **never** a host-only field (the storage
+provider/bucket/object key and the checksum). Listing an attachment **never** grants access to its bytes: the
+download of each listed asset still goes through the **server-side `getDownloadUrl` authorization check**
+(defence in depth), which re-evaluates the linked resource's session-scoped visibility before minting a signed
+URL (CORE-SVIS-003/004). The attachments are resolved through a Visibility-owned port whose adapter lives in
+the composition root, because the central security module may not reference the Assets module (CORE-ARCH-001).
 
 ### Participant self-identification: own session participant context + the roster `isSelf` marker (CORE-PSELF-001)
 

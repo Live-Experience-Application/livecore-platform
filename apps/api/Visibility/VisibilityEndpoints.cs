@@ -269,10 +269,16 @@ internal static class VisibilityEndpoints
         // reveal time and scope) with the resource's AUDIENCE-SAFE label/body resolved through the
         // Visibility-owned IVisibleResourceAudienceProjector port (CORE-APROJ-002 + CORE-ARCH-001) — produced
         // ONLY through the resource kind's existing audience projection, never the raw host title/body, so no
-        // host-only content leaks (threats T2/T7). Visibility is NEVER recomputed here; the resource was
-        // already decided visible above. The per-resource resolution is bounded by the (already-filtered)
-        // visible set; a resource that no longer resolves (a dangling rule) degrades to a null label/body
-        // without error. The participant only ever sees items it may see (the feed is fail-closed).
+        // host-only content leaks (threats T2/T7) — and the resource's AUDIENCE-SAFE attachments resolved
+        // through the Visibility-owned IVisibleResourceAttachmentsProjector port (CORE-ALC-002 + CORE-ARCH-001).
+        // Each attachment INHERITS this resource's audience visibility because the item is built only for a
+        // resource the central VisibilityPolicy already decided visible — so a hidden resource's attachments
+        // are never enumerated (threat T2), and the download of each listed asset still goes through the
+        // server-side getDownloadUrl authorization check (defence in depth). Visibility is NEVER recomputed
+        // here; the resource was already decided visible above. The per-resource resolution is bounded by the
+        // (already-filtered) visible set; a resource that no longer resolves (a dangling rule) degrades to a
+        // null label/body without error, and a resource with no attachments to an empty list. The participant
+        // only ever sees items it may see (the feed is fail-closed).
         var items = new ParticipantVisibleFeedItem[visibleReveals.Count];
         for (var index = 0; index < visibleReveals.Count; index++)
         {
@@ -286,7 +292,16 @@ internal static class VisibilityEndpoints
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            items[index] = ParticipantVisibleFeedItem.From(reveal, projection);
+            var attachments = await deps.AttachmentsProjector
+                .ListAttachmentsAsync(
+                    context.OrganizationId,
+                    participant.WorkspaceId,
+                    reveal.ResourceType,
+                    reveal.ResourceId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            items[index] = ParticipantVisibleFeedItem.From(reveal, projection, attachments);
         }
 
         // Return the participant-safe envelope with a server timestamp from the injected TimeProvider
@@ -370,20 +385,22 @@ internal static class VisibilityEndpoints
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var preview = services.GetService<VisibilityPreviewService>();
         var audienceProjector = services.GetService<IVisibleResourceAudienceProjector>();
+        var attachmentsProjector = services.GetService<IVisibleResourceAttachmentsProjector>();
 
         if (resolver is null
             || participants is null
             || sessions is null
             || workspaceMembers is null
             || preview is null
-            || audienceProjector is null)
+            || audienceProjector is null
+            || attachmentsProjector is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new VisibilityEndpointDependencies(
-            resolver, participants, sessions, workspaceMembers, preview, audienceProjector);
+            resolver, participants, sessions, workspaceMembers, preview, audienceProjector, attachmentsProjector);
         return true;
     }
 
@@ -455,5 +472,6 @@ internal static class VisibilityEndpoints
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         VisibilityPreviewService Preview,
-        IVisibleResourceAudienceProjector AudienceProjector);
+        IVisibleResourceAudienceProjector AudienceProjector,
+        IVisibleResourceAttachmentsProjector AttachmentsProjector);
 }

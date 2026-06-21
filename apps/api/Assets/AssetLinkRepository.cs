@@ -95,6 +95,48 @@ internal sealed class AssetLinkRepository : IAssetLinkRepository
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<AssetLink>> ListByTargetAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        AssetLinkTargetType targetType,
+        Guid targetId,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a stored target's links, so the lookup fails fast instead of
+        // returning an arbitrary set of rows (mirrors ListByAssetAsync / RemoveByTargetAsync).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (targetId == Guid.Empty)
+        {
+            throw new ArgumentException("Target id must not be empty.", nameof(targetId));
+        }
+
+        // The predicate leads with the tenant column, then matches the workspace, the target type and the
+        // target id, so the list is exactly tenant-, workspace- and target-scoped: another tenant's or
+        // another workspace's links are never returned even when their ids would otherwise be addressable
+        // (threat T5/T1; the organization boundary is checked before the workspace boundary). The ordering
+        // is deterministic — sorted by the time-ordered surrogate id. Read-only, so AsNoTracking keeps the
+        // attachments projection from tracking entities it never writes back.
+        return await _dbContext.AssetLinks
+            .AsNoTracking()
+            .Where(link => link.OrganizationId == organizationId
+                && link.WorkspaceId == workspaceId
+                && link.TargetType == targetType
+                && link.TargetId == targetId)
+            .OrderBy(link => link.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<AssetLinkAddResult> AddAsync(AssetLink assetLink, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(assetLink);

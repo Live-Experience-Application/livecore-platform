@@ -247,6 +247,45 @@ download, and the audit role and any other role are denied fail-closed. The asse
 reached only through the single short-lived signed URL minted after the permission check (the epic
 acceptance criterion; threat T4 "Asset leak"; threat T2 visibility leak).
 
+### Audience-safe attachments projection on the visible feed (CORE-ALC-002)
+
+Linking an asset to a content block / entity (CORE-AST-005) lets the asset **inherit** that resource's
+audience visibility, but until this story a participant/audience surface had **no way to discover WHICH assets
+are attached to a resource it can see**: `getDownloadUrl` needs an `assetId` the consumer must already hold,
+and the participant visible-feed item carried no attachment list (the vertical adopter gap ARC-GAP-009 — an
+audience attachment viewer could download an asset it was *given* an id for, but could not *enumerate* the
+attachments a participant has been shown).
+
+This story projects an **audience-safe attachments list onto each participant visible-feed item**
+(`GET /api/v1/participants/{participantId}/visible-feed`, composing with the enriched item of CORE-APROJ-002).
+For each resource the feed already contains, the assets **linked** to it (the existing `asset_links` rows, read
+by the new tenant- and workspace-scoped `IAssetLinkRepository.ListByTargetAsync`) are projected as an
+`attachments` list — each entry an **`assetId`**, an audience-safe **`name`** and a **`contentType`**:
+
+- the list **inherits the resource's audience visibility through the central `VisibilityPolicy`** and never
+  re-derives it: the feed item is built only for a resource the participant may already see, so an asset linked
+  to a **hidden** resource is **never enumerated** (threat T2 visibility leak; the resource is not even in the
+  feed). Visibility logic is never duplicated (`docs/05_MODULE_CONTRACTS.md`);
+- each entry is **audience-safe** — only an `assetId`, an audience-safe `name` (the forward-compatible label
+  slot, `null` today because Core stores no host-facing asset filename and the storage coordinates are
+  host-only) and the `contentType` — **never** a host-only field (the storage provider/bucket/object key, the
+  checksum, the size or the creator; threats T4 "Asset leak"/T7);
+- only an **`Available`** (confirmed, downloadable) asset is listed; a still-`Pending` upload is not advertised;
+- the download of each listed asset **still goes through the server-side `getDownloadUrl` authorization check**
+  (defence in depth): listing an attachment never grants access to its bytes — a participant who enumerates an
+  attachment still gets a signed URL only after the session-scoped per-participant visibility check passes, so
+  the download check **still denies an asset linked only to a hidden resource** (CORE-SVIS-003/004);
+- the list is **empty (never an error)** when the resource has no attachments, when the resource kind cannot
+  carry attachments (a `Scene` is never an asset-link target), or when the consumer cannot see the resource.
+
+Because the Visibility module (the central security module) may not reference the Assets module (the enforced
+module dependency graph, CORE-ARCH-001), the attachments are resolved through a **Visibility-owned port**
+(`IVisibleResourceAttachmentsProjector`) whose **adapter lives in the composition root**
+(`VisibleResourceAttachmentsProjector`, the same port-and-adapter shape the audience label/body projection
+CORE-APROJ-002 uses). The product-neutral term is a generic **attachment** (no vertical-specific
+vocabulary; `docs/04_PRODUCT_BOUNDARIES.md`). No new route, event or schema is added — the projection reuses
+the existing `asset_links` table, the feed route and the signed download flow.
+
 ### Session-scoped audience download (CORE-SVIS-003, completed by CORE-SVIS-004)
 
 A reveal is **session-scoped** (`docs/adr/0013-session-scoped-visibility-rules.md`): a resource is made
@@ -348,6 +387,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - signed URLs are short-lived
 - asset metadata is filtered by visibility rules
 - an asset is audience-accessible only when linked to a visible content block or entity
+- the visible-feed attachments projection is audience-safe (assetId + name + contentType only, never a host-only storage coordinate) and inherits the resource's visibility, so a hidden resource's attachments are never enumerated; the listed asset's download still goes through getDownloadUrl (defence in depth) (CORE-ALC-002)
 - every audience download (participant and observer) is authorized against the session-scoped visibility of the linked resource; the workspace-wide overload has been removed (CORE-SVIS-004)
 - deleting an asset removes its storage object before its metadata row (no orphaned object)
 

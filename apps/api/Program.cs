@@ -875,6 +875,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // conditional, because it depends on the scene, content-block and entity repositories above.
     builder.Services.AddScoped<IVisibleResourceAudienceProjector, VisibleResourceAudienceProjector>();
 
+    // Visible-resource attachments projector (CORE-ALC-002): the Visibility-owned
+    // IVisibleResourceAttachmentsProjector PORT that resolves each visible feed resource's AUDIENCE-SAFE
+    // attachments (the assets linked to it through the existing AssetLink join) so the participant-visible feed
+    // can carry, per item, the list of assets the participant may download. Like the audience projector above,
+    // the central security module may not reference the Assets module (CORE-ARCH-001), so the adapter
+    // (VisibleResourceAttachmentsProjector) lives in this composition root and resolves the attachments through
+    // the Assets module's link/asset repositories — each attachment INHERITS the resource's audience visibility
+    // (the feed item is built only for an already-visible resource; visibility is never re-derived), carries only
+    // audience-safe metadata (assetId + name + content type, never a host-only storage coordinate — threats
+    // T2/T4/T7), and the download still goes through the server-side getDownloadUrl check (defence in depth).
+    // Registered here, inside the persistence conditional, because it depends on the asset-link and asset
+    // repositories registered in this same conditional.
+    builder.Services.AddScoped<IVisibleResourceAttachmentsProjector, VisibleResourceAttachmentsProjector>();
+
     // Template-loaded entity types loader (CORE-ENT-004, the headline behavior): materializes a
     // workspace's EntityType rows FROM a resolved template's entityTypes definitions, iterating them
     // generically (a foreach, never a switch on type names) and persisting through the Entities

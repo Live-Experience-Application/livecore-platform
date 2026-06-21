@@ -62,6 +62,34 @@ public interface IAssetLinkRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists every link attaching ANY asset to the given target (named by type + id) WITHIN the given
+    /// organization and workspace, in deterministic (time-ordered surrogate id) order (CORE-ALC-002). This
+    /// is the INVERSE of <see cref="ListByAssetAsync"/> (links by asset) — links by TARGET — and is the
+    /// lookup the audience-safe attachments projection
+    /// (<c>LiveCore.Api.Hosting.VisibleResourceAttachmentsProjector</c>) uses to enumerate the assets
+    /// attached to a resource the participant may currently see, so a visible-feed item can carry its
+    /// attachments list. It reads the SAME <c>asset_links</c> rows the per-target deletion
+    /// (<see cref="RemoveByTargetAsync"/>) matches. The list is tenant-, workspace- AND target-scoped: the
+    /// predicate leads with <c>organization_id</c>, then matches <c>workspace_id</c>, <c>target_type</c> and
+    /// <c>target_id</c>, so a foreign tenant's or workspace's links are NEVER returned even when their ids
+    /// would otherwise be addressable (threat T5/T1; the organization boundary is checked before the
+    /// workspace boundary). An empty list is returned for a target with no links (so a resource with no
+    /// attachments degrades to an empty list, never an error). This is NOT a list-everything method, and it
+    /// never decides visibility — the caller lists a resource's links only AFTER the central Visibility engine
+    /// has decided the participant may see the resource, so the link merely inherits the resource's audience
+    /// visibility (it is never re-derived here).
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id, workspace id or target id is empty.
+    /// </exception>
+    Task<IReadOnlyList<AssetLink>> ListByTargetAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        AssetLinkTargetType targetType,
+        Guid targetId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new link. The per-workspace natural key (<c>workspace_id</c>, <c>asset_id</c>,
     /// <c>target_type</c>, <c>target_id</c>) is unique, so the same asset cannot be linked to the same
     /// target twice; a duplicate insert is reported as <see cref="AssetLinkAddResult.Duplicate"/>.

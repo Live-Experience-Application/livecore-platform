@@ -158,21 +158,60 @@ export interface VisibilityRuleResponse {
 }
 
 /**
+ * A single AUDIENCE-SAFE attachment of a participant-visible feed item (CORE-ALC-002):
+ * an asset attached to the visible resource through the existing asset-link join
+ * (CORE-AST-005). It lets an audience surface enumerate the attachments of content the
+ * participant has been shown and then request the authorized per-asset download.
+ *
+ * It is audience-SAFE by construction (docs/08_API_CONTRACTS.md DTO rules; threats
+ * T2/T4/T7): it carries ONLY the asset's surrogate {@link assetId} (the download
+ * handle), an audience-safe {@link name} and the {@link contentType} — never a host-only
+ * field (the storage provider/bucket/object key and the checksum are host-only and never
+ * participant-facing). The attachment is listed only for a resource the participant may
+ * already see, so it inherits the resource's audience visibility (a hidden resource's
+ * attachments are never enumerated). Listing an attachment never grants access to its
+ * bytes: the download still goes through the server-side `getDownloadUrl` authorization
+ * check (defence in depth). Mirrors the server DTO
+ * `ParticipantVisibleFeedAttachment(Guid AssetId, string? Name, string ContentType)`.
+ */
+export interface ParticipantVisibleFeedAttachment {
+  /**
+   * The surrogate id of the attached asset — the handle a consumer passes to
+   * `getDownloadUrl` to request the authorized download.
+   */
+  assetId: Uuid;
+  /**
+   * The asset's audience-safe display label, or `null` when it has none. Core stores no
+   * host-facing asset filename and its storage coordinates are host-only, so this is the
+   * forward-compatible audience-safe label slot and is `null` today (exactly as the feed
+   * item's audience {@link ParticipantVisibleFeedItem.body} slot is).
+   */
+  name: string | null;
+  /**
+   * The attached asset's MIME content type — the same non-sensitive metadata the signed
+   * download-url response already discloses to an authorized audience caller.
+   */
+  contentType: string;
+}
+
+/**
  * A single participant-visible feed item (CORE-API-005; aligned to the server DTO in
- * CORE-APROJ-001; ENRICHED with audience-safe projected fields in CORE-APROJ-002). It
- * names a resource the participant may currently see by its kind and surrogate id —
- * exactly as a {@link RevealResponse} and the realtime audience event address their
- * resource — and additionally carries the audience-safe fields that let a consumer
- * render the revealed item from the feed ALONE, with no host read: an audience-safe
- * {@link title} (and, where the kind has one, a short {@link body}), the
- * {@link revealedAt} reveal time and the {@link revealScope} marker.
+ * CORE-APROJ-001; ENRICHED with audience-safe projected fields in CORE-APROJ-002; an
+ * audience-safe attachments list added in CORE-ALC-002). It names a resource the
+ * participant may currently see by its kind and surrogate id — exactly as a
+ * {@link RevealResponse} and the realtime audience event address their resource — and
+ * additionally carries the audience-safe fields that let a consumer render the revealed
+ * item from the feed ALONE, with no host read: an audience-safe {@link title} (and, where
+ * the kind has one, a short {@link body}), the {@link revealedAt} reveal time, the
+ * {@link revealScope} marker and the {@link attachments} list.
  *
  * It is audience-SAFE by construction (docs/08_API_CONTRACTS.md DTO rules; threats
  * T2/T7): the title/body are produced ONLY through the resource kind's existing
  * role-based audience projection, never the raw host title/body, so projecting an item
  * can never leak hidden content. Mirrors the server DTO
  * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
- * string? Body, DateTimeOffset RevealedAt, string RevealScope)`.
+ * string? Body, DateTimeOffset RevealedAt, string RevealScope,
+ * IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)`.
  */
 export interface ParticipantVisibleFeedItem {
   /**
@@ -201,6 +240,13 @@ export interface ParticipantVisibleFeedItem {
    * scoped to exactly this participant ({@link FeedRevealScope}).
    */
   revealScope: FeedRevealScope;
+  /**
+   * The audience-safe list of assets attached to this resource (CORE-ALC-002), each an
+   * assetId plus an audience-safe name and content type. Empty (never absent) when the
+   * resource has no attachments. Each attachment inherits this resource's audience
+   * visibility, so a hidden resource's attachments are never enumerated (threat T2).
+   */
+  attachments: ParticipantVisibleFeedAttachment[];
 }
 
 /**
