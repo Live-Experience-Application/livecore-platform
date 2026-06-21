@@ -77,8 +77,13 @@ public class DependencyReadinessHealthCheckTests
         // by the short timeout rather than hanging (CORE-RES-005).
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Contains("object-storage", result.Description);
+        // This proves the hung probe is BOUNDED (the check returns) rather than hanging forever; it deliberately
+        // uses a generous ceiling far above the 150 ms ProbeTimeout, not a tight assertion on the timeout's exact
+        // value. The wall-clock can be inflated to several seconds by thread-pool starvation when the whole suite
+        // runs under coverage instrumentation (the Task.Delay timeout fires on time, but its continuation waits for
+        // a thread) — a genuinely unbounded hang would never return and would trip the test runner's own timeout.
         Assert.True(
-            stopwatch.Elapsed < TimeSpan.FromSeconds(5),
+            stopwatch.Elapsed < TimeSpan.FromSeconds(30),
             $"The readiness check should have been bounded by the short timeout, but it took {stopwatch.Elapsed}.");
     }
 
