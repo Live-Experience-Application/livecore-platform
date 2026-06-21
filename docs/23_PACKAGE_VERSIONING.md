@@ -327,6 +327,20 @@ The consistency of the process is enforced by tests, not convention:
   `package.json` version, exported `VERSION` and `CHANGELOG.md` top entry — and
   the root `CHANGELOG.md` — all match the same value, so a one-package bump fails
   CI rather than shipping.
+- A **changelog-completeness gate** (CORE-REL-004,
+  `scripts/lint-changelog-completeness.ps1`, with the pure decision in
+  `scripts/LiveCoreChangelogCompleteness.psm1` and the gate-logic test
+  `scripts/test-changelog-completeness.ps1`, run by the CI `changelog-completeness`
+  job) fails when a published package's `src/` changed since the last release tag
+  with no `CHANGELOG.md` entry **newer than that tag** — an `## [Unreleased]` section
+  carrying a bullet, or a dated `## [X.Y.Z]` entry above the tag (a release cut but
+  not yet tagged). It binds a surface change to its changelog the way the
+  OpenAPI/event/SDK-parity drift gates bind the published types to the server, so a
+  new field, export or SDK method cannot ship undocumented. The lockstep test above
+  pins the top entry's *version*; this gate ensures the entry *exists* for a changed
+  surface. The 0.3.0 cut motivated it: most of the body had changed a package surface
+  with no changelog entry, so the release-cut story had to reconstruct the changelog
+  from the commit range.
 
 ## Release-tag and package-version consistency
 

@@ -10,6 +10,7 @@
 #   spec-consistency     - doc/csv route/table/event/epic consistency check (CORE-DOC-001); also drift-gates the committed OpenAPI document against the routes and uploads it as a build artifact (CORE-OAS-001)
 #   license-compliance   - third-party NOTICE drift/coverage gate, distribution completeness (NOTICE/LICENSE shipped, OCI labels) and the SBOM license-gate logic test (a seeded disallowed license fails) (CORE-LIC-003)
 #   contributor-policy   - DCO sign-off on the pushed/PR commits + SPDX source-header lint, with the gate-logic test (a headerless source file and an unsigned commit fail) (CORE-LIC-004)
+#   changelog-completeness - fail when a published package src/ changed since the last release tag with no CHANGELOG entry newer than the tag, gate-logic tested (CORE-REL-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   storage-docs         - grep backstop: keep RustFS the default example S3-compatible backend in the storage/self-hosting docs, no leftover MinIO setup guidance, any-S3-compatible contract stated (CORE-STOR-002)
 #   action-pin-lint      - fail the build on any workflow uses: ref not pinned to a full 40-char commit SHA (CORE-DEP-008)
@@ -560,6 +561,32 @@ jobs:
           else {
             pwsh -NoProfile -File scripts/lint-dco-signoff.ps1 -BaseSha $env:PUSH_BEFORE_SHA -HeadSha $env:PUSH_AFTER_SHA
           }
+
+  changelog-completeness:
+    name: Changelog completeness (CORE-REL-004)
+    runs-on: ubuntu-latest
+    # CORE-REL-004: a change to a published package's typed surface must not ship
+    # undocumented. The 0.3.0 cut found that a package src/ change can land with no
+    # changelog entry, so the release had to reconstruct the changelog from the commit
+    # range. This gate fails when packages/<pkg>/src changed since the last release tag
+    # with no CHANGELOG entry newer than that tag (an Unreleased section carrying a
+    # bullet, or a dated entry above the tag - a release cut but not yet tagged). The
+    # gate-logic test proves the pure decision on every run; fetch-depth: 0 makes the
+    # <lastTag>..HEAD range and the tags available.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Full history + tags so the last-release-tag..HEAD range resolves.
+          fetch-depth: 0
+
+      - name: Test the changelog-completeness gate logic
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-changelog-completeness.ps1
+
+      - name: Enforce changelog completeness since the last release tag
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/lint-changelog-completeness.ps1
 
   migration-down-lint:
     name: Migration Down() review (CORE-DR-004)
@@ -1940,6 +1967,7 @@ jobs:
       - spec-consistency
       - license-compliance
       - contributor-policy
+      - changelog-completeness
       - migration-down-lint
       - storage-docs
       - action-pin-lint
@@ -2214,6 +2242,7 @@ jobs:
       - spec-consistency
       - license-compliance
       - contributor-policy
+      - changelog-completeness
       - migration-down-lint
       - storage-docs
       - action-pin-lint
