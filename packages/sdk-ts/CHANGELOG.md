@@ -8,7 +8,7 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
-## [Unreleased]
+## [0.3.0] - 2026-06-21
 
 ### Added
 
@@ -23,6 +23,27 @@ The Core SDK and UI packages are released together (lockstep), so every
   `undefined` only when Core sent none — never fabricated (a blank header is treated
   as absent). No new runtime dependency and no route/method change; the new optional
   fields are an additive change to the typed surface.
+- A new `InvitationsClient` resource group, `client.invitations` (CORE-INV-002): the
+  authenticated caller's own pending-invitation self-discovery read over
+  `GET /api/v1/me/invitations`, so an onboarding flow can discover the workspaces that
+  invited it and then drive `client.workspaces.acceptInvitation`. A new resource-client
+  method (a MINOR change).
+- A new `PushSubscriptionsClient` resource group, `client.pushSubscriptions`
+  (CORE-PUSH-001): `getVapidPublicKey()`, `register(...)` and `delete(subscriptionId)`
+  over the closed-app Web Push registration routes (`GET /api/v1/push/vapid-public-key`,
+  `POST` and `DELETE /api/v1/me/push-subscriptions`). New resource-client methods (a
+  MINOR change).
+- `client.assets.confirmUpload(assetId, request)` (CORE-ALC-001): the `Pending` →
+  `Available` confirm-upload transition over `POST /api/v1/assets/{assetId}/confirm-upload`.
+  A new resource-client method (a MINOR change).
+- `client.realtime.getSessionParticipantContext(...)` (CORE-PSELF-001): the caller's own
+  session participant context over `GET /api/v1/sessions/{sessionId}/me`, so an audience
+  surface can learn its own surrogate participant id and then call the participant-keyed
+  reads for itself. A new resource-client method (a MINOR change).
+- `client.visibility.lockRule(...)` and `client.visibility.unlockRule(...)`
+  (CORE-VSEAL-001): seal and clear the authoring lock on a visibility rule over the
+  `.../visibility-rules/{ruleId}/lock` and `/unlock` routes. New resource-client methods
+  (a MINOR change).
 
 ## [0.2.0] - 2026-06-19
 

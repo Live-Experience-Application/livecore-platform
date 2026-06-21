@@ -33,7 +33,7 @@ export const PACKAGE_NAME = "@livecore/ui-core";
  * fails if they drift) and with the top entry of this package's `CHANGELOG.md`.
  * See the versioning and changelog process in `docs/23_PACKAGE_VERSIONING.md`.
  */
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export * from "./variants.js";
 export * from "./props.js";

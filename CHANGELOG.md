@@ -12,17 +12,55 @@ detail; this root file is the workspace-level summary. The .NET API and worker
 hosts are not published packages and are not versioned here. See
 `docs/23_PACKAGE_VERSIONING.md` for the full versioning and changelog process.
 
-## [Unreleased]
+## [0.3.0] - 2026-06-21
+
+This release adds the audience-projection, participant self-service,
+invitation-discovery, asset-lifecycle, sealed/scheduled-visibility and closed-app
+Web Push surfaces built since `0.2.0`, bumped in lockstep across all four
+`@livecore/*` packages. Everything is additive — new optional fields, new exports,
+new SDK resource methods and new design-token roles, plus the participant
+visible-feed item changing from an empty placeholder to a populated, audience-safe
+shape — so it ships as a MINOR bump (`docs/23_PACKAGE_VERSIONING.md`). The operator
+publishes it by pushing the matching `v0.3.0` git tag, which triggers the tag-gated
+CI publish pipeline (`publish` and `publish-packages`); the gates assert the tag
+equals this shared package version before anything ships.
 
 ### Added
 
-- `@livecore/sdk-ts` surfaces the correlation ids the Core API echoes on every
-  response (CORE-SDX-001): `LiveCoreApiError` and the success `SdkResponse` envelope
-  now both carry `requestId` (`X-Request-Id`) and `traceparent` (the W3C trace
-  context), so a vertical can log `request_id` with every call and show it in an
-  error state without wrapping the injected `fetch`. The ids are `undefined` only
-  when Core sent none — never fabricated. An additive (MINOR) change to the SDK's
-  typed surface; no route, contract or dependency change.
+- `@livecore/contracts`: the populated, audience-safe participant **visible feed**
+  (`ParticipantVisibleFeedItem` now carries the resource identity, an audience-safe
+  `title`/`body`, `revealedAt`, a `revealScope` marker, `locked`, `scheduledRevealAt`
+  and an `attachments` list of `ParticipantVisibleFeedAttachment` — CORE-APROJ-001/002,
+  CORE-ALC-002, with the new `FeedRevealScope` enum); `ParticipantEntityResponse.entityTypeKey`
+  (CORE-APROJ-003); `VisibilityRuleResponse.resourceLabel`/`locked`/`scheduledRevealAt`
+  and `CreateVisibilityRuleRequest.scheduledRevealAt` (CORE-APROJ-004, CORE-VSEAL-001/002);
+  `SessionParticipantContext` for `GET /api/v1/sessions/{sessionId}/me` and
+  `ParticipantRosterParticipant.isSelf` (CORE-PSELF-001); `MyPendingWorkspaceInvitationResponse`
+  for `GET /api/v1/me/invitations` (CORE-INV-002); the closed-app Web Push contracts in a
+  new `push.ts` module (CORE-PUSH-001); the asset confirm-upload contracts
+  (`ConfirmUploadRequest`/`ConfirmUploadResponse`, CORE-ALC-001); and the subject's push
+  subscriptions in the personal-data export (CORE-PUSH-001).
+- `@livecore/sdk-ts`: the echoed `requestId`/`traceparent` correlation ids on the
+  success `SdkResponse` envelope and on `LiveCoreApiError` (CORE-SDX-001); the new
+  resource groups `client.invitations` (CORE-INV-002) and `client.pushSubscriptions`
+  (CORE-PUSH-001); and the new methods `client.assets.confirmUpload` (CORE-ALC-001),
+  `client.realtime.getSessionParticipantContext` (CORE-PSELF-001) and
+  `client.visibility.lockRule`/`unlockRule` (CORE-VSEAL-001).
+- `@livecore/design-tokens`: paired `*Foreground` on-status color roles
+  (`successForeground`, `warningForeground`, `dangerForeground`, `infoForeground`)
+  across the role tuple and the light/dark base theme, each clearing the WCAG 2.1 AA
+  body-text contrast threshold (CORE-DTOK-001).
+
+### Changed
+
+- `@livecore/contracts` `ParticipantVisibleFeedItem` changed from the empty
+  `Record<string, never>` placeholder to the populated, audience-safe interface above
+  (CORE-APROJ-001 first realigned the published type to the server DTO it had drifted
+  from; CORE-APROJ-002 and CORE-ALC-002 enriched it). The feed is no longer a
+  perpetually-empty skeleton. Pre-1.0 the shape change ships as a MINOR bump; a
+  consumer that relied on the empty type reads the new fields.
+- `@livecore/ui-core` has no surface change this release; it is bumped in lockstep so
+  the four packages always share one version.
 
 ## [0.2.0] - 2026-06-19
 
