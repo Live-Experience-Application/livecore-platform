@@ -358,6 +358,18 @@ builder.Services.AddSingleton(PurchaseEnvironmentPolicy.ForDeployment(builder.En
 // purchase: with nothing configured an inbound notification is 503 and nothing happens.
 builder.Services.AddSingleton<StoreNotificationParserResolver>();
 
+// Web Push (VAPID) configuration (CORE-PUSH-001, the "Closed-App Push Notifications" epic). WebPushOptions
+// carries the deployment's VAPID PUBLIC key — the value a browser client needs to create a push subscription,
+// exposed by GET /api/v1/push/vapid-public-key. It is read from configuration only (WebPush:Vapid:PublicKey;
+// docs/13_SELF_HOSTING_REQUIREMENTS.md) and registered UNCONDITIONALLY (it needs no database or identity,
+// exactly like the metrics/OpenAPI surfaces), so the public-key route exists even when the host runs without
+// persistence. FAIL-CLOSED / INERT when unconfigured: with no key configured the surface is inert — the
+// public-key route reports a null key and registration is refused (no subscription is registrable), the same
+// private-by-default posture the host holds without object storage or an OIDC authority. The VAPID PRIVATE key
+// stays deployment-side and is never read here or shipped to a client; the signed outbound delivery that needs
+// it is a later story (CORE-PUSH-002). No credential lives in source (threat T7).
+builder.Services.AddSingleton(WebPushOptions.FromConfiguration(builder.Configuration));
+
 // Authentication wiring (CORE-WS-003, the first endpoint story). Adds JWT bearer
 // validation for the external OIDC provider per the documented request flow
 // (docs/02_ARCHITECTURE.md) and ADR 0005, configured only from configuration
@@ -509,8 +521,20 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // TENANT-SCOPED (their identity profile plus organization membership, workspace memberships, participant
     // records and invited-email rows), auditing the access by id. Registered here inside the persistence
     // conditional alongside the repositories it composes (user-profile, organization-member, workspace-member,
-    // participant, invitation and audit-log).
+    // participant, invitation, push-subscription and audit-log).
     builder.Services.AddScoped<PersonalDataExportService>();
+
+    // Per-principal Web Push subscription store (CORE-PUSH-001, the "Closed-App Push Notifications" epic): the
+    // IdentityAccess module owns the global, per-principal push_subscriptions table that backs the closed-app
+    // push surface (POST/DELETE /api/v1/me/push-subscriptions). The subscription is scoped to — and authorized
+    // by — the authenticated principal (the story's "the store must live where the principal and authorization
+    // live"), and its users(id) foreign key is ON DELETE CASCADE so the data-subject erasure (CORE-PRIV-001)
+    // removes a subject's subscriptions automatically and the user-data export (CORE-PRIV-004) discloses them.
+    // The registration service is the idempotent (user, endpoint) upsert behind the register route. Registered
+    // here inside the persistence conditional alongside the IdentityAccess repositories above; the VAPID
+    // public-key surface (WebPushOptions) is registered unconditionally above.
+    builder.Services.AddScoped<IPushSubscriptionRepository, PushSubscriptionRepository>();
+    builder.Services.AddScoped<PushSubscriptionRegistrationService>();
 
     // Authorized tenant organization deletion command (CORE-PRIV-002, tenant offboarding / data deletion): the
     // Organizations module's destructive teardown command. An authorized Owner (DELETE
@@ -1725,6 +1749,17 @@ app.MapLiveCoreOpenApi();
 // does not assert; the response is a safe DTO with no token/secret (threats
 // T5/T7).
 app.MapMeEndpoints();
+
+// Closed-app Web Push subscription surface (CORE-PUSH-001): GET /api/v1/push/vapid-public-key plus
+// POST/DELETE /api/v1/me/push-subscriptions, the IdentityAccess module's per-principal push registration. They
+// live in an authenticated route group (anonymous callers get 401); the /me register/delete fail closed (503)
+// when persistence is not configured and deny a service account (403), and the subscription is scoped entirely
+// to the caller's server-resolved profile so a caller can never register or delete another principal's
+// subscription (a foreign/unknown id is a hidden 404; threats T1/T5). The public-key route needs no persistence
+// and is INERT when no VAPID key is configured (null key, registration refused). No delivery is wired here
+// (that is CORE-PUSH-002). The push-subscription repository, registration service and WebPushOptions it consumes
+// are registered above (the repository/service inside the persistence conditional, the options unconditionally).
+app.MapPushSubscriptionEndpoints();
 
 // Organization endpoints (CORE-API-001): the tenant create/read API,
 // GET/POST /api/v1/organizations. They live in an authenticated route group and

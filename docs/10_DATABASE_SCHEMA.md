@@ -34,6 +34,7 @@ Current Core tables:
 ```text
 organizations
 users
+push_subscriptions
 organization_members
 workspaces
 workspace_members
@@ -78,6 +79,7 @@ Examples:
 organizations(id)
 workspaces(organization_id, id)
 workspace_members(workspace_id, user_id)
+push_subscriptions(user_id, endpoint) unique
 workspace_invitations(token_hash) unique
 workspace_invitations(organization_id, workspace_id)
 participants(workspace_id, id)
@@ -188,7 +190,8 @@ losing dependent records:
 - `assets.created_by`, `export_jobs.requested_by` and `participants.user_id` are nullable **`ON DELETE SET
   NULL`**: the dependent record SURVIVES with an anonymized (null) creator/requester/user link;
 - `organization_members.user_id` and `workspace_members.user_id` are **`ON DELETE CASCADE`**: the subject's
-  access grants are revoked everywhere;
+  access grants are revoked everywhere; `push_subscriptions.user_id` (CORE-PUSH-001) is likewise **`ON DELETE
+  CASCADE`**, so the subject's per-principal Web Push subscriptions are removed with their profile;
 - `audit_logs` reference the actor/resource as **recorded facts, not foreign keys**, so the PII-free
   append-only audit trail and its per-tenant hash chain survive a user deletion intact (the erasure is
   reconcilable with the immutable audit log — `docs/07_SECURITY_THREAT_MODEL.md`).

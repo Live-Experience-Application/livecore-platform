@@ -19,6 +19,7 @@ Roles are generic. Verticals may rename them in UI.
 | View own participant feed | no | no | no | no | yes | no | no |
 | Resolve own session participant context | own | own | own | own | own | own | own |
 | Discover own pending invitations | own | own | own | own | own | own | own |
+| Manage own push subscriptions | own | own | own | own | own | own | own |
 | View observer feed | yes | yes | yes | yes | no | yes | no |
 | View audit log | yes | yes | optional | no | no | no | yes |
 | Export workspace | yes | yes | optional | no | no | no | optional |
@@ -53,6 +54,22 @@ Roles are generic. Verticals may rename them in UI.
   other rule routes: a foreign-tenant, cross-session, unknown rule or a non-member of the session's workspace is
   an indistinguishable `404`, a non-authoring member is `403`. The lock change is recorded as a
   `VisibilityRuleLockChanged` audit fact (actor + governed resource + before/after lock-state, by id only).
+- A caller managing its OWN closed-app Web Push subscriptions (`POST /api/v1/me/push-subscriptions` and
+  `DELETE /api/v1/me/push-subscriptions/{subscriptionId}`, CORE-PUSH-001, the "Manage own push subscriptions"
+  row above) is a self-service surface scoped ENTIRELY to the authenticated caller's server-resolved
+  user-profile id, never a client-supplied principal id, so a caller can ONLY ever register, refresh or delete
+  its OWN browser push subscription — never another principal's (threats T1/T5). A delete addressing another
+  principal's subscription id (or an unknown id) removes nothing and is an indistinguishable hidden `404`, so a
+  caller can never delete or even probe another principal's subscription. A push subscription is a USER concept
+  (only a human user has a browser), so a service-account principal is denied `403`. The "own" cells mean the
+  surface is keyed to the caller's own subscriptions regardless of workspace role. The companion VAPID
+  public-key read (`GET /api/v1/push/vapid-public-key`) returns published deployment configuration any
+  authenticated caller may read; the VAPID PRIVATE key is never exposed (threat T7). The surface is INERT when
+  no VAPID key is configured: the public-key route returns a null key and registration is refused `503` (no
+  subscription is registrable), while deletion stays available so a stale subscription can always be cleaned up.
+  A push subscription is per-principal personal data: it is removed on the data-subject erasure (CORE-PRIV-001,
+  via the `push_subscriptions.user_id` `ON DELETE CASCADE`) and disclosed in the user-data export
+  (CORE-PRIV-004), with the `auth` encryption secret never projected.
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.

@@ -30,7 +30,7 @@ namespace LiveCore.Api.Persistence;
 ///
 /// The context is shared infrastructure of the modular monolith: each
 /// module contributes only its own table mappings (the IdentityAccess
-/// <c>users</c> table, the Organizations <c>organizations</c> and
+/// <c>users</c> and <c>push_subscriptions</c> tables, the Organizations <c>organizations</c> and
 /// <c>organization_members</c> tables, the Workspaces <c>workspaces</c>,
 /// <c>workspace_members</c> and <c>workspace_invitations</c> tables, the
 /// Participants <c>participants</c> table, the Sessions <c>sessions</c> table, the
@@ -60,6 +60,9 @@ public sealed class LiveCoreDbContext : DbContext
 
     /// <summary>User profile references owned by the IdentityAccess module.</summary>
     public DbSet<UserProfile> UserProfiles => Set<UserProfile>();
+
+    /// <summary>Per-principal Web Push subscriptions owned by the IdentityAccess module.</summary>
+    public DbSet<PushSubscription> PushSubscriptions => Set<PushSubscription>();
 
     /// <summary>Organization tenant roots owned by the Organizations module.</summary>
     public DbSet<Organization> Organizations => Set<Organization>();
@@ -178,6 +181,7 @@ public sealed class LiveCoreDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfiguration(new UserProfileConfiguration());
+        modelBuilder.ApplyConfiguration(new PushSubscriptionConfiguration());
         modelBuilder.ApplyConfiguration(new OrganizationConfiguration());
         modelBuilder.ApplyConfiguration(new OrganizationMemberConfiguration());
         modelBuilder.ApplyConfiguration(new WorkspaceConfiguration());

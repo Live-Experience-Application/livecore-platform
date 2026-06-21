@@ -92,6 +92,9 @@ it is a row in `csv/api_routes.csv`):
 ```text
 GET    /api/v1/me
 GET    /api/v1/me/invitations
+GET    /api/v1/push/vapid-public-key
+POST   /api/v1/me/push-subscriptions
+DELETE /api/v1/me/push-subscriptions/{subscriptionId}
 GET    /api/v1/organizations
 POST   /api/v1/organizations
 DELETE /api/v1/organizations/{organizationSlug}

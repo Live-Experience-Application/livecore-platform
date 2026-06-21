@@ -21,6 +21,69 @@
         }
       }
     },
+    "/api/v1/push/vapid-public-key": {
+      "get": {
+        "tags": [
+          "PushSubscriptionEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/me/push-subscriptions": {
+      "post": {
+        "tags": [
+          "PushSubscriptionEndpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/RegisterPushSubscriptionRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/me/push-subscriptions/{subscriptionId}": {
+      "delete": {
+        "tags": [
+          "PushSubscriptionEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "subscriptionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/organizations": {
       "get": {
         "tags": [
@@ -2825,6 +2888,28 @@
           }
         }
       },
+      "RegisterPushSubscriptionRequest": {
+        "required": [
+          "endpoint",
+          "p256dh",
+          "auth"
+        ],
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "nullable": true
+          },
+          "p256dh": {
+            "type": "string",
+            "nullable": true
+          },
+          "auth": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "ReorderSceneRequest": {
         "required": [
           "organizationSlug",
@@ -2891,6 +2976,9 @@
   "tags": [
     {
       "name": "MeEndpoints"
+    },
+    {
+      "name": "PushSubscriptionEndpoints"
     },
     {
       "name": "OrganizationEndpoints"

@@ -49,6 +49,25 @@ internal static class TestData
         return profile;
     }
 
+    /// <summary>
+    /// Creates and persists a Web Push subscription for a principal (CORE-PUSH-001), driving the real
+    /// <see cref="PushSubscription.Register"/> aggregate factory so the seeded row has exactly the invariants
+    /// production would produce. Used to arrange a subject's per-principal push subscription for the erasure
+    /// (cascade-removed) and user-data export (disclosed) tests. The endpoint and keys are generic, neutral data.
+    /// </summary>
+    public static async Task<PushSubscription> AddPushSubscriptionAsync(
+        this LiveCoreDbContext context,
+        Guid userProfileId,
+        string endpoint = "https://push.example.test/sub/seed",
+        string p256dh = "seed-p256dh-key",
+        string auth = "seed-auth-secret")
+    {
+        var subscription = PushSubscription.Register(userProfileId, endpoint, p256dh, auth, SeedTime);
+        context.PushSubscriptions.Add(subscription);
+        await context.SaveChangesAsync();
+        return subscription;
+    }
+
     /// <summary>Creates and persists an organization.</summary>
     public static async Task<Organization> AddOrganizationAsync(
         this LiveCoreDbContext context,

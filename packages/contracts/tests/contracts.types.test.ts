@@ -44,6 +44,7 @@ import type {
   ProblemCode,
   ProblemDetails,
   PurchaseProvider,
+  RegisterPushSubscriptionRequest,
   ReorderSceneRequest,
   RevealRequest,
   SessionEventPayloadMap,
@@ -507,6 +508,14 @@ export type CreateVisibilityRuleRequestMatchesSchema = Assert<
 export type ReorderSceneRequestMatchesSchema = Assert<
   SameKeys<ReorderSceneRequest, Schemas["ReorderSceneRequest"]>
 >;
+// The closed-app Web Push registration request (CORE-PUSH-001): its property names
+// must match the generated schema exactly, same as the request DTOs above.
+export type RegisterPushSubscriptionRequestMatchesSchema = Assert<
+  SameKeys<
+    RegisterPushSubscriptionRequest,
+    Schemas["RegisterPushSubscriptionRequest"]
+  >
+>;
 
 // The generated ProblemDetails schema carries exactly the fields the curated
 // `ProblemDetails` models. The curated type adds an index signature for the RFC 7807
@@ -546,6 +555,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "HideRequest"
     | "InviteWorkspaceMemberRequest"
     | "ProblemDetails"
+    | "RegisterPushSubscriptionRequest"
     | "ReorderSceneRequest"
     | "RevealRequest"
     | "UpdateWorkspaceRequest"

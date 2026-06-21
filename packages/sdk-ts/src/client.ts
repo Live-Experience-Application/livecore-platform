@@ -29,6 +29,7 @@ import { ExportsClient } from "./resources/exports.js";
 import { IdentityClient } from "./resources/identity.js";
 import { InvitationsClient } from "./resources/invitations.js";
 import { OrganizationsClient } from "./resources/organizations.js";
+import { PushSubscriptionsClient } from "./resources/push-subscriptions.js";
 import { RealtimeClient } from "./resources/realtime.js";
 import { RecapsClient } from "./resources/recaps.js";
 import { ScenesClient } from "./resources/scenes.js";
@@ -51,6 +52,8 @@ export class LiveCoreClient {
   readonly workspaces: WorkspacesClient;
   /** The authenticated caller's own pending-invitation self-discovery read. */
   readonly invitations: InvitationsClient;
+  /** The caller's own closed-app Web Push subscription registration and the VAPID public key. */
+  readonly pushSubscriptions: PushSubscriptionsClient;
   /** Session list/create/read, lifecycle commands and participant presence. */
   readonly sessions: SessionsClient;
   /** Scene list, create, read, reorder and delete routes. */
@@ -84,6 +87,7 @@ export class LiveCoreClient {
     this.templates = new TemplatesClient(http);
     this.workspaces = new WorkspacesClient(http);
     this.invitations = new InvitationsClient(http);
+    this.pushSubscriptions = new PushSubscriptionsClient(http);
     this.sessions = new SessionsClient(http);
     this.scenes = new ScenesClient(http);
     this.content = new ContentClient(http);

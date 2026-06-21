@@ -1,6 +1,7 @@
 table,module,scope,notes
 organizations,Organizations,global,Tenant root
 users,IdentityAccess,global,OIDC-linked user reference
+push_subscriptions,IdentityAccess,global,Per-principal Web Push subscription (endpoint plus p256dh/auth keys; unique per user+endpoint; ON DELETE CASCADE with users so erased on user erasure)
 organization_members,Organizations,organization,Tenant membership
 workspaces,Workspaces,organization,Generic workspace
 workspace_members,Workspaces,workspace,Workspace roles

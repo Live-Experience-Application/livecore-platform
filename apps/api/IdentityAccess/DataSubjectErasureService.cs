@@ -31,11 +31,12 @@ namespace LiveCore.Api.IdentityAccess;
 /// WHAT THE SCHEMA'S FOREIGN KEYS DO (the cascade the erasure relies on). Deleting the user row lets the
 /// database honor the foreign keys other modules already declared against <c>users(id)</c>:
 /// <c>assets.created_by</c> and <c>export_jobs.requested_by</c> are <c>ON DELETE SET NULL</c>, so those records
-/// SURVIVE with a null (anonymized) creator; <c>organization_members.user_id</c> and
-/// <c>workspace_members.user_id</c> are <c>ON DELETE CASCADE</c>, so the subject's access grants are revoked
-/// everywhere. The append-only <c>audit_logs</c> reference the actor/resource as RECORDED FACTS, not foreign
-/// keys, so the PII-free audit trail and its per-tenant hash chain survive intact — which is precisely what
-/// makes erasure reconcilable with the immutable audit log.
+/// SURVIVE with a null (anonymized) creator; <c>organization_members.user_id</c>, <c>workspace_members.user_id</c>
+/// and <c>push_subscriptions.user_id</c> (CORE-PUSH-001) are <c>ON DELETE CASCADE</c>, so the subject's access
+/// grants and their per-principal Web Push subscriptions are removed everywhere. The append-only
+/// <c>audit_logs</c> reference the actor/resource as RECORDED FACTS, not foreign keys, so the PII-free audit
+/// trail and its per-tenant hash chain survive intact — which is precisely what makes erasure reconcilable with
+/// the immutable audit log.
 ///
 /// SCOPE / AUTHORIZATION. The command is AUTHORIZED within a tenant (the endpoint resolves an Owner/Admin and a
 /// target member of that tenant before calling in, exactly like the member-removal command), but its EFFECT is

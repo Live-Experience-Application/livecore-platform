@@ -67,6 +67,7 @@ public sealed class PersonalDataExportServiceTests : IDisposable
             new WorkspaceMemberRepository(context),
             new ParticipantRepository(context),
             new WorkspaceInvitationRepository(context),
+            new PushSubscriptionRepository(context),
             new AuditLogRepository(context));
 
     [Fact]
@@ -79,6 +80,7 @@ public sealed class PersonalDataExportServiceTests : IDisposable
         Guid workspaceMembershipAId = Guid.Empty;
         Guid participantAId = Guid.Empty;
         Guid invitationAId = Guid.Empty;
+        Guid subjectPushSubscriptionId = Guid.Empty;
 
         await using (var seed = CreateContext())
         {
@@ -104,6 +106,14 @@ public sealed class PersonalDataExportServiceTests : IDisposable
             var invitationA = WorkspaceInvitation.Create(orgA.Id, workspaceA.Id, _subjectEmail, MembershipRole.Participant, _seed, out _);
             seed.WorkspaceInvitations.Add(invitationA);
 
+            // A global, per-principal Web Push subscription for the subject (CORE-PUSH-001): no tenant, so it is
+            // disclosed regardless of the resolved tenant. A control subscription belongs to the OTHER subject.
+            var subjectPushSubscription = PushSubscription.Register(
+                subject.Id, "https://push.example.test/sub/subject", "p256dh-subject", "auth-subject", _seed);
+            seed.PushSubscriptions.Add(subjectPushSubscription);
+            seed.PushSubscriptions.Add(PushSubscription.Register(
+                other.Id, "https://push.example.test/sub/other", "p256dh-other", "auth-other", _seed));
+
             // CROSS-TENANT control (threat T5): the SAME subject also has data in tenant B — it must NOT appear in
             // the tenant-A export.
             seed.OrganizationMembers.Add(OrganizationMember.Create(orgB.Id, subject.Id, MembershipRole.Participant, _seed));
@@ -127,6 +137,7 @@ public sealed class PersonalDataExportServiceTests : IDisposable
             workspaceMembershipAId = workspaceMembershipA.Id;
             participantAId = participantA.Id;
             invitationAId = invitationA.Id;
+            subjectPushSubscriptionId = subjectPushSubscription.Id;
         }
 
         PersonalDataExport? export;
@@ -158,6 +169,12 @@ public sealed class PersonalDataExportServiceTests : IDisposable
         var invitation = Assert.Single(export.Invitations);
         Assert.Equal(invitationAId, invitation.Id);
         Assert.Equal(_subjectEmail, invitation.InvitedEmail);
+
+        // The global push subscription is exactly the subject's own (the other subject's is absent), and the
+        // auth encryption secret is never carried on the assembled aggregate's projection.
+        var pushSubscription = Assert.Single(export.PushSubscriptions);
+        Assert.Equal(subjectPushSubscriptionId, pushSubscription.Id);
+        Assert.Equal("https://push.example.test/sub/subject", pushSubscription.Endpoint);
 
         await using (var verify = CreateContext())
         {

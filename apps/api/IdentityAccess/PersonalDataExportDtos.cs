@@ -29,13 +29,15 @@ namespace LiveCore.Api.IdentityAccess;
 /// <param name="WorkspaceMemberships">The subject's workspace memberships within this tenant.</param>
 /// <param name="Participants">The subject's participant records within this tenant.</param>
 /// <param name="Invitations">The invitations addressed to the subject's email within this tenant.</param>
+/// <param name="PushSubscriptions">The subject's global Web Push subscriptions (per-principal personal data).</param>
 public sealed record PersonalDataExportResponse(
     Guid OrganizationId,
     PersonalDataExportSubjectResponse Subject,
     PersonalDataExportOrganizationMembershipResponse? OrganizationMembership,
     IReadOnlyList<PersonalDataExportWorkspaceMembershipResponse> WorkspaceMemberships,
     IReadOnlyList<PersonalDataExportParticipantResponse> Participants,
-    IReadOnlyList<PersonalDataExportInvitationResponse> Invitations)
+    IReadOnlyList<PersonalDataExportInvitationResponse> Invitations,
+    IReadOnlyList<PersonalDataExportPushSubscriptionResponse> PushSubscriptions)
 {
     /// <summary>
     /// Projects the assembled <paramref name="export"/> into its machine-readable response. Internal because the
@@ -60,6 +62,9 @@ public sealed record PersonalDataExportResponse(
                 .ToArray(),
             export.Invitations
                 .Select(PersonalDataExportInvitationResponse.From)
+                .ToArray(),
+            export.PushSubscriptions
+                .Select(PersonalDataExportPushSubscriptionResponse.From)
                 .ToArray());
     }
 }
@@ -219,5 +224,31 @@ public sealed record PersonalDataExportInvitationResponse(
             invitation.Status.ToString(),
             invitation.ExpiresAt,
             invitation.CreatedAt);
+    }
+}
+
+/// <summary>
+/// A Web Push subscription registered by the subject within a personal-data export (CORE-PUSH-001): the
+/// subscription id, the push service endpoint (the subject's per-device personal datum) and when it was
+/// registered. The encryption keys (<c>p256dh</c> and the <c>auth</c> secret) are NEVER projected — the
+/// subscription's secret stays out of the export, exactly as the invitation token hash does (threats T6/T7).
+/// </summary>
+/// <param name="Id">Surrogate id of the subscription row.</param>
+/// <param name="Endpoint">The push service endpoint URL the subscription is registered against.</param>
+/// <param name="CreatedAt">When the subscription was registered (UTC).</param>
+public sealed record PersonalDataExportPushSubscriptionResponse(
+    Guid Id,
+    string Endpoint,
+    DateTimeOffset CreatedAt)
+{
+    /// <summary>Projects a <see cref="PushSubscription"/> into its export DTO, never emitting the keys.</summary>
+    public static PersonalDataExportPushSubscriptionResponse From(PushSubscription subscription)
+    {
+        ArgumentNullException.ThrowIfNull(subscription);
+
+        return new PersonalDataExportPushSubscriptionResponse(
+            subscription.Id,
+            subscription.Endpoint,
+            subscription.CreatedAt);
     }
 }

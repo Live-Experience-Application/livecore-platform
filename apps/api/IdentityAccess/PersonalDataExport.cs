@@ -34,10 +34,16 @@ namespace LiveCore.Api.IdentityAccess;
 /// <param name="WorkspaceMemberships">The subject's workspace memberships within this tenant (possibly empty).</param>
 /// <param name="Participants">The subject's participant records within this tenant (possibly empty).</param>
 /// <param name="Invitations">The invitations addressed to the subject's email within this tenant (possibly empty).</param>
+/// <param name="PushSubscriptions">
+/// The subject's Web Push subscriptions (CORE-PUSH-001). Like <see cref="Subject"/>, these are GLOBAL,
+/// per-principal personal data (no tenant), disclosed to the subject themselves or the data controller acting
+/// for them; possibly empty.
+/// </param>
 internal sealed record PersonalDataExport(
     Guid OrganizationId,
     UserProfile Subject,
     OrganizationMember? OrganizationMembership,
     IReadOnlyList<WorkspaceMember> WorkspaceMemberships,
     IReadOnlyList<Participant> Participants,
-    IReadOnlyList<WorkspaceInvitation> Invitations);
+    IReadOnlyList<WorkspaceInvitation> Invitations,
+    IReadOnlyList<PushSubscription> PushSubscriptions);

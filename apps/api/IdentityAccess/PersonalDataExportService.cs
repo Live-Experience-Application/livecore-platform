@@ -19,10 +19,11 @@ namespace LiveCore.Api.IdentityAccess;
 ///
 /// WHAT IS ASSEMBLED. A data subject's personal data is spread across the schema, so the export is cross-cutting —
 /// it gathers exactly the documented set (the story's acceptance criteria): the subject's user-profile identity,
-/// their organization membership in the tenant, their workspace memberships, their participant records and the
-/// invitations addressed to their email. The same repositories the erasure command reuses are reused here for the
-/// reads (the user-profile, organization-membership, workspace-membership, participant and invitation
-/// repositories), so there is no parallel persistence path.
+/// their organization membership in the tenant, their workspace memberships, their participant records, the
+/// invitations addressed to their email and their global Web Push subscriptions (CORE-PUSH-001). The same
+/// repositories the erasure command reuses are reused here for the reads (the user-profile,
+/// organization-membership, workspace-membership, participant, invitation and push-subscription repositories), so
+/// there is no parallel persistence path.
 ///
 /// TENANT SCOPE (threat T5). Unlike the erasure — whose EFFECT is global because a subject's personal data must be
 /// removed everywhere (GDPR Art.17) — this export is TENANT-SCOPED in both authorization AND data: the export
@@ -51,6 +52,7 @@ internal sealed class PersonalDataExportService
     private readonly IWorkspaceMemberRepository _workspaceMembers;
     private readonly IParticipantRepository _participants;
     private readonly IWorkspaceInvitationRepository _invitations;
+    private readonly IPushSubscriptionRepository _pushSubscriptions;
     private readonly IAuditLogRepository _audit;
 
     public PersonalDataExportService(
@@ -59,6 +61,7 @@ internal sealed class PersonalDataExportService
         IWorkspaceMemberRepository workspaceMembers,
         IParticipantRepository participants,
         IWorkspaceInvitationRepository invitations,
+        IPushSubscriptionRepository pushSubscriptions,
         IAuditLogRepository audit)
     {
         ArgumentNullException.ThrowIfNull(users);
@@ -66,12 +69,14 @@ internal sealed class PersonalDataExportService
         ArgumentNullException.ThrowIfNull(workspaceMembers);
         ArgumentNullException.ThrowIfNull(participants);
         ArgumentNullException.ThrowIfNull(invitations);
+        ArgumentNullException.ThrowIfNull(pushSubscriptions);
         ArgumentNullException.ThrowIfNull(audit);
         _users = users;
         _organizationMembers = organizationMembers;
         _workspaceMembers = workspaceMembers;
         _participants = participants;
         _invitations = invitations;
+        _pushSubscriptions = pushSubscriptions;
         _audit = audit;
     }
 
@@ -142,6 +147,14 @@ internal sealed class PersonalDataExportService
                 .ConfigureAwait(false)
             : Array.Empty<WorkspaceInvitation>();
 
+        // The subject's Web Push subscriptions (CORE-PUSH-001) are GLOBAL, per-principal personal data (no
+        // tenant column), so they are read by the subject's user-profile id, not tenant-scoped — exactly like
+        // the global Subject profile above. They are the subject's own per-device data, disclosed to the subject
+        // themselves or the data controller acting for them; the auth encryption secret is never projected.
+        var pushSubscriptions = await _pushSubscriptions
+            .ListByUserAsync(subjectUserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+
         // AUDIT (by id only): the access is recorded as an append-only fact capturing the actor (who obtained the
         // export), the exported subject (by id) and the requesting tenant — never the disclosed PII (threats
         // T1/T5/T7). It is appended only after a successful assembly, so a not-found subject records nothing.
@@ -159,6 +172,7 @@ internal sealed class PersonalDataExportService
             organizationMembership,
             workspaceMemberships,
             participants,
-            invitations);
+            invitations,
+            pushSubscriptions);
     }
 }

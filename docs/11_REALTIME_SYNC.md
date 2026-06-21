@@ -380,6 +380,36 @@ Reconnect requires:
   `nextSequence` is the cursor for the next page, so a large backlog is drained over successive bounded
   requests rather than one unbounded load (CORE-PERF-002)
 
+## Closed-app Web Push subscription registration (CORE-PUSH-001)
+
+The realtime hub and the reconnect replay above reach a client only while the app is OPEN. The "Closed-App Push
+Notifications" epic (raised by a vertical adopter, ARC-GAP-005) adds a way to reach a user whose app is CLOSED,
+through the browser's Web Push. **CORE-PUSH-001 is the enabler — the subscription registration surface only; no
+push is delivered here. The outbound, content-free delivery is the separate CORE-PUSH-002 story.**
+
+A browser client:
+
+- reads the deployment **VAPID public key** (`GET /api/v1/push/vapid-public-key`) and creates a Web Push
+  subscription against it;
+- **registers** that subscription with Core (`POST /api/v1/me/push-subscriptions`: the push service `endpoint`
+  URL plus the client's `p256dh` public key and `auth` secret) and can **remove** it
+  (`DELETE /api/v1/me/push-subscriptions/{subscriptionId}`).
+
+The subscription is owned by — and authorized by — the **authenticated principal** (the `push_subscriptions`
+table is global, per-principal, keyed by `users(id)`), so it lives in Core where the principal and authorization
+already live and a vertical adopter need not duplicate Core authorization. It is scoped entirely to the caller's
+server-resolved profile: a caller can only ever register, refresh or delete its OWN subscription, and a delete
+addressing another principal's subscription id is an indistinguishable hidden `404` (threats T1/T5). A push
+subscription is per-principal personal data — removed on the data-subject erasure (CORE-PRIV-001, via the
+`push_subscriptions.user_id` `ON DELETE CASCADE`) and disclosed in the user-data export (CORE-PRIV-004), with
+the `auth` encryption secret never projected (threat T7).
+
+**Deployment-gated and inert by default.** The VAPID public key is deployment configuration (`WebPush:Vapid:PublicKey`),
+and the VAPID PRIVATE key stays deployment-side and is never shipped to a client. With **no VAPID key configured
+the surface is inert**: the public-key route returns a null key and registration is refused (`503`, no
+subscription is registrable), while deletion stays available so a stale subscription can always be cleaned up —
+the same private-by-default posture the host holds without object storage or an OIDC authority.
+
 ## Scale-out
 
 Use a Valkey/Redis-compatible backplane when multiple API instances run.

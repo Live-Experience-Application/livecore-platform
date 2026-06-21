@@ -96,6 +96,21 @@ export interface PersonalDataExportInvitationResponse {
 }
 
 /**
+ * A Web Push subscription registered by the subject within a personal-data export
+ * (CORE-PUSH-001). The encryption keys (`p256dh` and the `auth` secret) are NEVER
+ * projected — the subscription's secret stays out of the export, exactly as the
+ * invitation token hash does (threats T6/T7).
+ */
+export interface PersonalDataExportPushSubscriptionResponse {
+  /** Surrogate id of the subscription row. */
+  id: Uuid;
+  /** The push service endpoint URL the subscription is registered against. */
+  endpoint: string;
+  /** When the subscription was registered (UTC). */
+  createdAt: IsoDateTimeString;
+}
+
+/**
  * Machine-readable response of a data-subject access/portability export: the
  * personal data Core holds about ONE data subject within ONE tenant.
  */
@@ -112,4 +127,6 @@ export interface PersonalDataExportResponse {
   participants: PersonalDataExportParticipantResponse[];
   /** The invitations addressed to the subject's email within this tenant. */
   invitations: PersonalDataExportInvitationResponse[];
+  /** The subject's global Web Push subscriptions (per-principal personal data). */
+  pushSubscriptions: PersonalDataExportPushSubscriptionResponse[];
 }
