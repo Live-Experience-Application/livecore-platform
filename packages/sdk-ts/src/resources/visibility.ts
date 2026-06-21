@@ -142,6 +142,46 @@ export class VisibilityClient {
   }
 
   /**
+   * `POST /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock` — SEAL (lock) a
+   * visibility rule (CORE-VSEAL-001), asserting the server-side flag that makes the
+   * governed resource permanently-restricted: while a rule is locked, a
+   * reveal/hide/change targeting it is refused with `409`. Restricted to the authoring
+   * roles; the change is audited and idempotent. The organization slug travels as a query
+   * parameter (this command carries no body). Returns the updated
+   * {@link VisibilityRuleResponse} with `locked: true`.
+   */
+  lockRule(
+    sessionId: Uuid,
+    ruleId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<VisibilityRuleResponse> {
+    return this.http.send<VisibilityRuleResponse>({
+      method: "POST",
+      path: `/sessions/${encodeURIComponent(sessionId)}/visibility-rules/${encodeURIComponent(ruleId)}/lock`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `POST /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock` — clear the seal
+   * (unlock) on a visibility rule (CORE-VSEAL-001), restoring it so its visibility may be
+   * changed again. The inverse of {@link lockRule}: restricted to the authoring roles,
+   * audited and idempotent, with the organization slug as a query parameter. Returns the
+   * updated {@link VisibilityRuleResponse} with `locked: false`.
+   */
+  unlockRule(
+    sessionId: Uuid,
+    ruleId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<VisibilityRuleResponse> {
+    return this.http.send<VisibilityRuleResponse>({
+      method: "POST",
+      path: `/sessions/${encodeURIComponent(sessionId)}/visibility-rules/${encodeURIComponent(ruleId)}/unlock`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
    * `GET /api/v1/participants/{participantId}/visible-feed` — a single
    * participant's private, already-filtered visible feed WITHIN a session. A
    * reveal is session-scoped (CORE-SVIS-001), so the feed is "what this

@@ -805,6 +805,56 @@ public sealed class VisibilityPolicyTests : IDisposable
         Assert.Equal(VisibleResourceRevealScope.AudienceWide, reveal.Scope);
     }
 
+    // --- Sealed/locked presentation flag on the feed projection (CORE-VSEAL-001) ----
+
+    [Fact]
+    public void RevealGate_marks_a_resource_unlocked_when_the_granting_rule_is_not_sealed()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var rules = new[] { AudienceWideRule(session, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible) };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, Guid.NewGuid(), rules));
+
+        Assert.False(reveal.Locked);
+    }
+
+    [Fact]
+    public void RevealGate_projects_the_locked_flag_when_the_granting_audience_wide_rule_is_sealed()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var locked = AudienceWideRule(session, VisibilityResourceType.Scene, resourceId, VisibilityState.Visible);
+        locked.Lock(_createdAt);
+        var rules = new[] { locked };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, Guid.NewGuid(), rules));
+
+        // A consumer can render the locked presentation state from the feed item alone.
+        Assert.True(reveal.Locked);
+        // The lock is orthogonal: the resource is still visible (the binary state is unchanged).
+        Assert.Equal(VisibleResourceRevealScope.AudienceWide, reveal.Scope);
+    }
+
+    [Fact]
+    public void RevealGate_projects_the_locked_flag_for_a_sealed_selected_participant_reveal()
+    {
+        var session = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var selected = Guid.NewGuid();
+        var locked = ParticipantRule(session, VisibilityResourceType.Entity, resourceId, selected, VisibilityState.Visible);
+        locked.Lock(_createdAt);
+        var rules = new[] { locked };
+
+        var reveal = Assert.Single(
+            InMemoryPolicy().ComputeVisibleResourceRevealsForParticipant(session, selected, rules));
+
+        Assert.True(reveal.Locked);
+        Assert.Equal(VisibleResourceRevealScope.SelectedParticipant, reveal.Scope);
+    }
+
     [Fact]
     public async Task Gate_matches_the_per_candidate_computation_over_the_same_rules()
     {

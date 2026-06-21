@@ -468,4 +468,22 @@ public enum AuditAction
     /// coordinate (threats T4/T7) (<see cref="AuditLogEntry.ForAssetConfirmation"/>).
     /// </summary>
     AssetConfirmed = 29,
+
+    /// <summary>
+    /// An authoring role SEALED (locked) or unsealed (unlocked) a visibility rule — the visibility-rule lock
+    /// command (CORE-VSEAL-001, the "Scheduled and Sealed Visibility" epic, raised by a vertical adopter,
+    /// ARC-GAP-002). A sealed rule expresses a permanently-restricted resource whose audience visibility can
+    /// no longer be changed or revealed (a reveal/hide/change targeting it is 409, fail-closed); clearing the
+    /// seal restores it. Auditing the change satisfies the story's "the authoring roles set and clear the
+    /// lock" being a security-relevant, server-asserted fact (threats T1/T5 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// It is DISTINCT from <see cref="VisibilityRuleChanged"/>: that records a Hidden/Visible state transition,
+    /// while this records the ORTHOGONAL lock transition and never moves the binary visibility state. Like
+    /// <see cref="WorkspaceArchived"/> it is a real STATE TRANSITION (the rule survives), so it records the
+    /// before/after lock-state NAMES (<c>Unlocked</c> -&gt; <c>Locked</c>, or the inverse); its actor is the
+    /// authoring role who changed the lock, its resource is the governed resource the rule controls (its
+    /// generic kind name and surrogate id) and it carries the optional selected-participant target. A generic,
+    /// workspace-scoped audit fact whose values are identifiers, an enum or a generic state name — never any
+    /// resolved content (threat T7) (<see cref="AuditLogEntry.ForVisibilityRuleLockChange"/>).
+    /// </summary>
+    VisibilityRuleLockChanged = 30,
 }

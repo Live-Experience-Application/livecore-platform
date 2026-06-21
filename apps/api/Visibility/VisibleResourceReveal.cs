@@ -30,8 +30,16 @@ namespace LiveCore.Api.Visibility;
 /// Whether the resource is visible to the participant through an audience-wide reveal or only through a
 /// reveal scoped to exactly them (<see cref="VisibleResourceRevealScope"/>).
 /// </param>
+/// <param name="Locked">
+/// Whether the granting rule of the effective <see cref="Scope"/> is SEALED (locked, CORE-VSEAL-001): the
+/// resource is permanently-restricted in the way it is visible to the participant, so a consumer can render a
+/// locked presentation state bound to this server fact. It is audience-safe — a boolean server fact about a
+/// resource the participant already sees, never host content (threat T7). <see langword="false"/> when no
+/// granting rule of the effective scope is locked.
+/// </param>
 internal sealed record VisibleResourceReveal(
     VisibilityResourceType ResourceType,
     Guid ResourceId,
     DateTimeOffset RevealedAt,
-    VisibleResourceRevealScope Scope);
+    VisibleResourceRevealScope Scope,
+    bool Locked);

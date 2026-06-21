@@ -74,6 +74,7 @@ public sealed class VisibilityRule
         Guid resourceId,
         VisibilityState visibility,
         Guid? targetParticipantId,
+        bool locked,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt)
     {
@@ -143,6 +144,7 @@ public sealed class VisibilityRule
         ResourceId = resourceId;
         Visibility = visibility;
         TargetParticipantId = targetParticipantId;
+        Locked = locked;
         // Timestamps are normalized to UTC so the persisted timestamptz values are
         // offset-independent (docs/10_DATABASE_SCHEMA.md).
         CreatedAt = createdAt.ToUniversalTime();
@@ -225,6 +227,22 @@ public sealed class VisibilityRule
     /// </summary>
     public Guid? TargetParticipantId { get; }
 
+    /// <summary>
+    /// Whether this rule is SEALED (locked): a server-asserted authoring lock that expresses a
+    /// permanently-restricted resource (CORE-VSEAL-001, raised by a vertical adopter, ARC-GAP-002). A
+    /// locked rule's audience visibility CANNOT be changed — a reveal, hide or visibility change that
+    /// targets a locked rule is rejected fail-closed (the reveal/hide command resolves the locked rule and
+    /// refuses; the endpoint maps it to <c>409</c>). The lock is an ORTHOGONAL authoring concern, NOT a
+    /// third <see cref="VisibilityState"/> member: it gates whether the existing binary Hidden/Visible
+    /// state may transition, and leaves the binary state — and every projection and recipient decision that
+    /// branches on it — exactly as before. It is set and cleared only by the authoring roles
+    /// (<see cref="Lock"/>/<see cref="Unlock"/>); an UNLOCKED rule (the default) behaves exactly as a
+    /// pre-CORE-VSEAL-001 rule. The flag is projected on the rule and, where audience-safe, on the
+    /// participant visible-feed item so a consumer can render a locked presentation state bound to a
+    /// server fact (never host content; threat T7 in docs/07_SECURITY_THREAT_MODEL.md).
+    /// </summary>
+    public bool Locked { get; private set; }
+
     /// <summary>When this rule was first created (UTC).</summary>
     public DateTimeOffset CreatedAt { get; }
 
@@ -264,6 +282,9 @@ public sealed class VisibilityRule
             resourceId,
             visibility,
             targetParticipantId: null,
+            // A new rule is UNLOCKED: locking is an explicit, separately-authorized authoring action
+            // (CORE-VSEAL-001), so a freshly created rule behaves exactly as a pre-seal rule.
+            locked: false,
             createdAt,
             createdAt);
 
@@ -304,6 +325,8 @@ public sealed class VisibilityRule
             resourceId,
             visibility,
             targetParticipantId,
+            // A new selected-participant rule is UNLOCKED, exactly like an audience-wide one (CORE-VSEAL-001).
+            locked: false,
             createdAt,
             createdAt);
     }
@@ -399,8 +422,15 @@ public sealed class VisibilityRule
     /// update timestamp. An undefined state is rejected with NO mutation, leaving the prior state
     /// intact. This is the bare model transition only — authorization, idempotency and the
     /// append-only reveal event are the CORE-VIS-004 command, not this method.
+    ///
+    /// SEALED/LOCKED GATE (CORE-VSEAL-001): a <see cref="Locked"/> rule's visibility cannot be changed —
+    /// the lock is the invariant that a sealed resource is permanently-restricted. The reveal/hide command
+    /// resolves a locked rule and refuses BEFORE calling this method (returning the 409 outcome), so this
+    /// guard is defence-in-depth: it makes the locked invariant unbypassable at the aggregate level. The
+    /// state and timestamp are left intact when locked.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The new visibility state is not defined.</exception>
+    /// <exception cref="InvalidOperationException">The rule is locked, so its visibility cannot change.</exception>
     public void ChangeVisibility(VisibilityState visibility, DateTimeOffset updatedAt)
     {
         if (!IsValidVisibility(visibility))
@@ -411,8 +441,56 @@ public sealed class VisibilityRule
                 "Visibility is not a defined visibility state.");
         }
 
+        if (Locked)
+        {
+            throw new InvalidOperationException(
+                "A locked (sealed) visibility rule's visibility cannot be changed.");
+        }
+
         Visibility = visibility;
         UpdatedAt = updatedAt.ToUniversalTime();
+    }
+
+    /// <summary>
+    /// SEALS (locks) this rule (CORE-VSEAL-001): asserts the server-side authoring lock that makes the
+    /// resource permanently-restricted, so a later reveal/hide/visibility-change targeting it is rejected
+    /// fail-closed. Idempotent: locking an already-locked rule is a no-op that returns <see langword="false"/>
+    /// and bumps no timestamp; a real lock returns <see langword="true"/> and updates the timestamp. The
+    /// binary <see cref="Visibility"/> state is left exactly as it was — the lock is orthogonal to it, never
+    /// a third state. Only the authoring command (gated to Owner/Admin/Host/CoHost) calls this.
+    /// </summary>
+    /// <returns>Whether the lock state actually changed (it was previously unlocked).</returns>
+    public bool Lock(DateTimeOffset updatedAt)
+    {
+        if (Locked)
+        {
+            return false;
+        }
+
+        Locked = true;
+        UpdatedAt = updatedAt.ToUniversalTime();
+        return true;
+    }
+
+    /// <summary>
+    /// Clears the seal (unlocks) on this rule (CORE-VSEAL-001): removes the authoring lock so the rule's
+    /// visibility may be changed again, behaving exactly as a never-locked rule. Idempotent: unlocking an
+    /// already-unlocked rule is a no-op that returns <see langword="false"/> and bumps no timestamp; a real
+    /// unlock returns <see langword="true"/> and updates the timestamp. The binary <see cref="Visibility"/>
+    /// state is left exactly as it was. Only the authoring command (gated to Owner/Admin/Host/CoHost) calls
+    /// this.
+    /// </summary>
+    /// <returns>Whether the lock state actually changed (it was previously locked).</returns>
+    public bool Unlock(DateTimeOffset updatedAt)
+    {
+        if (!Locked)
+        {
+            return false;
+        }
+
+        Locked = false;
+        UpdatedAt = updatedAt.ToUniversalTime();
+        return true;
     }
 
     /// <summary>
@@ -436,6 +514,6 @@ public sealed class VisibilityRule
     /// </summary>
     public override string ToString()
         => $"VisibilityRule {Id} org={OrganizationId} ws={WorkspaceId} session={SessionId} "
-            + $"resource={ResourceType}:{ResourceId} visibility={Visibility} "
+            + $"resource={ResourceType}:{ResourceId} visibility={Visibility} locked={Locked} "
             + $"target={(TargetParticipantId is { } target ? target.ToString() : "audience")}";
 }

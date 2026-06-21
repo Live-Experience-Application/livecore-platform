@@ -827,6 +827,55 @@ public sealed class ParticipantVisibleFeedEndpointTests
     }
 
     [Fact]
+    public async Task A_sealed_visible_resource_carries_the_locked_flag_on_the_feed_item()
+    {
+        // CORE-VSEAL-001: a SEALED (locked) but visible resource shows up in the feed marked locked=true, so
+        // an audience surface can render a locked presentation state bound to the server fact — while an
+        // unsealed sibling stays locked=false (the flag is per-rule, audience-safe and never host content).
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        Guid lockedSceneId = Guid.Empty;
+        Guid unlockedSceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+
+            // A sealed (locked) audience-wide visible rule, and an unsealed one alongside it.
+            lockedSceneId = Guid.CreateVersion7();
+            var lockedRule = await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, lockedSceneId, VisibilityState.Visible);
+            lockedRule.Lock(TestData.SeedTime);
+            await db.SaveChangesAsync();
+
+            unlockedSceneId = Guid.CreateVersion7();
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, unlockedSceneId, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var items = await ReadFeedItemsByIdAsync(response);
+        Assert.Equal(2, items.Count);
+        // The sealed resource is marked locked; the unsealed one is not.
+        Assert.True(items[lockedSceneId].GetProperty("locked").GetBoolean());
+        Assert.False(items[unlockedSceneId].GetProperty("locked").GetBoolean());
+    }
+
+    [Fact]
     public async Task Own_selected_participant_reveal_item_is_marked_selected_and_carries_audience_safe_title()
     {
         // A resource revealed privately to the participant appears in their own feed marked
@@ -1056,6 +1105,9 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Assert.Equal(JsonValueKind.Null, item.GetProperty("body").ValueKind);
         Assert.Equal("AudienceWide", item.GetProperty("revealScope").GetString());
         Assert.Equal(TestData.SeedTime, item.GetProperty("revealedAt").GetDateTimeOffset());
+        // An ordinary (never-sealed) reveal is unlocked, so the feed item is not in a locked presentation
+        // state (CORE-VSEAL-001; the default is unchanged for an unlocked rule).
+        Assert.False(item.GetProperty("locked").GetBoolean());
     }
 
     private static void AssertItemPropertySet(JsonElement item)
@@ -1072,6 +1124,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 "body",
                 "revealedAt",
                 "revealScope",
+                "locked",
                 "attachments",
             },
             itemProperties);

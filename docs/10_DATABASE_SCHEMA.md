@@ -303,6 +303,16 @@ workspace-led composite, which left the cleanup predicate uncovered (only the si
 foreign-key index); CORE-PERF-004 restores it, and because `workspace_id` is its prefix the composite also
 serves the workspace foreign key (the separate single-column workspace index is therefore retired).
 
+`visibility_rules` additionally carries a **`locked`** boolean column (CORE-VSEAL-001, `NOT NULL` default
+`false`): the **sealed/locked** authoring flag that makes the governed resource permanently-restricted. While a
+rule is locked, a reveal/hide/visibility-change targeting it is refused **fail-closed with `409`**. It is an
+**orthogonal** authoring flag, **not** a third value of the `visibility` column — a first-class boolean column
+(authorization-relevant fields are real columns, never inside arbitrary JSON), so it reshapes **no** index and
+leaves the binary Hidden/Visible enforcement and the recipient resolver exactly as before. The default of
+`false` means every pre-existing row is unlocked, so an unlocked rule behaves exactly as before. The flag is
+set/cleared only by the authoring roles (the lock/unlock commands) and is projected on `VisibilityRuleResponse`
+and, where audience-safe, on the participant visible-feed item.
+
 ## Single rule per dimension (CORE-SVIS-002)
 
 A resource has **at most one active visibility rule per `(session, resource, dimension)`**. The dimension is

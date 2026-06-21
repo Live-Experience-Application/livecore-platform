@@ -81,6 +81,13 @@ public sealed record CreateVisibilityRuleRequest(
 /// The participant a selected-participant rule applies to, or <see langword="null"/> for an audience-wide
 /// rule.
 /// </param>
+/// <param name="Locked">
+/// Whether the rule is SEALED (locked) — the server-asserted authoring lock (CORE-VSEAL-001) that makes the
+/// governed resource permanently-restricted: while <see langword="true"/>, a reveal/hide/change targeting the
+/// rule is refused fail-closed (<c>409</c>). It is an ORTHOGONAL flag, NOT a third <see cref="Visibility"/>
+/// state, so a consumer can render a locked presentation state bound to this server fact while the binary
+/// Hidden/Visible state is unchanged. <see langword="false"/> for an unlocked rule (the default).
+/// </param>
 /// <param name="CreatedAt">Server timestamp (UTC) at which the rule was first created.</param>
 /// <param name="UpdatedAt">Server timestamp (UTC) at which the rule was last updated.</param>
 public sealed record VisibilityRuleResponse(
@@ -90,6 +97,7 @@ public sealed record VisibilityRuleResponse(
     string? ResourceLabel,
     string Visibility,
     Guid? ParticipantId,
+    bool Locked,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
 {
@@ -97,8 +105,9 @@ public sealed record VisibilityRuleResponse(
     /// Projects a <see cref="VisibilityRule"/> into its response DTO, denormalizing the governed resource's
     /// audience-safe label (<paramref name="resourceLabel"/>, resolved by the endpoint through the
     /// Visibility-owned <see cref="IVisibleResourceAudienceProjector"/> port, or <see langword="null"/> when
-    /// the resource no longer resolves) onto the row. The factory is shared by the create, list and by-id read
-    /// routes so the three shapes can never diverge.
+    /// the resource no longer resolves) onto the row and carrying the rule's sealed/locked flag
+    /// (CORE-VSEAL-001). The factory is shared by the create, list, by-id read and lock/unlock routes so the
+    /// shapes can never diverge.
     /// </summary>
     public static VisibilityRuleResponse From(VisibilityRule rule, string? resourceLabel)
     {
@@ -111,6 +120,7 @@ public sealed record VisibilityRuleResponse(
             resourceLabel,
             rule.Visibility.ToString(),
             rule.TargetParticipantId,
+            rule.Locked,
             rule.CreatedAt,
             rule.UpdatedAt);
     }

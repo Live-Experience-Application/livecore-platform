@@ -866,6 +866,16 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     builder.Services.AddScoped<IVisibilityResourceWorkspaceLocator, VisibilityResourceWorkspaceLocator>();
     builder.Services.AddScoped<VisibilityRuleService>();
 
+    // Visibility-rule LOCK command (CORE-VSEAL-001, the "Scheduled and Sealed Visibility" epic): the
+    // authoring API that SEALS (locks) or unseals (unlocks) a rule so a vertical can express a
+    // permanently-restricted resource — while a rule is locked, a reveal/hide/change targeting it is refused
+    // fail-closed (409). It REUSES the CORE-VIS-001 aggregate's Lock/Unlock transitions, the
+    // IVisibilityRuleRepository and the audit pipeline (a real lock change is a VisibilityRuleLockChanged
+    // audit fact); the rule update and the audit append commit in ONE transaction. Registered here, inside
+    // the persistence conditional, because it depends on the visibility-rule and audit repositories and the
+    // unit of work above.
+    builder.Services.AddScoped<VisibilityRuleLockService>();
+
     // Visible-resource audience projector (CORE-APROJ-002): the Visibility-owned IVisibleResourceAudienceProjector
     // PORT that resolves each visible feed resource's AUDIENCE-SAFE label/body so the participant-visible feed can
     // be rendered from the feed alone. Like the locator above, the central security module may not reference the
@@ -1863,14 +1873,16 @@ app.MapVisibilityEndpoints();
 // session start/end commands. The durable reveal event emission is deferred to the Realtime epic.
 app.MapRevealEndpoints();
 
-// Visibility-rule authoring endpoints (CORE-SVIS-005): the Visibility module's create/list/read routes under
+// Visibility-rule authoring endpoints (CORE-SVIS-005 + CORE-VSEAL-001): the Visibility module's
+// create/list/read routes plus the seal (lock)/unseal (unlock) commands under
 // /api/v1/sessions/{sessionId}/visibility-rules. They let an authoring role configure session-scoped
 // visibility over HTTP (a capability previously deliberately-absent; docs/24). The create enforces the
-// same-workspace invariant for the referenced resource server-side and audits the creation; all three routes
-// are restricted to the authoring roles (Owner/Admin/Host/CoHost) in the session's own workspace — a
-// participant can neither author nor enumerate rules — fail-closed and hidden-404 exactly like the reveal
-// command. No new persistence registration beyond the VisibilityRuleService + IVisibilityResourceWorkspaceLocator
-// above is required.
+// same-workspace invariant for the referenced resource server-side and audits the creation; the lock/unlock
+// commands seal a rule so a reveal/hide/change targeting it is refused fail-closed (409) and audit the lock
+// change (CORE-VSEAL-001). All five routes are restricted to the authoring roles (Owner/Admin/Host/CoHost) in
+// the session's own workspace — a participant can neither author, enumerate nor seal rules — fail-closed and
+// hidden-404 exactly like the reveal command. The VisibilityRuleLockService registered above backs the
+// lock/unlock commands.
 app.MapVisibilityRuleEndpoints();
 
 // Hide (un-reveal) command endpoint (CORE-REV-001, the "Reveal Lifecycle" hide): the inverse of the

@@ -126,6 +126,8 @@ POST   /api/v1/sessions/{sessionId}/hide
 POST   /api/v1/sessions/{sessionId}/visibility-rules
 GET    /api/v1/sessions/{sessionId}/visibility-rules
 GET    /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}
+POST   /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock
+POST   /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock
 GET    /api/v1/sessions/{sessionId}/recap
 GET    /api/v1/exports/{exportId}
 GET    /api/v1/workspaces/{workspaceId}/scenes
@@ -195,6 +197,7 @@ alone, with **no host read**:
 | `body` | the resource's **audience-safe short body**, or `null` when the kind's audience projection exposes none (the case for every current resource kind) |
 | `revealedAt` | when the resource became visible to the participant (the reveal time) |
 | `revealScope` | the marker distinguishing an `AudienceWide` reveal from a `SelectedParticipant` (private) reveal |
+| `locked` | whether the resource is **sealed (locked)** in the way this participant sees it (CORE-VSEAL-001) — a server-asserted authoring lock marking it permanently-restricted, so a consumer can render a locked presentation state. Audience-safe (a boolean fact about an already-visible resource, never host content). `false` for a normally-revealed resource |
 | `attachments` | the audience-safe list of assets attached to the resource (CORE-ALC-002); each entry is an `assetId`, an audience-safe `name` and a `contentType`. Empty (never absent) when the resource has no attachments |
 
 The `title`/`body` are produced **only** through the resource kind's existing role-based **audience**
@@ -302,6 +305,7 @@ The visibility-rule response (`VisibilityRuleResponse`, returned by the create c
 | `resourceLabel` | the resource's **audience-safe label** — a scene's title, an entity's name, a content block's generic kind — or `null` when the resource no longer resolves in the rule's own workspace (a dangling rule) |
 | `visibility` | the base audience visibility state (`Hidden`/`Visible`) |
 | `participantId` | the selected-participant target, or `null` for an audience-wide rule |
+| `locked` | whether the rule is **sealed (locked)** — the server-asserted authoring lock (CORE-VSEAL-001) that makes the governed resource permanently-restricted; `true` while a reveal/hide/change targeting the rule is refused with `409`. Orthogonal to `visibility` (not a third state) |
 | `createdAt` / `updatedAt` | server timestamps |
 
 `resourceLabel` lets a host render a **per-resource visibility matrix from `listRules` alone** — naming each row
@@ -316,6 +320,30 @@ lookup is the rule's **own** `(organization, workspace)`, so it never borrows an
 a rule whose resource was **deleted** degrades to a `null` label **without error** (the row's identity and state
 still render). The list and read stay restricted to the authoring roles and fail closed — a participant can neither
 author nor enumerate rules — and a foreign or unknown rule stays an indistinguishable hidden `404`.
+
+### Sealing (locking) a visibility rule (CORE-VSEAL-001)
+
+A visibility rule can be **sealed (locked)** so the governed resource is **permanently-restricted**: while a
+rule is locked, a reveal/hide/visibility-change targeting it is refused **fail-closed with `409`**. The lock is
+an **orthogonal authoring flag**, **not** a third `VisibilityState`, so the existing binary Hidden/Visible
+enforcement and the central recipient resolver are unchanged — an **unlocked** rule behaves exactly as before.
+Two commands, restricted to the authoring roles (Owner/Admin/Host/CoHost — the "Seal or unseal visibility rule"
+matrix row), set and clear the lock:
+
+```text
+POST   /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock     ?organizationSlug={slug}
+POST   /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock   ?organizationSlug={slug}
+```
+
+- The organization slug travels as a **query parameter** (these commands carry **no body**); a missing slug is
+  `400`.
+- They are **session-scoped** and fail closed: a foreign-tenant, cross-session, unknown rule or a non-member of
+  the session's workspace is an indistinguishable hidden `404`; a non-authoring member is `403`.
+- They are **idempotent**: re-locking an already-locked rule (or re-unlocking an already-unlocked one) is a
+  no-op that still returns `200` with the rule projection (carrying the updated `locked` flag).
+- A real lock change is recorded as a `VisibilityRuleLockChanged` audit fact (actor + governed resource +
+  before/after lock-state, by id only — never content).
+- The `409` a reveal/hide returns when it targets a locked rule carries the generic `conflict` problem code.
 
 ## Idempotency
 

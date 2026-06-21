@@ -147,6 +147,11 @@ internal sealed class RevealService
                 cancellationToken)
             .ConfigureAwait(false);
 
+        if (outcome.BlockedByLock)
+        {
+            return RevealResult.Blocked(resourceType, resourceId, targetParticipantId);
+        }
+
         return outcome.AlreadyApplied
             ? RevealResult.AlreadyApplied(resourceType, resourceId, targetParticipantId)
             : RevealResult.Applied(resourceType, resourceId, targetParticipantId, outcome.VisibilityChanged);
@@ -215,6 +220,11 @@ internal sealed class RevealService
                 now,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        if (outcome.BlockedByLock)
+        {
+            return HideResult.Blocked(resourceType, resourceId, targetParticipantId);
+        }
 
         return outcome.AlreadyApplied
             ? HideResult.AlreadyApplied(resourceType, resourceId, targetParticipantId)
@@ -298,15 +308,28 @@ internal sealed class RevealService
         var existing = await _idempotency.FindAsync(scope, idempotencyKey, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
-            return new VisibilityCommandOutcome(AlreadyApplied: true, VisibilityChanged: false);
+            return new VisibilityCommandOutcome(AlreadyApplied: true, VisibilityChanged: false, BlockedByLock: false);
         }
 
         // Apply the (state-idempotent) effect, then record the key. Recording after the effect means
         // a crash between the two leaves the key unrecorded, so a retry safely re-ensures the target
         // state (the effect is idempotent) rather than skipping it.
-        var change = await EnsureStateAsync(
+        var resolution = await EnsureStateAsync(
                 organizationId, workspaceId, sessionId, resourceType, resourceId, targetParticipantId, targetState, now, cancellationToken)
             .ConfigureAwait(false);
+
+        // SEALED/LOCKED GATE (CORE-VSEAL-001): the resource's rule in the target dimension is locked, so a
+        // reveal/hide/change targeting it is REFUSED fail-closed. Nothing was changed; do NOT audit and do
+        // NOT record the idempotency key (the command was rejected, so a retry must again be refused, never
+        // short-circuited as "already applied"). The public method maps this to the 409 outcome. The lock is
+        // per-rule and per-dimension, so a locked audience-wide rule never blocks a selected-participant
+        // reveal (a different dimension/rule) — an unlocked rule is wholly unaffected.
+        if (resolution.Locked)
+        {
+            return new VisibilityCommandOutcome(AlreadyApplied: false, VisibilityChanged: false, BlockedByLock: true);
+        }
+
+        var change = resolution.Change;
 
         // AUDIT (CORE-VIS-006): append an append-only audit record IFF the visibility actually changed.
         // This sits inside the retry short-circuit (a repeat key returned above) and after the effect, so
@@ -337,8 +360,8 @@ internal sealed class RevealService
         // whether the visibility ACTUALLY changed (the same signal the audit used) so the endpoint emits
         // the durable ContentRevealed/ContentHidden event exactly once per real change.
         return recorded == IdempotencyKeyAddResult.Duplicate
-            ? new VisibilityCommandOutcome(AlreadyApplied: true, VisibilityChanged: false)
-            : new VisibilityCommandOutcome(AlreadyApplied: false, VisibilityChanged: change is not null);
+            ? new VisibilityCommandOutcome(AlreadyApplied: true, VisibilityChanged: false, BlockedByLock: false)
+            : new VisibilityCommandOutcome(AlreadyApplied: false, VisibilityChanged: change is not null, BlockedByLock: false);
     }
 
     /// <summary>
@@ -358,7 +381,7 @@ internal sealed class RevealService
     /// retry is bounded to one. A hide then has exactly one rule to flip, so it fully reverses the reveal
     /// (no resource stays visible after a successful hide).
     /// </summary>
-    private async Task<VisibilityChange?> EnsureStateAsync(
+    private async Task<StateResolution> EnsureStateAsync(
         Guid organizationId,
         Guid workspaceId,
         Guid sessionId,
@@ -384,7 +407,7 @@ internal sealed class RevealService
                 .ConfigureAwait(false);
         }
 
-        return resolution.Change;
+        return resolution;
     }
 
     /// <summary>
@@ -428,6 +451,18 @@ internal sealed class RevealService
         var inDimension = rules
             .Where(rule => rule.TargetParticipantId == targetParticipantId)
             .ToArray();
+
+        // SEALED/LOCKED GATE (CORE-VSEAL-001): if a rule in the target dimension is locked, the resource is
+        // permanently-restricted and its visibility cannot be changed or revealed — REFUSE fail-closed
+        // BEFORE any state check, so even a no-op reveal of an already-visible-but-locked rule is rejected
+        // (the resource's seal must reject every reveal/hide attempt). Nothing is read further, flipped or
+        // created. The check is per-dimension, so a locked audience-wide rule does not block a
+        // selected-participant change (a different rule), and an unlocked dimension proceeds exactly as
+        // before — the binary Hidden/Visible enforcement is unchanged for an unlocked rule.
+        if (inDimension.Any(rule => rule.Locked))
+        {
+            return StateResolution.Sealed;
+        }
 
         var visibleRules = inDimension
             .Where(rule => rule.IsVisibleToAudience())
@@ -493,17 +528,23 @@ internal sealed class RevealService
     /// LOST the single-rule-per-dimension race (<see cref="LostCreateRace"/>) so the caller re-resolves once
     /// against the now-committed rule (CORE-SVIS-002).
     /// </summary>
-    private readonly record struct StateResolution(VisibilityChange? Change, bool LostCreateRace)
+    private readonly record struct StateResolution(VisibilityChange? Change, bool LostCreateRace, bool Locked)
     {
         /// <summary>Nothing changed (already in the target state); nothing to audit.</summary>
-        public static StateResolution NoChange => new(null, LostCreateRace: false);
+        public static StateResolution NoChange => new(null, LostCreateRace: false, Locked: false);
 
         /// <summary>A concurrent first-reveal won the create race; re-resolve onto the existing rule.</summary>
-        public static StateResolution LostRace => new(null, LostCreateRace: true);
+        public static StateResolution LostRace => new(null, LostCreateRace: true, Locked: false);
+
+        /// <summary>
+        /// A rule in the target dimension is SEALED (locked, CORE-VSEAL-001): the change is refused
+        /// fail-closed (no mutation, no audit, no key recorded); the command reports the 409 outcome.
+        /// </summary>
+        public static StateResolution Sealed => new(null, LostCreateRace: false, Locked: true);
 
         /// <summary>A real visibility change was applied (audit it).</summary>
         public static StateResolution Changed(VisibilityState? previousVisibility, VisibilityState newVisibility)
-            => new(new VisibilityChange(previousVisibility, newVisibility), LostCreateRace: false);
+            => new(new VisibilityChange(previousVisibility, newVisibility), LostCreateRace: false, Locked: false);
     }
 
     /// <summary>
@@ -516,10 +557,13 @@ internal sealed class RevealService
 
     /// <summary>
     /// The idempotency outcome of a visibility command: whether it was an idempotent retry
-    /// (<see cref="AlreadyApplied"/>) and, for a first apply, whether it ACTUALLY changed the visibility
-    /// (<see cref="VisibilityChanged"/>, the signal the audit and the durable realtime event use).
+    /// (<see cref="AlreadyApplied"/>), for a first apply whether it ACTUALLY changed the visibility
+    /// (<see cref="VisibilityChanged"/>, the signal the audit and the durable realtime event use), and
+    /// whether it was REFUSED because the target rule is sealed/locked (<see cref="BlockedByLock"/>,
+    /// CORE-VSEAL-001 — the endpoint maps it to 409). At most one of <see cref="VisibilityChanged"/> and
+    /// <see cref="BlockedByLock"/> is ever true.
     /// </summary>
-    private readonly record struct VisibilityCommandOutcome(bool AlreadyApplied, bool VisibilityChanged);
+    private readonly record struct VisibilityCommandOutcome(bool AlreadyApplied, bool VisibilityChanged, bool BlockedByLock);
 
     /// <summary>Idempotency scope prefix for reveal commands.</summary>
     private const string _revealScopePrefix = "reveal";

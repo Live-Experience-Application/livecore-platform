@@ -117,6 +117,114 @@ public sealed class VisibilityRuleTests
         Assert.Equal(_createdAt, rule.UpdatedAt);
     }
 
+    // --- Sealed/locked authoring flag (CORE-VSEAL-001) -------------------------
+
+    [Fact]
+    public void Create_is_unlocked_by_default()
+    {
+        // A new rule is never sealed: locking is a separately-authorized authoring action, so a fresh rule
+        // behaves exactly as a pre-seal rule.
+        Assert.False(CreateRule().Locked);
+        Assert.False(VisibilityRule.CreateForParticipant(
+            _organizationId, _workspaceId, _sessionId, VisibilityResourceType.Entity, _resourceId, Guid.NewGuid(),
+            VisibilityState.Visible, _createdAt).Locked);
+    }
+
+    [Fact]
+    public void Lock_seals_the_rule_and_bumps_the_timestamp()
+    {
+        var rule = CreateRule(visibility: VisibilityState.Visible);
+
+        var changed = rule.Lock(_updatedAt);
+
+        Assert.True(changed);
+        Assert.True(rule.Locked);
+        Assert.Equal(_updatedAt, rule.UpdatedAt);
+        // The lock is ORTHOGONAL to the binary state: visibility is untouched.
+        Assert.Equal(VisibilityState.Visible, rule.Visibility);
+    }
+
+    [Fact]
+    public void Lock_is_idempotent_no_op_when_already_locked()
+    {
+        var rule = CreateRule();
+        Assert.True(rule.Lock(_updatedAt));
+
+        // Re-locking changes nothing and bumps no timestamp (the command audits nothing on a no-op).
+        var changed = rule.Lock(_updatedAt.AddHours(1));
+
+        Assert.False(changed);
+        Assert.True(rule.Locked);
+        Assert.Equal(_updatedAt, rule.UpdatedAt);
+    }
+
+    [Fact]
+    public void Unlock_clears_the_seal_and_bumps_the_timestamp()
+    {
+        var rule = CreateRule();
+        rule.Lock(_updatedAt);
+
+        var unlockedAt = _updatedAt.AddHours(1);
+        var changed = rule.Unlock(unlockedAt);
+
+        Assert.True(changed);
+        Assert.False(rule.Locked);
+        Assert.Equal(unlockedAt, rule.UpdatedAt);
+    }
+
+    [Fact]
+    public void Unlock_is_idempotent_no_op_when_already_unlocked()
+    {
+        var rule = CreateRule();
+
+        var changed = rule.Unlock(_updatedAt);
+
+        Assert.False(changed);
+        Assert.False(rule.Locked);
+        // No mutation: the original create timestamp is intact.
+        Assert.Equal(_createdAt, rule.UpdatedAt);
+    }
+
+    [Fact]
+    public void ChangeVisibility_on_a_locked_rule_throws_and_does_not_mutate()
+    {
+        // Defence-in-depth: a locked rule's visibility cannot be changed at the aggregate level, so the seal
+        // is unbypassable even if a caller skipped the service-level gate.
+        var rule = CreateRule(visibility: VisibilityState.Hidden);
+        rule.Lock(_updatedAt);
+
+        Assert.Throws<InvalidOperationException>(() => rule.ChangeVisibility(VisibilityState.Visible, _updatedAt.AddHours(1)));
+
+        // No mutation: the prior state and the lock timestamp are intact.
+        Assert.Equal(VisibilityState.Hidden, rule.Visibility);
+        Assert.Equal(_updatedAt, rule.UpdatedAt);
+        Assert.True(rule.Locked);
+    }
+
+    [Fact]
+    public void ChangeVisibility_resumes_after_unlock()
+    {
+        var rule = CreateRule(visibility: VisibilityState.Hidden);
+        rule.Lock(_updatedAt);
+        rule.Unlock(_updatedAt.AddHours(1));
+
+        // Once unsealed, the rule behaves exactly as a never-locked rule.
+        var changedAt = _updatedAt.AddHours(2);
+        rule.ChangeVisibility(VisibilityState.Visible, changedAt);
+
+        Assert.Equal(VisibilityState.Visible, rule.Visibility);
+        Assert.Equal(changedAt, rule.UpdatedAt);
+    }
+
+    [Fact]
+    public void ToString_exposes_the_locked_flag()
+    {
+        var rule = CreateRule(visibility: VisibilityState.Visible);
+        rule.Lock(_updatedAt);
+
+        Assert.Contains("locked=True", rule.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void IsVisibleToAudience_reflects_the_state()
     {

@@ -425,6 +425,88 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a visibility-rule LOCK change (<see cref="AuditAction.VisibilityRuleLockChanged"/>) — the audit
+    /// fact written by the Visibility module's lock command when an authoring role seals (locks) or unseals
+    /// (unlocks) a rule (CORE-VSEAL-001). It is the lock-transition counterpart of
+    /// <see cref="ForVisibilityRuleChange"/>: that records a Hidden/Visible visibility transition, while this
+    /// records the ORTHOGONAL lock transition and never touches the binary visibility state. A thin
+    /// specialization of <see cref="Create"/> that pins the action and applies the same stricter contract (the
+    /// workspace, actor, resource and new state are all REQUIRED). The caller (the lock command, the only
+    /// producer) supplies the already-resolved tenant, workspace, the authenticated authoring actor, the
+    /// governed resource the rule controls, the optional selected-participant target and the before/after
+    /// LOCK-STATE NAMES (<c>Unlocked</c>/<c>Locked</c>), passed as generic strings so this module does not
+    /// depend on the Visibility enum.
+    /// </summary>
+    /// <param name="organizationId">The tenant the lock change happened in (required).</param>
+    /// <param name="workspaceId">The workspace the rule belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The authoring role who changed the lock (required; the audited actor).</param>
+    /// <param name="resourceType">The governed resource kind name (Scene/ContentBlock/Entity).</param>
+    /// <param name="resourceId">The governed resource id the rule controls.</param>
+    /// <param name="targetParticipantId">
+    /// The selected participant for a private rule, or <see langword="null"/> for an audience-wide rule.
+    /// </param>
+    /// <param name="previousState">The lock-state name before the change (Unlocked/Locked; required).</param>
+    /// <param name="newState">The lock-state name after the change (Unlocked/Locked; required).</param>
+    /// <param name="createdAt">When the lock change happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, an optional id is explicitly empty, or the resource type / new / previous state is blank.
+    /// </exception>
+    public static AuditLogEntry ForVisibilityRuleLockChange(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId,
+        string previousState,
+        string newState,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(resourceType))
+        {
+            throw new ArgumentException("Resource type must not be empty.", nameof(resourceType));
+        }
+
+        if (resourceId == Guid.Empty)
+        {
+            throw new ArgumentException("Resource id must not be empty.", nameof(resourceId));
+        }
+
+        // A lock change is a real STATE TRANSITION, so both the before and after lock-state are recorded.
+        if (string.IsNullOrWhiteSpace(previousState))
+        {
+            throw new ArgumentException("Previous state must not be empty.", nameof(previousState));
+        }
+
+        if (string.IsNullOrWhiteSpace(newState))
+        {
+            throw new ArgumentException("New state must not be empty.", nameof(newState));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.VisibilityRuleLockChanged,
+            actorUserProfileId,
+            resourceType,
+            resourceId,
+            targetParticipantId,
+            previousState,
+            newState,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records a session start (<see cref="AuditAction.SessionStarted"/>) — the audit fact written when an
     /// authorized host starts a session, opening its live timeline (CORE-EVT-001). It is the start
     /// counterpart of <see cref="ForSessionCancellation"/> and, like it, a thin specialization of

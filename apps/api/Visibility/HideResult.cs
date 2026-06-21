@@ -40,13 +40,15 @@ public sealed class HideResult
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId,
-        bool visibilityChanged)
+        bool visibilityChanged,
+        bool blockedByLock)
     {
         Outcome = outcome;
         ResourceType = resourceType;
         ResourceId = resourceId;
         TargetParticipantId = targetParticipantId;
         VisibilityChanged = visibilityChanged;
+        BlockedByLock = blockedByLock;
     }
 
     /// <summary>Whether the hide was newly applied or recognized as an idempotent retry.</summary>
@@ -74,6 +76,15 @@ public sealed class HideResult
     public bool VisibilityChanged { get; }
 
     /// <summary>
+    /// Whether the hide was REFUSED because the resource's rule in the target dimension is SEALED (locked)
+    /// (CORE-VSEAL-001): a locked rule's visibility cannot be changed, so the command applied nothing,
+    /// audited nothing and recorded no idempotency key. The endpoint maps this fail-closed outcome to
+    /// <c>409</c>. When <see langword="true"/>, <see cref="VisibilityChanged"/> is always
+    /// <see langword="false"/>. An unlocked rule never sets this, so a pre-seal hide is unaffected.
+    /// </summary>
+    public bool BlockedByLock { get; }
+
+    /// <summary>
     /// Builds a result for a hide that was applied for the first time, recording whether it actually
     /// changed visibility.
     /// </summary>
@@ -82,7 +93,7 @@ public sealed class HideResult
         Guid resourceId,
         Guid? targetParticipantId,
         bool visibilityChanged)
-        => new(HideOutcome.Applied, resourceType, resourceId, targetParticipantId, visibilityChanged);
+        => new(HideOutcome.Applied, resourceType, resourceId, targetParticipantId, visibilityChanged, blockedByLock: false);
 
     /// <summary>
     /// Builds a result for an idempotent retry (the hide was already applied). A retry changes nothing,
@@ -92,5 +103,17 @@ public sealed class HideResult
         VisibilityResourceType resourceType,
         Guid resourceId,
         Guid? targetParticipantId)
-        => new(HideOutcome.AlreadyApplied, resourceType, resourceId, targetParticipantId, visibilityChanged: false);
+        => new(HideOutcome.AlreadyApplied, resourceType, resourceId, targetParticipantId, visibilityChanged: false, blockedByLock: false);
+
+    /// <summary>
+    /// Builds a result for a hide that was REFUSED because the target rule is SEALED (locked)
+    /// (CORE-VSEAL-001) — nothing changed, nothing was audited and no idempotency key was recorded; the
+    /// endpoint returns <c>409</c>. The outcome is reported as <see cref="HideOutcome.Applied"/> only as a
+    /// placeholder (the endpoint short-circuits on <see cref="BlockedByLock"/> before reading the outcome).
+    /// </summary>
+    public static HideResult Blocked(
+        VisibilityResourceType resourceType,
+        Guid resourceId,
+        Guid? targetParticipantId)
+        => new(HideOutcome.Applied, resourceType, resourceId, targetParticipantId, visibilityChanged: false, blockedByLock: true);
 }

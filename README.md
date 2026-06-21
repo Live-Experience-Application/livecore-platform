@@ -2596,11 +2596,13 @@ Beyond the live reveal/hide commands, an authoring role can **create, list and r
 the session-scoped visibility rules directly, so a vertical can **configure** session
 visibility over the API and drive the reveal/visibility engine (CORE-SVIS-005):
 
-| Method | Route                                                    | Authorized callers                             |
-| ------ | -------------------------------------------------------- | ---------------------------------------------- |
-| `POST` | `/api/v1/sessions/{sessionId}/visibility-rules`          | workspace `Owner`, `Admin`, `Host` or `CoHost` |
-| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules`          | workspace `Owner`, `Admin`, `Host` or `CoHost` |
-| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| Method | Route                                                           | Authorized callers                             |
+| ------ | --------------------------------------------------------------- | ---------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/visibility-rules`                 | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules`                 | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `GET`  | `/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}`        | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock`   | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| `POST` | `/api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
 
 The session id in the path pins the workspace; the `organizationSlug` travels in the
 request body for the create and as a query parameter for the reads (resolved by the
@@ -2640,6 +2642,22 @@ root (the central security module may not reference the Scenes/Content/Entities 
 CORE-ARCH-001). The lookup is the rule's **own** workspace, so it never borrows another
 workspace's resource name, and a rule whose resource was **deleted** degrades to a
 `null` label **without error**.
+
+#### Sealing (locking) a visibility rule
+
+A visibility rule can be **sealed (locked)** so the governed resource is
+**permanently-restricted** (CORE-VSEAL-001, raised by a vertical adopter, ARC-GAP-002):
+while a rule is locked, a **reveal/hide/change targeting it is refused fail-closed with
+`409`**. The lock is an **orthogonal authoring flag**, **not** a third visibility state —
+the existing binary Hidden/Visible enforcement and the central recipient resolver are
+**unchanged**, and an **unlocked** rule behaves exactly as before. The two commands seal
+and unseal an existing rule by id, with the `organizationSlug` as a query parameter (no
+body); they are **session-scoped** and fail closed (a foreign-tenant, cross-session,
+unknown rule or a non-member is a hidden `404`; a non-authoring member is `403`),
+**idempotent** (re-locking/unlocking is a no-op), and a real lock change is **audited**
+(`VisibilityRuleLockChanged`, by id only). The flag is projected as `locked` on
+`VisibilityRuleResponse` and, where audience-safe, on the participant visible-feed item,
+so a consumer can render a locked presentation state bound to the server fact.
 
 ### Scene and content lifecycle session events
 

@@ -127,6 +127,23 @@ public sealed class RevealServiceTests : IDisposable
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
 
+    private async Task SeedLockedRuleAsync(
+        Guid org,
+        Guid ws,
+        VisibilityResourceType type,
+        Guid resourceId,
+        VisibilityState visibility,
+        Guid? targetParticipantId = null)
+    {
+        var sessionId = await SessionIdAsync(org, ws);
+        var rule = targetParticipantId is { } participantId
+            ? VisibilityRule.CreateForParticipant(org, ws, sessionId, type, resourceId, participantId, visibility, _now)
+            : VisibilityRule.Create(org, ws, sessionId, type, resourceId, visibility, _now);
+        rule.Lock(_now);
+        await using var context = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
     private async Task<IReadOnlyList<VisibilityRule>> ListRulesAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId)
     {
         var sessionId = await SessionIdAsync(org, ws);
@@ -395,6 +412,81 @@ public sealed class RevealServiceTests : IDisposable
         Assert.Equal(RevealOutcome.AlreadyApplied, second.Outcome);
         var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
         Assert.Single(rules);
+    }
+
+    // --- Sealed/locked gate (CORE-VSEAL-001) -----------------------------------
+
+    [Fact]
+    public async Task Reveal_of_a_locked_rule_is_blocked_and_changes_nothing()
+    {
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedLockedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+
+        var result = await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1");
+
+        // The reveal is REFUSED fail-closed: nothing changed (the endpoint maps this to 409).
+        Assert.True(result.BlockedByLock);
+        Assert.False(result.VisibilityChanged);
+        // The rule is untouched: still hidden, still locked.
+        var rule = Assert.Single(await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId));
+        Assert.False(rule.IsVisibleToAudience());
+        Assert.True(rule.Locked);
+        // Nothing is audited for a refused reveal.
+        Assert.Empty(await ListAuditAsync(org));
+    }
+
+    [Fact]
+    public async Task A_reveal_blocked_by_a_lock_records_no_idempotency_key_so_a_retry_is_refused_again()
+    {
+        // A refused reveal must NOT record its idempotency key — a retry with the same key must again be
+        // refused (409), never short-circuited as "already applied" (which would mask the seal).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedLockedRuleAsync(org, ws, VisibilityResourceType.Scene, resourceId, VisibilityState.Hidden);
+
+        var first = await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-1");
+        var retry = await RevealAsync(org, ws, VisibilityResourceType.Scene, resourceId, "key-1");
+
+        Assert.True(first.BlockedByLock);
+        Assert.True(retry.BlockedByLock);
+    }
+
+    [Fact]
+    public async Task Reveal_of_an_already_visible_but_locked_rule_is_still_blocked()
+    {
+        // Fail-closed: a locked rule rejects EVERY reveal attempt, even a no-op reveal of an
+        // already-visible (sealed-visible) resource.
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedLockedRuleAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, VisibilityState.Visible);
+
+        var result = await RevealAsync(org, ws, VisibilityResourceType.ContentBlock, resourceId, "key-1");
+
+        Assert.True(result.BlockedByLock);
+        Assert.Empty(await ListAuditAsync(org));
+    }
+
+    [Fact]
+    public async Task A_locked_audience_wide_rule_does_not_block_a_selected_participant_reveal()
+    {
+        // The lock is per-rule and per-dimension: a sealed audience-wide rule never blocks a reveal in the
+        // independent selected-participant dimension (a different rule).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var participant = await SeedParticipantAsync(org, ws);
+        var resourceId = Guid.NewGuid();
+        await SeedLockedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Hidden);
+
+        var result = await RevealAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1", participant.Id);
+
+        Assert.False(result.BlockedByLock);
+        Assert.Equal(RevealOutcome.Applied, result.Outcome);
+        Assert.True(result.VisibilityChanged);
+        // Two rules now exist: the locked audience-wide one (untouched) and the new selected-participant one.
+        var rules = await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId);
+        Assert.Equal(2, rules.Count);
+        Assert.Contains(rules, r => r.IsAudienceWide && r.Locked && !r.IsVisibleToAudience());
+        Assert.Contains(rules, r => r.TargetsParticipant(participant.Id) && r.IsVisibleToAudience() && !r.Locked);
     }
 
     // --- Isolation -------------------------------------------------------------

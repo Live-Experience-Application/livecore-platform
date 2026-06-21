@@ -173,7 +173,8 @@ export type RevealParticipantIsOptional = Assert<
 // produced ONLY through the existing audience projection, never the raw host title/body
 // (threats T2/T7). It mirrors the server DTO (apps/api/Visibility/ParticipantFeedDtos.cs
 // `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
-// string? Body, DateTimeOffset RevealedAt, string RevealScope)`) and the wire item the
+// string? Body, DateTimeOffset RevealedAt, string RevealScope, bool Locked, ...)` — the
+// CORE-VSEAL-001 sealed/locked flag added) and the wire item the
 // participant-visible-feed integration test pins. Pinning the property set to exactly this
 // audience-safe shape makes a host-only or content field a compile error here, so the
 // published contract can never grow a leaking field.
@@ -187,6 +188,7 @@ export type ParticipantVisibleFeedItemKeysAreExact = Assert<
     | "body"
     | "revealedAt"
     | "revealScope"
+    | "locked"
     | "attachments"
   >
 >;
@@ -213,6 +215,12 @@ export type ParticipantVisibleFeedItemRevealedAtIsIsoDateTime = Assert<
 
 export type ParticipantVisibleFeedItemRevealScopeIsEnum = Assert<
   Equal<ParticipantVisibleFeedItem["revealScope"], FeedRevealScope>
+>;
+
+// The sealed/locked authoring flag (CORE-VSEAL-001) is an audience-safe boolean server fact —
+// a consumer renders a locked presentation state from it without any host read.
+export type ParticipantVisibleFeedItemLockedIsBoolean = Assert<
+  Equal<ParticipantVisibleFeedItem["locked"], boolean>
 >;
 
 // --- The participant visible-feed attachment is the AUDIENCE-SAFE attachment shape. ---
@@ -303,8 +311,9 @@ export type EntityResponseKeepsHostOnlyFields = Assert<
 // dangling rule — never the resource's full host content (threats T2/T7). It mirrors the
 // server DTO (apps/api/Visibility/VisibilityRuleDtos.cs `VisibilityRuleResponse(Guid Id,
 // string ResourceType, Guid ResourceId, string? ResourceLabel, string Visibility,
-// Guid? ParticipantId, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)`). Pinning the
-// property set keeps the published contract from silently growing or dropping a field.
+// Guid? ParticipantId, bool Locked, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)` —
+// the CORE-VSEAL-001 sealed/locked flag added). Pinning the property set keeps the published
+// contract from silently growing or dropping a field.
 
 export type VisibilityRuleResponseKeysAreExact = Assert<
   Equal<
@@ -315,6 +324,7 @@ export type VisibilityRuleResponseKeysAreExact = Assert<
     | "resourceLabel"
     | "visibility"
     | "participantId"
+    | "locked"
     | "createdAt"
     | "updatedAt"
   >
@@ -322,6 +332,12 @@ export type VisibilityRuleResponseKeysAreExact = Assert<
 
 export type VisibilityRuleResponseResourceLabelIsNullableString = Assert<
   Equal<VisibilityRuleResponse["resourceLabel"], string | null>
+>;
+
+// The sealed/locked authoring flag (CORE-VSEAL-001) is a server-asserted boolean on the rule
+// projection — `true` while the rule is locked (reveal/hide/change refused with 409).
+export type VisibilityRuleResponseLockedIsBoolean = Assert<
+  Equal<VisibilityRuleResponse["locked"], boolean>
 >;
 
 // --- Request DTOs require exactly the documented fields. -----------------------

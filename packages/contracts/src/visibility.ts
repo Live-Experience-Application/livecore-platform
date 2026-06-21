@@ -128,6 +128,12 @@ export interface CreateVisibilityRuleRequest {
  * name each row from the rule list ALONE, with no per-resource host read. The label is
  * the resource's audience-safe NAME (a scene's title, an entity's name, a content
  * block's generic kind), never its full host content (threats T2/T7).
+ *
+ * It also carries the sealed/locked authoring flag (CORE-VSEAL-001): a server-asserted
+ * boolean that marks the governed resource permanently-restricted, so a reveal/hide/change
+ * targeting a locked rule is refused with `409`. The flag is ORTHOGONAL to the
+ * Hidden/Visible {@link visibility} state — not a third state — and is set/cleared only by
+ * the authoring roles through the lock/unlock commands.
  */
 export interface VisibilityRuleResponse {
   /** The surrogate id of the visibility rule. */
@@ -151,6 +157,15 @@ export interface VisibilityRuleResponse {
    * audience-wide rule.
    */
   participantId: Uuid | null;
+  /**
+   * Whether the rule is SEALED (locked) — the server-asserted authoring lock
+   * (CORE-VSEAL-001) that makes the governed resource permanently-restricted: while
+   * `true`, a reveal/hide/change targeting the rule is refused with `409`. An orthogonal
+   * flag, not a third {@link visibility} state, so a consumer can render a locked
+   * presentation state while the binary Hidden/Visible state is unchanged. `false` for an
+   * unlocked rule.
+   */
+  locked: boolean;
   /** Server timestamp (UTC) at which the rule was first created. */
   createdAt: IsoDateTimeString;
   /** Server timestamp (UTC) at which the rule was last updated. */
@@ -208,9 +223,11 @@ export interface ParticipantVisibleFeedAttachment {
  * It is audience-SAFE by construction (docs/08_API_CONTRACTS.md DTO rules; threats
  * T2/T7): the title/body are produced ONLY through the resource kind's existing
  * role-based audience projection, never the raw host title/body, so projecting an item
- * can never leak hidden content. Mirrors the server DTO
+ * can never leak hidden content. The {@link locked} flag (CORE-VSEAL-001) is an
+ * audience-safe boolean server fact about a resource the participant is already allowed to
+ * see — never host content. Mirrors the server DTO
  * `ParticipantVisibleFeedItem(string ResourceType, Guid ResourceId, string? Title,
- * string? Body, DateTimeOffset RevealedAt, string RevealScope,
+ * string? Body, DateTimeOffset RevealedAt, string RevealScope, bool Locked,
  * IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)`.
  */
 export interface ParticipantVisibleFeedItem {
@@ -240,6 +257,14 @@ export interface ParticipantVisibleFeedItem {
    * scoped to exactly this participant ({@link FeedRevealScope}).
    */
   revealScope: FeedRevealScope;
+  /**
+   * Whether the visible resource is SEALED (locked) in the way this participant sees it
+   * (CORE-VSEAL-001) — a server-asserted authoring lock marking it permanently-restricted,
+   * so an audience surface can render a locked presentation state bound to this server
+   * fact. Audience-safe: a boolean fact about an already-visible resource, never host
+   * content. `false` for a normally-revealed (unlocked) resource.
+   */
+  locked: boolean;
   /**
    * The audience-safe list of assets attached to this resource (CORE-ALC-002), each an
    * assetId plus an audience-safe name and content type. Empty (never absent) when the

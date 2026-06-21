@@ -42,6 +42,15 @@ namespace LiveCore.Api.Visibility;
 ///   <see cref="IVisibilityRuleRepository.FindByIdInSessionAsync"/> (tenant-, workspace- AND session-scoped),
 ///   so a rule of another session, workspace or tenant is never returned even when its surrogate id is known;
 ///   a foreign/unknown rule is a hidden <c>404</c>.</item>
+///   <item><c>POST /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock</c> and
+///   <c>.../unlock</c> — module Visibility, roles "Host,CoHost,Owner,Admin" (CORE-VSEAL-001). SEAL (lock) or
+///   unseal (unlock) a rule via <see cref="VisibilityRuleLockService"/>, asserting the server-side flag that
+///   makes the governed resource permanently-restricted: while a rule is locked a reveal/hide/change targeting
+///   it is refused fail-closed (<c>409</c>). Only the authoring roles may set or clear the lock; the change is
+///   audited (<see cref="Audit.AuditAction.VisibilityRuleLockChanged"/>) and idempotent (re-locking/unlocking
+///   is a no-op). The organization slug travels as a required query parameter (these commands carry no body).
+///   Returns <c>200 OK</c> with the host <see cref="VisibilityRuleResponse"/> carrying the updated
+///   <c>locked</c> flag; a foreign/unknown/cross-session rule is a hidden <c>404</c>.</item>
 /// </list>
 ///
 /// Tenant resolution + authorization mirror the reveal command exactly: the route path carries only
@@ -88,6 +97,8 @@ internal static class VisibilityRuleEndpoints
         group.MapPost("/{sessionId}/visibility-rules", CreateVisibilityRuleAsync);
         group.MapGet("/{sessionId}/visibility-rules", ListVisibilityRulesAsync);
         group.MapGet("/{sessionId}/visibility-rules/{ruleId}", GetVisibilityRuleByIdAsync);
+        group.MapPost("/{sessionId}/visibility-rules/{ruleId}/lock", LockVisibilityRuleAsync);
+        group.MapPost("/{sessionId}/visibility-rules/{ruleId}/unlock", UnlockVisibilityRuleAsync);
 
         return endpoints;
     }
@@ -359,6 +370,103 @@ internal static class VisibilityRuleEndpoints
         return Results.Ok(VisibilityRuleResponse.From(rule, label));
     }
 
+    // POST /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/lock?organizationSlug={slug}
+    private static Task<IResult> LockVisibilityRuleAsync(
+        HttpContext httpContext,
+        string sessionId,
+        string ruleId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+        => SetLockAsync(httpContext, sessionId, ruleId, organizationSlug, locked: true, timeProvider, cancellationToken);
+
+    // POST /api/v1/sessions/{sessionId}/visibility-rules/{ruleId}/unlock?organizationSlug={slug}
+    private static Task<IResult> UnlockVisibilityRuleAsync(
+        HttpContext httpContext,
+        string sessionId,
+        string ruleId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+        => SetLockAsync(httpContext, sessionId, ruleId, organizationSlug, locked: false, timeProvider, cancellationToken);
+
+    /// <summary>
+    /// Shared handler behind the lock and unlock commands (CORE-VSEAL-001): they differ ONLY in the
+    /// <paramref name="locked"/> direction, so they share one fail-closed flow — the same tenant resolution and
+    /// authoring authorization as the create/read routes (<see cref="AuthorizeAsync"/>), then the
+    /// <see cref="VisibilityRuleLockService"/> effect. The organization slug is a required QUERY parameter (a
+    /// lock command carries no body); a missing slug is 400, a malformed session/rule id is hidden as 404, and
+    /// a non-authoring member is 403 exactly like the other rule routes. The rule is loaded and sealed/unsealed
+    /// SESSION-SCOPED, so a foreign/unknown/cross-session rule is hidden as 404 (threats T1/T5/T3). On success
+    /// the response carries the updated rule (with its <c>locked</c> flag) and the audience-safe resource label.
+    /// </summary>
+    private static async Task<IResult> SetLockAsync(
+        HttpContext httpContext,
+        string sessionId,
+        string ruleId,
+        string? organizationSlug,
+        bool locked,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed session or rule id can never address a stored row; treat each as hidden (404).
+        if (!Guid.TryParse(sessionId, out var sessionGuid) || sessionGuid == Guid.Empty)
+        {
+            return HiddenRule();
+        }
+
+        if (!Guid.TryParse(ruleId, out var ruleGuid) || ruleGuid == Guid.Empty)
+        {
+            return HiddenRule();
+        }
+
+        var (authorized, context, session, failure) = await AuthorizeAsync(
+                deps, principal, organizationSlug, sessionGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (!authorized)
+        {
+            return failure!;
+        }
+
+        // SEAL/UNSEAL the rule WITHIN the resolved tenant, workspace and session: the service loads the rule
+        // session-scoped and atomically audits a real lock transition. A rule of another session, workspace or
+        // tenant — or an unknown rule — is never reachable, so it is hidden as 404 (threats T1/T5/T3). The
+        // command is idempotent (re-locking/unlocking is a no-op).
+        var now = timeProvider.GetUtcNow();
+        var rule = await deps.LockService
+            .SetLockAsync(
+                context!.OrganizationId, session!.WorkspaceId, session.Id, ruleGuid, locked, context.UserProfileId, now, cancellationToken)
+            .ConfigureAwait(false);
+        if (rule is null)
+        {
+            return HiddenRule();
+        }
+
+        // Name the row from the rule alone (CORE-APROJ-004): resolve the governed resource to its
+        // denormalized, audience-safe label through the Visibility-owned port; a dangling rule degrades to a
+        // null label without error. The projection carries the updated locked flag (CORE-VSEAL-001).
+        var label = await ResolveResourceLabelAsync(
+                deps, context.OrganizationId, session.WorkspaceId, rule, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(VisibilityRuleResponse.From(rule, label));
+    }
+
     /// <summary>
     /// Resolves a rule's governed resource to its denormalized, AUDIENCE-SAFE label (CORE-APROJ-004) through
     /// the Visibility-owned <see cref="IVisibleResourceAudienceProjector"/> port (CORE-APROJ-002) — the same
@@ -501,6 +609,7 @@ internal static class VisibilityRuleEndpoints
         var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var visibilityRules = services.GetService<VisibilityRuleService>();
+        var lockService = services.GetService<VisibilityRuleLockService>();
         var rules = services.GetService<IVisibilityRuleRepository>();
         var audienceProjector = services.GetService<IVisibleResourceAudienceProjector>();
 
@@ -508,6 +617,7 @@ internal static class VisibilityRuleEndpoints
             || sessions is null
             || workspaceMembers is null
             || visibilityRules is null
+            || lockService is null
             || rules is null
             || audienceProjector is null)
         {
@@ -516,7 +626,7 @@ internal static class VisibilityRuleEndpoints
         }
 
         dependencies = new VisibilityRuleEndpointDependencies(
-            resolver, sessions, workspaceMembers, visibilityRules, rules, audienceProjector);
+            resolver, sessions, workspaceMembers, visibilityRules, lockService, rules, audienceProjector);
         return true;
     }
 
@@ -592,6 +702,7 @@ internal static class VisibilityRuleEndpoints
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
         VisibilityRuleService VisibilityRules,
+        VisibilityRuleLockService LockService,
         IVisibilityRuleRepository Rules,
         IVisibleResourceAudienceProjector AudienceProjector);
 }

@@ -131,6 +131,15 @@ public sealed class HideServiceTests : IDisposable
         Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
     }
 
+    private async Task SeedLockedRuleAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId, VisibilityState visibility)
+    {
+        var sessionId = await SessionIdAsync(org, ws);
+        var rule = VisibilityRule.Create(org, ws, sessionId, type, resourceId, visibility, _now);
+        rule.Lock(_now);
+        await using var context = CreateContext();
+        Assert.Equal(VisibilityRuleAddResult.Added, await new VisibilityRuleRepository(context).AddAsync(rule, CancellationToken.None));
+    }
+
     private async Task<IReadOnlyList<VisibilityRule>> ListRulesAsync(Guid org, Guid ws, VisibilityResourceType type, Guid resourceId)
     {
         var sessionId = await SessionIdAsync(org, ws);
@@ -181,6 +190,27 @@ public sealed class HideServiceTests : IDisposable
         await using var context = CreateContext();
         Assert.Equal(ParticipantAddResult.Added, await new ParticipantRepository(context).AddAsync(participant, CancellationToken.None));
         return participant;
+    }
+
+    // --- Sealed/locked gate (CORE-VSEAL-001) -----------------------------------
+
+    [Fact]
+    public async Task Hide_of_a_locked_rule_is_blocked_and_changes_nothing()
+    {
+        // A sealed (locked) rule's visibility cannot be hidden either: the hide is refused fail-closed (409),
+        // changes nothing and audits nothing — the resource stays visible (and locked).
+        var (org, ws) = await SeedWorkspaceAsync();
+        var resourceId = Guid.NewGuid();
+        await SeedLockedRuleAsync(org, ws, VisibilityResourceType.Entity, resourceId, VisibilityState.Visible);
+
+        var result = await HideAsync(org, ws, VisibilityResourceType.Entity, resourceId, "key-1");
+
+        Assert.True(result.BlockedByLock);
+        Assert.False(result.VisibilityChanged);
+        var rule = Assert.Single(await ListRulesAsync(org, ws, VisibilityResourceType.Entity, resourceId));
+        Assert.True(rule.IsVisibleToAudience());
+        Assert.True(rule.Locked);
+        Assert.Empty(await ListAuditAsync(org));
     }
 
     // --- State change ----------------------------------------------------------

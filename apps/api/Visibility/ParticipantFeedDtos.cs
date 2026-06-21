@@ -101,7 +101,8 @@ public sealed record ParticipantVisibleFeedResponse(
 /// (<see cref="Realtime.SessionEventEnvelope.ForAudience"/>) address their resource — and additionally
 /// carries the AUDIENCE-SAFE projected fields that let a consumer render the revealed item from the feed
 /// ALONE, with no host read: an audience-safe <see cref="Title"/> (and, where the kind has one, a short
-/// <see cref="Body"/>), the <see cref="RevealedAt"/> reveal time and the <see cref="RevealScope"/> marker.
+/// <see cref="Body"/>), the <see cref="RevealedAt"/> reveal time, the <see cref="RevealScope"/> marker and the
+/// sealed/locked <see cref="Locked"/> presentation flag (CORE-VSEAL-001).
 ///
 /// AUDIENCE-SAFE BY CONSTRUCTION (docs/08 DTO rules; threats T2/T7 in docs/07_SECURITY_THREAT_MODEL.md):
 /// <list type="bullet">
@@ -155,6 +156,14 @@ public sealed record ParticipantVisibleFeedResponse(
 /// The marker distinguishing an audience-wide reveal from a selected-participant reveal — the stable name of
 /// a <see cref="VisibleResourceRevealScope"/> (AudienceWide/SelectedParticipant).
 /// </param>
+/// <param name="Locked">
+/// Whether the visible resource is SEALED (locked) in the way this participant sees it (CORE-VSEAL-001) — a
+/// server-asserted authoring lock that marks it permanently-restricted, so an audience surface can render a
+/// locked presentation state bound to this server fact. It is AUDIENCE-SAFE: a boolean server fact about a
+/// resource the participant is ALREADY allowed to see (the item is built only for an already-visible
+/// resource), never host content and never an authorization rationale (threats T2/T7). <see langword="false"/>
+/// for a normally-revealed (unlocked) resource.
+/// </param>
 /// <param name="Attachments">
 /// The audience-safe list of assets attached to this resource (CORE-ALC-002), each an assetId plus an
 /// audience-safe name and content type. Empty when the resource has no attachments or cannot carry them.
@@ -166,6 +175,7 @@ public sealed record ParticipantVisibleFeedItem(
     string? Body,
     DateTimeOffset RevealedAt,
     string RevealScope,
+    bool Locked,
     IReadOnlyList<ParticipantVisibleFeedAttachment> Attachments)
 {
     /// <summary>
@@ -201,6 +211,7 @@ public sealed record ParticipantVisibleFeedItem(
             projection?.Body,
             reveal.RevealedAt,
             reveal.Scope.ToString(),
+            reveal.Locked,
             projectedAttachments);
     }
 }

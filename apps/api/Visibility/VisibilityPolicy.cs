@@ -598,13 +598,19 @@ internal sealed class VisibilityPolicy
 
         // Within the effective scope (audience-wide when any audience-wide rule applies, else the
         // participant-scoped granting rules), the resource first became visible at the EARLIEST reveal time.
-        var effective = audienceWide.Length > 0 ? audienceWide : grantingRules.AsEnumerable();
+        var effective = (audienceWide.Length > 0 ? audienceWide : grantingRules.AsEnumerable()).ToArray();
         var revealedAt = effective.Min(rule => rule.UpdatedAt);
+
+        // SEALED/LOCKED presentation state (CORE-VSEAL-001): the resource is sealed in the way the participant
+        // sees it iff a granting rule of the effective scope is locked. Audience-safe (a boolean server fact
+        // about an already-visible resource, never host content; threat T7).
+        var locked = effective.Any(rule => rule.Locked);
 
         return new VisibleResourceReveal(
             grantingRules.Key.ResourceType,
             grantingRules.Key.ResourceId,
             revealedAt,
-            scope);
+            scope,
+            locked);
     }
 }

@@ -305,6 +305,15 @@ internal static class HideEndpoints
                 cancellationToken)
             .ConfigureAwait(false);
 
+        // SEALED/LOCKED (CORE-VSEAL-001): the resource's rule in the target dimension is sealed (locked), so
+        // the hide was REFUSED fail-closed — nothing changed, nothing was audited and no durable event was
+        // appended (the events list is empty). A locked rule expresses a permanently-restricted resource, so
+        // a hide targeting it is a 409 Conflict. Return before the deliver loop (there is nothing to deliver).
+        if (committed.Result.BlockedByLock)
+        {
+            return SealedConflict();
+        }
+
         // COMMIT-THEN-PUBLISH (CORE-CONC-002): the transaction has committed, so deliver each appended event
         // to its server-computed realtime recipients OUTSIDE the transaction. Delivery is best-effort, so a
         // delivery failure cannot roll back the committed hide; a reconnecting client replays a missed push
@@ -440,6 +449,16 @@ internal static class HideEndpoints
             code: ProblemCodes.ValidationError,
             title: "Bad Request",
             detail: detail);
+
+    // The resource's visibility rule is sealed (locked, CORE-VSEAL-001): the caller is authorized, but the
+    // resource is permanently-restricted, so its visibility cannot be hidden. A 409 Conflict with the
+    // generic conflict code; the detail names only the seal and leaks no tenant data (threat T7).
+    private static IResult SealedConflict()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
+            title: "Conflict",
+            detail: "The visibility rule is sealed (locked) and its visibility cannot be changed.");
 
     // Session existence is hidden: a malformed id, a session in a foreign or non-entitled tenant, an
     // unknown session, and a session in a workspace the caller does not belong to are ALL reported as

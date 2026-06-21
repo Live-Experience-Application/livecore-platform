@@ -162,6 +162,17 @@ internal sealed class VisibilityRuleConfiguration : IEntityTypeConfiguration<Vis
         builder.Property(rule => rule.TargetParticipantId)
             .HasColumnName("target_participant_id");
 
+        // Sealed/locked authoring flag (CORE-VSEAL-001): a server-asserted boolean that gates whether the
+        // rule's binary Hidden/Visible state may transition. A real, required boolean column (not JSON,
+        // never an authorization field inside arbitrary JSON — docs/10_DATABASE_SCHEMA.md), defaulting to
+        // false so every pre-existing row is unlocked and behaves exactly as before. It is orthogonal to
+        // the visibility column — NOT a third VisibilityState — so it needs no enum conversion and reshapes
+        // no existing index.
+        builder.Property(rule => rule.Locked)
+            .HasColumnName("locked")
+            .HasDefaultValue(false)
+            .IsRequired();
+
         // Documented critical index visibility_rules(session_id, resource_type, resource_id)
         // (CORE-SVIS-001; docs/10_DATABASE_SCHEMA.md): a reveal is session-scoped, so "find the rule(s)
         // for this resource in this session" leads with the session column — the lookup the
