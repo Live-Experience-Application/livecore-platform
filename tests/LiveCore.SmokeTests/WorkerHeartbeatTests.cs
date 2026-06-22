@@ -81,7 +81,7 @@ public class WorkerHeartbeatTests
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             await ((IHostedService)service).StartAsync(timeout.Token);
 
-            await WaitForFileAsync(jobFile, TimeSpan.FromSeconds(10));
+            await WaitForReadableHeartbeatAsync(jobFile, TimeSpan.FromSeconds(30));
 
             await ((IHostedService)service).StopAsync(CancellationToken.None);
 
@@ -138,12 +138,16 @@ public class WorkerHeartbeatTests
     private static string TempHeartbeatPath()
         => Path.Combine(Path.GetTempPath(), $"livecore-worker-heartbeat-test-{Guid.NewGuid():N}");
 
-    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    private static async Task WaitForReadableHeartbeatAsync(string path, TimeSpan timeout)
     {
+        // Wait until a COMPLETE heartbeat can be READ, not merely until the file exists: the loop
+        // creates the file and then writes its timestamp, so a bare File.Exists can observe a
+        // created-but-not-yet-flushed file - a race widened by thread-pool load under coverage. A
+        // genuinely unwritten heartbeat never becomes readable and trips the timeout below.
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            if (File.Exists(path))
+            if (WorkerHeartbeat.TryReadLastBeat(path, out _))
             {
                 return;
             }
@@ -151,7 +155,9 @@ public class WorkerHeartbeatTests
             await Task.Delay(TimeSpan.FromMilliseconds(25));
         }
 
-        Assert.True(File.Exists(path), $"Heartbeat file was not written within {timeout}.");
+        Assert.True(
+            WorkerHeartbeat.TryReadLastBeat(path, out _),
+            $"A readable heartbeat was not written within {timeout}.");
     }
 
     private static void TryDelete(string path)
