@@ -2,15 +2,17 @@
 
 <#
 .SYNOPSIS
-    CLI wrapper the CI publish job uses to derive the immutable, versioned API
-    and worker image references for a release tag (CORE-OPS-009).
+    CLI wrapper the CI publish job uses to derive the immutable, versioned API,
+    worker and migrations-runner image references for a release tag
+    (CORE-OPS-009, migrations added by CORE-OPS-015).
 
 .DESCRIPTION
     Imports LiveCoreImageTags.psm1 and prints (and, when an output path is given,
-    appends) 'api=<reference>' and 'worker=<reference>' lines. In GitHub Actions
-    the output path is $GITHUB_OUTPUT, so a later step reads the references as
-    step outputs. It fails closed (non-zero) for any non-release ref, so it can
-    never emit a reference for a pull request or a moving tag.
+    appends) 'api=<reference>', 'worker=<reference>' and 'migrations=<reference>'
+    lines. In GitHub Actions the output path is $GITHUB_OUTPUT, so a later step
+    reads the references as step outputs. It fails closed (non-zero) for any
+    non-release ref, so it can never emit a reference for a pull request or a
+    moving tag.
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
@@ -31,7 +33,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Owner,
 
-    # File the 'api='/'worker=' lines are appended to (defaults to
+    # File the 'api='/'worker='/'migrations=' lines are appended to (defaults to
     # $GITHUB_OUTPUT under GitHub Actions). The lines are always written to
     # stdout regardless.
     [string]$OutputPath
@@ -47,8 +49,9 @@ Import-Module (Join-Path $scriptDir 'LiveCoreImageTags.psm1') -Force
 
 $apiReference = Get-LiveCoreImageReference -Ref $Ref -Registry $Registry -Owner $Owner -Component 'api'
 $workerReference = Get-LiveCoreImageReference -Ref $Ref -Registry $Registry -Owner $Owner -Component 'worker'
+$migrationsReference = Get-LiveCoreImageReference -Ref $Ref -Registry $Registry -Owner $Owner -Component 'migrations'
 
-$lines = @("api=$apiReference", "worker=$workerReference")
+$lines = @("api=$apiReference", "worker=$workerReference", "migrations=$migrationsReference")
 
 if (-not $OutputPath -and $env:GITHUB_OUTPUT) {
     $OutputPath = $env:GITHUB_OUTPUT

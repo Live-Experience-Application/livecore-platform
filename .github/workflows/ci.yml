@@ -1519,15 +1519,20 @@ jobs:
           DRY_RUN_REF: refs/tags/v0.0.0-cidryrun
         run: ./scripts/derive-image-tags.ps1 -Ref $env:DRY_RUN_REF -Registry $env:REGISTRY -Owner $env:REPOSITORY_OWNER -OutputPath $env:GITHUB_OUTPUT
 
-      - name: Dry-run build the API and worker images (built, never pushed)
+      - name: Dry-run build the API, worker and migrations images (built, never pushed)
+        # CORE-OPS-015: the migrations runner image is built here on a pull request
+        # (and any non-tag push) exactly as the api/worker images are, proving the
+        # publish build path for it without ever pushing.
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           docker build --file apps/api/Dockerfile --tag "$API_REFERENCE" .
           docker build --file apps/worker/Dockerfile --tag "$WORKER_REFERENCE" .
-          echo "Dry-run built $API_REFERENCE and $WORKER_REFERENCE; this job never logs in or pushes."
+          docker build --file apps/api/Migrations.Dockerfile --tag "$MIGRATIONS_REFERENCE" .
+          echo "Dry-run built $API_REFERENCE, $WORKER_REFERENCE and $MIGRATIONS_REFERENCE; this job never logs in or pushes."
 
       - name: Install Trivy (SBOM generator and vulnerability scanner)
         # CORE-DEP-003: installs the Trivy CLI from its APT repository (the same
@@ -1573,9 +1578,10 @@ jobs:
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
-          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE" "migrations=$MIGRATIONS_REFERENCE"; do
             name="${entry%%=*}"
             reference="${entry#*=}"
             trivy image --format cyclonedx --output "$name.sbom.cdx.json" "$reference"
@@ -1598,6 +1604,7 @@ jobs:
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
           # A throwaway, password-less key generated for this run only; the release
           # publish never uses a key (it signs keyless via OIDC).
           COSIGN_PASSWORD: ""
@@ -1613,7 +1620,7 @@ jobs:
           # A throwaway key pair, generated for this run only (never committed and
           # never used for a real publish).
           cosign generate-key-pair
-          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE" "migrations=$MIGRATIONS_REFERENCE"; do
             name="${entry%%=*}"
             reference="${entry#*=}"
             local_ref="localhost:5000/livecore-$name:dryrun"
@@ -1652,7 +1659,7 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: |
           set -euo pipefail
-          for name in api worker; do
+          for name in api worker migrations; do
             pwsh -NoProfile -File scripts/assert-license-compliance.ps1 \
               -SbomPath "$name.sbom.cdx.json" -ReportOnly
           done
@@ -1667,6 +1674,8 @@ jobs:
             api.scan.json
             worker.sbom.cdx.json
             worker.scan.json
+            migrations.sbom.cdx.json
+            migrations.scan.json
           if-no-files-found: error
 
   publish-packages-dry-run:
@@ -2052,14 +2061,20 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USER" --password-stdin
 
-      - name: Build the versioned API and worker images
+      - name: Build the versioned API, worker and migrations images
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
           docker build --file apps/api/Dockerfile --build-arg SOURCE_REVISION="${{ github.sha }}" --tag "$API_REFERENCE" .
           docker build --file apps/worker/Dockerfile --build-arg SOURCE_REVISION="${{ github.sha }}" --tag "$WORKER_REFERENCE" .
+          # CORE-OPS-015: the migrations runner shares the API assembly and is built
+          # from apps/api/Migrations.Dockerfile, which declares no SOURCE_REVISION ARG
+          # (this story is a release-tooling change only and does not modify that
+          # Dockerfile), so it is built without the build-arg.
+          docker build --file apps/api/Migrations.Dockerfile --tag "$MIGRATIONS_REFERENCE" .
 
       - name: Produce an SBOM and a CVE scan report, and fail the publish on a critical vulnerability
         # CORE-DEP-003: before anything is pushed, generate a CycloneDX SBOM and a
@@ -2070,9 +2085,10 @@ jobs:
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
-          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE" "migrations=$MIGRATIONS_REFERENCE"; do
             name="${entry%%=*}"
             reference="${entry#*=}"
             trivy image --format cyclonedx --output "$name.sbom.cdx.json" "$reference"
@@ -2094,7 +2110,7 @@ jobs:
         # the published closure.
         run: |
           set -euo pipefail
-          for name in api worker; do
+          for name in api worker migrations; do
             pwsh -NoProfile -File scripts/assert-license-compliance.ps1 \
               -SbomPath "$name.sbom.cdx.json" -ReportOnly
           done
@@ -2103,12 +2119,13 @@ jobs:
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
           # Immutability guard: a release version is cut once, so an already
           # published tag must never be overwritten. Refuse to push when the tag
           # already exists in the registry rather than mutating a shipped image.
-          for reference in "$API_REFERENCE" "$WORKER_REFERENCE"; do
+          for reference in "$API_REFERENCE" "$WORKER_REFERENCE" "$MIGRATIONS_REFERENCE"; do
             if docker manifest inspect "$reference" > /dev/null 2>&1; then
               echo "Refusing to overwrite an already-published immutable tag: $reference"
               exit 1
@@ -2116,6 +2133,7 @@ jobs:
           done
           docker push "$API_REFERENCE"
           docker push "$WORKER_REFERENCE"
+          docker push "$MIGRATIONS_REFERENCE"
 
       - name: Sign each pushed image and attach its CycloneDX SBOM as an attestation (keyless OIDC)
         # CORE-SEC-008: after the CVE gate passed and the images were pushed, sign
@@ -2127,9 +2145,10 @@ jobs:
         env:
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
-          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE" "migrations=$MIGRATIONS_REFERENCE"; do
             name="${entry%%=*}"
             reference="${entry#*=}"
             digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$reference" | cut -d@ -f2)"
@@ -2150,11 +2169,12 @@ jobs:
           REPO: ${{ github.repository }}
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           set -euo pipefail
           identity_regexp="^https://github.com/${REPO}/\.github/workflows/.+@refs/tags/v"
           issuer="https://token.actions.githubusercontent.com"
-          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE"; do
+          for entry in "api=$API_REFERENCE" "worker=$WORKER_REFERENCE" "migrations=$MIGRATIONS_REFERENCE"; do
             name="${entry%%=*}"
             reference="${entry#*=}"
             digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$reference" | cut -d@ -f2)"
@@ -2185,6 +2205,10 @@ jobs:
             worker.scan.json
             worker.sig.json
             worker.att.json
+            migrations.sbom.cdx.json
+            migrations.scan.json
+            migrations.sig.json
+            migrations.att.json
           if-no-files-found: error
 
       - name: Summarize the published images
@@ -2192,12 +2216,14 @@ jobs:
           REPO: ${{ github.repository }}
           API_REFERENCE: ${{ steps.tags.outputs.api }}
           WORKER_REFERENCE: ${{ steps.tags.outputs.worker }}
+          MIGRATIONS_REFERENCE: ${{ steps.tags.outputs.migrations }}
         run: |
           {
             echo "### Published container images"
             echo ""
             echo "- \`$API_REFERENCE\`"
             echo "- \`$WORKER_REFERENCE\`"
+            echo "- \`$MIGRATIONS_REFERENCE\`"
             echo ""
             echo "A CycloneDX SBOM and a CVE scan report were produced for each"
             echo "image and the critical-vulnerability gate passed before push."

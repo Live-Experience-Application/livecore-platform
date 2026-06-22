@@ -82,6 +82,12 @@ AssertEqual 'ghcr.io/live-experience-application/livecore-worker:1.2.3' `
     (Get-LiveCoreImageReference -Ref 'refs/tags/v1.2.3' -Registry $registry -Owner $owner -Component 'worker') `
     'a worker release tag derives the version-pinned worker image reference'
 
+# CORE-OPS-015: the migrations runner image publishes version-pinned alongside
+# the api and worker images, so a downstream e2e harness can pull a pinned Core.
+AssertEqual 'ghcr.io/live-experience-application/livecore-migrations:1.2.3' `
+    (Get-LiveCoreImageReference -Ref 'refs/tags/v1.2.3' -Registry $registry -Owner $owner -Component 'migrations') `
+    'a migrations release tag derives the version-pinned migrations image reference'
+
 # The owner segment is lowercased (container repositories are lowercase).
 AssertTrue ((Get-LiveCoreImageReference -Ref 'refs/tags/v1.2.3' -Registry $registry -Owner $owner -Component 'api') -clike '*/live-experience-application/*') `
     'the owner segment is lowercased'
@@ -126,9 +132,11 @@ foreach ($badRef in $rejectedRefs) {
         "fails closed for non-release ref '$label'"
 }
 
-# Fail closed: only the api and worker images publish; any other component is rejected.
+# Fail closed: only the api, worker and migrations images publish; any other
+# component - here the non-publishable 'database' - is rejected, so the
+# publishable set cannot silently grow to a component that has no release image.
 AssertThrows { Get-LiveCoreImageReference -Ref 'refs/tags/v1.2.3' -Registry $registry -Owner $owner -Component 'database' } `
-    'fails closed for an unknown image component'
+    'fails closed for a non-publishable image component (database)'
 
 # The CLI wrapper emits both version-pinned references for a release tag...
 $cliOutput = & $deriveScript -Ref 'refs/tags/v5.6.7' -Registry $registry -Owner $owner
@@ -136,6 +144,8 @@ AssertTrue ($cliOutput -contains 'api=ghcr.io/live-experience-application/liveco
     'the CLI emits the version-pinned API reference'
 AssertTrue ($cliOutput -contains 'worker=ghcr.io/live-experience-application/livecore-worker:5.6.7') `
     'the CLI emits the version-pinned worker reference'
+AssertTrue ($cliOutput -contains 'migrations=ghcr.io/live-experience-application/livecore-migrations:5.6.7') `
+    'the CLI emits the version-pinned migrations reference'
 
 # ...and the CLI itself fails closed for a non-release ref.
 AssertThrows { & $deriveScript -Ref 'refs/heads/main' -Registry $registry -Owner $owner } `
