@@ -130,6 +130,15 @@ internal sealed class CachingWorkspaceMemberRepository : IWorkspaceMemberReposit
         CancellationToken cancellationToken)
         => _inner.ListBySubjectInOrganizationAsync(organizationId, userProfileId, cancellationToken);
 
+    /// <inheritdoc />
+    public Task<IReadOnlyList<WorkspaceMemberRosterEntry>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+        => _inner.ListByWorkspaceAsync(organizationId, workspaceId, skip, take, cancellationToken);
+
     private static string MemberKey(Guid organizationId, Guid workspaceId, Guid userProfileId)
         => string.Concat(
             _memberKeyPrefix,

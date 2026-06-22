@@ -242,6 +242,9 @@ public sealed class AuthorizationCacheDecoratorTests
 
         public Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(Guid organizationId, Guid userProfileId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        public Task<IReadOnlyList<WorkspaceMemberRosterEntry>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, int skip, int take, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
     }
 
     private sealed class CountingOrganizationRepository : IOrganizationRepository

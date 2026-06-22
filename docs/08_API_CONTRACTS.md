@@ -110,6 +110,7 @@ POST   /api/v1/workspaces
 GET    /api/v1/workspaces/{workspaceId}
 POST   /api/v1/workspaces/{workspaceId}/archive
 POST   /api/v1/workspaces/{workspaceId}/members
+GET    /api/v1/workspaces/{workspaceId}/members
 GET    /api/v1/workspaces/{workspaceId}/invitations
 POST   /api/v1/workspaces/{workspaceId}/invitations/accept
 DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}

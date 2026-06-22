@@ -43,6 +43,17 @@ namespace LiveCore.Api.Workspaces;
 ///   single-use invite token and returns the plaintext token exactly once; only
 ///   its hash is stored (threats T6/T7). The matching acceptance/redeem route is
 ///   CORE-WS-006 below; email delivery and UI remain out of scope.</item>
+///   <item><c>GET /api/v1/workspaces/{workspaceId}/members</c> — list a
+///   workspace's MEMBER ROSTER (CORE-WSM-001), the administration members read, so a
+///   host can render the members screen and obtain the membership id that
+///   <c>removeMember</c> requires. Returns an audience-safe, data-minimized paged
+///   projection (membership id, userProfileId, generic role, allow-listed display
+///   name, server timestamps) and NEVER an invited/login email, a token or any auth
+///   rationale (threats T6/T7). Authorized to the same Owner/Admin set as
+///   listInvitations, but the roster discloses the membership list, so a
+///   non-administration caller is hidden as 404 (not 403): a non-member, a
+///   non-administration tenant member and a foreign/unknown workspace are all an
+///   indistinguishable hidden 404.</item>
 ///   <item><c>GET /api/v1/workspaces/{workspaceId}/invitations</c> — list a
 ///   workspace's PENDING invitations (CORE-WS-008), "Manage members" (Owner or
 ///   Admin), so the manage-members surface can see its outstanding invites. Returns
@@ -131,6 +142,7 @@ internal static class WorkspaceEndpoints
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
         group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
+        group.MapGet("/{workspaceId}/members", ListWorkspaceMembersAsync);
         group.MapGet("/{workspaceId}/invitations", ListPendingWorkspaceInvitationsAsync);
         group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/invitations/{invitationId}", RevokeWorkspaceInvitationAsync);
@@ -863,6 +875,118 @@ internal static class WorkspaceEndpoints
         // The one-time token is returned to the caller here and only here.
         var response = WorkspaceInvitationResponse.From(invitation, plaintextToken);
         return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/members?organizationSlug={slug}
+    //
+    // Lists a workspace's MEMBER ROSTER (CORE-WSM-001), so an administration surface can render the members
+    // screen and obtain the membership id that removeMember requires (the membership id was otherwise
+    // unobtainable: the redemption projection is returned only to the accepting caller). It returns an
+    // audience-safe, data-minimized projection — the membership id, the userProfileId, the generic role, the
+    // allow-listed audience-safe display name and the server timestamps — and NEVER an invited/login email, a
+    // token or any auth rationale (threats T6/T7); the roster query joins only the audience-safe display column
+    // of the subject's profile, never its email.
+    //
+    // It reuses the listInvitations flow (fail-closed, resolve-tenant, load-then-authorize) and the SAME
+    // administration role set (the "Manage members" matrix row, Owner/Admin), with ONE deliberate difference: a
+    // caller who is NOT an Owner/Admin is hidden as 404, not 403. The roster discloses who is in the workspace,
+    // so its very existence is hidden from a non-administrator (a stronger T1/T5 posture than the invitations
+    // list, which reveals existence with a 403). So a non-administration tenant member, a non-member of the
+    // tenant, and a cross-tenant/unknown workspace are all an indistinguishable hidden 404. The read takes no
+    // clock and is bounded (CORE-DX-003).
+    private static async Task<IResult> ListWorkspaceMembersAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the other workspace by-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404), never echoing
+        // back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is indistinguishable
+            // from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant or
+        // unknown workspace is never revealed; threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite/list-invitations
+        // siblings on this same module. The roster discloses the membership list, so unlike those siblings a
+        // non-Owner/Admin is hidden as 404 rather than 403: the workspace's existence is never revealed to a
+        // non-administrator (threats T1/T5; the story's "non-administration caller hidden-404"). Exact,
+        // non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return HiddenWorkspace();
+        }
+
+        // Authorized. Only now validate the optional paging parameters, so a hidden caller (404 above) never
+        // receives request-shape feedback (mirrors the invitations/audit reads): a present-but-malformed
+        // limit/offset is a 400, an absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // Read ONE BOUNDED PAGE of the membership roster WITHIN this tenant and workspace; a membership in
+        // another workspace or tenant is never returned (threats T1/T5). Fetch ONE extra row so HasMore is set
+        // without a second COUNT. The read-model carries only the audience-safe fields, and the response is the
+        // data-minimized projection, which never emits an email or token (threats T6/T7). Bounded so a list never
+        // returns an unbounded array (threat T9; CORE-DX-003).
+        var rows = await deps.WorkspaceMembers
+            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
+            .ConfigureAwait(false);
+
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
+
+        var response = PageResponse.From(
+            pageRows.Select(WorkspaceMemberRosterEntryResponse.From).ToArray(), pageOffset, pageLimit, hasMore);
+        return Results.Ok(response);
     }
 
     // GET /api/v1/workspaces/{workspaceId}/invitations?organizationSlug={slug}

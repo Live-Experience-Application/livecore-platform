@@ -18,6 +18,7 @@ import type {
   Uuid,
   WorkspaceInvitationResponse,
   WorkspaceMemberResponse,
+  WorkspaceMemberRosterEntryResponse,
   WorkspaceResponse,
 } from "@livecore/contracts";
 
@@ -158,6 +159,29 @@ export class WorkspacesClient {
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/members`,
       body: request,
+    });
+  }
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/members` — the workspace's member ROSTER,
+   * as a bounded page (Owner/Admin). Each entry carries the membership `id` (the id
+   * {@link removeMember} requires), the `userProfileId`, the generic `role` and the
+   * audience-safe `displayName`; the projection never carries an email, token or auth
+   * rationale (threats T6/T7). The roster discloses the membership list, so a caller
+   * who is not an Owner/Admin (and a foreign/unknown workspace) is hidden as `404`,
+   * never `403`. Pass optional `limit`/`offset` to page.
+   */
+  listMembers(
+    workspaceId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<WorkspaceMemberRosterEntryResponse>> {
+    return this.http.send<PageResponse<WorkspaceMemberRosterEntryResponse>>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
     });
   }
 

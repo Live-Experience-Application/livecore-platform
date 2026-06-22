@@ -7,6 +7,7 @@ Roles are generic. Verticals may rename them in UI.
 | View workspace metadata | yes | yes | yes | yes | limited | limited | yes |
 | Manage workspace settings | yes | yes | no | no | no | no | no |
 | Manage members | yes | yes | limited | no | no | no | no |
+| View workspace member roster | yes | yes | no | no | no | no | no |
 | Create session | yes | yes | yes | yes | no | no | no |
 | Start/end session | yes | yes | yes | yes | no | no | no |
 | Create scene | yes | yes | yes | yes | no | no | no |
@@ -70,6 +71,20 @@ Roles are generic. Verticals may rename them in UI.
   A push subscription is per-principal personal data: it is removed on the data-subject erasure (CORE-PRIV-001,
   via the `push_subscriptions.user_id` `ON DELETE CASCADE`) and disclosed in the user-data export
   (CORE-PRIV-004), with the `auth` encryption secret never projected.
+- Reading a workspace's MEMBER ROSTER (`GET /api/v1/workspaces/{workspaceId}/members`, CORE-WSM-001, the "View
+  workspace member roster" row above) is a workspace-administration read restricted to Owner/Admin — the SAME
+  role set as listing a workspace's invitations (the "Manage members" privilege), so a host can render a members
+  screen and obtain the membership id that `client.workspaces.removeMember` requires (the membership id was
+  otherwise unobtainable: the redemption projection `WorkspaceMemberResponse` is returned only to the accepting
+  caller, never an administrator roster). It returns a tenant- and workspace-scoped, bounded, audience-safe
+  projection — the membership id, the userProfileId, the generic `MembershipRole` and explicitly allow-listed
+  audience-safe display metadata (a display name) plus server timestamps — joined READ-ONLY from the subject's
+  profile, and it NEVER includes an invited/login email, a token or any authorization rationale (data-minimized
+  PII discipline; threats T6/T7). Unlike the invitations list (which reveals a workspace's existence to a
+  non-administrator with a `403`), the roster discloses WHO is in the workspace, so it is fully fail-closed and
+  HIDDEN-404: a non-member, a non-administration tenant member, and a foreign-tenant or unknown workspace are all
+  an indistinguishable `404`, never `403` (threats T1/T5). The role check is exact and non-linear (Owner or
+  Admin, never an ordering comparison).
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.

@@ -42,6 +42,7 @@ import type {
   TemplateResponse,
   UploadIntentResponse,
   WorkspaceMemberResponse,
+  WorkspaceMemberRosterEntryResponse,
   WorkspaceResponse,
 } from "@livecore/contracts";
 
@@ -510,6 +511,14 @@ export type ListInvitationsReturn = Assert<
   Equal<
     Awaited<ReturnType<WorkspacesClient["listInvitations"]>>,
     PageResponse<PendingWorkspaceInvitationResponse>
+  >
+>;
+// The member-roster read (CORE-WSM-001) is a bounded page of the audience-safe roster
+// projection, never an unbounded array.
+export type ListMembersReturn = Assert<
+  Equal<
+    Awaited<ReturnType<WorkspacesClient["listMembers"]>>,
+    PageResponse<WorkspaceMemberRosterEntryResponse>
   >
 >;
 export type AcceptInvitationReturn = Assert<

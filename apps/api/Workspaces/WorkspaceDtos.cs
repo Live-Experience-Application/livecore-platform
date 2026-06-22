@@ -399,3 +399,63 @@ public sealed record WorkspaceMemberResponse(
             member.UpdatedAt);
     }
 }
+
+/// <summary>
+/// Audience-safe response projection of one workspace-membership ROSTER entry (CORE-WSM-001,
+/// <c>GET /api/v1/workspaces/{workspaceId}/members</c>). It is the read DTO of the administration members
+/// screen, returned to an Owner/Admin so they can render the workspace's members and obtain the membership
+/// <see cref="Id"/> the member-removal command (<c>client.workspaces.removeMember</c>) requires.
+///
+/// It is DISTINCT from <see cref="WorkspaceMemberResponse"/> (the invitation-redemption projection returned only
+/// to the accepting caller): it adds the audience-safe <see cref="DisplayName"/> so a host can put a name to each
+/// id, and it is the projection an ADMINISTRATOR roster returns rather than a single redeemed membership.
+///
+/// Data minimization and the allow-listed shape (docs/08_API_CONTRACTS.md DTO rules; threats T6/T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md): the projection carries ONLY generic identifiers, the generic role, the
+/// EXPLICITLY allow-listed audience-safe display metadata (the display name) and the server timestamps. It NEVER
+/// carries the subject's invited/login email, any token or token hash, or any internal authorization rationale —
+/// the roster query joins only the audience-safe display column of the profile, never its email. The shape is
+/// generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): generic identifiers + the generic
+/// <c>MembershipRole</c>, no vertical vocabulary.
+/// </summary>
+/// <param name="Id">Surrogate id of the membership (the id <c>removeMember</c> addresses).</param>
+/// <param name="OrganizationId">Tenant the membership belongs to.</param>
+/// <param name="WorkspaceId">Workspace the membership grants standing in.</param>
+/// <param name="UserProfileId">Subject (the member's user-profile id).</param>
+/// <param name="Role">Generic role the subject holds in the workspace.</param>
+/// <param name="DisplayName">
+/// The subject's optional, audience-safe display name, mirrored read-only from the profile. <see langword="null"/>
+/// when the profile asserts none; it is NEVER the subject's email (data minimization).
+/// </param>
+/// <param name="CreatedAt">When the membership was created (UTC).</param>
+/// <param name="UpdatedAt">When the membership was last updated (UTC).</param>
+public sealed record WorkspaceMemberRosterEntryResponse(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid UserProfileId,
+    string Role,
+    string? DisplayName,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// Projects an audience-safe <see cref="WorkspaceMemberRosterEntry"/> read-model into its response DTO. Only
+    /// the generic, allow-listed fields are copied (the role is emitted by its stable name); the read-model
+    /// carries no email/token, so none can be projected (threats T6/T7).
+    /// </summary>
+    public static WorkspaceMemberRosterEntryResponse From(WorkspaceMemberRosterEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        return new WorkspaceMemberRosterEntryResponse(
+            entry.Id,
+            entry.OrganizationId,
+            entry.WorkspaceId,
+            entry.UserProfileId,
+            entry.Role.ToString(),
+            entry.DisplayName,
+            entry.CreatedAt,
+            entry.UpdatedAt);
+    }
+}

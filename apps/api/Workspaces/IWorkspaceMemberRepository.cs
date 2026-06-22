@@ -180,4 +180,38 @@ public interface IWorkspaceMemberRepository
         Guid organizationId,
         Guid userProfileId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given workspace's membership ROSTER under the given organization
+    /// (CORE-WSM-001), oldest first, as the audience-safe <see cref="WorkspaceMemberRosterEntry"/> projection
+    /// the administration member-roster read returns. It is the read that finally makes a workspace's
+    /// membership ids enumerable to an administrator (so a host can drive <see cref="RemoveAsync"/> /
+    /// <c>removeMember</c> with a returned membership id), distinct from the per-subject
+    /// <see cref="ListBySubjectInOrganizationAsync"/> the personal-data export uses.
+    ///
+    /// The read is TENANT- and WORKSPACE-scoped: the predicate LEADS with <c>organization_id</c> (the
+    /// organization boundary checked before the workspace boundary) and matches the workspace, so a membership in
+    /// another workspace, or in the same workspace id under a different organization, is never returned (threats
+    /// T1/T5 in docs/07_SECURITY_THREAT_MODEL.md). It JOINS the audience-safe display metadata of the subject's
+    /// <c>users</c> profile READ-ONLY — selecting ONLY the optional display name, never the profile's email,
+    /// token or any other column — so the projection is data-minimized at the query (threats T6/T7). The read is
+    /// tracking-free (it never mutates) and ordered oldest-first by the time-ordered surrogate id (UUIDv7),
+    /// provider-independent because SQLite cannot ORDER BY a DateTimeOffset, matching the other repositories'
+    /// ordering convention. It is bounded by <paramref name="skip"/>/<paramref name="take"/> so a single
+    /// response can never materialize an unbounded array (threat T9; CORE-DX-003).
+    /// </summary>
+    /// <param name="organizationId">The tenant the roster is read in (required, non-empty).</param>
+    /// <param name="workspaceId">The workspace whose members are listed (required, non-empty).</param>
+    /// <param name="skip">Zero-based offset of the first row to return (non-negative).</param>
+    /// <param name="take">Maximum number of rows to return (at least one).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The page of audience-safe roster entries (empty when the workspace has no members on the page).</returns>
+    /// <exception cref="ArgumentException">The organization id or workspace id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The skip is negative or the take is less than one.</exception>
+    Task<IReadOnlyList<WorkspaceMemberRosterEntry>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
 }

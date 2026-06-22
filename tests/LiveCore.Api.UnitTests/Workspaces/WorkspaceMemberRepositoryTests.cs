@@ -104,10 +104,10 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
         return workspace;
     }
 
-    private async Task<UserProfile> SeedUserAsync(string issuer, string subjectId)
+    private async Task<UserProfile> SeedUserAsync(string issuer, string subjectId, string? displayName = null)
     {
         var profile = UserProfile.CreateFromPrincipal(
-            new OidcPrincipal(PrincipalType.User, issuer, subjectId),
+            new OidcPrincipal(PrincipalType.User, issuer, subjectId, displayName),
             _createdAt);
         await using var context = CreateContext();
         var repository = new UserProfileRepository(context);
@@ -473,6 +473,96 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
         Assert.NotNull(second);
         Assert.Equal(MembershipRole.Owner, first.Role);
         Assert.Equal(MembershipRole.Auditor, second.Role);
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_returns_audience_safe_entries_scoped_to_the_workspace_and_tenant()
+    {
+        // CORE-WSM-001: the roster read returns the workspace's members with the membership id, the role and the
+        // audience-safe display name joined read-only from the users profile, and is fully tenant- and
+        // workspace-scoped (threat T5): a member of another workspace or another tenant is never returned.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspace1 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspace2 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugB);
+        var named = await SeedUserAsync(_issuer, _subject, "Ada Lovelace");
+        var unnamed = await SeedUserAsync(_issuer, _otherSubject);
+        var inW2 = await SeedUserAsync(_foreignIssuer, _subject);
+        var memberNamed = await SeedMembershipAsync(organizationA.Id, workspace1.Id, named.Id, MembershipRole.Owner);
+        var memberUnnamed = await SeedMembershipAsync(
+            organizationA.Id, workspace1.Id, unnamed.Id, MembershipRole.Participant);
+        // A member of workspace2 must never appear in workspace1's roster.
+        await SeedMembershipAsync(organizationA.Id, workspace2.Id, inW2.Id, MembershipRole.Host);
+
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        var roster = await repository.ListByWorkspaceAsync(
+            organizationA.Id, workspace1.Id, 0, 50, CancellationToken.None);
+
+        Assert.Equal(2, roster.Count);
+        var namedEntry = Assert.Single(roster, entry => entry.Id == memberNamed.Id);
+        Assert.Equal(named.Id, namedEntry.UserProfileId);
+        Assert.Equal(MembershipRole.Owner, namedEntry.Role);
+        Assert.Equal("Ada Lovelace", namedEntry.DisplayName);
+        Assert.Equal(workspace1.Id, namedEntry.WorkspaceId);
+        Assert.Equal(organizationA.Id, namedEntry.OrganizationId);
+
+        // The member with no profile display name reads back a null display metadatum, never an error.
+        var unnamedEntry = Assert.Single(roster, entry => entry.Id == memberUnnamed.Id);
+        Assert.Null(unnamedEntry.DisplayName);
+        Assert.Equal(MembershipRole.Participant, unnamedEntry.Role);
+
+        // Tenant isolation: the same workspace id read under organization B's id returns nothing (threat T5).
+        var underForeignTenant = await repository.ListByWorkspaceAsync(
+            organizationB.Id, workspace1.Id, 0, 50, CancellationToken.None);
+        Assert.Empty(underForeignTenant);
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_pages_bounded_and_ordered_by_id()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var userOne = await SeedUserAsync(_issuer, _subject);
+        var userTwo = await SeedUserAsync(_issuer, _otherSubject);
+        var userThree = await SeedUserAsync(_foreignIssuer, _subject);
+        var first = await SeedMembershipAsync(organization.Id, workspace.Id, userOne.Id, MembershipRole.Owner);
+        var second = await SeedMembershipAsync(organization.Id, workspace.Id, userTwo.Id, MembershipRole.Host);
+        var third = await SeedMembershipAsync(
+            organization.Id, workspace.Id, userThree.Id, MembershipRole.Participant);
+
+        // The membership ids are time-ordered (UUIDv7), so the deterministic oldest-first order is by id.
+        var expectedOrder = new[] { first.Id, second.Id, third.Id }.OrderBy(id => id).ToArray();
+
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        var firstPage = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, 0, 2, CancellationToken.None);
+        var secondPage = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, 2, 2, CancellationToken.None);
+
+        Assert.Equal(expectedOrder.Take(2), firstPage.Select(entry => entry.Id));
+        Assert.Equal(expectedOrder.Skip(2), secondPage.Select(entry => entry.Id));
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_rejects_empty_ids_and_out_of_range_paging()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(Guid.Empty, Guid.CreateVersion7(), 0, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(Guid.CreateVersion7(), Guid.Empty, 0, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), -1, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), 0, 0, CancellationToken.None));
     }
 
     [Fact]
