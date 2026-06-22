@@ -286,6 +286,46 @@ CORE-APROJ-002 uses). The product-neutral term is a generic **attachment** (no v
 vocabulary; `docs/04_PRODUCT_BOUNDARIES.md`). No new route, event or schema is added — the projection reuses
 the existing `asset_links` table, the feed route and the signed download flow.
 
+### Host workspace asset enumeration (CORE-ALC-003)
+
+The CORE-ALC-002 projection above is **audience-safe**: it lets a *participant* discover the attachments of a
+resource it can already see. It gives a **host** no way to enumerate a workspace's uploaded assets — to find the
+asset ids it needs to re-attach, reveal or delete — because the participant projection is audience-scoped and
+host-field-stripped, and every other asset route addresses **one** asset by id. Every other authoring resource
+(scenes, sessions, entities, content blocks) already has a workspace- or parent-scoped list read; assets did not
+(the vertical adopter gap ARC-GAP-104 part b).
+
+This story adds the **host-side workspace asset enumeration read**,
+`GET /api/v1/workspaces/{workspaceId}/assets` (`csv/api_routes.csv`, roles `Host,CoHost,Owner,Admin`). It
+returns a bounded page of the **host `AssetResponse` projection** — the **`assetId`**, the **`AssetStatus`**, the
+**`contentType`**, the recorded **`sizeBytes`** and **`checksum`** (both `null` while the asset is still
+`Pending`) and the created/updated **server timestamps** — for **every** asset in the workspace, in **every**
+lifecycle status, so a host authoring surface can enumerate a workspace's uploaded assets across page loads:
+
+- it is the **HOST projection** (full asset metadata for an authoring role) and is **distinct from** the
+  audience-safe attachments projection on the visible feed (CORE-ALC-002): that one carries only an `assetId`, an
+  audience-safe `name` and a `contentType` of an `Available` asset linked to a **revealed** resource, while this
+  carries the full asset metadata of **every** asset regardless of any reveal or link;
+- it carries **no storage coordinate** (the provider, bucket and object key stay host-internal) and **no
+  authorization rationale** (threats T4 "Asset leak"/T7); returning the metadata is **not** access to the bytes —
+  each object is still reached only through the authorized signed download route
+  (`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004), so listing never grants a download;
+- it is **tenant- and workspace-scoped** through the new paged
+  `IAssetRepository.ListPageByWorkspaceAsync` (the predicate leads with `organization_id` then `workspace_id`,
+  backed by the `assets(workspace_id, id)` index), so a **foreign tenant's or foreign workspace's assets never
+  appear** (threats T5/T1), in a deterministic **time-ordered id** order;
+- it is **bounded** (`limit` default 50, clamped to a max of 200; `offset`; the `items + hasMore` envelope), so a
+  single read can never materialize the whole table (threat T9; CORE-DX-003);
+- assets are **host-only content**, so — unlike the scene/entity workspace-scoped lists, which return an
+  audience-stripped projection to **any** member — the host asset list's **very existence is hidden from a
+  non-host**: just like the member-roster read (CORE-WSM-001), a non-member, a known member who **lacks a
+  host-content role** (`Participant`/`Observer`/`Auditor`), and a foreign-tenant or unknown workspace are **all an
+  indistinguishable `404`, never `403`** (threats T1/T5). The role check is the **same host-content set that
+  creates the upload intent** (Owner/Admin/Host/CoHost), exact and non-linear.
+
+No new event, table or schema is added — the read reuses the existing `assets` table and the asset authorization
+posture; it adds only the route and the matching `client.assets.list` SDK method.
+
 ### Session-scoped audience download (CORE-SVIS-003, completed by CORE-SVIS-004)
 
 A reveal is **session-scoped** (`docs/adr/0013-session-scoped-visibility-rules.md`): a resource is made
@@ -388,6 +428,7 @@ storage credentials live in Core; the concrete S3-compatible adapter is supplied
 - asset metadata is filtered by visibility rules
 - an asset is audience-accessible only when linked to a visible content block or entity
 - the visible-feed attachments projection is audience-safe (assetId + name + contentType only, never a host-only storage coordinate) and inherits the resource's visibility, so a hidden resource's attachments are never enumerated; the listed asset's download still goes through getDownloadUrl (defence in depth) (CORE-ALC-002)
+- the host workspace asset enumeration (GET /api/v1/workspaces/{workspaceId}/assets) is host-only: it is authorized to the host-content roles that create the upload intent (Owner/Admin/Host/CoHost), is tenant- and workspace-scoped and bounded, returns the full host AssetResponse metadata (never a storage coordinate, so listing is not access to the bytes), and hides its very existence from a non-host (a non-member and a member who lacks a host-content role are an indistinguishable hidden-404) (CORE-ALC-003)
 - every audience download (participant and observer) is authorized against the session-scoped visibility of the linked resource; the workspace-wide overload has been removed (CORE-SVIS-004)
 - deleting an asset removes its storage object before its metadata row (no orphaned object)
 

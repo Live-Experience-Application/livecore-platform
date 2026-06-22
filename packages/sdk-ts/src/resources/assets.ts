@@ -10,20 +10,47 @@
  */
 import type {
   AssetLinkResponse,
+  AssetResponse,
   ConfirmUploadRequest,
   ConfirmUploadResponse,
   CreateAssetLinkRequest,
   CreateUploadIntentRequest,
   DownloadUrlResponse,
+  PageResponse,
   UploadIntentResponse,
   Uuid,
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
 import type { IdempotentCreateOptions } from "./idempotency.js";
+import { pageQuery, type PageParams } from "./pagination.js";
 
 export class AssetsClient {
   constructor(private readonly http: HttpClient) {}
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/assets` — the workspace's HOST assets, as
+   * a bounded page (CORE-ALC-003). The full host {@link AssetResponse} metadata of
+   * every asset in the workspace (all lifecycle statuses), so an authoring surface can
+   * enumerate a workspace's uploaded assets to re-attach, reveal or delete them across
+   * page loads. This is the HOST projection — distinct from the audience-safe
+   * attachments on the participant visible feed (CORE-ALC-002). Assets are host-only,
+   * so a caller who is not a host-content role (and a foreign/unknown workspace) is
+   * hidden as `404`, never `403`. Pass optional `limit`/`offset` to page.
+   */
+  list(
+    workspaceId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<AssetResponse>> {
+    return this.http.send<PageResponse<AssetResponse>>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/assets`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
 
   /**
    * `POST /api/v1/assets/upload-intent` — register a pending asset and return a

@@ -97,6 +97,39 @@ export interface CreateAssetLinkRequest {
   targetId: Uuid;
 }
 
+/**
+ * HOST-facing projection of one asset, the per-item shape of the host workspace-asset
+ * enumeration read (`GET /api/v1/workspaces/{workspaceId}/assets`, CORE-ALC-003). It is
+ * the full, product-neutral asset metadata an authoring role needs to enumerate a
+ * workspace's uploaded assets — to re-attach, reveal or delete them across page loads —
+ * for every lifecycle status. A still-`Pending` asset has no confirmed upload yet, so its
+ * `sizeBytes` and `checksum` are `null`; an `Available` asset carries both.
+ *
+ * This HOST projection is distinct from the audience-safe attachments projection on the
+ * participant visible feed (CORE-ALC-002): that one carries only an `assetId`, an
+ * audience-safe `name` and a `contentType` of an `Available` asset linked to a REVEALED
+ * resource, while this carries the full asset metadata regardless of any reveal and is
+ * returned only to a host-content role. It carries no storage coordinate and no
+ * authorization rationale; the asset stays private and is still reached only through an
+ * authorized signed download URL (`getDownloadUrl`; threat T4).
+ */
+export interface AssetResponse {
+  /** Surrogate id of the asset (the id confirm/link/download/delete address). */
+  assetId: Uuid;
+  /** Lifecycle status — `Pending` (upload not yet confirmed) or `Available`. */
+  status: AssetStatus;
+  /** The MIME content type of the stored (or to-be-uploaded) object. */
+  contentType: string;
+  /** The recorded object size in bytes, or `null` while the asset is still `Pending`. */
+  sizeBytes: number | null;
+  /** The recorded object checksum, or `null` while the asset is still `Pending`. */
+  checksum: string | null;
+  /** When the asset was first registered (UTC). */
+  createdAt: IsoDateTimeString;
+  /** When the asset was last updated (UTC). */
+  updatedAt: IsoDateTimeString;
+}
+
 /** Response body of the asset-link command. */
 export interface AssetLinkResponse {
   /** Surrogate id of the created link. */

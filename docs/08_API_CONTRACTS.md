@@ -149,6 +149,7 @@ GET    /api/v1/workspaces/{workspaceId}/entity-types
 POST   /api/v1/workspaces/{workspaceId}/entity-types
 GET    /api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId}
 GET    /api/v1/participants/{participantId}/visible-feed
+GET    /api/v1/workspaces/{workspaceId}/assets
 POST   /api/v1/assets/upload-intent
 POST   /api/v1/assets/{assetId}/confirm-upload
 GET    /api/v1/assets/{assetId}/download-url

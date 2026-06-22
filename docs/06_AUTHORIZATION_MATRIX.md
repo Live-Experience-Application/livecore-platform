@@ -13,6 +13,7 @@ Roles are generic. Verticals may rename them in UI.
 | Start/end session | yes | yes | yes | yes | no | no | no |
 | Create scene | yes | yes | yes | yes | no | no | no |
 | View host-only content | yes | yes | yes | yes | no | no | audit-only |
+| Enumerate workspace assets | yes | yes | yes | yes | no | no | no |
 | View participant-visible content | yes | yes | yes | yes | if visible | if visible | audit-only |
 | Change visibility rule | yes | yes | yes | yes | no | no | no |
 | Execute reveal | yes | yes | yes | yes | no | no | no |
@@ -102,6 +103,24 @@ Roles are generic. Verticals may rename them in UI.
   member is denied `403`. The role check is exact and non-linear (Owner or Admin, never an ordering comparison),
   and the new role must be a DEFINED generic role, never an undefined value a cast could smuggle in (threat T6 role
   limitation). A same-role change is an idempotent no-op (`200`, no audit).
+- Enumerating a workspace's HOST assets (`GET /api/v1/workspaces/{workspaceId}/assets`, CORE-ALC-003, the
+  "Enumerate workspace assets" row above) is a host-authoring read restricted to the host-content roles that
+  create the upload intent (Owner/Admin/Host/CoHost — the SAME set as "Send private content"), so an authoring
+  surface can enumerate a workspace's uploaded assets to re-attach, reveal or delete them across page loads. It
+  returns a tenant- and workspace-scoped, bounded host `AssetResponse` projection — the assetId, the
+  `AssetStatus`, the content type, the recorded size and checksum (both `null` while still `Pending`) and the
+  server timestamps — for EVERY lifecycle status, and it carries NO storage coordinate and no authorization
+  rationale (threats T4/T7); the asset stays private and is still reached only through the authorized signed
+  download route (`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004). This is the HOST projection (full
+  asset metadata for an authoring role) and is DISTINCT from the audience-safe attachments projection on the
+  participant visible feed (CORE-ALC-002), which carries only an `assetId`, an audience-safe `name` and a
+  `contentType` of an `Available` asset linked to a REVEALED resource. Assets are host-only content, so — UNLIKE
+  the scene/entity workspace-scoped lists, which return an audience-stripped projection to ANY workspace member —
+  the host asset list's very existence is hidden from a non-host: just like the member-roster read, a non-member,
+  a known member who lacks a host-content role (Participant/Observer/Auditor), and a foreign-tenant or unknown
+  workspace are ALL an indistinguishable `404`, never `403`, and a foreign tenant's or foreign workspace's assets
+  never appear (threats T1/T5). The page is bounded (CORE-DX-003) in a deterministic time-ordered id order, and
+  the role check is exact and non-linear (an EXACT host-content set membership, never an ordering comparison).
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.
