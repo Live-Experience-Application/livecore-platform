@@ -20,6 +20,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 export class EntitiesClient {
@@ -69,16 +70,22 @@ export class EntitiesClient {
    * `POST /api/v1/workspaces/{workspaceId}/entities` — create a generic entity.
    * Its surrogate id is assigned server-side; the referenced `entityTypeId` must
    * address a type in the same workspace. The authoring caller always receives
-   * the full host {@link EntityResponse}.
+   * the full host {@link EntityResponse}. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the create retry-safe
+   * (CORE-DX-009): a retry under the SAME key replays the original entity the
+   * server already dedupes instead of creating a duplicate; omit it to create
+   * unconditionally (the prior behavior).
    */
   create(
     workspaceId: Uuid,
     request: CreateEntityRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<EntityResponse> {
     return this.http.send<EntityResponse>({
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/entities`,
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

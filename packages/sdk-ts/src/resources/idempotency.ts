@@ -5,11 +5,11 @@
  * Shared optional idempotency-key option for the retry-safe SDK create commands
  * (CORE-DX-008).
  *
- * The resource-create POSTs the Core API dedupes server-side (CORE-DX-004) —
- * workspace, session, scene, content-block and asset-link create — honor an
- * optional `Idempotency-Key` header: a retry under the SAME key replays the
- * ORIGINAL resource the server already recorded instead of creating a duplicate
- * (docs/08_API_CONTRACTS.md "Idempotency"). Pass
+ * The resource-create POSTs the Core API dedupes server-side — workspace,
+ * session, scene, content-block and asset-link create (CORE-DX-004) plus entity
+ * create (CORE-DX-009) — honor an optional `Idempotency-Key` header: a retry under
+ * the SAME key replays the ORIGINAL resource the server already recorded instead
+ * of creating a duplicate (docs/08_API_CONTRACTS.md "Idempotency"). Pass
  * {@link IdempotentCreateOptions.idempotencyKey} to opt in; omitting it preserves
  * the prior unconditional create, so it is non-breaking.
  *

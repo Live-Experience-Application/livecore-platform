@@ -254,14 +254,14 @@ export type RevealKeyIsRequired = Assert<
   Equal<RevealOptions, { idempotencyKey: string }>
 >;
 
-// --- The dedupe-capable create commands accept an OPTIONAL idempotency key (CORE-DX-008). ---
+// --- The dedupe-capable create commands accept an OPTIONAL idempotency key (CORE-DX-008/CORE-DX-009). ---
 // Each covered create takes an optional trailing options argument carrying an
 // optional idempotencyKey, so its parameter resolves to `IdempotentCreateOptions
 // | undefined` (the option may be omitted) and the key itself is optional. This is
 // the deliberate CONTRAST with reveal/hide above, where the options argument and
-// its idempotencyKey are both REQUIRED. The covered creates are exactly the five
-// routes the server dedupes (workspace/session/scene/content-block/asset-link) —
-// entity create has no server dedupe yet (CORE-DX-009) and is intentionally absent.
+// its idempotencyKey are both REQUIRED. The covered creates are exactly the routes
+// the server dedupes: workspace/session/scene/content-block/asset-link (CORE-DX-004)
+// plus entity create (CORE-DX-009).
 
 export type IdempotentCreateKeyIsOptional = Assert<
   Equal<IdempotentCreateOptions, { idempotencyKey?: string }>
@@ -298,6 +298,13 @@ export type CreateContentBlockAcceptsOptionalKey = Assert<
 export type CreateAssetLinkAcceptsOptionalKey = Assert<
   Equal<
     Parameters<AssetsClient["createLink"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateEntityAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<EntitiesClient["create"]>[2],
     IdempotentCreateOptions | undefined
   >
 >;

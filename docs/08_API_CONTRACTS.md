@@ -388,7 +388,8 @@ Unsafe POSTs that create a resource or have money/entitlement effects also honor
 so a client or network retry cannot double-create a resource or re-run an external verifier:
 
 - Covered routes: session create, scene create, content-block create, workspace create, asset-link create,
-  and the Apple/Google purchase-verification routes.
+  entity create (CORE-DX-009, scope `entity-create:{organizationId}`), and the Apple/Google
+  purchase-verification routes.
 - The header is OPTIONAL on these routes (unlike reveal/hide, where it is required): omitting it preserves
   the prior behavior, so it is non-breaking. A present-but-malformed key (over the length bound or carrying
   control characters) is a 400, returned only after authorization.
@@ -402,12 +403,11 @@ so a client or network retry cannot double-create a resource or re-run an extern
   tenant's or buyer's key never resolves another's resource. A different key creates a new resource.
 
 The typed SDK (`@livecore/sdk-ts`, CORE-DX-008) exposes this on exactly these create routes: the
-`workspaces.create`, `sessions.create`, `scenes.create`, `content.createBlock` and `assets.createLink`
-methods each accept an optional trailing options argument carrying an `idempotencyKey`, forwarded as the
-`Idempotency-Key` header. The option is optional (contrast `visibility.reveal`/`hide`, where the key is
-required), so omitting it is unchanged and non-breaking; a retry under a reused key replays the original
-resource the server dedupes instead of creating a duplicate. Entity create advertises no SDK key because the
-server does not dedupe it yet (CORE-DX-009).
+`workspaces.create`, `sessions.create`, `scenes.create`, `content.createBlock`, `assets.createLink` and
+`entities.create` (CORE-DX-009) methods each accept an optional trailing options argument carrying an
+`idempotencyKey`, forwarded as the `Idempotency-Key` header. The option is optional (contrast
+`visibility.reveal`/`hide`, where the key is required), so omitting it is unchanged and non-breaking; a retry
+under a reused key replays the original resource the server dedupes instead of creating a duplicate.
 
 ## Pagination (CORE-DX-003)
 
