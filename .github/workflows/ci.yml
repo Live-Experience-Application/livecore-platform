@@ -2261,12 +2261,12 @@ jobs:
       - unit-smoke-postgres
     permissions:
       # Least privilege: this job keeps the read-only repository token and uses NO
-      # long-lived npm token. It publishes via npm TRUSTED PUBLISHING (OIDC): pnpm
-      # exchanges the short-lived GitHub OIDC id-token for a one-time registry publish
-      # credential, against the Trusted Publisher configured on each @livecore package
-      # (CORE-PUB-002). id-token: write is the ONE added scope, granted to this publish
-      # job only (the workflow default is contents: read), so no other job can request
-      # an id-token; the same token mints the build-provenance attestation each
+      # long-lived npm token. It publishes via npm TRUSTED PUBLISHING (OIDC): the npm
+      # CLI exchanges the short-lived GitHub OIDC id-token for a one-time registry
+      # publish credential, against the Trusted Publisher configured on each @livecore
+      # package (CORE-PUB-002). id-token: write is the ONE added scope, granted to this
+      # publish job only (the workflow default is contents: read), so no other job can
+      # request an id-token; the same token mints the build-provenance attestation each
       # published @livecore/* version carries (CORE-PUB-004).
       contents: read
       id-token: write
@@ -2294,6 +2294,13 @@ jobs:
         env:
           GIT_REF: ${{ github.ref }}
         run: ./scripts/assert-release-version.ps1 -Ref $env:GIT_REF
+
+      - name: Upgrade npm for OIDC trusted publishing
+        # The real publish packs each package with pnpm (rewriting workspace:*) and
+        # publishes the tarball with `npm publish`, because the OIDC trusted-publishing
+        # token exchange is an npm CLI feature (>= 11.5.1) that pnpm's own publish does
+        # not perform. Node 22 ships npm 10, so upgrade it here (CORE-PUB-002).
+        run: npm install --global npm@latest
 
       - name: Build packages
         run: pnpm --recursive run build
