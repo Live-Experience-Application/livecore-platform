@@ -43,10 +43,14 @@
     Registry and access come from each package's publishConfig (the public npm
     registry under the @livecore scope, docs/23_PACKAGE_VERSIONING.md). No
     credential lives in the repository AND none is stored as a secret: the real
-    publish authenticates via npm TRUSTED PUBLISHING (OIDC) - pnpm exchanges the
-    publish job's short-lived GitHub OIDC id-token with the registry for a one-time
-    publish credential, against the Trusted Publisher configured on each @livecore
-    package (CORE-PUB-002).
+    publish authenticates via npm TRUSTED PUBLISHING (OIDC). That token exchange is
+    an npm CLI feature (npm >= 11.5.1) that pnpm's own publish does not perform, so
+    the real publish PACKS each package with `pnpm pack` - which rewrites the
+    workspace:* dependency to the resolved shared version and honors the package's
+    files[] - and publishes the resulting tarball with `npm publish`, which exchanges
+    the publish job's short-lived GitHub OIDC id-token with the registry for a
+    one-time publish credential against the Trusted Publisher configured on each
+    @livecore package (CORE-PUB-002).
 
     Compatible with Windows PowerShell 5.1 and PowerShell 7+ (pwsh) on Linux.
 
@@ -129,14 +133,40 @@ try {
             throw "Refusing to republish an already-published immutable version: $($package.Name)@$($package.Version) is already on the registry. A release version is cut once and never overwritten (CORE-PUB-002)."
         }
 
-        # --provenance: publish a verified npm build provenance attestation for the
-        # version (CORE-PUB-004). It needs the CI OIDC token (the publish-packages
-        # job's scoped `id-token: write`); the registry verifies it against this
-        # pipeline and the package's repository.url and rejects a mismatch.
+        # Pack with pnpm (rewrites workspace:* to the resolved version, honors
+        # files[]), then publish the tarball with the npm CLI. npm performs the OIDC
+        # trusted-publishing token exchange that pnpm's own publish does not, and
+        # --provenance attaches a verified build provenance attestation for the
+        # version (CORE-PUB-002 / CORE-PUB-004): it needs the publish-packages job's
+        # scoped `id-token: write`, and the registry verifies it against this pipeline
+        # and the package's repository.url and rejects a mismatch. The tarball carries
+        # its own publishConfig (public access, the npm registry), so the publish
+        # targets the right registry and access.
         Write-Host "Publishing $($package.Name)@$($package.Version) with build provenance..." -ForegroundColor Green
-        & pnpm --filter $package.Name publish --provenance --no-git-checks
-        if ($LASTEXITCODE -ne 0) {
-            throw "Publish failed for $($package.Name) (CORE-PUB-002)."
+        $packDir = Join-Path ([System.IO.Path]::GetTempPath()) ("livecore-pack-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $packDir -Force | Out-Null
+        try {
+            Push-Location (Join-Path $RepositoryRoot $package.Directory)
+            try {
+                & pnpm pack --pack-destination $packDir
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Pack failed for $($package.Name) (CORE-PUB-002)."
+                }
+            }
+            finally {
+                Pop-Location
+            }
+            $tarball = Get-ChildItem -Path $packDir -Filter '*.tgz' | Select-Object -First 1
+            if (-not $tarball) {
+                throw "No tarball was produced for $($package.Name) (CORE-PUB-002)."
+            }
+            & npm publish $tarball.FullName --provenance --access public
+            if ($LASTEXITCODE -ne 0) {
+                throw "Publish failed for $($package.Name) (CORE-PUB-002)."
+            }
+        }
+        finally {
+            Remove-Item -Path $packDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-Host "Published $($package.Name)@$($package.Version)." -ForegroundColor Green
     }

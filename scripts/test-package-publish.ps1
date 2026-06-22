@@ -166,15 +166,18 @@ AssertThrows { & $publishScript -Ref 'refs/heads/main' -RepositoryRoot $repoRoot
 # verification step is documented in docs/23 and README.
 $publishScriptText = Get-Content -Path $publishScript -Raw
 $publishLines = $publishScriptText -split "`r?`n"
-$realPublishLines = @($publishLines | Where-Object { $_ -match 'pnpm .*\bpublish\b' -and $_ -notmatch '--dry-run' })
-$dryRunPublishLines = @($publishLines | Where-Object { $_ -match 'pnpm .*\bpublish\b' -and $_ -match '--dry-run' })
+# The real publish invokes `npm publish` on the pnpm-packed tarball - npm performs the
+# OIDC trusted-publishing token exchange that pnpm's own publish does not; the dry-run
+# uses `pnpm publish --dry-run` (packs only, no registry contact, no provenance).
+$realPublishLines = @($publishLines | Where-Object { $_ -match '&\s+npm\s+publish\b' })
+$dryRunPublishLines = @($publishLines | Where-Object { $_ -match '&\s+pnpm\b' -and $_ -match '\bpublish\b' -and $_ -match '--dry-run' })
 
 AssertTrue ($realPublishLines.Count -ge 1) `
-    'the publish CLI has a real (non-dry-run) pnpm publish invocation'
+    'the publish CLI has a real npm publish invocation (npm performs the OIDC trusted-publishing exchange)'
 AssertTrue (@($realPublishLines | Where-Object { $_ -notmatch '--provenance' }).Count -eq 0) `
     'the real publish requests --provenance (npm build provenance, CORE-PUB-004)'
 AssertTrue ($dryRunPublishLines.Count -ge 1) `
-    'the publish CLI has a dry-run pnpm publish invocation'
+    'the publish CLI has a dry-run publish invocation'
 AssertTrue (@($dryRunPublishLines | Where-Object { $_ -match '--provenance' }).Count -eq 0) `
     'the dry-run does NOT request --provenance (no CI OIDC id-token off the publish job, CORE-PUB-004)'
 
