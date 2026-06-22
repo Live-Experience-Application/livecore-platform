@@ -19,19 +19,17 @@ CORE-DEP-001) already enforces:
 
 ## Quick start
 
-The chart needs container images your cluster can pull. The published API and
-worker images are on GHCR (CORE-OPS-009); the **migrations runner image**
-(`apps/api/Migrations.Dockerfile`) must be built and pushed to a registry your
-cluster can reach (see `docs/13`, "The migration runner"):
+The chart needs container images your cluster can pull. **All three runtime
+images — the API, the worker and the migrations runner — are published to GHCR**
+(`ghcr.io/<owner>/livecore-{api,worker,migrations}:<version>`, CORE-OPS-009 /
+CORE-OPS-015) and the chart **defaults to those published coordinates**, so a
+default install pulls every image and **no manual build/push step is required**.
+Pin the released version with `--set image.tag=<version>` (it otherwise falls back
+to the chart `appVersion`). If your cluster cannot reach GHCR, override the
+per-component `repository`/`image.registry`/tag to your own registry or mirror.
 
-```bash
-# From the repository root, build and push the migrations runner image:
-docker build -f apps/api/Migrations.Dockerfile -t <registry>/livecore-migrations:<version> .
-docker push <registry>/livecore-migrations:<version>
-```
-
-Then install, supplying the database connection string and OIDC settings (never
-commit real secrets — pass them at install time or via `secrets.existingSecret`):
+Install, supplying the database connection string and OIDC settings (never commit
+real secrets — pass them at install time or via `secrets.existingSecret`):
 
 ```bash
 helm install livecore deploy/helm/livecore \

@@ -14,8 +14,10 @@ It applies only to the published TypeScript packages:
 @livecore/ui-core         packages/ui-core
 ```
 
-The .NET API and worker hosts are deployed applications, not published packages,
-and are versioned by deployment — they are out of scope here.
+The .NET API and worker hosts — and the one-shot migrations runner image built from the same
+source (CORE-OPS-015) — are deployed applications, not published packages, and are versioned by
+the release tag (see "Release-tag and package-version consistency" below); they are out of scope
+here.
 
 ## Semantic Versioning
 
@@ -344,13 +346,16 @@ The consistency of the process is enforced by tests, not convention:
 
 ## Release-tag and package-version consistency
 
-The .NET API and worker host **images** are versioned by the **release tag**
-(`v<MAJOR>.<MINOR>.<PATCH>`, `scripts/LiveCoreImageTags.psm1`), not by a manifest
-of their own — they are deployed applications, not published packages. So the
-hosts are versioned separately from the packages by mechanism, and the intended
-relationship at release time is that the release tag equals the packages' shared
-version: one coherent repository release where the published image tag and the
-package version are the same number.
+The Core's published **container images** — the API host, the worker host **and the one-shot
+migrations runner** (`ghcr.io/<owner>/livecore-migrations:<version>`, CORE-OPS-015) — are
+versioned by the **release tag** (`v<MAJOR>.<MINOR>.<PATCH>`,
+`scripts/LiveCoreImageTags.psm1`), not by a manifest of their own. The migrations runner image
+is versioned by the release tag **exactly like api/worker** — `Get-LiveCoreImageReference`
+derives all three from the same tag and the publish gate refuses to push any of them off a
+non-release ref — they are deployed applications, not published packages. So the images are
+versioned separately from the packages by mechanism, and the intended relationship at release
+time is that the release tag equals the packages' shared version: one coherent repository
+release where the published image tag and the package version are the same number.
 
 A publish gate enforces this so drift cannot ship (CORE-CMP-003):
 

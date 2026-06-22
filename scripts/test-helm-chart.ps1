@@ -64,8 +64,16 @@ function Get-FixtureHelmChart {
         [switch]$OmitHpa,
         [switch]$OmitPdb,
         [switch]$EmptyAllowedHosts,
-        [switch]$OmitForwardedHeadersDoc
+        [switch]$OmitForwardedHeadersDoc,
+        [switch]$MigrationsBuildOnly
     )
+
+    # CORE-OPS-016: the migrations runner image defaults to the published GHCR coordinate
+    # (image.registry + this repository + the release tag), exactly like api/worker, so a
+    # default install PULLS it with no build/push step. The negative test empties the
+    # repository (no published default — the old "build it yourself" state) so the
+    # validator's "must default to the published livecore-migrations repository" rule trips.
+    $migrationsRepository = if ($MigrationsBuildOnly) { '""' } else { 'live-experience-application/livecore-migrations' }
 
     # CORE-SEC-010: a non-empty host-header allow-list by default (ASP.NET treats an empty
     # AllowedHosts as allow-all). The negative test renders it empty in BOTH values.yaml and the
@@ -263,6 +271,9 @@ $secretConnString
   Realtime__Backplane__ConnectionString: ""
 migrations:
   enabled: true
+  image:
+    repository: $migrationsRepository
+    tag: ""
 $migrationsResources
 api:
   replicaCount: $apiReplicaCount
@@ -294,6 +305,7 @@ spec:
     spec:
       containers:
         - name: migrate
+          image: {{ include "livecore.componentImage" (dict "root" `$ "component" .Values.migrations) }}
           envFrom:
             - secretRef:
                 name: livecore-secret
@@ -413,6 +425,12 @@ $noForwardedDoc = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -OmitForwa
 AssertTrue (-not $noForwardedDoc.IsValid) 'a chart that does not document the ForwardedHeaders KnownProxies/KnownNetworks requirement is rejected'
 AssertTrue (($noForwardedDoc.Findings -join "`n") -match 'FORWARDED-HEADERS') `
     'the rejection flags the missing forwarded-headers / rate-limit-partition documentation'
+
+# --- Negative: a migrations image with no published GHCR repository default (CORE-OPS-016) is rejected. ---
+$migrationsBuildOnly = Test-LiveCoreHelmChart -Files (Get-FixtureHelmChart -MigrationsBuildOnly)
+AssertTrue (-not $migrationsBuildOnly.IsValid) 'a chart whose migrations image has no published livecore-migrations repository default (the operator must build/push it) is rejected'
+AssertTrue (($migrationsBuildOnly.Findings -join "`n") -match 'MIGRATIONS IMAGE') `
+    'the rejection flags the migrations image not defaulting to the published GHCR coordinate'
 
 # --- Negative: a missing required template is rejected. ---
 $incomplete = Get-FixtureHelmChart
@@ -537,6 +555,31 @@ AssertTrue ($realDocCorpus -match 'ForwardedHeaders' -and ($realDocCorpus -match
 AssertTrue ($realDocCorpus -match '(?i)rate.?limit' -and ($realDocCorpus -match '(?i)single bucket' -or $realDocCorpus -match '(?i)partition')) `
     'the real chart documents the rate-limit single-bucket consequence of unconfigured forwarded headers (CORE-SEC-010)'
 
+# Spot-check the published migrations image default on the real chart (CORE-OPS-016). The
+# migrations runner image must default to the published GHCR coordinate exactly like
+# api/worker — image.registry (ghcr.io) + migrations.image.repository (livecore-migrations)
+# + the release tag (migrations.image.tag empty, falling back to image.tag/appVersion) — so
+# a default install PULLS it and no operator build/push step is required.
+$realMigrationsImage = Get-LiveCoreHelmComponentImage -ValuesContent $realFiles['values.yaml'] -Component 'migrations'
+AssertTrue ($realMigrationsImage.ContainsKey('repository') -and $realMigrationsImage['repository'] -match 'livecore-migrations') `
+    'the real values.yaml defaults migrations.image.repository to the published livecore-migrations GHCR repository (CORE-OPS-016)'
+AssertTrue ($realMigrationsImage.ContainsKey('tag') -and [string]::IsNullOrEmpty($realMigrationsImage['tag'])) `
+    'the real values.yaml leaves migrations.image.tag empty so it falls back to the shared image.tag/appVersion release tag, like api/worker (CORE-OPS-016)'
+$realApiImage = Get-LiveCoreHelmComponentImage -ValuesContent $realFiles['values.yaml'] -Component 'api'
+AssertTrue ($realApiImage.ContainsKey('repository') -and $realApiImage['repository'] -match 'livecore-api') `
+    'the real values.yaml defaults api.image.repository to the published livecore-api GHCR repository (the migrations default mirrors it, CORE-OPS-016)'
+AssertTrue ($realFiles['values.yaml'] -match '(?m)^\s*registry:\s*ghcr\.io\s*$') `
+    'the real values.yaml defaults the shared image.registry to ghcr.io so every component (including migrations) renders the published GHCR coordinate (CORE-OPS-016)'
+AssertTrue ($realMigrate -match 'componentImage' -and $realMigrate -match '\.Values\.migrations') `
+    'the real migrate Job renders its image from .Values.migrations via the shared livecore.componentImage helper, so the published coordinate reaches the Pod (CORE-OPS-016)'
+# The chart must no longer instruct the operator to BUILD AND PUSH the migrations image
+# (the flipped default this story lands): the README drops that instruction and documents
+# that all three images are published / no manual build is required.
+AssertTrue ($realReadme -notmatch '(?i)must be built and pushed') `
+    'the real Helm README drops the "must be built and pushed" migrations-image instruction (CORE-OPS-016)'
+AssertTrue ($realReadme -match '(?i)ghcr\.io/\S*migrations' -and $realReadme -match '(?i)no manual build') `
+    'the real Helm README documents the published migrations coordinate (a ghcr.io/...migrations reference) and that no manual build/push step is required (CORE-OPS-016)'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Helm chart tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -547,5 +590,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Helm chart tests passed: the pre-install migrate Job, the documented probes, the ConfigMap/Secret externalization and the no-baked-secret rule are all wired as required.' -ForegroundColor Green
+Write-Host 'Helm chart tests passed: the pre-install migrate Job, the documented probes, the ConfigMap/Secret externalization, the no-baked-secret rule and the published migrations-image default (CORE-OPS-016) are all wired as required.' -ForegroundColor Green
 exit 0

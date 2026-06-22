@@ -124,8 +124,14 @@ secrets:
 migrations:
   enabled: true
   image:
-    # The migrations runner image (apps/api/Migrations.Dockerfile). Build and push
-    # it to a registry your cluster can pull (docs/13 shows the build command).
+    # The migrations runner image (apps/api/Migrations.Dockerfile). Like api/worker below
+    # it defaults to the PUBLISHED GHCR coordinate — image.registry (ghcr.io) + this
+    # repository + the release tag (image.tag, falling back to the chart appVersion) — so a
+    # default install PULLS it; no operator build/push step is required. CI publishes it
+    # version-pinned, signed and SBOM-attested on every release tag, exactly as for
+    # api/worker (CORE-OPS-015; docs/13 "Release container images"). Point it at your own
+    # registry/mirror by overriding repository (and image.registry / tag) if your cluster
+    # cannot reach GHCR.
     repository: live-experience-application/livecore-migrations
     tag: ""
   # Helm hook weight; the migrate Job runs before the rest of the release.

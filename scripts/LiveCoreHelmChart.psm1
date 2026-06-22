@@ -258,6 +258,66 @@ function Get-LiveCoreHelmApiReplicaCount {
     return $null
 }
 
+function Get-LiveCoreHelmComponentImage {
+    <#
+    .SYNOPSIS
+        Extracts the <component>.image.{repository,tag} scalars of a top-level component
+        (migrations/api/worker) from a values.yaml document, so the "the migrations image
+        defaults to the published GHCR coordinate" rule (CORE-OPS-016) can be asserted over
+        the default install.
+    .OUTPUTS
+        A hashtable keyed 'repository','tag' -> raw scalar value (unquoted, trimmed). Keys
+        absent from the document are absent from the hashtable.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ValuesContent,
+        [Parameter(Mandatory = $true)][string]$Component
+    )
+
+    $result = @{}
+    $lines = $ValuesContent -split "`r?`n"
+
+    $inComponent = $false
+    $imageIndent = -1
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $indent = Get-LiveCoreHelmIndent -Line $line
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+
+        if (-not $inComponent) {
+            if ($indent -eq 0 -and $trimmed -match "^$([regex]::Escape($Component)):\s*$") { $inComponent = $true }
+            continue
+        }
+
+        # The component mapping ends at the next top-level (indent 0) key.
+        if ($indent -eq 0) { break }
+
+        # Walk forward (skipping the component's other keys and their nested blocks)
+        # until the `image:` mapping opens.
+        if ($imageIndent -lt 0) {
+            if ($trimmed -match '^image:\s*$' -and ($indent -gt 0)) { $imageIndent = $indent }
+            continue
+        }
+
+        # The image block ends when we dedent back to (or above) its own indent.
+        if ($indent -le $imageIndent) { break }
+
+        if ($trimmed -match '^(repository|tag):\s*(.*)$') {
+            $field = $Matches[1]
+            $value = $Matches[2]
+            if ($value -match '^(.*?)\s+#.*$') { $value = $Matches[1] }
+            $value = $value.Trim().Trim('"', "'")
+            $result[$field] = $value
+        }
+    }
+    return $result
+}
+
 function Get-LiveCoreHelmComponentResources {
     <#
     .SYNOPSIS
@@ -677,6 +737,30 @@ function Test-LiveCoreHelmChart {
         $findings.Add('FORWARDED-HEADERS: the chart must document that without trusted ForwardedHeaders the anonymous per-IP rate-limit partition collapses to a single bucket (CORE-SEC-010)')
     }
 
+    # 16. CORE-OPS-016: the migrations runner image defaults to the PUBLISHED GHCR coordinate
+    #     (registry + repository + release tag) exactly like api/worker, so a default install
+    #     PULLS it and no operator build/push step is required. Two invariants prove it:
+    #     (a) values.yaml defaults migrations.image.repository to the published livecore-migrations
+    #         repository (a non-empty repository, NOT a placeholder), with the tag falling back to
+    #         the shared image.tag/appVersion; and
+    if ($Files.ContainsKey('values.yaml')) {
+        $migrationsImage = Get-LiveCoreHelmComponentImage -ValuesContent $Files['values.yaml'] -Component 'migrations'
+        $repo = if ($migrationsImage.ContainsKey('repository')) { $migrationsImage['repository'] } else { '' }
+        if ([string]::IsNullOrEmpty($repo) -or $repo -notmatch 'livecore-migrations') {
+            $findings.Add('MIGRATIONS IMAGE: values.yaml must default migrations.image.repository to the published livecore-migrations repository so the chart pulls the published GHCR coordinate by default (no manual build/push step) (CORE-OPS-016)')
+        }
+    }
+    # (b) the migrate Job renders its image from the SHARED component-image mechanism
+    #     (.Values.migrations via the livecore.componentImage helper), so the default
+    #     image.registry (ghcr.io) + migrations.image.repository + tag actually reach the
+    #     rendered Pod - rather than a hardcoded or unset image an operator must replace.
+    if ($Files.ContainsKey('templates/migrate-job.yaml')) {
+        $migrateTpl = Get-LiveCoreHelmContentWithoutComments -Content $Files['templates/migrate-job.yaml']
+        if ($migrateTpl -notmatch 'componentImage' -and $migrateTpl -notmatch '\.Values\.migrations\.image') {
+            $findings.Add('MIGRATIONS IMAGE: templates/migrate-job.yaml must render the migrations image from .Values.migrations (the shared livecore.componentImage helper) so the published registry+repository+tag reach the Pod (CORE-OPS-016)')
+        }
+    }
+
     return [pscustomobject]@{
         IsValid  = ($findings.Count -eq 0)
         Findings = $findings.ToArray()
@@ -692,4 +776,5 @@ Export-ModuleMember -Function `
     Get-LiveCoreHelmApiReplicaCount, `
     Get-LiveCoreHelmAutoscalingValues, `
     Get-LiveCoreHelmComponentResources, `
+    Get-LiveCoreHelmComponentImage, `
     Test-LiveCoreHelmChart

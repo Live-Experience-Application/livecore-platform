@@ -474,18 +474,21 @@ untouched. It carries no credentials; the connection string is supplied at run
 time through the **same** configuration key the API runtime reads,
 `ConnectionStrings:Database` (environment variable `ConnectionStrings__Database`).
 
-Build it from the repository root:
+A deployment **pulls the published, version-pinned runner image** rather than building it on the host — CI
+publishes it to `ghcr.io/<owner>/livecore-migrations:<version>` alongside api/worker on every release tag
+(CORE-OPS-015; see "Release container images" below). Building it locally is only a development convenience:
 
 ```bash
+# Local/dev build (a deployment pulls ghcr.io/<owner>/livecore-migrations:<version> instead):
 docker build -f apps/api/Migrations.Dockerfile -t livecore-migrations .
 ```
 
-Apply the migrations (this is the exact command a deploy runs):
+Apply the migrations (this is the exact command a deploy runs, against the pulled image or a local build):
 
 ```bash
 docker run --rm \
   -e ConnectionStrings__Database="Host=<db-host>;Port=5432;Database=<db>;Username=<user>;Password=<password>" \
-  livecore-migrations
+  ghcr.io/<owner>/livecore-migrations:<version>
 ```
 
 The runner exits `0` on success; re-running it when the database is already up to
@@ -1792,16 +1795,29 @@ two diagnostics never double-report the same key.
 
 ## Release container images (CORE-OPS-009)
 
-A deployment runs the published API and worker images rather than building them on the host. CI publishes them to
-the **GitHub Container Registry** (`ghcr.io`) on a release, so a self-hoster pulls a known, immutable version:
+A deployment runs the published images rather than building them on the host. CI publishes **all three Core runtime
+images** — the API, the worker **and the one-shot migrations runner** — to the **GitHub Container Registry**
+(`ghcr.io`) on a release, so a self-hoster pulls a known, immutable, version-pinned set:
 
 ```text
 ghcr.io/<owner>/livecore-api:<version>
 ghcr.io/<owner>/livecore-worker:<version>
+ghcr.io/<owner>/livecore-migrations:<version>
 ```
 
-(The one-shot **migrations runner image** of `apps/api/Migrations.Dockerfile` is built from the same source at the
-same release version; see "Database migrations" above for how a rollout gates the API on it.)
+The **migrations runner image** (`apps/api/Migrations.Dockerfile`) is built from the same source at the same
+release version and goes through the **same** publish path as api/worker — the immutable version tag, the SBOM/CVE
+scan and the keyless cosign sign + SBOM-attest + verify round-trip below (CORE-OPS-015). So a downstream e2e
+harness (and any deployment) **pulls a pinned, signed Core** rather than building the migrate image from source;
+see "Database migrations" above for how a rollout gates the API on it. Like api/worker it can also be pinned by
+**digest** (`...@sha256:...`) for an exact, tamper-evident reference.
+
+Both shipped deploy targets default to these published coordinates, so no operator build step is required: the
+**Helm chart** defaults every component image — including the migrations runner — to its `ghcr.io/<owner>/...`
+coordinate (`deploy/helm/livecore/values.yaml`), and the **Compose stack** ships an opt-in **image-only overlay**
+(`deploy/compose/docker-compose.images.yml`) that points migrate/api/worker at the pinned published images with no
+`build:` stanza — the documented pull-only path for a downstream e2e harness (`deploy/compose/README.md`,
+"Image-only overlay").
 
 ### How a release is published
 
