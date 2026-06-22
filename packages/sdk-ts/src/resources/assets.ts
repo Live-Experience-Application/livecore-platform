@@ -20,6 +20,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 
 export class AssetsClient {
   constructor(private readonly http: HttpClient) {}
@@ -75,16 +76,22 @@ export class AssetsClient {
    * `POST /api/v1/assets/{assetId}/links` — link an asset to a content block or
    * entity in its own workspace. Linking never makes an asset public; it only
    * records the attachment whose audience visibility the server governs. The
-   * organization slug travels in the body.
+   * organization slug travels in the body. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the create retry-safe
+   * (CORE-DX-008): a retry under the SAME key replays the original asset link the
+   * server already dedupes (CORE-DX-004) instead of creating a duplicate; omit it
+   * to create unconditionally (the prior behavior).
    */
   createLink(
     assetId: Uuid,
     request: CreateAssetLinkRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<AssetLinkResponse> {
     return this.http.send<AssetLinkResponse>({
       method: "POST",
       path: `/assets/${encodeURIComponent(assetId)}/links`,
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

@@ -22,6 +22,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 export class ContentClient {
@@ -77,18 +78,24 @@ export class ContentClient {
   /**
    * `POST /api/v1/scenes/{sceneId}/content-blocks` — create a content block at
    * its initial revision. The authoring caller always receives the full host
-   * {@link ContentBlockResponse}.
+   * {@link ContentBlockResponse}. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the create retry-safe
+   * (CORE-DX-008): a retry under the SAME key replays the original content block
+   * the server already dedupes (CORE-DX-004) instead of creating a duplicate;
+   * omit it to create unconditionally (the prior behavior).
    */
   createBlock(
     sceneId: Uuid,
     params: { organizationSlug: string },
     request: CreateContentBlockRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<ContentBlockResponse> {
     return this.http.send<ContentBlockResponse>({
       method: "POST",
       path: `/scenes/${encodeURIComponent(sceneId)}/content-blocks`,
       query: { organizationSlug: params.organizationSlug },
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

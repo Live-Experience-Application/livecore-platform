@@ -18,6 +18,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 export class ScenesClient {
@@ -49,16 +50,22 @@ export class ScenesClient {
 
   /**
    * `POST /api/v1/workspaces/{workspaceId}/scenes` — create a scene. Its ordering
-   * position is assigned server-side; clients never supply a position.
+   * position is assigned server-side; clients never supply a position. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the create retry-safe
+   * (CORE-DX-008): a retry under the SAME key replays the original scene the
+   * server already dedupes (CORE-DX-004) instead of creating a duplicate; omit it
+   * to create unconditionally (the prior behavior).
    */
   create(
     workspaceId: Uuid,
     request: CreateSceneRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<SceneResponse> {
     return this.http.send<SceneResponse>({
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/scenes`,
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

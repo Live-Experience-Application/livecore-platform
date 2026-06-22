@@ -22,6 +22,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient, SdkResponse } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 /** Options for a conditional workspace write (CORE-DX-002). */
@@ -56,12 +57,22 @@ export class WorkspacesClient {
     });
   }
 
-  /** `POST /api/v1/workspaces` — create a workspace (organization Owner/Admin). */
-  create(request: CreateWorkspaceRequest): Promise<WorkspaceResponse> {
+  /**
+   * `POST /api/v1/workspaces` — create a workspace (organization Owner/Admin).
+   * Pass {@link IdempotentCreateOptions.idempotencyKey} to make the create
+   * retry-safe (CORE-DX-008): a retry under the SAME key replays the original
+   * workspace the server already dedupes (CORE-DX-004) instead of creating a
+   * duplicate; omit it to create unconditionally (the prior behavior).
+   */
+  create(
+    request: CreateWorkspaceRequest,
+    options?: IdempotentCreateOptions,
+  ): Promise<WorkspaceResponse> {
     return this.http.send<WorkspaceResponse>({
       method: "POST",
       path: "/workspaces",
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

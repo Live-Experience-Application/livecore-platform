@@ -51,6 +51,7 @@ export type {
 } from "./options.js";
 export type { SdkResponse } from "./http.js";
 export type { PageParams } from "./resources/pagination.js";
+export type { IdempotentCreateOptions } from "./resources/idempotency.js";
 
 export { IdentityClient } from "./resources/identity.js";
 export { OrganizationsClient } from "./resources/organizations.js";

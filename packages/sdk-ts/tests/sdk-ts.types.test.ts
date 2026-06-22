@@ -56,6 +56,7 @@ import type {
   ExportsClient,
   HideOptions,
   HubConnectionFactory,
+  IdempotentCreateOptions,
   IdentityClient,
   InvitationsClient,
   LiveCoreApiError,
@@ -251,6 +252,54 @@ export type RevealRequiresKey = Assert<
 
 export type RevealKeyIsRequired = Assert<
   Equal<RevealOptions, { idempotencyKey: string }>
+>;
+
+// --- The dedupe-capable create commands accept an OPTIONAL idempotency key (CORE-DX-008). ---
+// Each covered create takes an optional trailing options argument carrying an
+// optional idempotencyKey, so its parameter resolves to `IdempotentCreateOptions
+// | undefined` (the option may be omitted) and the key itself is optional. This is
+// the deliberate CONTRAST with reveal/hide above, where the options argument and
+// its idempotencyKey are both REQUIRED. The covered creates are exactly the five
+// routes the server dedupes (workspace/session/scene/content-block/asset-link) —
+// entity create has no server dedupe yet (CORE-DX-009) and is intentionally absent.
+
+export type IdempotentCreateKeyIsOptional = Assert<
+  Equal<IdempotentCreateOptions, { idempotencyKey?: string }>
+>;
+
+export type CreateWorkspaceAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<WorkspacesClient["create"]>[1],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateSessionAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<SessionsClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateSceneAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<ScenesClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateContentBlockAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<ContentClient["createBlock"]>[3],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateAssetLinkAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<AssetsClient["createLink"]>[2],
+    IdempotentCreateOptions | undefined
+  >
 >;
 
 // --- The client options surface is exactly the documented keys. -----------------

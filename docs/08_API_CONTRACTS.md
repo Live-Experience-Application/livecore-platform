@@ -401,6 +401,14 @@ so a client or network retry cannot double-create a resource or re-run an extern
   per buyer subject for the purchase routes (a purchase is named globally and carries no tenant), so one
   tenant's or buyer's key never resolves another's resource. A different key creates a new resource.
 
+The typed SDK (`@livecore/sdk-ts`, CORE-DX-008) exposes this on exactly these create routes: the
+`workspaces.create`, `sessions.create`, `scenes.create`, `content.createBlock` and `assets.createLink`
+methods each accept an optional trailing options argument carrying an `idempotencyKey`, forwarded as the
+`Idempotency-Key` header. The option is optional (contrast `visibility.reveal`/`hide`, where the key is
+required), so omitting it is unchanged and non-breaking; a retry under a reused key replays the original
+resource the server dedupes instead of creating a duplicate. Entity create advertises no SDK key because the
+server does not dedupe it yet (CORE-DX-009).
+
 ## Pagination (CORE-DX-003)
 
 A list endpoint must never return an unbounded array: a single read could otherwise materialize a whole table,

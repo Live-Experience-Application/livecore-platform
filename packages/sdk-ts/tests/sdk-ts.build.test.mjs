@@ -1206,6 +1206,135 @@ test("assets: link delete and asset delete are 204 DELETEs", async () => {
   );
 });
 
+test("each dedupe-capable create forwards a supplied Idempotency-Key header (CORE-DX-008)", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(201, { id: "r-1" }),
+  });
+
+  await client.workspaces.create(
+    { organizationSlug: "acme", slug: "demo", name: "Demo" },
+    { idempotencyKey: "ws-key" },
+  );
+  await client.sessions.create(
+    "ws-1",
+    { organizationSlug: "acme", title: "Demo" },
+    { idempotencyKey: "sess-key" },
+  );
+  await client.scenes.create(
+    "ws-1",
+    { organizationSlug: "acme", title: "Scene" },
+    { idempotencyKey: "scene-key" },
+  );
+  await client.content.createBlock(
+    "sc-1",
+    { organizationSlug: "acme" },
+    { type: "Text", body: { text: "hi" } },
+    { idempotencyKey: "cb-key" },
+  );
+  await client.assets.createLink(
+    "a-1",
+    { organizationSlug: "acme", targetType: "ContentBlock", targetId: "cb-1" },
+    { idempotencyKey: "link-key" },
+  );
+
+  // The supplied key rides as the Idempotency-Key header on each covered create,
+  // through the same RequestSpec.idempotencyKey transport seam reveal/hide use.
+  assert.deepEqual(
+    calls.map((c) => c.init.headers["Idempotency-Key"]),
+    ["ws-key", "sess-key", "scene-key", "cb-key", "link-key"],
+  );
+  assert.ok(calls.every((c) => c.init.method === "POST"));
+});
+
+test("an omitted idempotency option sends no Idempotency-Key header on a create (non-breaking) (CORE-DX-008)", async () => {
+  const { client, calls } = makeClient({
+    handler: () => jsonResponse(201, { id: "r-1" }),
+  });
+
+  // No options argument: the call is unchanged from the prior, header-less create.
+  await client.workspaces.create({
+    organizationSlug: "acme",
+    slug: "demo",
+    name: "Demo",
+  });
+  await client.sessions.create("ws-1", {
+    organizationSlug: "acme",
+    title: "Demo",
+  });
+  await client.scenes.create("ws-1", {
+    organizationSlug: "acme",
+    title: "Scene",
+  });
+  await client.content.createBlock(
+    "sc-1",
+    { organizationSlug: "acme" },
+    { type: "Text", body: { text: "hi" } },
+  );
+  await client.assets.createLink("a-1", {
+    organizationSlug: "acme",
+    targetType: "ContentBlock",
+    targetId: "cb-1",
+  });
+
+  assert.ok(
+    calls.every((c) => c.init.headers["Idempotency-Key"] === undefined),
+  );
+});
+
+test("a reused Idempotency-Key replays the original created resource through the SDK — count stays 1 (CORE-DX-008/CORE-DX-004)", async () => {
+  // A fake Core that dedupes create POSTs exactly as the server does (CORE-DX-004):
+  // the FIRST request under a key records and returns the new resource (201); a
+  // RETRY under the SAME key returns the ORIGINAL resource (200) and creates
+  // nothing. A different key creates a new resource.
+  const store = new Map();
+  let created = 0;
+  const { client, calls } = makeClient({
+    handler: (_url, init) => {
+      const key = init.headers["Idempotency-Key"];
+      if (key !== undefined && store.has(key)) {
+        return jsonResponse(200, store.get(key));
+      }
+      created += 1;
+      const resource = {
+        id: `ws-${created}`,
+        organizationId: "org-1",
+        slug: "demo",
+        name: "Demo",
+        createdAt: "2026-06-22T00:00:00+00:00",
+        updatedAt: "2026-06-22T00:00:00+00:00",
+      };
+      if (key !== undefined) {
+        store.set(key, resource);
+      }
+      return jsonResponse(201, resource);
+    },
+  });
+
+  const request = { organizationSlug: "acme", slug: "demo", name: "Demo" };
+  const first = await client.workspaces.create(request, {
+    idempotencyKey: "retry-key",
+  });
+  const replay = await client.workspaces.create(request, {
+    idempotencyKey: "retry-key",
+  });
+
+  // The retry replays the original resource, and the server created exactly one.
+  assert.equal(first.id, "ws-1");
+  assert.equal(replay.id, first.id);
+  assert.equal(created, 1);
+  assert.equal(calls.length, 2);
+  assert.ok(
+    calls.every((c) => c.init.headers["Idempotency-Key"] === "retry-key"),
+  );
+
+  // A DIFFERENT key is a different logical create — it produces a new resource.
+  const other = await client.workspaces.create(request, {
+    idempotencyKey: "other-key",
+  });
+  assert.equal(other.id, "ws-2");
+  assert.equal(created, 2);
+});
+
 test("entitlements.getMyEntitlements reads GET /me/entitlements", async () => {
   const { client, calls } = makeClient({
     handler: () => jsonResponse(200, { entitlements: [] }),
