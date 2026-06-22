@@ -40,6 +40,19 @@ namespace LiveCore.Api.Visibility;
 ///   ("Include server timestamps").</item>
 /// </list>
 ///
+/// CURRENT SCENE (CORE-APROJ-005). In addition to the items, the response carries an optional
+/// <see cref="CurrentScene"/> — the AUDIENCE-SAFE projection (id/title/order) of the participant's
+/// most-recently-revealed visible Scene — so a consumer can render "where we are now" from the feed alone,
+/// without enumerating the workspace's scenes or reaching for a host read. It is derived from the SAME
+/// <see cref="VisibleResourceReveal"/> set the items are built from (the scene reveal with the greatest
+/// <see cref="VisibleResourceReveal.RevealedAt"/>), so the feed stays already-filtered and fail-closed — the
+/// current scene is only ever one the participant may already see. It is produced ONLY through the existing
+/// role-based audience scene projection (the <see cref="IVisibleResourceAudienceProjector"/> port, the same
+/// port the items use; the central security module may not reference the Scenes module — CORE-ARCH-001), never
+/// the raw host scene, so no host-only scene field leaks (threats T2/T7). It is <see langword="null"/> (never
+/// an error) when no scene is currently visible to the participant, or when the most-recently-revealed scene no
+/// longer resolves (a dangling rule).
+///
 /// There is deliberately NO resource version/ETag field: the feed is a computed
 /// read with no aggregate to version, and the per-event cursor a realtime feed
 /// carries (the last-acknowledged event id of docs/11_REALTIME_SYNC.md) belongs to
@@ -60,6 +73,13 @@ namespace LiveCore.Api.Visibility;
 /// resource kind then id, as <see cref="VisibilityPreviewService"/> computes them).
 /// Each is the participant-safe IDENTITY of a resource the participant may see.
 /// </param>
+/// <param name="CurrentScene">
+/// The AUDIENCE-SAFE projection (id/title/order) of the participant's most-recently-revealed visible Scene
+/// (CORE-APROJ-005), or <see langword="null"/> when no scene is currently visible to them (or the
+/// most-recently-revealed scene no longer resolves). Derived from the SAME visible-reveal set as
+/// <see cref="Items"/> and produced only through the existing audience scene projection — never the raw host
+/// scene (threats T2/T7).
+/// </param>
 /// <param name="GeneratedAt">
 /// Server timestamp (UTC) at which this feed view was generated, from the
 /// injected <see cref="TimeProvider"/>.
@@ -68,30 +88,70 @@ public sealed record ParticipantVisibleFeedResponse(
     Guid ParticipantId,
     Guid WorkspaceId,
     IReadOnlyList<ParticipantVisibleFeedItem> Items,
+    ParticipantFeedSceneResponse? CurrentScene,
     DateTimeOffset GeneratedAt)
 {
     /// <summary>
     /// Builds the participant-safe feed envelope for the given participant from the already-projected,
-    /// audience-safe feed items (CORE-APROJ-002), at the given server time, preserving the engine's
-    /// deterministic order. The items are built by the endpoint, which combines each
-    /// <see cref="VisibleResourceReveal"/> the visibility engine computed with the resource's audience-safe
-    /// label/body resolved through the <see cref="IVisibleResourceAudienceProjector"/> port and its
-    /// audience-safe attachments resolved through the <see cref="IVisibleResourceAttachmentsProjector"/> port
-    /// (the central security module may not reference the resource or asset modules — CORE-ARCH-001). Only the
-    /// non-sensitive boundary identifiers, the audience-safe items and the server timestamp are projected; nothing about
+    /// audience-safe feed items (CORE-APROJ-002) and the optional audience-safe current scene (CORE-APROJ-005),
+    /// at the given server time, preserving the engine's deterministic order. The items are built by the
+    /// endpoint, which combines each <see cref="VisibleResourceReveal"/> the visibility engine computed with the
+    /// resource's audience-safe label/body resolved through the <see cref="IVisibleResourceAudienceProjector"/>
+    /// port and its audience-safe attachments resolved through the
+    /// <see cref="IVisibleResourceAttachmentsProjector"/> port (the central security module may not reference the
+    /// resource or asset modules — CORE-ARCH-001). The current scene is likewise resolved by the endpoint
+    /// through that same audience projector port for the most-recently-revealed visible scene of the SAME
+    /// visible-reveal set, or <see langword="null"/> when none. Only the non-sensitive boundary identifiers, the
+    /// audience-safe items, the audience-safe current scene and the server timestamp are projected; nothing about
     /// the participant's user link, status or display name, and no authorization rationale, is ever echoed
-    /// (threats T2/T7). When the participant has nothing visible the item list is naturally empty.
+    /// (threats T2/T7). When the participant has nothing visible the item list is naturally empty and the current
+    /// scene is null.
     /// </summary>
     public static ParticipantVisibleFeedResponse From(
         Guid participantId,
         Guid workspaceId,
         IReadOnlyList<ParticipantVisibleFeedItem> items,
+        ParticipantFeedSceneResponse? currentScene,
         DateTimeOffset generatedAt)
     {
         ArgumentNullException.ThrowIfNull(items);
 
-        return new ParticipantVisibleFeedResponse(participantId, workspaceId, items, generatedAt);
+        return new ParticipantVisibleFeedResponse(participantId, workspaceId, items, currentScene, generatedAt);
     }
+}
+
+/// <summary>
+/// The AUDIENCE-SAFE projection of the participant's CURRENT scene carried by
+/// <see cref="ParticipantVisibleFeedResponse.CurrentScene"/> (CORE-APROJ-005). It mirrors the Scenes module's
+/// audience-safe <c>ParticipantSceneResponse</c> shape — exactly the surrogate <see cref="Id"/>, the
+/// audience-safe <see cref="Title"/> and the ordering <see cref="Order"/> — so a consumer can render
+/// "where-we-are-now" from the feed alone, with no host read.
+///
+/// It is a SEPARATE, Visibility-owned record (NOT the Scenes module's <c>ParticipantSceneResponse</c>) because
+/// the central security module may not reference the Scenes module (CORE-ARCH-001); it is populated ONLY from a
+/// <see cref="VisibleSceneAudienceProjection"/> the <see cref="IVisibleResourceAudienceProjector"/> port
+/// resolves through the scene's existing AUDIENCE projection, never the raw host scene, so no host-only scene
+/// field (the tenant/workspace boundary ids or the host preparation timestamps) can leak (threats T2/T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md). Adding any host-only field here would be caught by the integration test
+/// that pins the current scene's EXACT JSON property set.
+/// </summary>
+/// <param name="Id">The scene's surrogate id — a non-sensitive correlation handle.</param>
+/// <param name="Title">The scene's audience-safe display title.</param>
+/// <param name="Order">The scene's ordering position within its workspace.</param>
+public sealed record ParticipantFeedSceneResponse(
+    Guid Id,
+    string Title,
+    int Order)
+{
+    /// <summary>
+    /// Projects a <see cref="VisibleSceneAudienceProjection"/> (resolved through the
+    /// <see cref="IVisibleResourceAudienceProjector"/> port from the scene's existing audience projection) into
+    /// its participant-safe current-scene DTO. Audience-safe only — id/title/order, never a host-only scene
+    /// field (threats T2/T7). The factory is internal because it consumes the Visibility module's internal
+    /// projection type; the DTO itself is public for serialization and the published contract.
+    /// </summary>
+    internal static ParticipantFeedSceneResponse From(VisibleSceneAudienceProjection scene)
+        => new(scene.Id, scene.Title, scene.Order);
 }
 
 /// <summary>

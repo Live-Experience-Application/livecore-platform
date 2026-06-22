@@ -9,6 +9,7 @@ import type {
   VisibilityState,
 } from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
+import type { ParticipantSceneResponse } from "./scenes.js";
 
 /**
  * Visibility module contracts (CORE-SDK-001): the reveal/hide commands and the
@@ -312,6 +313,13 @@ export interface ParticipantVisibleFeedItem {
  * participant's currently visible resources — each the participant-safe identity of
  * a resource they may see — in the server's deterministic order; it is empty only
  * when the participant has nothing visible yet.
+ *
+ * It also carries the optional {@link currentScene} (CORE-APROJ-005) — the audience-safe
+ * projection of the participant's most-recently-revealed visible scene — so a consumer can
+ * render where-we-are-now from the feed alone, with no host read. Mirrors the server DTO
+ * `ParticipantVisibleFeedResponse(Guid ParticipantId, Guid WorkspaceId,
+ * IReadOnlyList<ParticipantVisibleFeedItem> Items, ParticipantFeedSceneResponse? CurrentScene,
+ * DateTimeOffset GeneratedAt)`.
  */
 export interface ParticipantVisibleFeedResponse {
   /** Surrogate id of the participant whose feed this is. */
@@ -320,6 +328,16 @@ export interface ParticipantVisibleFeedResponse {
   workspaceId: Uuid;
   /** The participant's currently visible feed items, in deterministic order. */
   items: ParticipantVisibleFeedItem[];
+  /**
+   * The audience-safe projection (id/title/order) of the scene currently active for the
+   * participant (CORE-APROJ-005) — the most-recently-revealed visible {@link
+   * ParticipantSceneResponse} of the SAME visible set {@link items} is built from (by the
+   * reveal time) — or `null` when no scene is currently visible to the participant. It lets a
+   * consumer render where-we-are-now from the feed alone, without enumerating workspace scenes
+   * or a host read. Produced ONLY through the audience-safe scene projection, never the raw
+   * host scene, so no host-only scene field leaks (threats T2/T7).
+   */
+  currentScene: ParticipantSceneResponse | null;
   /** Server timestamp (UTC) at which this feed view was generated. */
   generatedAt: IsoDateTimeString;
 }

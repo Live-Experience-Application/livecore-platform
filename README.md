@@ -2961,6 +2961,14 @@ recomputed for the projection (the feed stays already-filtered and fail-closed).
 module may not reference the Scenes/Content/Entities modules (CORE-ARCH-001), the label/body is resolved
 through a Visibility-owned port whose adapter lives in the composition root.
 
+Beyond the items, the feed **response** also carries an optional `currentScene` (CORE-APROJ-005) — the
+audience-safe projection (`id`/`title`/`order`) of the participant's **most-recently-revealed** visible scene,
+derived from the same visible set the items are built from (by the reveal time) — so a consumer can render
+**where-we-are-now** from the feed alone, without enumerating workspace scenes or a host read. It is produced
+**only** through the existing audience scene projection (never the raw host scene, so no host-only scene field
+leaks; threats T2/T7) through the same Visibility-owned port, and is `null` (never an error) when no scene is
+currently visible. Revealing a newer scene flips it.
+
 Broad external/anonymous participant feed delivery over the realtime hub remains a Realtime-epic follow-up.
 
 ### Scene content APIs

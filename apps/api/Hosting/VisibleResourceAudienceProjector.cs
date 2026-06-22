@@ -127,4 +127,38 @@ internal sealed class VisibleResourceAudienceProjector : IVisibleResourceAudienc
                 return null;
         }
     }
+
+    /// <inheritdoc />
+    public async Task<VisibleSceneAudienceProjection?> ProjectAudienceSafeSceneAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sceneId,
+        CancellationToken cancellationToken)
+    {
+        // An empty id can never address a stored scene, so fail soft without a query (mirrors
+        // ProjectAudienceSafeAsync). The (organization, workspace) ids come from the loaded participant/session,
+        // so they are non-empty.
+        if (sceneId == Guid.Empty)
+        {
+            return null;
+        }
+
+        // The lookup is tenant- AND workspace-scoped (the predicate leads with organization_id then
+        // workspace_id), so a scene in another tenant or workspace is never read even when the surrogate id
+        // matches (threats T1/T5). A missing scene (deleted / dangling rule) yields null so the feed's current
+        // scene degrades to null without error.
+        var scene = await _scenes
+            .FindByIdAsync(organizationId, workspaceId, sceneId, cancellationToken)
+            .ConfigureAwait(false);
+        if (scene is null)
+        {
+            return null;
+        }
+
+        // Project ONLY through the scene's existing AUDIENCE projection (ParticipantSceneResponse keeps exactly
+        // id/title/order), never the raw host scene, so no host-only scene field (the tenant/workspace boundary
+        // ids or the host preparation timestamps) can leak (threats T2/T7).
+        var audience = ParticipantSceneResponse.From(scene);
+        return new VisibleSceneAudienceProjection(audience.Id, audience.Title, audience.Order);
+    }
 }

@@ -304,15 +304,73 @@ internal static class VisibilityEndpoints
             items[index] = ParticipantVisibleFeedItem.From(reveal, projection, attachments);
         }
 
+        // Project the participant's CURRENT scene onto the response (CORE-APROJ-005): the AUDIENCE-SAFE
+        // projection (id/title/order) of the most-recently-revealed visible Scene of the SAME already-filtered
+        // visible-reveal set the items were built from (selected by VisibleResourceReveal.RevealedAt). It is
+        // resolved through the SAME Visibility-owned IVisibleResourceAudienceProjector port — only through the
+        // scene's existing audience projection, never the raw host scene (threats T2/T7) — so no host-only scene
+        // field leaks and the central security module never references the Scenes module (CORE-ARCH-001).
+        // Visibility is NEVER recomputed here: the scene was already decided visible above. It is null (never an
+        // error) when no scene is currently visible to the participant, and degrades to null when the
+        // most-recently-revealed scene no longer resolves (a dangling rule).
+        ParticipantFeedSceneResponse? currentScene = null;
+        var currentSceneReveal = SelectCurrentSceneReveal(visibleReveals);
+        if (currentSceneReveal is not null)
+        {
+            var sceneProjection = await deps.AudienceProjector
+                .ProjectAudienceSafeSceneAsync(
+                    context.OrganizationId,
+                    participant.WorkspaceId,
+                    currentSceneReveal.ResourceId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (sceneProjection is { } scene)
+            {
+                currentScene = ParticipantFeedSceneResponse.From(scene);
+            }
+        }
+
         // Return the participant-safe envelope with a server timestamp from the injected TimeProvider
         // (docs/08: "Include server timestamps").
         var feed = ParticipantVisibleFeedResponse.From(
             participant.Id,
             participant.WorkspaceId,
             items,
+            currentScene,
             timeProvider.GetUtcNow());
 
         return Results.Ok(feed);
+    }
+
+    /// <summary>
+    /// Selects the participant's CURRENT scene reveal (CORE-APROJ-005) from their already-filtered, fail-closed
+    /// visible-reveal set: the Scene reveal with the greatest <see cref="VisibleResourceReveal.RevealedAt"/> (the
+    /// most-recently-revealed visible scene), so a newer scene reveal supersedes an earlier one. Ties on the
+    /// reveal time are broken DETERMINISTICALLY by the greater <see cref="VisibleResourceReveal.ResourceId"/>
+    /// (UUIDv7 ids are time-ordered, so the greater id is the later-created scene), so the result is stable.
+    /// Non-Scene reveals are ignored; returns <see langword="null"/> when no scene is currently visible to the
+    /// participant. This only ORDERS the already-decided visible set — it never recomputes visibility.
+    /// </summary>
+    private static VisibleResourceReveal? SelectCurrentSceneReveal(IReadOnlyList<VisibleResourceReveal> reveals)
+    {
+        VisibleResourceReveal? current = null;
+        foreach (var reveal in reveals)
+        {
+            if (reveal.ResourceType != VisibilityResourceType.Scene)
+            {
+                continue;
+            }
+
+            if (current is null
+                || reveal.RevealedAt > current.RevealedAt
+                || (reveal.RevealedAt == current.RevealedAt
+                    && reveal.ResourceId.CompareTo(current.ResourceId) > 0))
+            {
+                current = reveal;
+            }
+        }
+
+        return current;
     }
 
     /// <summary>

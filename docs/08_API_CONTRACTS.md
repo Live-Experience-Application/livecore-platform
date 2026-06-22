@@ -242,6 +242,32 @@ download of each listed asset still goes through the **server-side `getDownloadU
 URL (CORE-SVIS-003/004). The attachments are resolved through a Visibility-owned port whose adapter lives in
 the composition root, because the central security module may not reference the Assets module (CORE-ARCH-001).
 
+#### The current scene on the feed response (CORE-APROJ-005)
+
+In addition to the items, the feed RESPONSE carries an optional **`currentScene`** — the audience-safe
+projection of the scene currently active for the participant — so a consumer can render **where-we-are-now**
+from the feed alone, without enumerating workspace scenes or reaching for a host read:
+
+| Field | Meaning |
+|---|---|
+| `participantId` | the surrogate id of the participant whose feed this is |
+| `workspaceId` | the workspace the participant belongs to (a non-sensitive boundary id) |
+| `items` | the participant's currently visible feed items, in deterministic order |
+| `currentScene` | the audience-safe `ParticipantSceneResponse` (`id`/`title`/`order`) of the **most-recently-revealed** visible scene of the SAME visible set `items` is built from (by the reveal time), or `null` when no scene is currently visible to the participant |
+| `generatedAt` | the server timestamp (UTC) at which this feed view was generated |
+
+`currentScene` is **derived from the same `VisibleResourceReveal` set the items are built from** (the scene
+reveal with the greatest `revealedAt`, ties broken by the greater scene id), so revealing a newer scene flips
+it and the feed stays already-filtered and fail-closed — the current scene is only ever one the participant may
+already see. It is produced **only** through the existing role-based **audience** scene projection (the same
+`ParticipantSceneResponse` shape the scene list/read routes use, resolved through the Visibility-owned port
+whose adapter lives in the composition root because the central security module may not reference the Scenes
+module, CORE-ARCH-001), **never** the raw host scene — so no host-only scene field (the tenant/workspace
+boundary ids or the host preparation timestamps) leaks (threats T2/T7). It is **`null` (never an error)** when
+no scene is currently visible, or when the most-recently-revealed scene no longer resolves (a dangling rule).
+This composes with CORE-APROJ-002: the same scene also appears among `items` (named by `resourceType` +
+`resourceId`), and `currentScene` denormalizes and marks the active one.
+
 ### Participant self-identification: own session participant context + the roster `isSelf` marker (CORE-PSELF-001)
 
 An audience surface needs to call the participant-keyed reads (`getParticipantVisibleFeed`, the roster) **for
