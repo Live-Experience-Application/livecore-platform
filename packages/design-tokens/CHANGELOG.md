@@ -8,6 +8,14 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+## [0.4.0] - 2026-06-23
+
+Released in lockstep with the other `@livecore/*` packages, which always share one
+version. There are no changes to the `@livecore/design-tokens` typed surface in this
+release.
+
 ## [0.3.0] - 2026-06-21
 
 ### Added
