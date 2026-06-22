@@ -153,6 +153,7 @@ GET    /api/v1/workspaces/{workspaceId}/assets
 POST   /api/v1/assets/upload-intent
 POST   /api/v1/assets/{assetId}/confirm-upload
 GET    /api/v1/assets/{assetId}/download-url
+GET    /api/v1/assets/by-target/{targetType}/{targetId}
 POST   /api/v1/assets/{assetId}/links
 DELETE /api/v1/assets/{assetId}/links/{linkId}
 DELETE /api/v1/assets/{assetId}

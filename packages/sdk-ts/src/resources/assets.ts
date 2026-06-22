@@ -10,6 +10,7 @@
  */
 import type {
   AssetLinkResponse,
+  AssetLinkTargetType,
   AssetResponse,
   ConfirmUploadRequest,
   ConfirmUploadResponse,
@@ -47,6 +48,37 @@ export class AssetsClient {
       path: `/workspaces/${encodeURIComponent(workspaceId)}/assets`,
       query: {
         organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
+   * `GET /api/v1/assets/by-target/{targetType}/{targetId}` — the HOST assets
+   * attached to ONE target resource (a content block or entity), as a bounded page
+   * (CORE-ALC-004). It returns the same full host {@link AssetResponse} projection as
+   * {@link list} for every asset LINKED to the target, in every lifecycle status, so
+   * a host authoring surface focused on one resource can see and manage its
+   * attachments without enumerating the whole workspace. A content block / entity
+   * cannot be addressed by id alone, so the target's `workspaceId` is required
+   * alongside `organizationSlug`. This is the HOST counterpart of the audience-safe
+   * per-resource attachments on the participant visible feed (CORE-ALC-002) and
+   * complements, never replaces, it. Authorized to the host-content roles
+   * (Owner/Admin/Host/CoHost): a non-host member is denied `403`, a target outside
+   * the caller's tenant/workspace is hidden as `404`, and a target with no links is
+   * an empty page (never an error). Pass optional `limit`/`offset` to page.
+   */
+  listForResource(
+    targetType: AssetLinkTargetType,
+    targetId: Uuid,
+    params: { organizationSlug: string; workspaceId: Uuid } & PageParams,
+  ): Promise<PageResponse<AssetResponse>> {
+    return this.http.send<PageResponse<AssetResponse>>({
+      method: "GET",
+      path: `/assets/by-target/${encodeURIComponent(targetType)}/${encodeURIComponent(targetId)}`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        workspaceId: params.workspaceId,
         ...pageQuery(params),
       },
     });

@@ -112,7 +112,8 @@ internal sealed class AssetLinkService
         // OWN organization and workspace. A target in another workspace or tenant is never found, so an
         // asset can never be linked to a foreign resource (threats T5/T1). Returning the row only confirms
         // existence and the same-workspace coupling; it grants no access.
-        var targetExists = await TargetExistsInWorkspaceAsync(asset, targetType, targetId, cancellationToken)
+        var targetExists = await TargetExistsAsync(
+                asset.OrganizationId, asset.WorkspaceId, targetType, targetId, cancellationToken)
             .ConfigureAwait(false);
         if (!targetExists)
         {
@@ -184,26 +185,59 @@ internal sealed class AssetLinkService
     }
 
     /// <summary>
-    /// Whether the given target resource exists in the asset's OWN organization and workspace, resolved
-    /// through the workspace-scoped repository for its kind. The lookup leads with the organization id,
-    /// so a target in another tenant or workspace is never found (threats T5/T1).
+    /// Whether the given target resource (a content block or entity) exists in the given organization and
+    /// workspace, resolved through the WORKSPACE-SCOPED repository for its kind. The lookup leads with the
+    /// organization id, so a target in another tenant or workspace is never found (threats T5/T1). It is the
+    /// same-workspace target resolution <see cref="LinkAsync"/> performs before creating a link, exposed so
+    /// the host per-resource attachments read (CORE-ALC-004, <c>GET /api/v1/assets/by-target/...</c>) can
+    /// distinguish a target that genuinely exists in the caller's authorized workspace (its attachments are
+    /// listed, possibly an empty page) from one outside that tenant/workspace (a hidden 404) WITHOUT
+    /// duplicating the polymorphic-target switch in the endpoint. Returning <see langword="true"/> only
+    /// confirms existence and the same-workspace coupling; it grants no access to the resource or its bytes.
+    /// The calling endpoint resolves the tenant, authorizes the caller's workspace role and validates the
+    /// ids BEFORE invoking this; the method performs no authorization itself.
     /// </summary>
-    private async Task<bool> TargetExistsInWorkspaceAsync(
-        Asset asset,
+    /// <param name="organizationId">The tenant the target must belong to (the lookup leads with this).</param>
+    /// <param name="workspaceId">The workspace the target must belong to.</param>
+    /// <param name="targetType">The kind of target resource to resolve.</param>
+    /// <param name="targetId">The surrogate id of the target resource (in the given organization/workspace).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentException">The organization, workspace or target id is empty.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The target type is not defined.</exception>
+    public async Task<bool> TargetExistsAsync(
+        Guid organizationId,
+        Guid workspaceId,
         AssetLinkTargetType targetType,
         Guid targetId,
         CancellationToken cancellationToken)
-        => targetType switch
+    {
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (targetId == Guid.Empty)
+        {
+            throw new ArgumentException("Target id must not be empty.", nameof(targetId));
+        }
+
+        return targetType switch
         {
             AssetLinkTargetType.ContentBlock => await _contentBlocks
-                .FindByIdAsync(asset.OrganizationId, asset.WorkspaceId, targetId, cancellationToken)
+                .FindByIdAsync(organizationId, workspaceId, targetId, cancellationToken)
                 .ConfigureAwait(false) is not null,
             AssetLinkTargetType.Entity => await _entities
-                .FindByIdAsync(asset.OrganizationId, asset.WorkspaceId, targetId, cancellationToken)
+                .FindByIdAsync(organizationId, workspaceId, targetId, cancellationToken)
                 .ConfigureAwait(false) is not null,
             _ => throw new ArgumentOutOfRangeException(
                 nameof(targetType),
                 targetType,
                 "Target type is not a defined asset link target type."),
         };
+    }
 }

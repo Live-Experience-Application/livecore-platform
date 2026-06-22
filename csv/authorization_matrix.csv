@@ -6,6 +6,7 @@ Change workspace member role,yes,yes,no,no,no,no,no
 Create session,yes,yes,yes,yes,no,no,no
 View host-only content,yes,yes,yes,yes,no,no,audit-only
 Enumerate workspace assets,yes,yes,yes,yes,no,no,no
+List a resource's attachments,yes,yes,yes,yes,no,no,no
 Execute reveal,yes,yes,yes,yes,no,no,no
 Seal or unseal visibility rule,yes,yes,yes,yes,no,no,no
 View own visible feed,no,no,preview,preview,yes,no,no

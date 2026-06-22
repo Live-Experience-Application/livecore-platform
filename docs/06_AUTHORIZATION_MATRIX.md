@@ -14,6 +14,7 @@ Roles are generic. Verticals may rename them in UI.
 | Create scene | yes | yes | yes | yes | no | no | no |
 | View host-only content | yes | yes | yes | yes | no | no | audit-only |
 | Enumerate workspace assets | yes | yes | yes | yes | no | no | no |
+| List a resource's attachments | yes | yes | yes | yes | no | no | no |
 | View participant-visible content | yes | yes | yes | yes | if visible | if visible | audit-only |
 | Change visibility rule | yes | yes | yes | yes | no | no | no |
 | Execute reveal | yes | yes | yes | yes | no | no | no |
@@ -121,6 +122,24 @@ Roles are generic. Verticals may rename them in UI.
   workspace are ALL an indistinguishable `404`, never `403`, and a foreign tenant's or foreign workspace's assets
   never appear (threats T1/T5). The page is bounded (CORE-DX-003) in a deterministic time-ordered id order, and
   the role check is exact and non-linear (an EXACT host-content set membership, never an ordering comparison).
+- Listing a resource's attachments (`GET /api/v1/assets/by-target/{targetType}/{targetId}`, CORE-ALC-004, the
+  "List a resource's attachments" row above) is the per-resource companion to the workspace enumeration: it
+  returns the SAME bounded host `AssetResponse` projection for every asset LINKED to ONE target (a content block
+  or entity), in EVERY lifecycle status, so a host authoring surface focused on one resource can see and manage
+  its attachments without scanning the whole workspace. It is restricted to the SAME host-content roles
+  (Owner/Admin/Host/CoHost) and is the HOST counterpart of the audience-safe per-resource attachments projection
+  on the participant visible feed (CORE-ALC-002), which it complements, never replaces. A content block / entity
+  cannot be resolved by its id alone (the Content/Entities repositories expose no by-id-alone lookup, by design),
+  so the caller names the target's workspace in a required `workspaceId` query parameter alongside
+  `organizationSlug`; the read is tenant- and workspace-scoped to the target's workspace through the SAME
+  per-target link read the audience projection uses (`IAssetLinkRepository.ListByTargetAsync`), and carries no
+  storage coordinate (threats T4/T7). It is fail-closed: a missing `organizationSlug`/`workspaceId` is `400`; a
+  malformed/empty workspace id, a malformed/unknown target type, a malformed/empty target id, a denied tenant, a
+  non-member of the named workspace, and a target OUTSIDE the caller's tenant/workspace are ALL an
+  indistinguishable hidden `404` (so an empty page unambiguously means "no attachments", never "unknown target");
+  a known member who lacks a host-content role is denied `403` — UNLIKE the workspace enumeration's hidden `404`,
+  because the target resource's existence is not host-only (a member may see the content block / entity). The role
+  check is exact and non-linear (an EXACT host-content set membership, never an ordering comparison).
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.
