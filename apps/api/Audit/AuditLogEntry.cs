@@ -1147,6 +1147,88 @@ public sealed class AuditLogEntry
     }
 
     /// <summary>
+    /// Records a workspace member role change (<see cref="AuditAction.MemberRoleChanged"/>) — the audit fact
+    /// written when an authorized Owner/Admin changes a workspace member's generic role (CORE-WSM-002). It is the
+    /// role-administration counterpart of <see cref="ForMemberRemoval"/> (which records the role REVOKED) and
+    /// <see cref="ForMemberJoined"/> (which records the role GRANTED), and — like <see cref="ForWorkspaceArchive"/>
+    /// — a thin specialization of <see cref="Create"/> that pins the action and applies the producer's stricter
+    /// contract: the tenant, the workspace the membership belongs to, the authenticated actor (the admin who
+    /// changed the role) and the re-roled membership resource (its generic kind name and surrogate id) are all
+    /// REQUIRED, where the generic factory leaves them optional. Unlike the deletion factories, a re-role is a real
+    /// STATE TRANSITION (the membership row survives), so it records the before/after role NAMES (e.g.
+    /// <c>Participant</c> -&gt; <c>Admin</c>), exactly as <see cref="ForWorkspaceArchive"/> records a status
+    /// transition. The role is passed as a generic NAME string so the Audit module does not depend on the
+    /// Workspaces role enum. Every value is an identifier or a generic name — never the subject's email or any
+    /// free-form content (threats T1/T7) — and the audit row outlives any later change to the membership it
+    /// references because the reference is a recorded fact, not a foreign key (see the type summary).
+    /// </summary>
+    /// <param name="organizationId">The tenant the role change happened in (required).</param>
+    /// <param name="workspaceId">The workspace the re-roled membership belongs to (required for this action).</param>
+    /// <param name="actorUserProfileId">The admin who performed the role change (required; the audited actor).</param>
+    /// <param name="memberResourceType">The re-roled membership's generic kind name (e.g. WorkspaceMember).</param>
+    /// <param name="memberId">The re-roled membership's surrogate id.</param>
+    /// <param name="previousRole">The generic role NAME the member held before the change (required).</param>
+    /// <param name="newRole">The generic role NAME the member holds after the change (required).</param>
+    /// <param name="createdAt">When the role change happened.</param>
+    /// <exception cref="ArgumentException">
+    /// A required id is empty, or the member resource type / a role name is blank.
+    /// </exception>
+    public static AuditLogEntry ForMemberRoleChanged(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid actorUserProfileId,
+        string memberResourceType,
+        Guid memberId,
+        string previousRole,
+        string newRole,
+        DateTimeOffset createdAt)
+    {
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (actorUserProfileId == Guid.Empty)
+        {
+            throw new ArgumentException("Actor user profile id must not be empty.", nameof(actorUserProfileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(memberResourceType))
+        {
+            throw new ArgumentException("Member resource type must not be empty.", nameof(memberResourceType));
+        }
+
+        if (memberId == Guid.Empty)
+        {
+            throw new ArgumentException("Member id must not be empty.", nameof(memberId));
+        }
+
+        // A re-role is a real STATE TRANSITION, so both the before and after role are recorded even though the
+        // generic factory leaves the state pair optional.
+        if (string.IsNullOrWhiteSpace(previousRole))
+        {
+            throw new ArgumentException("Previous role must not be empty.", nameof(previousRole));
+        }
+
+        if (string.IsNullOrWhiteSpace(newRole))
+        {
+            throw new ArgumentException("New role must not be empty.", nameof(newRole));
+        }
+
+        return Create(
+            organizationId,
+            workspaceId,
+            AuditAction.MemberRoleChanged,
+            actorUserProfileId,
+            memberResourceType,
+            memberId,
+            targetParticipantId: null,
+            previousState: previousRole,
+            newState: newRole,
+            createdAt);
+    }
+
+    /// <summary>
     /// Records an entity creation (<see cref="AuditAction.EntityCreated"/>) — the audit fact written when an
     /// authorized authoring role creates a new entity in a workspace (CORE-ENT-006). It is the authoring
     /// counterpart of <see cref="ForEntityDeletion"/> and, like it, a thin specialization of

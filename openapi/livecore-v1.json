@@ -738,6 +738,50 @@
       }
     },
     "/api/v1/workspaces/{workspaceId}/members/{memberId}": {
+      "patch": {
+        "tags": [
+          "WorkspaceEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "memberId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/UpdateWorkspaceMemberRoleRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "WorkspaceEndpoints"
@@ -2991,6 +3035,23 @@
           "participantId": {
             "type": "string",
             "format": "uuid",
+            "nullable": true
+          }
+        }
+      },
+      "UpdateWorkspaceMemberRoleRequest": {
+        "required": [
+          "organizationSlug",
+          "role"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "role": {
+            "type": "string",
             "nullable": true
           }
         }

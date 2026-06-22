@@ -174,10 +174,28 @@ export interface AcceptWorkspaceInvitationRequest {
 }
 
 /**
+ * Request body for `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}`
+ * (CORE-WSM-002): change a workspace member's generic role. Authorized to the
+ * workspace-administration roles (Owner/Admin). The new {@link role} must be a
+ * defined generic `MembershipRole` (never a vertical term). The last remaining
+ * Owner cannot be demoted (a `409`). The change honors `If-Match` optimistic
+ * concurrency (a stale ETag is `412`, CORE-DX-002).
+ */
+export interface UpdateWorkspaceMemberRoleRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /** The generic role to assign to the member. */
+  role: MembershipRole;
+}
+
+/**
  * Response projection of a workspace membership, returned when an invitation is
- * redeemed (CORE-SDK-006). Generic and product-neutral: identifiers, the granted
- * generic role and server timestamps only. It carries no invited email, no token
- * and no internal authorization rationale (data minimization; threats T6/T7).
+ * redeemed (CORE-SDK-006) and when a member's role is changed (CORE-WSM-002).
+ * Generic and product-neutral: identifiers, the granted generic role and server
+ * timestamps only. It carries no invited email, no token and no internal
+ * authorization rationale (data minimization; threats T6/T7). On a role change the
+ * resource's optimistic-concurrency token rides on the response `ETag` header
+ * (CORE-DX-002), not the body.
  */
 export interface WorkspaceMemberResponse {
   /** Surrogate id of the membership. */

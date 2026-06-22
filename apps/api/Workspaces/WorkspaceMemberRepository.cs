@@ -227,6 +227,19 @@ internal sealed class WorkspaceMemberRepository : IWorkspaceMemberRepository
     }
 
     /// <inheritdoc />
+    public async Task UpdateAsync(WorkspaceMember member, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        // The aggregate is already tracked (loaded through FindByIdAsync on this same context), so EF detects
+        // the role change and issues the UPDATE. On PostgreSQL the xmin row-version token (mapped on the mutable
+        // aggregates) adds WHERE ... AND xmin = @original, so a concurrent role change loses the race with a
+        // DbUpdateConcurrencyException the ConcurrencyConflictMiddleware turns into a 409 (CORE-CONC-006).
+        _dbContext.WorkspaceMembers.Update(member);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(
         Guid organizationId,
         Guid userProfileId,

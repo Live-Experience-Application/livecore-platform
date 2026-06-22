@@ -359,11 +359,39 @@ public sealed record MyPendingWorkspaceInvitationResponse(
 public sealed record AcceptWorkspaceInvitationRequest(string? OrganizationSlug, string? Token);
 
 /// <summary>
+/// Request body for changing a workspace member's generic role (CORE-WSM-002,
+/// <c>PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}</c>, csv/api_routes.csv
+/// "Change workspace member role", roles Owner,Admin).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> (the route carries
+/// no organization in its path), matched against the caller's token organization claim and a
+/// persisted organization membership by the tenant context resolver (CORE-ID-005); the change
+/// is then authorized by the caller's organization role (Owner or Admin), exactly like the
+/// member-invite/remove siblings on this same path. The workspace and the membership are taken
+/// from the route. The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): it
+/// names only the generic <see cref="Role"/> to grant — never a vertical role term, and never
+/// the tenant, workspace, subject or membership id (those are immutable on the aggregate, so a
+/// re-role never moves the membership; threat T5). The role must be a DEFINED generic role,
+/// never an undefined value a cast could smuggle in (threat T6 role limitation; the matrix is
+/// non-linear, so it is parsed and defined-checked, never ordered).
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to resolve the
+/// tenant context.
+/// </param>
+/// <param name="Role">The generic role to assign to the member.</param>
+public sealed record UpdateWorkspaceMemberRoleRequest(string? OrganizationSlug, string? Role);
+
+/// <summary>
 /// Response projection of a workspace membership (CORE-WS-006). Returned when an
-/// invitation is redeemed into a new <see cref="WorkspaceMember"/>. Generic and
+/// invitation is redeemed into a new <see cref="WorkspaceMember"/>, and when an
+/// Owner/Admin changes a member's role (CORE-WSM-002). Generic and
 /// product-neutral (docs/04_PRODUCT_BOUNDARIES.md, docs/08_API_CONTRACTS.md): identifiers,
 /// the granted generic role and server timestamps only. It carries no invited email, no
-/// token and no internal authorization rationale (data minimization; threats T6/T7).
+/// token and no internal authorization rationale (data minimization; threats T6/T7). The
+/// resource's optimistic-concurrency token rides on the response's weak <c>ETag</c> header
+/// (CORE-DX-002), not on the body — a caller echoes it back as <c>If-Match</c> on a later
+/// conditional role change.
 /// </summary>
 /// <param name="Id">Surrogate id of the membership (UUIDv7).</param>
 /// <param name="OrganizationId">Tenant the membership belongs to.</param>

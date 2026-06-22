@@ -14,6 +14,7 @@ import type {
   InviteWorkspaceMemberRequest,
   PageResponse,
   PendingWorkspaceInvitationResponse,
+  UpdateWorkspaceMemberRoleRequest,
   UpdateWorkspaceRequest,
   Uuid,
   WorkspaceInvitationResponse,
@@ -238,6 +239,30 @@ export class WorkspacesClient {
       method: "DELETE",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
       query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}` — change a member's
+   * generic role (Owner/Admin), so an administrator can correct a role without
+   * remove-and-reinvite. The last remaining Owner cannot be DEMOTED (a `409`). Pass
+   * {@link ConditionalWriteOptions.ifMatch} to make the change conditional on the
+   * version last read (a stale value is refused with `412`); omit it to change
+   * unconditionally. Audited. Returns the updated membership; its new version rides on
+   * the response `ETag` header (CORE-DX-002). A cross-tenant/unknown workspace or
+   * member is hidden as `404`, a non-administration caller is `403`.
+   */
+  updateMemberRole(
+    workspaceId: Uuid,
+    memberId: Uuid,
+    request: UpdateWorkspaceMemberRoleRequest,
+    options?: ConditionalWriteOptions,
+  ): Promise<WorkspaceMemberResponse> {
+    return this.http.send<WorkspaceMemberResponse>({
+      method: "PATCH",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(memberId)}`,
+      body: request,
+      ifMatch: options?.ifMatch,
     });
   }
 

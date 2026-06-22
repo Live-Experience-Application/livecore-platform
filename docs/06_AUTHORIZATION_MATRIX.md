@@ -8,6 +8,7 @@ Roles are generic. Verticals may rename them in UI.
 | Manage workspace settings | yes | yes | no | no | no | no | no |
 | Manage members | yes | yes | limited | no | no | no | no |
 | View workspace member roster | yes | yes | no | no | no | no | no |
+| Change workspace member role | yes | yes | no | no | no | no | no |
 | Create session | yes | yes | yes | yes | no | no | no |
 | Start/end session | yes | yes | yes | yes | no | no | no |
 | Create scene | yes | yes | yes | yes | no | no | no |
@@ -85,6 +86,22 @@ Roles are generic. Verticals may rename them in UI.
   HIDDEN-404: a non-member, a non-administration tenant member, and a foreign-tenant or unknown workspace are all
   an indistinguishable `404`, never `403` (threats T1/T5). The role check is exact and non-linear (Owner or
   Admin, never an ordering comparison).
+- Changing a workspace member's ROLE (`PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}`, CORE-WSM-002,
+  the "Change workspace member role" row above) is a workspace-administration command restricted to Owner/Admin —
+  the SAME "Manage members" set as inviting and removing a member — so an administrator can correct a member's
+  generic `MembershipRole` without the previous remove-and-reinvite workaround (the workspace surface had only
+  invite and remove). It reuses the member-removal flow exactly (fail-closed, resolve-tenant, load-then-authorize,
+  hidden-404) over the existing `WorkspaceMember` aggregate and authorization, differing only in the mutation: it
+  transitions the role IN PLACE (the membership's tenant, workspace and subject are immutable, so a re-role never
+  moves the membership to another organization, workspace or subject — threat T5). The same last-Owner invariant
+  the removal enforces applies on DEMOTION: demoting the sole remaining workspace Owner is refused (`409`), so a
+  workspace can never be left ownerless (an invariant conflict, not an authorization failure). The change honors
+  `If-Match` optimistic concurrency (a stale ETag is `412`, CORE-DX-002) and is recorded as a `MemberRoleChanged`
+  audit fact (actor + membership + before/after role, by id only). It is tenant- and workspace-scoped and
+  fail-closed: a foreign-tenant or unknown member or workspace is hidden as `404`, and a non-administration tenant
+  member is denied `403`. The role check is exact and non-linear (Owner or Admin, never an ordering comparison),
+  and the new role must be a DEFINED generic role, never an undefined value a cast could smuggle in (threat T6 role
+  limitation). A same-role change is an idempotent no-op (`200`, no audit).
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.

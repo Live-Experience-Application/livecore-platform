@@ -874,7 +874,31 @@ export interface paths {
         };
         options?: never;
         head?: never;
-        patch?: never;
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    memberId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": unknown | components["schemas"]["UpdateWorkspaceMemberRoleRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         trace?: never;
     };
     "/api/v1/me/invitations": {
@@ -2866,6 +2890,10 @@ export interface components {
             resourceId: string;
             /** Format: uuid */
             participantId?: string | null;
+        };
+        UpdateWorkspaceMemberRoleRequest: {
+            organizationSlug: string | null;
+            role: string | null;
         };
         UpdateWorkspaceRequest: {
             organizationSlug: string | null;

@@ -307,6 +307,12 @@ public sealed class LiveCoreDbContext : DbContext
             // the single-use guarantee; the xmin token makes the second redeem's UPDATE conflict (409) so the
             // token is honoured at most once even under a race (threat T6).
             typeof(WorkspaceInvitation),
+
+            // CORE-WSM-002 makes the membership an in-place-updated aggregate for the first time: the
+            // role-change command transitions a member's generic role (a workspace membership was previously
+            // only created and removed). The token makes the role change honour If-Match (a stale ETag is 412)
+            // and makes two concurrent role changes conflict (409) rather than silently last-write-wins.
+            typeof(WorkspaceMember),
         ];
 
         foreach (var aggregate in mutableAggregates)

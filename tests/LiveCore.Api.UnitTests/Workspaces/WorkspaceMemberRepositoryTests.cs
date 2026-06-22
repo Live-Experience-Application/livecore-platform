@@ -604,4 +604,50 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
         await Assert.ThrowsAsync<DbUpdateException>(
             () => repository.AddAsync(ghost, CancellationToken.None));
     }
+
+    [Fact]
+    public async Task UpdateAsync_persists_a_role_change_in_place_keeping_the_id_and_natural_key()
+    {
+        // CORE-WSM-002: a role change is the first in-place update to a membership. The persisted row keeps its
+        // surrogate id and (workspace, subject) natural key; only the role and the updated timestamp move.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var seeded = await SeedMembershipAsync(
+            organization.Id, workspace.Id, user.Id, MembershipRole.Participant);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceMemberRepository(context);
+            var loaded = await repository.FindByIdAsync(
+                organization.Id, workspace.Id, seeded.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            loaded!.ChangeRole(MembershipRole.Admin, _updatedAt);
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using var verifyContext = CreateContext();
+        var verifyRepository = new WorkspaceMemberRepository(verifyContext);
+        var reloaded = await verifyRepository.FindByIdAsync(
+            organization.Id, workspace.Id, seeded.Id, CancellationToken.None);
+
+        Assert.NotNull(reloaded);
+        Assert.Equal(seeded.Id, reloaded!.Id);
+        Assert.Equal(workspace.Id, reloaded.WorkspaceId);
+        Assert.Equal(user.Id, reloaded.UserProfileId);
+        Assert.Equal(MembershipRole.Admin, reloaded.Role);
+        Assert.Equal(_updatedAt, reloaded.UpdatedAt);
+        // Still exactly one membership for the (workspace, subject) pair — an update, not an insert.
+        Assert.Equal(1, await verifyContext.WorkspaceMembers.CountAsync(m => m.WorkspaceId == workspace.Id));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_rejects_a_null_member()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => repository.UpdateAsync(null!, CancellationToken.None));
+    }
 }

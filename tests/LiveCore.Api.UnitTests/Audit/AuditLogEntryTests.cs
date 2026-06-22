@@ -460,6 +460,68 @@ public sealed class AuditLogEntryTests
             Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Session", Guid.NewGuid(),
             "Live", newState, _now));
 
+    // --- Member role-change audit fact (CORE-WSM-002) --------------------------
+
+    [Fact]
+    public void ForMemberRoleChanged_sets_the_action_resource_and_before_after_role_transition()
+    {
+        var org = Guid.NewGuid();
+        var ws = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var member = Guid.NewGuid();
+
+        var entry = AuditLogEntry.ForMemberRoleChanged(
+            org, ws, actor, "WorkspaceMember", member,
+            previousRole: "Participant", newRole: "Admin", createdAt: _now);
+
+        Assert.Equal(AuditAction.MemberRoleChanged, entry.Action);
+        Assert.Equal(org, entry.OrganizationId);
+        Assert.Equal(ws, entry.WorkspaceId);
+        Assert.Equal(actor, entry.ActorUserProfileId);
+        // The membership is the governed resource; the re-role is a surviving STATE TRANSITION, so it records
+        // before/after role names.
+        Assert.Equal("WorkspaceMember", entry.ResourceType);
+        Assert.Equal(member, entry.ResourceId);
+        Assert.Equal("Participant", entry.PreviousState);
+        Assert.Equal("Admin", entry.NewState);
+        Assert.Null(entry.TargetParticipantId);
+        Assert.NotEqual(Guid.Empty, entry.Id);
+    }
+
+    [Fact]
+    public void ForMemberRoleChanged_rejects_an_empty_workspace()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberRoleChanged(
+            Guid.NewGuid(), Guid.Empty, Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(),
+            "Participant", "Admin", _now));
+
+    [Fact]
+    public void ForMemberRoleChanged_rejects_an_empty_actor()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberRoleChanged(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.Empty, "WorkspaceMember", Guid.NewGuid(),
+            "Participant", "Admin", _now));
+
+    [Fact]
+    public void ForMemberRoleChanged_rejects_an_empty_member_id()
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberRoleChanged(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.Empty,
+            "Participant", "Admin", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberRoleChanged_rejects_a_blank_previous_role(string previousRole)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberRoleChanged(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(),
+            previousRole, "Admin", _now));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ForMemberRoleChanged_rejects_a_blank_new_role(string newRole)
+        => Assert.Throws<ArgumentException>(() => AuditLogEntry.ForMemberRoleChanged(
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "WorkspaceMember", Guid.NewGuid(),
+            "Participant", newRole, _now));
+
     // --- Entitlement / store / purchase audit facts (CORE-SPEC-002) ------------
 
     [Fact]

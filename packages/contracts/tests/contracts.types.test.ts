@@ -53,6 +53,7 @@ import type {
   SessionResponse,
   SessionStatus,
   StoreNotificationAck,
+  UpdateWorkspaceMemberRoleRequest,
   UpdateWorkspaceRequest,
   VisibilityResourceType,
   VisibilityRuleResponse,
@@ -445,6 +446,12 @@ export type InviteWorkspaceMemberRequestMatchesSchema = Assert<
     Schemas["InviteWorkspaceMemberRequest"]
   >
 >;
+export type UpdateWorkspaceMemberRoleRequestMatchesSchema = Assert<
+  SameKeys<
+    UpdateWorkspaceMemberRoleRequest,
+    Schemas["UpdateWorkspaceMemberRoleRequest"]
+  >
+>;
 export type CreateSceneRequestMatchesSchema = Assert<
   SameKeys<CreateSceneRequest, Schemas["CreateSceneRequest"]>
 >;
@@ -558,6 +565,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "RegisterPushSubscriptionRequest"
     | "ReorderSceneRequest"
     | "RevealRequest"
+    | "UpdateWorkspaceMemberRoleRequest"
     | "UpdateWorkspaceRequest"
   >
 >;

@@ -225,6 +225,12 @@ public sealed class AuthorizationCacheDecoratorTests
             return Task.CompletedTask;
         }
 
+        public Task UpdateAsync(WorkspaceMember member, CancellationToken cancellationToken)
+        {
+            _member = member;
+            return Task.CompletedTask;
+        }
+
         public Task<bool> IsMemberAsync(Guid organizationId, Guid workspaceId, Guid userProfileId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

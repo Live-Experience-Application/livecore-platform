@@ -158,6 +158,22 @@ public interface IWorkspaceMemberRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Persists an in-place change to an existing membership (CORE-WSM-002) — today the generic role change
+    /// (<see cref="WorkspaceMember.ChangeRole"/>). The membership row IS the access grant every workspace-scoped
+    /// authorization reads, so the persisted role takes effect on the subject's next request. The membership's
+    /// tenant, workspace and subject are immutable on the aggregate, so an update never moves it to another
+    /// organization, workspace or subject (threat T5). On PostgreSQL the row carries an <c>xmin</c>
+    /// optimistic-concurrency token, so two concurrent role changes make the second write conflict
+    /// (translated to a <c>409</c> by the concurrency-conflict middleware) rather than silently overwriting
+    /// (last-write-wins). The caller is responsible for guarding the last-Owner invariant before demoting an
+    /// Owner.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The member is null.</exception>
+    Task UpdateAsync(
+        WorkspaceMember member,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Lists every workspace membership the given subject holds WITHIN the given organization (tenant), oldest
     /// first, for the data-subject access/portability export (CORE-PRIV-004, GDPR Art.15/20). It is the only
     /// lookup on this contract keyed by the subject across a whole tenant (every other lookup additionally pins a

@@ -182,7 +182,8 @@ function Get-LiveCoreImplementedRoute {
 
         # Verb calls. Whitespace (including newlines) may sit between Map{Verb}(
         # and the route literal, so the multi-line MapDelete(...) form is matched.
-        $verbPattern = '(?<recv>\w+)\s*\.\s*Map(?<verb>Get|Post|Put|Delete)\(\s*"(?<rel>[^"]*)"'
+        # PATCH is included for the partial-update commands (CORE-WSM-002, the first MapPatch route).
+        $verbPattern = '(?<recv>\w+)\s*\.\s*Map(?<verb>Get|Post|Put|Patch|Delete)\(\s*"(?<rel>[^"]*)"'
         foreach ($v in [regex]::Matches($text, $verbPattern)) {
             $recv = $v.Groups['recv'].Value
             if (-not $groups.ContainsKey($recv)) { continue }
