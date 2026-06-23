@@ -71,7 +71,7 @@ function Get-FixtureHelmChart {
     # CORE-OPS-016: the migrations runner image defaults to the published GHCR coordinate
     # (image.registry + this repository + the release tag), exactly like api/worker, so a
     # default install PULLS it with no build/push step. The negative test empties the
-    # repository (no published default — the old "build it yourself" state) so the
+    # repository (no published default - the old "build it yourself" state) so the
     # validator's "must default to the published livecore-migrations repository" rule trips.
     $migrationsRepository = if ($MigrationsBuildOnly) { '""' } else { 'live-experience-application/livecore-migrations' }
 
@@ -557,8 +557,8 @@ AssertTrue ($realDocCorpus -match '(?i)rate.?limit' -and ($realDocCorpus -match 
 
 # Spot-check the published migrations image default on the real chart (CORE-OPS-016). The
 # migrations runner image must default to the published GHCR coordinate exactly like
-# api/worker — image.registry (ghcr.io) + migrations.image.repository (livecore-migrations)
-# + the release tag (migrations.image.tag empty, falling back to image.tag/appVersion) — so
+# api/worker - image.registry (ghcr.io) + migrations.image.repository (livecore-migrations)
+# + the release tag (migrations.image.tag empty, falling back to image.tag/appVersion) - so
 # a default install PULLS it and no operator build/push step is required.
 $realMigrationsImage = Get-LiveCoreHelmComponentImage -ValuesContent $realFiles['values.yaml'] -Component 'migrations'
 AssertTrue ($realMigrationsImage.ContainsKey('repository') -and $realMigrationsImage['repository'] -match 'livecore-migrations') `
