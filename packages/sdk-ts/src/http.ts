@@ -26,7 +26,7 @@ import type {
 /** An internal description of one Core API request. */
 export interface RequestSpec {
   /** The HTTP method. */
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /**
    * Path under {@link API_BASE_PATH}, beginning with `/`. Any interpolated id
    * must already be percent-encoded by the caller.

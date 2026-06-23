@@ -155,6 +155,14 @@ internal static class AssetEndpoints
     private const string _organizationSlugQuery = "organizationSlug";
 
     /// <summary>
+    /// Required query parameter naming the workspace the target resource belongs to on the per-resource
+    /// attachments read (CORE-ALC-004). A content block / entity cannot be resolved by its id alone (the
+    /// Content/Entities repositories deliberately expose no by-id-alone lookup — threat T5/T1), so the
+    /// caller names the workspace, the read is scoped to it, and a target outside it is a hidden 404.
+    /// </summary>
+    private const string _workspaceIdQuery = "workspaceId";
+
+    /// <summary>
     /// Query parameter naming the session a PARTICIPANT's download is scoped to (CORE-SVIS-003). A reveal is
     /// session-scoped (ADR 0013), so a participant's download is "may I see the linked resource IN this
     /// session?"; a reveal in a sibling session of the same workspace is never honoured. Required only for a
@@ -173,11 +181,349 @@ internal static class AssetEndpoints
         group.MapPost("/upload-intent", CreateUploadIntentAsync);
         group.MapPost("/{assetId}/confirm-upload", ConfirmUploadAsync);
         group.MapGet("/{assetId}/download-url", CreateDownloadUrlAsync);
+        // The per-resource host attachments read (CORE-ALC-004). The literal "by-target" segment keeps it
+        // distinct from the by-asset-id routes ("/{assetId}/..."), so there is no route ambiguity.
+        group.MapGet("/by-target/{targetType}/{targetId}", ListAssetsByTargetAsync);
         group.MapPost("/{assetId}/links", CreateAssetLinkAsync);
         group.MapDelete("/{assetId}/links/{linkId}", DeleteAssetLinkAsync);
         group.MapDelete("/{assetId}", DeleteAssetAsync);
 
+        // The workspace-scoped host enumeration read (CORE-ALC-003): the route path carries the
+        // {workspaceId}, so the target organization is a required ?organizationSlug= query parameter exactly
+        // like the scene/entity workspace-scoped list reads (mirrors SceneEndpoints' workspace-scoped group).
+        var workspaceScopedGroup = endpoints
+            .MapGroup("/api/v1/workspaces")
+            .RequireAuthorization();
+
+        workspaceScopedGroup.MapGet("/{workspaceId}/assets", ListWorkspaceAssetsAsync);
+
         return endpoints;
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/assets?organizationSlug={slug}&limit={n}&offset={n}
+    //
+    // Lists a workspace's HOST assets (CORE-ALC-003, the "Asset Lifecycle and Attachment Completeness" epic):
+    // the full host AssetResponse metadata of every asset in the workspace (all lifecycle statuses), so a host
+    // authoring surface can enumerate a workspace's uploaded assets to re-attach, reveal or delete them across
+    // page loads. It is the HOST projection and is distinct from the audience-safe attachments projection on the
+    // participant visible feed (CORE-ALC-002): that one surfaces only the audience-relevant fields of an
+    // Available asset linked to a REVEALED resource, while this host read returns the full asset metadata of
+    // EVERY asset in the workspace regardless of any reveal, and only ever to a host-content role.
+    //
+    // Tenant resolution mirrors the scene/entity workspace-scoped list reads: the route path carries the
+    // {workspaceId}, so the target organization is a required ?organizationSlug= query parameter resolved by the
+    // TenantContextResolver (token organization claim AND persisted organization membership - defence in depth,
+    // threat T5); the caller is then authorized by their WORKSPACE membership and role in the route's workspace.
+    //
+    // Authorization (object-level, server-side; docs/06_AUTHORIZATION_MATRIX.md "Enumerate workspace assets";
+    // threats T1/T5), load-then-authorize, fail-closed at every step and never leaking why. Assets are
+    // host-only content, so - unlike the scene/entity lists, which return an audience-stripped projection to
+    // any member - the very EXISTENCE of a workspace's host asset list is HIDDEN from a non-host: a caller who
+    // is NOT a member of the workspace AND a known member whose role is not a host-content role
+    // (Owner/Admin/Host/CoHost, the same set that creates the upload intent) are BOTH an indistinguishable
+    // hidden 404 (never 403), exactly as the member-roster read hides itself from a non-administrator (the
+    // story's "a non-member or unauthorized role ... are hidden-404"). So:
+    //   * 503 when persistence is off; 401 when the principal cannot be mapped.
+    //   * A missing organizationSlug is 400; a malformed/empty workspace id, a denied tenant resolution, a
+    //     caller who is not a member of the workspace, and a member who lacks a host-content role are ALL hidden
+    //     as 404 (never distinguishable; threats T1/T5). MembershipRole is non-linear, so the role check is an
+    //     EXACT set membership check, never an ordering comparison.
+    //   * Only AFTER authorization are the optional paging parameters validated, so a hidden caller never
+    //     receives request-shape feedback: a present-but-malformed limit/offset is a 400, an absent value uses
+    //     the default page.
+    // The page is read through the tenant- AND workspace-scoped paged repository, over-fetching ONE extra row so
+    // HasMore is set without a second COUNT; the trimmed page is projected into the PageResponse envelope in the
+    // deterministic (time-ordered id) order. A foreign tenant's or foreign workspace's assets never appear, and
+    // a list can never return the whole table (threat T9; CORE-DX-003). Returning the metadata is NOT access to
+    // the bytes: each object is still reached only through the authorized signed download route (threat T4).
+    private static async Task<IResult> ListWorkspaceAssetsAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries the
+        // workspace, so the organization is a query parameter exactly like the scene/entity list reads.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty workspace id can never address a stored workspace; hidden as 404, never echoing why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the workspace as 404 (threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace. A caller who is a member
+        // of the tenant but NOT of the workspace must not learn the workspace (or its host asset list) exists,
+        // so a missing membership is hidden as 404 (threats T1/T5). The member's workspace role then drives the
+        // host-content role check below.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Assets are host-only content, so the host asset list is authorized to the host-content roles that
+        // create the upload intent (Owner/Admin/Host/CoHost; csv/api_routes.csv; the "Enumerate workspace
+        // assets" / asset-write capability of docs/06_AUTHORIZATION_MATRIX.md). Unlike the scene/entity lists
+        // (which return an audience-stripped projection to any member), a known member who lacks a host-content
+        // role is hidden as 404, NOT 403: the host asset list's very existence is host-only, so it is hidden
+        // from a non-host exactly as the member-roster read hides itself from a non-administrator (threats
+        // T1/T5). MembershipRole is non-linear, so this is an EXACT set membership check, never an ordering
+        // comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return HiddenWorkspace();
+        }
+
+        // Authorized. Only now validate the optional paging parameters, so a hidden caller (404 above) never
+        // receives request-shape feedback (mirrors the roster/scene reads): a present-but-malformed limit/offset
+        // is a 400, an absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // Read ONE BOUNDED PAGE of the workspace's assets WITHIN this tenant and workspace; an asset in another
+        // workspace or tenant is never returned (threats T1/T5). Over-fetch ONE row so HasMore is set without a
+        // second COUNT, then project the trimmed page into the host AssetResponse envelope. Bounded so a list
+        // never returns an unbounded array (threat T9; CORE-DX-003).
+        var rows = await deps.Assets
+            .ListPageByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
+            .ConfigureAwait(false);
+
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
+
+        var response = PageResponse.From(
+            pageRows.Select(AssetResponse.From).ToArray(), pageOffset, pageLimit, hasMore);
+        return Results.Ok(response);
+    }
+
+    // GET /api/v1/assets/by-target/{targetType}/{targetId}?organizationSlug={slug}&workspaceId={wsId}&limit={n}&offset={n}
+    //
+    // Lists the HOST assets attached to ONE target resource (CORE-ALC-004, the "Asset Lifecycle and Attachment
+    // Completeness" epic): the full host AssetResponse metadata of every asset LINKED to a given content block
+    // or entity (all lifecycle statuses), so a host authoring surface focused on one resource can see and manage
+    // its attachments without enumerating the whole workspace (CORE-ALC-003). It returns the SAME host
+    // AssetResponse projection as the workspace enumeration and is the HOST counterpart of the audience-safe
+    // per-resource attachments projection on the participant visible feed (CORE-ALC-002): that one carries only
+    // the audience-relevant fields of an Available asset linked to a REVEALED resource, while this returns the
+    // full asset metadata of EVERY linked asset regardless of any reveal, and only ever to a host-content role.
+    // It complements, never replaces, the audience feed projection.
+    //
+    // A content block / entity cannot be resolved by its id alone (the Content/Entities repositories expose no
+    // by-id-alone lookup, by design — threats T5/T1), so the caller names the target's workspace in a required
+    // ?workspaceId= query parameter alongside the required ?organizationSlug=; the read is then scoped to that
+    // tenant and workspace exactly like the asset link command's same-workspace target resolution. Tenant
+    // resolution mirrors the by-asset-id routes: the organizationSlug is resolved by the TenantContextResolver
+    // (token organization claim AND persisted membership - defence in depth, threat T5).
+    //
+    // Authorization (object-level, server-side; docs/06_AUTHORIZATION_MATRIX.md "List a resource's attachments";
+    // threats T1/T5), load-then-authorize, fail-closed at every step and never leaking why:
+    //   * 503 when persistence is off; 401 when the principal cannot be mapped.
+    //   * A missing organizationSlug or workspaceId is 400; a malformed/empty workspace id, a malformed/unknown
+    //     target type, a malformed/empty target id, a denied tenant resolution and a caller who is NOT a member
+    //     of the named workspace are ALL hidden as 404 (never distinguishable; threats T1/T5).
+    //   * A known member of the workspace who lacks a host-content role (Owner/Admin/Host/CoHost - the same set
+    //     that creates the upload intent and links assets) is DENIED 403, exactly like the asset link/confirm/
+    //     delete routes: the target resource's existence is NOT host-only (a member may see the content
+    //     block/entity), so the host attachments capability is a plain 403, not a hidden 404. MembershipRole is
+    //     non-linear, so the role check is an EXACT set membership check, never an ordering comparison.
+    //   * Only AFTER authorization are the optional paging parameters validated, so a non-host (403) and a
+    //     non-member (404) never receive request-shape feedback.
+    //   * A target that does not exist in the caller's authorized tenant/workspace - including one in another
+    //     workspace or tenant - is a hidden 404 (the same-workspace coupling, reusing AssetLinkService); only a
+    //     target that genuinely exists in this workspace is listed, so an empty result means "no attachments",
+    //     never "unknown target".
+    // The attachments are read through the tenant- AND workspace-scoped IAssetLinkRepository.ListByTargetAsync
+    // (the same per-target link read the audience projection uses), each linked asset is resolved within the
+    // SAME tenant and workspace, and the projected page is returned in the deterministic (time-ordered link id)
+    // order. A target with NO links returns an empty page (never an error). The projection carries no storage
+    // coordinate, so listing is never access to the bytes (each object is still reached only through the
+    // authorized signed download route; threat T4).
+    private static async Task<IResult> ListAssetsByTargetAsync(
+        HttpContext httpContext,
+        string targetType,
+        string targetId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = _workspaceIdQuery)] string? workspaceId,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries only the
+        // target, so the organization is a query parameter exactly like the by-asset-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // The target's workspace is required: a content block / entity cannot be resolved by its id alone, so
+        // the caller names the workspace and the read is scoped to it. A missing value is a request-shape 400
+        // (like organizationSlug); a present-but-malformed/empty workspace id can never address a stored
+        // workspace, so it is hidden as 404.
+        if (string.IsNullOrWhiteSpace(workspaceId))
+        {
+            return ValidationError($"The '{_workspaceIdQuery}' value is required.");
+        }
+
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        // A malformed/unknown target type or a malformed/empty target id can never address a stored target, so
+        // both are hidden as 404, never echoing why (the target type is parsed by NAME only, rejecting numeric
+        // and unknown values exactly like the asset link command).
+        if (!TryParseTargetType(targetType, out var parsedTargetType))
+        {
+            return HiddenTarget();
+        }
+
+        if (!Guid.TryParse(targetId, out var targetGuid) || targetGuid == Guid.Empty)
+        {
+            return HiddenTarget();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the workspace as 404 (threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of the named workspace. A caller who is a
+        // member of the tenant but NOT of the workspace must not learn the workspace exists, so a missing
+        // membership is hidden as 404 (mirrors the by-asset-id routes; threats T1/T5).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // The caller is a known member of the workspace, so an insufficient role is 403. The attachments-read
+        // roles are the host-content Owner/Admin/Host/CoHost (the same set that creates the upload intent and
+        // links assets; csv/api_routes.csv; the asset-write capability of docs/06_AUTHORIZATION_MATRIX.md).
+        // Unlike the workspace-asset enumeration (CORE-ALC-003), the target resource's existence is NOT
+        // host-only - any member may see the content block / entity - so a known member who lacks a host-content
+        // role is DENIED 403 (the asset link/confirm/delete convention), not hidden as 404. MembershipRole is
+        // non-linear, so this is an EXACT set membership check, never an ordering comparison.
+        if (!(member.HasRole(MembershipRole.Owner)
+            || member.HasRole(MembershipRole.Admin)
+            || member.HasRole(MembershipRole.Host)
+            || member.HasRole(MembershipRole.CoHost)))
+        {
+            return Forbidden();
+        }
+
+        // Authorized. Only now validate the optional paging parameters, so a hidden caller (404) and a denied
+        // caller (403) never receive request-shape feedback: a present-but-malformed limit/offset is a 400, an
+        // absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // The target must genuinely exist in the caller's authorized tenant and workspace. Reusing the asset
+        // link command's same-workspace target resolution (not duplicating it), a target in another workspace or
+        // tenant is never found and is hidden as 404, so an empty result below unambiguously means "this target
+        // has no attachments", never "unknown target" (threats T1/T5).
+        var targetExists = await deps.AssetLinks
+            .TargetExistsAsync(context.OrganizationId, workspaceGuid, parsedTargetType, targetGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (!targetExists)
+        {
+            return HiddenTarget();
+        }
+
+        // List the links attaching any asset to this target, tenant- and workspace-scoped (the SAME per-target
+        // link read the audience projection uses), then resolve each linked asset within the SAME tenant and
+        // workspace. A link whose asset no longer resolves (a race with deletion) is skipped, so the list
+        // degrades without error. Every lifecycle status is projected (this is the host view), in the
+        // deterministic time-ordered link id order ListByTargetAsync enforces.
+        var links = await deps.AssetLinkRepository
+            .ListByTargetAsync(context.OrganizationId, workspaceGuid, parsedTargetType, targetGuid, cancellationToken)
+            .ConfigureAwait(false);
+
+        var attachments = new List<AssetResponse>(links.Count);
+        foreach (var link in links)
+        {
+            var asset = await deps.Assets
+                .FindByIdAsync(context.OrganizationId, workspaceGuid, link.AssetId, cancellationToken)
+                .ConfigureAwait(false);
+            if (asset is null)
+            {
+                continue;
+            }
+
+            attachments.Add(AssetResponse.From(asset));
+        }
+
+        // Return the standard bounded PageResponse envelope (CORE-DX-003). A single resource's attachment count
+        // is naturally bounded, so the reused ListByTargetAsync is paged in memory (offset/limit over the stable
+        // projected order); a target with no attachments yields an empty page, never an error.
+        var pageItems = attachments.Skip(pageOffset).Take(pageLimit).ToArray();
+        var hasMore = attachments.Count > pageOffset + pageItems.Length;
+
+        var response = PageResponse.From(pageItems, pageOffset, pageLimit, hasMore);
+        return Results.Ok(response);
     }
 
     // POST /api/v1/assets/upload-intent
@@ -1320,6 +1666,13 @@ internal static class AssetEndpoints
     // ALL reported as 404, never distinguishable from each other and never echoing the reason (docs/08;
     // threats T1/T5).
     private static IResult HiddenAssetLink() => NotFound();
+
+    // Target (content block / entity) existence is hidden on the per-resource attachments read (CORE-ALC-004):
+    // a malformed/unknown target type, a malformed/empty target id, and a target in a foreign or non-entitled
+    // tenant/workspace are ALL reported as 404, never distinguishable from each other and never echoing the
+    // reason (docs/08; threats T1/T5). It is distinct from an empty page, which means an existing target with
+    // no attachments.
+    private static IResult HiddenTarget() => NotFound();
 
     // An authorized viewer asked to download an asset whose upload is not yet confirmed: the object is not
     // downloadable in its current state (mirrors the session lifecycle's 409 for an out-of-state command).

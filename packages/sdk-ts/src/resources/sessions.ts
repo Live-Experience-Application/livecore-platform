@@ -20,6 +20,7 @@ import type {
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 export class SessionsClient {
@@ -47,16 +48,21 @@ export class SessionsClient {
   /**
    * `POST /api/v1/workspaces/{workspaceId}/sessions` — create a session. It is
    * always created `Prepared`; the only way into the live timeline is the guarded
-   * {@link start} command.
+   * {@link start} command. Pass {@link IdempotentCreateOptions.idempotencyKey} to
+   * make the create retry-safe (CORE-DX-008): a retry under the SAME key replays
+   * the original session the server already dedupes (CORE-DX-004) instead of
+   * creating a duplicate; omit it to create unconditionally (the prior behavior).
    */
   create(
     workspaceId: Uuid,
     request: CreateSessionRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<SessionResponse> {
     return this.http.send<SessionResponse>({
       method: "POST",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

@@ -154,6 +154,55 @@ to loopback (the normal dev posture) warns about nothing.
 forces `ASPNETCORE_ENVIRONMENT=Production` on both the api and worker (no Docker
 needed).
 
+## Image-only overlay — pull a pinned Core (CORE-OPS-016)
+
+The base stack **builds** the migrate/api/worker images from the in-repo
+Dockerfiles, which is the right default for a from-source self-hoster. But a
+downstream end-to-end harness (and any deployment) often wants to **pull a pinned,
+pull-only Core** instead — building the migrations image from Core source would
+cross the no-vendor boundary. All three runtime images are **published to GHCR**,
+version-pinned, signed and SBOM-attested on every release (CORE-OPS-009 /
+CORE-OPS-015), so the opt-in overlay [`docker-compose.images.yml`](docker-compose.images.yml)
+points the three services at those published coordinates and carries **no `build:`
+stanza**:
+
+```text
+ghcr.io/<owner>/livecore-migrations:<version>
+ghcr.io/<owner>/livecore-api:<version>
+ghcr.io/<owner>/livecore-worker:<version>
+```
+
+Pin the exact release in `LIVECORE_VERSION` (it is **required** — pulling a pinned
+Core means naming the version, never a moving tag), then merge the overlay **last**
+and skip the build:
+
+```bash
+# Pull the pinned, published images, then run them without building:
+LIVECORE_VERSION=0.3.0 \
+  docker compose -f docker-compose.yml -f docker-compose.images.yml pull
+LIVECORE_VERSION=0.3.0 \
+  docker compose -f docker-compose.yml -f docker-compose.images.yml up -d --no-build
+```
+
+The base file still carries `build:` for the from-source path; the explicit `pull`
+and `--no-build` keep this path image-only. Set `LIVECORE_IMAGE_REGISTRY` /
+`LIVECORE_IMAGE_OWNER` in `.env` to pull from your own registry or mirror. Combine it
+with the production overlay for a pinned, Production-posture Core:
+
+```bash
+LIVECORE_VERSION=0.3.0 docker compose \
+  -f docker-compose.yml -f docker-compose.images.yml -f docker-compose.prod.yml \
+  up -d --no-build
+```
+
+The migrate-before-API gate, the probes and the resource ceilings are inherited from
+the base manifest unchanged — this overlay only swaps "build from source" for "pull a
+pinned, published image".
+
+**Tested.** `scripts/test-compose-deploy.ps1` statically validates that the overlay
+references the published api + migrations coordinates and contains no `build:` stanza
+(no Docker needed).
+
 ## The migrate-before-API gate
 
 The API host **never** applies migrations implicitly on startup — that is unsafe
@@ -247,9 +296,11 @@ production overlay (above) so the Production posture cannot be accidentally skip
   TLS itself, CORE-OPS-003);
 - keep secrets in your platform's secret store, not in a committed file.
 
-To run the **published** release images (CORE-OPS-009) instead of building from
-source, replace each service's `build:`/`image:` with the versioned reference, e.g.
-`image: ghcr.io/<owner>/livecore-api:<version>`.
+To run the **published** release images (CORE-OPS-009 / CORE-OPS-015) instead of
+building from source, merge the image-only overlay (above) — it points migrate/api/worker
+at the pinned `ghcr.io/<owner>/livecore-{api,worker,migrations}:<version>` coordinates with
+no `build:` stanza: `LIVECORE_VERSION=<version> docker compose -f docker-compose.yml -f
+docker-compose.images.yml up -d --no-build`.
 
 For Kubernetes (the third production option in `docs/13`), the repository ships a
 **Helm** chart at [`../helm/livecore`](../helm/livecore/README.md) (CORE-DEP-004)

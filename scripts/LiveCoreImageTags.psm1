@@ -6,8 +6,8 @@
     job pushes on a tagged release (CORE-OPS-009).
 
 .DESCRIPTION
-    The Core API and worker images are published only from a release tag of the
-    form 'refs/tags/v<MAJOR>.<MINOR>.<PATCH>' (an optional SemVer prerelease is
+    The Core API, worker and migrations-runner images are published only from a
+    release tag of the form 'refs/tags/v<MAJOR>.<MINOR>.<PATCH>' (an optional SemVer prerelease is
     allowed). Derivation is fail-closed: any other git ref - a branch push, a
     pull request, a moving tag such as 'latest', an incomplete or malformed
     version, or a tag carrying build metadata - is rejected, so a mutable or
@@ -69,8 +69,14 @@ function Get-LiveCoreImageReference {
         [Parameter(Mandatory = $true)]
         [string]$Owner,
 
+        # The publishable image set. 'migrations' is the one-shot migrations
+        # runner image (apps/api/Migrations.Dockerfile), published version-pinned
+        # alongside the api and worker images so a downstream e2e harness can pull
+        # a pinned Core instead of building it from source (CORE-OPS-015). Any
+        # value outside this set fails closed, so a non-publishable component (for
+        # example 'database') never maps to a published reference.
         [Parameter(Mandatory = $true)]
-        [ValidateSet('api', 'worker')]
+        [ValidateSet('api', 'worker', 'migrations')]
         [string]$Component
     )
 

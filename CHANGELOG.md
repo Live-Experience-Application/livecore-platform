@@ -12,6 +12,41 @@ detail; this root file is the workspace-level summary. The .NET API and worker
 hosts are not published packages and are not versioned here. See
 `docs/23_PACKAGE_VERSIONING.md` for the full versioning and changelog process.
 
+## [Unreleased]
+
+## [0.4.0] - 2026-06-23
+
+This release adds the workspace member-administration reads and command, the
+host-side asset enumeration reads, retry-safe (idempotent) resource creates and
+the participant current-scene projection built since `0.3.0`, bumped in lockstep
+across all four `@livecore/*` packages. Everything is additive — new contract
+types and an optional response field, new SDK resource methods and a new optional
+idempotency-key option on the create commands — so it ships as a MINOR bump
+(`docs/23_PACKAGE_VERSIONING.md`). `@livecore/design-tokens` and `@livecore/ui-core`
+carry no surface change this release and are bumped only to keep the four packages
+on one version. The operator publishes it by pushing the matching `v0.4.0` git tag,
+which triggers the tag-gated CI publish pipeline (`publish` and `publish-packages`);
+the gates assert the tag equals this shared package version before anything ships.
+
+### Added
+
+- `@livecore/contracts`: the host workspace member **roster** entry
+  `WorkspaceMemberRosterEntryResponse` for `GET /api/v1/workspaces/{workspaceId}/members`
+  (CORE-WSM-001); the member **role-change** request `UpdateWorkspaceMemberRoleRequest`
+  for `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}` (CORE-WSM-002); the
+  host **asset** projection `AssetResponse` for the workspace asset enumeration
+  `GET /api/v1/workspaces/{workspaceId}/assets` (CORE-ALC-003) and the per-resource
+  attachments read `GET /api/v1/assets/by-target/{targetType}/{targetId}` (CORE-ALC-004);
+  and the optional audience-safe `ParticipantVisibleFeedResponse.currentScene`
+  (`ParticipantSceneResponse | null`) current-scene projection (CORE-APROJ-005).
+- `@livecore/sdk-ts`: the new client methods `client.workspaces.listMembers`
+  (CORE-WSM-001), `client.workspaces.updateMemberRole` (CORE-WSM-002, the SDK's first
+  `PATCH` route), `client.assets.list` (CORE-ALC-003) and `client.assets.listForResource`
+  (CORE-ALC-004); and the shared optional `IdempotentCreateOptions` (`idempotencyKey`),
+  now accepted by the retry-safe resource-create commands `client.workspaces.create`,
+  `client.sessions.create`, `client.scenes.create`, `client.content.createBlock` and
+  `client.assets.createLink` (CORE-DX-008), and `client.entities.create` (CORE-DX-009).
+
 ## [0.3.0] - 2026-06-21
 
 This release adds the audience-projection, participant self-service,

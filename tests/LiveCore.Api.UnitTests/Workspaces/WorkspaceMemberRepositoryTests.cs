@@ -104,10 +104,10 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
         return workspace;
     }
 
-    private async Task<UserProfile> SeedUserAsync(string issuer, string subjectId)
+    private async Task<UserProfile> SeedUserAsync(string issuer, string subjectId, string? displayName = null)
     {
         var profile = UserProfile.CreateFromPrincipal(
-            new OidcPrincipal(PrincipalType.User, issuer, subjectId),
+            new OidcPrincipal(PrincipalType.User, issuer, subjectId, displayName),
             _createdAt);
         await using var context = CreateContext();
         var repository = new UserProfileRepository(context);
@@ -476,6 +476,96 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task ListByWorkspace_returns_audience_safe_entries_scoped_to_the_workspace_and_tenant()
+    {
+        // CORE-WSM-001: the roster read returns the workspace's members with the membership id, the role and the
+        // audience-safe display name joined read-only from the users profile, and is fully tenant- and
+        // workspace-scoped (threat T5): a member of another workspace or another tenant is never returned.
+        var organizationA = await SeedOrganizationAsync(_organizationSlugA);
+        var organizationB = await SeedOrganizationAsync(_organizationSlugB);
+        var workspace1 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugA);
+        var workspace2 = await SeedWorkspaceAsync(organizationA.Id, _workspaceSlugB);
+        var named = await SeedUserAsync(_issuer, _subject, "Ada Lovelace");
+        var unnamed = await SeedUserAsync(_issuer, _otherSubject);
+        var inW2 = await SeedUserAsync(_foreignIssuer, _subject);
+        var memberNamed = await SeedMembershipAsync(organizationA.Id, workspace1.Id, named.Id, MembershipRole.Owner);
+        var memberUnnamed = await SeedMembershipAsync(
+            organizationA.Id, workspace1.Id, unnamed.Id, MembershipRole.Participant);
+        // A member of workspace2 must never appear in workspace1's roster.
+        await SeedMembershipAsync(organizationA.Id, workspace2.Id, inW2.Id, MembershipRole.Host);
+
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        var roster = await repository.ListByWorkspaceAsync(
+            organizationA.Id, workspace1.Id, 0, 50, CancellationToken.None);
+
+        Assert.Equal(2, roster.Count);
+        var namedEntry = Assert.Single(roster, entry => entry.Id == memberNamed.Id);
+        Assert.Equal(named.Id, namedEntry.UserProfileId);
+        Assert.Equal(MembershipRole.Owner, namedEntry.Role);
+        Assert.Equal("Ada Lovelace", namedEntry.DisplayName);
+        Assert.Equal(workspace1.Id, namedEntry.WorkspaceId);
+        Assert.Equal(organizationA.Id, namedEntry.OrganizationId);
+
+        // The member with no profile display name reads back a null display metadatum, never an error.
+        var unnamedEntry = Assert.Single(roster, entry => entry.Id == memberUnnamed.Id);
+        Assert.Null(unnamedEntry.DisplayName);
+        Assert.Equal(MembershipRole.Participant, unnamedEntry.Role);
+
+        // Tenant isolation: the same workspace id read under organization B's id returns nothing (threat T5).
+        var underForeignTenant = await repository.ListByWorkspaceAsync(
+            organizationB.Id, workspace1.Id, 0, 50, CancellationToken.None);
+        Assert.Empty(underForeignTenant);
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_pages_bounded_and_ordered_by_id()
+    {
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var userOne = await SeedUserAsync(_issuer, _subject);
+        var userTwo = await SeedUserAsync(_issuer, _otherSubject);
+        var userThree = await SeedUserAsync(_foreignIssuer, _subject);
+        var first = await SeedMembershipAsync(organization.Id, workspace.Id, userOne.Id, MembershipRole.Owner);
+        var second = await SeedMembershipAsync(organization.Id, workspace.Id, userTwo.Id, MembershipRole.Host);
+        var third = await SeedMembershipAsync(
+            organization.Id, workspace.Id, userThree.Id, MembershipRole.Participant);
+
+        // The membership ids are time-ordered (UUIDv7), so the deterministic oldest-first order is by id.
+        var expectedOrder = new[] { first.Id, second.Id, third.Id }.OrderBy(id => id).ToArray();
+
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        var firstPage = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, 0, 2, CancellationToken.None);
+        var secondPage = await repository.ListByWorkspaceAsync(
+            organization.Id, workspace.Id, 2, 2, CancellationToken.None);
+
+        Assert.Equal(expectedOrder.Take(2), firstPage.Select(entry => entry.Id));
+        Assert.Equal(expectedOrder.Skip(2), secondPage.Select(entry => entry.Id));
+    }
+
+    [Fact]
+    public async Task ListByWorkspace_rejects_empty_ids_and_out_of_range_paging()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(Guid.Empty, Guid.CreateVersion7(), 0, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => repository.ListByWorkspaceAsync(Guid.CreateVersion7(), Guid.Empty, 0, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), -1, 1, CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => repository.ListByWorkspaceAsync(
+                Guid.CreateVersion7(), Guid.CreateVersion7(), 0, 0, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task A_membership_cannot_reference_a_workspace_that_does_not_exist()
     {
         // The workspace_id foreign key is enforced (PRAGMA foreign_keys = ON): a
@@ -513,5 +603,51 @@ public sealed class WorkspaceMemberRepositoryTests : IDisposable
 
         await Assert.ThrowsAsync<DbUpdateException>(
             () => repository.AddAsync(ghost, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_persists_a_role_change_in_place_keeping_the_id_and_natural_key()
+    {
+        // CORE-WSM-002: a role change is the first in-place update to a membership. The persisted row keeps its
+        // surrogate id and (workspace, subject) natural key; only the role and the updated timestamp move.
+        var organization = await SeedOrganizationAsync(_organizationSlugA);
+        var workspace = await SeedWorkspaceAsync(organization.Id, _workspaceSlugA);
+        var user = await SeedUserAsync(_issuer, _subject);
+        var seeded = await SeedMembershipAsync(
+            organization.Id, workspace.Id, user.Id, MembershipRole.Participant);
+
+        await using (var context = CreateContext())
+        {
+            var repository = new WorkspaceMemberRepository(context);
+            var loaded = await repository.FindByIdAsync(
+                organization.Id, workspace.Id, seeded.Id, CancellationToken.None);
+            Assert.NotNull(loaded);
+            loaded!.ChangeRole(MembershipRole.Admin, _updatedAt);
+            await repository.UpdateAsync(loaded, CancellationToken.None);
+        }
+
+        await using var verifyContext = CreateContext();
+        var verifyRepository = new WorkspaceMemberRepository(verifyContext);
+        var reloaded = await verifyRepository.FindByIdAsync(
+            organization.Id, workspace.Id, seeded.Id, CancellationToken.None);
+
+        Assert.NotNull(reloaded);
+        Assert.Equal(seeded.Id, reloaded!.Id);
+        Assert.Equal(workspace.Id, reloaded.WorkspaceId);
+        Assert.Equal(user.Id, reloaded.UserProfileId);
+        Assert.Equal(MembershipRole.Admin, reloaded.Role);
+        Assert.Equal(_updatedAt, reloaded.UpdatedAt);
+        // Still exactly one membership for the (workspace, subject) pair — an update, not an insert.
+        Assert.Equal(1, await verifyContext.WorkspaceMembers.CountAsync(m => m.WorkspaceId == workspace.Id));
+    }
+
+    [Fact]
+    public async Task UpdateAsync_rejects_a_null_member()
+    {
+        await using var context = CreateContext();
+        var repository = new WorkspaceMemberRepository(context);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => repository.UpdateAsync(null!, CancellationToken.None));
     }
 }

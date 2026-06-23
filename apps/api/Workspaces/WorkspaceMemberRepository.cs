@@ -227,6 +227,19 @@ internal sealed class WorkspaceMemberRepository : IWorkspaceMemberRepository
     }
 
     /// <inheritdoc />
+    public async Task UpdateAsync(WorkspaceMember member, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        // The aggregate is already tracked (loaded through FindByIdAsync on this same context), so EF detects
+        // the role change and issues the UPDATE. On PostgreSQL the xmin row-version token (mapped on the mutable
+        // aggregates) adds WHERE ... AND xmin = @original, so a concurrent role change loses the race with a
+        // DbUpdateConcurrencyException the ConcurrencyConflictMiddleware turns into a 409 (CORE-CONC-006).
+        _dbContext.WorkspaceMembers.Update(member);
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(
         Guid organizationId,
         Guid userProfileId,
@@ -255,6 +268,70 @@ internal sealed class WorkspaceMemberRepository : IWorkspaceMemberRepository
             .Where(member => member.OrganizationId == organizationId
                 && member.UserProfileId == userProfileId)
             .OrderBy(member => member.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkspaceMemberRosterEntry>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        // Empty ids can never address a tenant or workspace (ids are generated non-empty), so the read fails fast
+        // instead of scanning the whole table (mirrors the other tenant/workspace-scoped reads).
+        if (organizationId == Guid.Empty)
+        {
+            throw new ArgumentException("Organization id must not be empty.", nameof(organizationId));
+        }
+
+        if (workspaceId == Guid.Empty)
+        {
+            throw new ArgumentException("Workspace id must not be empty.", nameof(workspaceId));
+        }
+
+        if (skip < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(skip), skip, "Skip must not be negative.");
+        }
+
+        if (take < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(take), take, "Take must be at least one.");
+        }
+
+        // TENANT- and WORKSPACE-scoped roster read (CORE-WSM-001): the predicate LEADS with organization_id (the
+        // organization boundary checked before the workspace boundary) and matches the workspace, so a membership
+        // in another workspace or tenant is never returned (threats T1/T5). The audience-safe display name is
+        // joined READ-ONLY from the subject's users profile with a LEFT JOIN (the workspace_members.user_id FK
+        // cascades on user erasure, so a row without a profile cannot normally exist, but the left join keeps the
+        // read defensive); ONLY the display-name column is projected — never the profile's email, token or any
+        // other column — so the projection is data-minimized at the query (threats T6/T7). Tracking-free (it never
+        // mutates) and ordered oldest-first by the time-ordered surrogate id (UUIDv7), provider-independent
+        // because SQLite cannot ORDER BY a DateTimeOffset. Bounded by Skip/Take so a single response can never
+        // materialize an unbounded array (threat T9; CORE-DX-003).
+        var query =
+            from member in _dbContext.WorkspaceMembers.AsNoTracking()
+            where member.OrganizationId == organizationId && member.WorkspaceId == workspaceId
+            join profile in _dbContext.UserProfiles.AsNoTracking()
+                on member.UserProfileId equals profile.Id into profiles
+            from profile in profiles.DefaultIfEmpty()
+            orderby member.Id
+            select new WorkspaceMemberRosterEntry(
+                member.Id,
+                member.OrganizationId,
+                member.WorkspaceId,
+                member.UserProfileId,
+                member.Role,
+                profile != null ? profile.DisplayName : null,
+                member.CreatedAt,
+                member.UpdatedAt);
+
+        return await query
+            .Skip(skip)
+            .Take(take)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }

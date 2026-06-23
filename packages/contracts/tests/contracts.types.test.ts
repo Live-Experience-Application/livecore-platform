@@ -39,8 +39,10 @@ import type {
   PageResponse,
   ParsedSessionEvent,
   ParticipantEntityResponse,
+  ParticipantSceneResponse,
   ParticipantVisibleFeedAttachment,
   ParticipantVisibleFeedItem,
+  ParticipantVisibleFeedResponse,
   ProblemCode,
   ProblemDetails,
   PurchaseProvider,
@@ -53,6 +55,7 @@ import type {
   SessionResponse,
   SessionStatus,
   StoreNotificationAck,
+  UpdateWorkspaceMemberRoleRequest,
   UpdateWorkspaceRequest,
   VisibilityResourceType,
   VisibilityRuleResponse,
@@ -266,6 +269,36 @@ export type ParticipantVisibleFeedAttachmentContentTypeIsString = Assert<
   Equal<ParticipantVisibleFeedAttachment["contentType"], string>
 >;
 
+// --- The participant visible-feed RESPONSE pins its per-response property set. ---
+// (CORE-APROJ-005.) The feed response carries the participant/workspace ids, the visible
+// items, the optional audience-safe `currentScene` and the server timestamp. Pinning the
+// property set to exactly this shape makes a future host-only/leaking field a compile error
+// here, and pins `currentScene` to the audience-safe `ParticipantSceneResponse` (id/title/order),
+// never the full host scene shape. It mirrors the server DTO
+// (apps/api/Visibility/ParticipantFeedDtos.cs `ParticipantVisibleFeedResponse(Guid ParticipantId,
+// Guid WorkspaceId, IReadOnlyList<ParticipantVisibleFeedItem> Items,
+// ParticipantFeedSceneResponse? CurrentScene, DateTimeOffset GeneratedAt)`).
+
+export type ParticipantVisibleFeedResponseKeysAreExact = Assert<
+  Equal<
+    keyof ParticipantVisibleFeedResponse,
+    "participantId" | "workspaceId" | "items" | "currentScene" | "generatedAt"
+  >
+>;
+
+export type ParticipantVisibleFeedResponseItemsIsList = Assert<
+  Equal<ParticipantVisibleFeedResponse["items"], ParticipantVisibleFeedItem[]>
+>;
+
+// The current scene is the audience-safe scene projection (id/title/order) or null when no
+// scene is currently visible — never the full host `SceneResponse` (threats T2/T7).
+export type ParticipantVisibleFeedResponseCurrentSceneIsNullableScene = Assert<
+  Equal<
+    ParticipantVisibleFeedResponse["currentScene"],
+    ParticipantSceneResponse | null
+  >
+>;
+
 // --- The participant entity projection is the AUDIENCE-SAFE entity shape. -------
 // (CORE-APROJ-003.) The audience/audit roles receive the stripped entity DTO: the
 // non-sensitive identity (id, name) PLUS the audience-safe entity-type discriminator
@@ -445,6 +478,12 @@ export type InviteWorkspaceMemberRequestMatchesSchema = Assert<
     Schemas["InviteWorkspaceMemberRequest"]
   >
 >;
+export type UpdateWorkspaceMemberRoleRequestMatchesSchema = Assert<
+  SameKeys<
+    UpdateWorkspaceMemberRoleRequest,
+    Schemas["UpdateWorkspaceMemberRoleRequest"]
+  >
+>;
 export type CreateSceneRequestMatchesSchema = Assert<
   SameKeys<CreateSceneRequest, Schemas["CreateSceneRequest"]>
 >;
@@ -558,6 +597,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "RegisterPushSubscriptionRequest"
     | "ReorderSceneRequest"
     | "RevealRequest"
+    | "UpdateWorkspaceMemberRoleRequest"
     | "UpdateWorkspaceRequest"
   >
 >;

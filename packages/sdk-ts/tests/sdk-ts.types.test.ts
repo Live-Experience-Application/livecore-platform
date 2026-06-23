@@ -42,6 +42,7 @@ import type {
   TemplateResponse,
   UploadIntentResponse,
   WorkspaceMemberResponse,
+  WorkspaceMemberRosterEntryResponse,
   WorkspaceResponse,
 } from "@livecore/contracts";
 
@@ -56,6 +57,7 @@ import type {
   ExportsClient,
   HideOptions,
   HubConnectionFactory,
+  IdempotentCreateOptions,
   IdentityClient,
   InvitationsClient,
   LiveCoreApiError,
@@ -251,6 +253,61 @@ export type RevealRequiresKey = Assert<
 
 export type RevealKeyIsRequired = Assert<
   Equal<RevealOptions, { idempotencyKey: string }>
+>;
+
+// --- The dedupe-capable create commands accept an OPTIONAL idempotency key (CORE-DX-008/CORE-DX-009). ---
+// Each covered create takes an optional trailing options argument carrying an
+// optional idempotencyKey, so its parameter resolves to `IdempotentCreateOptions
+// | undefined` (the option may be omitted) and the key itself is optional. This is
+// the deliberate CONTRAST with reveal/hide above, where the options argument and
+// its idempotencyKey are both REQUIRED. The covered creates are exactly the routes
+// the server dedupes: workspace/session/scene/content-block/asset-link (CORE-DX-004)
+// plus entity create (CORE-DX-009).
+
+export type IdempotentCreateKeyIsOptional = Assert<
+  Equal<IdempotentCreateOptions, { idempotencyKey?: string }>
+>;
+
+export type CreateWorkspaceAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<WorkspacesClient["create"]>[1],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateSessionAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<SessionsClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateSceneAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<ScenesClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateContentBlockAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<ContentClient["createBlock"]>[3],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateAssetLinkAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<AssetsClient["createLink"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateEntityAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<EntitiesClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
 >;
 
 // --- The client options surface is exactly the documented keys. -----------------
@@ -454,6 +511,14 @@ export type ListInvitationsReturn = Assert<
   Equal<
     Awaited<ReturnType<WorkspacesClient["listInvitations"]>>,
     PageResponse<PendingWorkspaceInvitationResponse>
+  >
+>;
+// The member-roster read (CORE-WSM-001) is a bounded page of the audience-safe roster
+// projection, never an unbounded array.
+export type ListMembersReturn = Assert<
+  Equal<
+    Awaited<ReturnType<WorkspacesClient["listMembers"]>>,
+    PageResponse<WorkspaceMemberRosterEntryResponse>
   >
 >;
 export type AcceptInvitationReturn = Assert<

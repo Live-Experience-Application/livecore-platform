@@ -486,4 +486,20 @@ public enum AuditAction
     /// resolved content (threat T7) (<see cref="AuditLogEntry.ForVisibilityRuleLockChange"/>).
     /// </summary>
     VisibilityRuleLockChanged = 30,
+
+    /// <summary>
+    /// An Owner/Admin changed a workspace member's generic <c>MembershipRole</c> — the member role-change command
+    /// (CORE-WSM-002, the "Workspace Member Roster and Role Administration" epic, raised by a vertical adopter,
+    /// ARC-GAP-103). Until this story an administrator could only correct a member's role by remove-and-reinvite;
+    /// this records the in-place re-role. It is the role-administration counterpart of <see cref="MemberRemoved"/>
+    /// (which records the role REVOKED on removal) and <see cref="MemberJoined"/> (which records the role GRANTED
+    /// on redemption): where those record a one-sided role, a re-role is a real STATE TRANSITION of the surviving
+    /// membership, so — exactly like <see cref="WorkspaceArchived"/> records a status transition — it records the
+    /// before/after role NAMES (e.g. <c>Participant</c> -&gt; <c>Admin</c>). Its actor is the Owner/Admin who
+    /// changed the role, its resource is the membership itself (its generic kind name and surrogate id) and it is
+    /// workspace-scoped. A generic audit fact whose values are identifiers, an enum or a generic role name — never
+    /// the subject's email or any free-form content (threats T1/T7) — recorded through
+    /// <see cref="AuditLogEntry.ForMemberRoleChanged"/>.
+    /// </summary>
+    MemberRoleChanged = 31,
 }

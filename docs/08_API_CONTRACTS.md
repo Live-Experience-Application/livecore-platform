@@ -110,6 +110,8 @@ POST   /api/v1/workspaces
 GET    /api/v1/workspaces/{workspaceId}
 POST   /api/v1/workspaces/{workspaceId}/archive
 POST   /api/v1/workspaces/{workspaceId}/members
+GET    /api/v1/workspaces/{workspaceId}/members
+PATCH  /api/v1/workspaces/{workspaceId}/members/{memberId}
 GET    /api/v1/workspaces/{workspaceId}/invitations
 POST   /api/v1/workspaces/{workspaceId}/invitations/accept
 DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}
@@ -147,9 +149,11 @@ GET    /api/v1/workspaces/{workspaceId}/entity-types
 POST   /api/v1/workspaces/{workspaceId}/entity-types
 GET    /api/v1/workspaces/{workspaceId}/entity-types/{entityTypeId}
 GET    /api/v1/participants/{participantId}/visible-feed
+GET    /api/v1/workspaces/{workspaceId}/assets
 POST   /api/v1/assets/upload-intent
 POST   /api/v1/assets/{assetId}/confirm-upload
 GET    /api/v1/assets/{assetId}/download-url
+GET    /api/v1/assets/by-target/{targetType}/{targetId}
 POST   /api/v1/assets/{assetId}/links
 DELETE /api/v1/assets/{assetId}/links/{linkId}
 DELETE /api/v1/assets/{assetId}
@@ -237,6 +241,32 @@ download of each listed asset still goes through the **server-side `getDownloadU
 (defence in depth), which re-evaluates the linked resource's session-scoped visibility before minting a signed
 URL (CORE-SVIS-003/004). The attachments are resolved through a Visibility-owned port whose adapter lives in
 the composition root, because the central security module may not reference the Assets module (CORE-ARCH-001).
+
+#### The current scene on the feed response (CORE-APROJ-005)
+
+In addition to the items, the feed RESPONSE carries an optional **`currentScene`** — the audience-safe
+projection of the scene currently active for the participant — so a consumer can render **where-we-are-now**
+from the feed alone, without enumerating workspace scenes or reaching for a host read:
+
+| Field | Meaning |
+|---|---|
+| `participantId` | the surrogate id of the participant whose feed this is |
+| `workspaceId` | the workspace the participant belongs to (a non-sensitive boundary id) |
+| `items` | the participant's currently visible feed items, in deterministic order |
+| `currentScene` | the audience-safe `ParticipantSceneResponse` (`id`/`title`/`order`) of the **most-recently-revealed** visible scene of the SAME visible set `items` is built from (by the reveal time), or `null` when no scene is currently visible to the participant |
+| `generatedAt` | the server timestamp (UTC) at which this feed view was generated |
+
+`currentScene` is **derived from the same `VisibleResourceReveal` set the items are built from** (the scene
+reveal with the greatest `revealedAt`, ties broken by the greater scene id), so revealing a newer scene flips
+it and the feed stays already-filtered and fail-closed — the current scene is only ever one the participant may
+already see. It is produced **only** through the existing role-based **audience** scene projection (the same
+`ParticipantSceneResponse` shape the scene list/read routes use, resolved through the Visibility-owned port
+whose adapter lives in the composition root because the central security module may not reference the Scenes
+module, CORE-ARCH-001), **never** the raw host scene — so no host-only scene field (the tenant/workspace
+boundary ids or the host preparation timestamps) leaks (threats T2/T7). It is **`null` (never an error)** when
+no scene is currently visible, or when the most-recently-revealed scene no longer resolves (a dangling rule).
+This composes with CORE-APROJ-002: the same scene also appears among `items` (named by `resourceType` +
+`resourceId`), and `currentScene` denormalizes and marks the active one.
 
 ### Participant self-identification: own session participant context + the roster `isSelf` marker (CORE-PSELF-001)
 
@@ -388,7 +418,8 @@ Unsafe POSTs that create a resource or have money/entitlement effects also honor
 so a client or network retry cannot double-create a resource or re-run an external verifier:
 
 - Covered routes: session create, scene create, content-block create, workspace create, asset-link create,
-  and the Apple/Google purchase-verification routes.
+  entity create (CORE-DX-009, scope `entity-create:{organizationId}`), and the Apple/Google
+  purchase-verification routes.
 - The header is OPTIONAL on these routes (unlike reveal/hide, where it is required): omitting it preserves
   the prior behavior, so it is non-breaking. A present-but-malformed key (over the length bound or carrying
   control characters) is a 400, returned only after authorization.
@@ -400,6 +431,13 @@ so a client or network retry cannot double-create a resource or re-run an extern
 - Replay is scoped per tenant and per operation for the create routes (`<operation>:{organizationId}`), and
   per buyer subject for the purchase routes (a purchase is named globally and carries no tenant), so one
   tenant's or buyer's key never resolves another's resource. A different key creates a new resource.
+
+The typed SDK (`@livecore/sdk-ts`, CORE-DX-008) exposes this on exactly these create routes: the
+`workspaces.create`, `sessions.create`, `scenes.create`, `content.createBlock`, `assets.createLink` and
+`entities.create` (CORE-DX-009) methods each accept an optional trailing options argument carrying an
+`idempotencyKey`, forwarded as the `Idempotency-Key` header. The option is optional (contrast
+`visibility.reveal`/`hide`, where the key is required), so omitting it is unchanged and non-breaking; a retry
+under a reused key replays the original resource the server dedupes instead of creating a duplicate.
 
 ## Pagination (CORE-DX-003)
 

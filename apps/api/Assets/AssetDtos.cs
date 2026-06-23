@@ -264,3 +264,63 @@ public sealed record AssetLinkResponse(
             link.CreatedAt);
     }
 }
+
+/// <summary>
+/// HOST-facing response projection of one asset (CORE-ALC-003), the per-item shape of the host workspace-asset
+/// enumeration read (<c>GET /api/v1/workspaces/{workspaceId}/assets</c>, csv/api_routes.csv "List a workspace's
+/// host assets", roles Host/CoHost/Owner/Admin). It is the FULL, product-neutral asset metadata an AUTHORING
+/// role needs to enumerate a workspace's uploaded assets — to re-attach, reveal or delete them across page
+/// loads — for EVERY lifecycle status (a still-<see cref="AssetStatus.Pending"/> asset carries no confirmed
+/// size or checksum yet, so those are <see langword="null"/>; an <see cref="AssetStatus.Available"/> asset
+/// carries both).
+///
+/// This is the HOST projection and is DISTINCT from the audience-safe attachments projection on the
+/// participant visible feed (CORE-ALC-002): that one carries only the audience-relevant assetId, name and
+/// content type of an Available asset linked to a REVEALED resource, while this host projection carries the
+/// full asset metadata regardless of any reveal, and is only ever returned to a host-content role
+/// (docs/06_AUTHORIZATION_MATRIX.md; threat T2). It carries NO storage coordinate (provider, bucket, object
+/// key) and NO authorization rationale (docs/08_API_CONTRACTS.md; threats T4/T7): the asset stays private and
+/// is still reached only through an authorized signed download URL (CORE-AST-004; threat T4 "Asset leak").
+/// The echoed checksum and size are the host's own recorded upload facts (metadata), not secrets.
+/// </summary>
+/// <param name="AssetId">The surrogate id of the asset (the id the confirm/link/download/delete routes address).</param>
+/// <param name="Status">The asset's lifecycle status name (<c>Pending</c> or <c>Available</c>).</param>
+/// <param name="ContentType">The MIME content type of the stored (or to-be-uploaded) object.</param>
+/// <param name="SizeBytes">
+/// The recorded object size in bytes, or <see langword="null"/> while the asset is still
+/// <see cref="AssetStatus.Pending"/> and no size has been confirmed.
+/// </param>
+/// <param name="Checksum">
+/// The recorded object checksum, or <see langword="null"/> while the asset is still
+/// <see cref="AssetStatus.Pending"/> and no upload has been confirmed.
+/// </param>
+/// <param name="CreatedAt">When the asset was first registered (UTC).</param>
+/// <param name="UpdatedAt">When the asset was last updated (UTC).</param>
+public sealed record AssetResponse(
+    Guid AssetId,
+    string Status,
+    string ContentType,
+    long? SizeBytes,
+    string? Checksum,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// Projects an <see cref="Asset"/> aggregate into its host response DTO. Only the generic, non-sensitive
+    /// metadata is copied; the internal storage coordinates and creator link are deliberately NOT copied
+    /// (threats T4/T7).
+    /// </summary>
+    public static AssetResponse From(Asset asset)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+
+        return new AssetResponse(
+            asset.Id,
+            asset.Status.ToString(),
+            asset.ContentType,
+            asset.SizeBytes,
+            asset.Checksum,
+            asset.CreatedAt,
+            asset.UpdatedAt);
+    }
+}

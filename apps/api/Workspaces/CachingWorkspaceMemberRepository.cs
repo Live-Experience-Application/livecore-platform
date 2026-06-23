@@ -18,12 +18,15 @@ namespace LiveCore.Api.Workspaces;
 /// <para>
 /// It is a TRANSPARENT decorator over the concrete <see cref="WorkspaceMemberRepository"/>, so every endpoint is
 /// unchanged. Only a positive membership is cached (no membership is never cached, so a non-member / wrong-role
-/// caller is always re-checked, fail-closed); the cached row is read-only (a workspace membership is created and
-/// removed, never updated, so the role is stable), and the role is matched in memory against the cached membership
-/// exactly as the inner repository does — so the EXACT, non-linear role check is unchanged. REMOVING a membership
-/// invalidates the subject's cache group, revoking their cached workspace access on the next request, fail-closed;
-/// an erasure or tenant deletion that CASCADE-removes the row invalidates the same subject/organization groups
-/// through the user-profile / organization decorators. All other operations delegate to the inner repository.
+/// caller is always re-checked, fail-closed), and the role is matched in memory against the cached membership
+/// exactly as the inner repository does — so the EXACT, non-linear role check is unchanged. A membership's role can
+/// be CHANGED in place (CORE-WSM-002, <see cref="UpdateAsync"/>) as well as created and removed, so a role change
+/// — like a removal — invalidates the subject's cache group, dropping the now-stale cached role so the next request
+/// re-queries and re-evaluates the new role (fail-closed: a demotion takes effect on the next request, never serving
+/// the cached higher role). REMOVING a membership likewise invalidates the subject's cache group, revoking their
+/// cached workspace access on the next request; an erasure or tenant deletion that CASCADE-removes the row
+/// invalidates the same subject/organization groups through the user-profile / organization decorators. All other
+/// operations delegate to the inner repository.
 /// </para>
 /// </summary>
 internal sealed class CachingWorkspaceMemberRepository : IWorkspaceMemberRepository
@@ -124,11 +127,34 @@ internal sealed class CachingWorkspaceMemberRepository : IWorkspaceMemberReposit
     }
 
     /// <inheritdoc />
+    public async Task UpdateAsync(WorkspaceMember member, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        await _inner.UpdateAsync(member, cancellationToken).ConfigureAwait(false);
+
+        // The cached membership carries the PRE-CHANGE role, so a role change must evict the subject's cache group
+        // exactly like a removal does. The next request re-queries the inner repository and re-evaluates the new
+        // role — fail-closed: a demotion takes effect on the next request and a stale higher role is never served
+        // from cache.
+        _cache.InvalidateSubject(member.UserProfileId);
+    }
+
+    /// <inheritdoc />
     public Task<IReadOnlyList<WorkspaceMember>> ListBySubjectInOrganizationAsync(
         Guid organizationId,
         Guid userProfileId,
         CancellationToken cancellationToken)
         => _inner.ListBySubjectInOrganizationAsync(organizationId, userProfileId, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<WorkspaceMemberRosterEntry>> ListByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+        => _inner.ListByWorkspaceAsync(organizationId, workspaceId, skip, take, cancellationToken);
 
     private static string MemberKey(Guid organizationId, Guid workspaceId, Guid userProfileId)
         => string.Concat(

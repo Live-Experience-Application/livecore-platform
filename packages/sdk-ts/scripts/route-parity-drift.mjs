@@ -142,7 +142,7 @@ export function parseDocumentedRoutes(csvText) {
 export function parseSdkRoutes(sources) {
   const routes = [];
   const pattern =
-    /method:\s*"(GET|POST|PUT|DELETE)"\s*,\s*path:\s*(`[^`]*`|"[^"]*")/g;
+    /method:\s*"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*path:\s*(`[^`]*`|"[^"]*")/g;
   for (const { file, text } of sources) {
     for (const match of text.matchAll(pattern)) {
       const method = match[1];

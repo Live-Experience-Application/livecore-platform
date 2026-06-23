@@ -919,6 +919,179 @@ public sealed class ParticipantVisibleFeedEndpointTests
     }
 
     // =====================================================================
+    // CURRENT SCENE (CORE-APROJ-005) — the feed RESPONSE carries the audience-safe
+    // projection (id/title/order) of the participant's most-recently-revealed visible
+    // scene, derived from the SAME visible set the items are built from. It is null when
+    // no scene is visible, flips when a newer scene is revealed, and never carries a
+    // host-only scene field.
+    // =====================================================================
+
+    [Fact]
+    public async Task Current_scene_is_the_latest_revealed_visible_scene_with_audience_safe_fields_only()
+    {
+        // Two visible scenes (the second revealed LATER) plus a visible entity. The current scene is the
+        // most-recently-revealed visible SCENE — projected to its audience-safe id/title/order ONLY, never a
+        // host-only scene field — and the entity is ignored (currentScene considers only scenes).
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        Guid laterSceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+
+            // The earlier visible scene (revealed at SeedTime).
+            var opening = await db.AddSceneAsync(org.Id, workspace.Id, "Opening Scene", 1);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, opening.Id, VisibilityState.Visible);
+
+            // The later visible scene — its reveal time is bumped, so it is the most-recently-revealed scene.
+            var actTwo = await db.AddSceneAsync(org.Id, workspace.Id, "Act Two", 2);
+            laterSceneId = actTwo.Id;
+            var actTwoRule = await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, actTwo.Id, VisibilityState.Visible);
+            actTwoRule.ChangeVisibility(VisibilityState.Visible, TestData.SeedTime.AddMinutes(5));
+            await db.SaveChangesAsync();
+
+            // A visible entity too — currentScene must consider only SCENES, never this.
+            var entityType = await db.AddEntityTypeAsync(org.Id, workspace.Id);
+            var entity = await db.AddEntityAsync(org.Id, workspace.Id, entityType.Id, "The Hero");
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entity.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var scene = await ReadCurrentSceneAsync(response);
+        Assert.Equal(JsonValueKind.Object, scene.ValueKind);
+        // Audience-safe id/title/order ONLY — a host-only scene field never appears (threats T2/T7).
+        AssertCurrentScenePropertySet(scene);
+        Assert.Equal(laterSceneId, scene.GetProperty("id").GetGuid());
+        Assert.Equal("Act Two", scene.GetProperty("title").GetString());
+        Assert.Equal(2, scene.GetProperty("order").GetInt32());
+    }
+
+    [Fact]
+    public async Task Revealing_a_newer_scene_flips_the_current_scene()
+    {
+        // The current scene tracks the most-recently-revealed visible scene: with one scene visible it is that
+        // scene; once a NEWER scene is revealed (a later reveal time) the current scene flips to it.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid orgId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid participantId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        Guid firstSceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            orgId = org.Id;
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+
+            var opening = await db.AddSceneAsync(org.Id, workspace.Id, "Opening Scene", 1);
+            firstSceneId = opening.Id;
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, opening.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+
+        // First read: the only visible scene is the current scene.
+        var firstResponse = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        var firstScene = await ReadCurrentSceneAsync(firstResponse);
+        Assert.Equal(JsonValueKind.Object, firstScene.ValueKind);
+        Assert.Equal(firstSceneId, firstScene.GetProperty("id").GetGuid());
+
+        // Reveal a NEWER scene with a later reveal time.
+        Guid secondSceneId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var actTwo = await db.AddSceneAsync(orgId, workspaceId, "Act Two", 2);
+            secondSceneId = actTwo.Id;
+            var rule = await db.AddVisibilityRuleAsync(
+                orgId, workspaceId, sessionId, VisibilityResourceType.Scene, actTwo.Id, VisibilityState.Visible);
+            rule.ChangeVisibility(VisibilityState.Visible, TestData.SeedTime.AddMinutes(10));
+            await db.SaveChangesAsync();
+        });
+
+        // Second read: the current scene flipped to the newer scene.
+        var secondResponse = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+        Assert.Equal(HttpStatusCode.OK, secondResponse.StatusCode);
+        var secondScene = await ReadCurrentSceneAsync(secondResponse);
+        Assert.Equal(JsonValueKind.Object, secondScene.ValueKind);
+        Assert.Equal(secondSceneId, secondScene.GetProperty("id").GetGuid());
+        Assert.Equal("Act Two", secondScene.GetProperty("title").GetString());
+    }
+
+    [Fact]
+    public async Task Current_scene_is_null_when_no_scene_is_visible()
+    {
+        // The feed has a visible item but NO visible scene (a Hidden scene and a visible entity), so the
+        // current scene is null — never an error.
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "participant-a";
+        Guid participantId = Guid.Empty;
+        Guid sessionId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Participant);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            var participant = await db.AddParticipantAsync(org.Id, workspace.Id, user.Id);
+            participantId = participant.Id;
+            var session = await db.AddSessionAsync(org.Id, workspace.Id, "Live Session", SessionStatus.Live);
+            sessionId = session.Id;
+
+            // A REAL scene that is HIDDEN -> not visible -> never the current scene.
+            var hiddenScene = await db.AddSceneAsync(org.Id, workspace.Id, "Backstage", 1);
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Scene, hiddenScene.Id, VisibilityState.Hidden);
+
+            // A visible entity -> the feed has an item, but still no visible scene.
+            var entityType = await db.AddEntityTypeAsync(org.Id, workspace.Id);
+            var entity = await db.AddEntityAsync(org.Id, workspace.Id, entityType.Id, "The Hero");
+            await db.AddVisibilityRuleAsync(
+                org.Id, workspace.Id, session.Id, VisibilityResourceType.Entity, entity.Id, VisibilityState.Visible);
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var response = await client.GetAsync(
+            $"/api/v1/participants/{participantId}/visible-feed?organizationSlug={_orgA}&sessionId={sessionId}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var payload = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        // The feed is non-empty (the visible entity is an item) but no scene is visible, so currentScene is null.
+        Assert.NotEmpty(document.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("currentScene").ValueKind);
+    }
+
+    // =====================================================================
     // SESSION SCOPE (CORE-SVIS-001) — the feed is bounded by a required session.
     // =====================================================================
 
@@ -1002,6 +1175,8 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Assert.Equal(expectedWorkspaceId, feed.WorkspaceId);
         Assert.NotNull(feed.Items);
         Assert.Empty(feed.Items);
+        // With nothing visible there is no current scene (CORE-APROJ-005): currentScene is null, never an error.
+        Assert.Null(feed.CurrentScene);
         Assert.NotEqual(default, feed.GeneratedAt);
 
         // The envelope must expose ONLY participant-safe fields. Parse the raw JSON
@@ -1019,9 +1194,13 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 nameof(FeedDto.ParticipantId),
                 nameof(FeedDto.WorkspaceId),
                 nameof(FeedDto.Items),
+                nameof(FeedDto.CurrentScene),
                 nameof(FeedDto.GeneratedAt),
             },
             properties);
+
+        // currentScene is present on the wire as an explicit null (never absent) when no scene is visible.
+        Assert.Equal(JsonValueKind.Null, document.RootElement.GetProperty("currentScene").ValueKind);
     }
 
     /// <summary>
@@ -1053,6 +1232,7 @@ public sealed class ParticipantVisibleFeedEndpointTests
                 nameof(FeedDto.ParticipantId),
                 nameof(FeedDto.WorkspaceId),
                 nameof(FeedDto.Items),
+                nameof(FeedDto.CurrentScene),
                 nameof(FeedDto.GeneratedAt),
             },
             properties);
@@ -1135,6 +1315,38 @@ public sealed class ParticipantVisibleFeedEndpointTests
     }
 
     /// <summary>
+    /// Asserts the <c>currentScene</c> object's top-level JSON property set is EXACTLY the audience-safe scene
+    /// shape (CORE-APROJ-005): id, title and order — and nothing else, so a host-only scene field (the
+    /// tenant/workspace boundary ids or the host preparation timestamps) can never slip in (docs/08 DTO rules;
+    /// threats T2/T7).
+    /// </summary>
+    private static void AssertCurrentScenePropertySet(JsonElement scene)
+    {
+        var properties = scene.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "id",
+                "title",
+                "order",
+            },
+            properties);
+    }
+
+    /// <summary>
+    /// Reads the feed body and returns its <c>currentScene</c> element (cloned), after asserting the
+    /// documented top-level envelope property set including <c>currentScene</c>.
+    /// </summary>
+    private static async Task<JsonElement> ReadCurrentSceneAsync(HttpResponseMessage response)
+    {
+        var payload = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        return document.RootElement.GetProperty("currentScene").Clone();
+    }
+
+    /// <summary>
     /// Reads the feed body, asserts the documented envelope shape and returns the items keyed by resource id,
     /// each already pinned to the audience-safe property set. Used by the enrichment tests to assert the
     /// per-item audience-safe fields (title, revealedAt, revealScope) without re-parsing.
@@ -1160,5 +1372,12 @@ public sealed class ParticipantVisibleFeedEndpointTests
         Guid ParticipantId,
         Guid WorkspaceId,
         IReadOnlyList<JsonElement> Items,
+        CurrentSceneDto? CurrentScene,
         DateTimeOffset GeneratedAt);
+
+    /// <summary>
+    /// The audience-safe current-scene projection (CORE-APROJ-005): exactly id/title/order, never a
+    /// host-only scene field.
+    /// </summary>
+    private sealed record CurrentSceneDto(Guid Id, string Title, int Order);
 }

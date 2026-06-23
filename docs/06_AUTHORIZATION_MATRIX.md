@@ -7,10 +7,14 @@ Roles are generic. Verticals may rename them in UI.
 | View workspace metadata | yes | yes | yes | yes | limited | limited | yes |
 | Manage workspace settings | yes | yes | no | no | no | no | no |
 | Manage members | yes | yes | limited | no | no | no | no |
+| View workspace member roster | yes | yes | no | no | no | no | no |
+| Change workspace member role | yes | yes | no | no | no | no | no |
 | Create session | yes | yes | yes | yes | no | no | no |
 | Start/end session | yes | yes | yes | yes | no | no | no |
 | Create scene | yes | yes | yes | yes | no | no | no |
 | View host-only content | yes | yes | yes | yes | no | no | audit-only |
+| Enumerate workspace assets | yes | yes | yes | yes | no | no | no |
+| List a resource's attachments | yes | yes | yes | yes | no | no | no |
 | View participant-visible content | yes | yes | yes | yes | if visible | if visible | audit-only |
 | Change visibility rule | yes | yes | yes | yes | no | no | no |
 | Execute reveal | yes | yes | yes | yes | no | no | no |
@@ -70,6 +74,72 @@ Roles are generic. Verticals may rename them in UI.
   A push subscription is per-principal personal data: it is removed on the data-subject erasure (CORE-PRIV-001,
   via the `push_subscriptions.user_id` `ON DELETE CASCADE`) and disclosed in the user-data export
   (CORE-PRIV-004), with the `auth` encryption secret never projected.
+- Reading a workspace's MEMBER ROSTER (`GET /api/v1/workspaces/{workspaceId}/members`, CORE-WSM-001, the "View
+  workspace member roster" row above) is a workspace-administration read restricted to Owner/Admin — the SAME
+  role set as listing a workspace's invitations (the "Manage members" privilege), so a host can render a members
+  screen and obtain the membership id that `client.workspaces.removeMember` requires (the membership id was
+  otherwise unobtainable: the redemption projection `WorkspaceMemberResponse` is returned only to the accepting
+  caller, never an administrator roster). It returns a tenant- and workspace-scoped, bounded, audience-safe
+  projection — the membership id, the userProfileId, the generic `MembershipRole` and explicitly allow-listed
+  audience-safe display metadata (a display name) plus server timestamps — joined READ-ONLY from the subject's
+  profile, and it NEVER includes an invited/login email, a token or any authorization rationale (data-minimized
+  PII discipline; threats T6/T7). Unlike the invitations list (which reveals a workspace's existence to a
+  non-administrator with a `403`), the roster discloses WHO is in the workspace, so it is fully fail-closed and
+  HIDDEN-404: a non-member, a non-administration tenant member, and a foreign-tenant or unknown workspace are all
+  an indistinguishable `404`, never `403` (threats T1/T5). The role check is exact and non-linear (Owner or
+  Admin, never an ordering comparison).
+- Changing a workspace member's ROLE (`PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}`, CORE-WSM-002,
+  the "Change workspace member role" row above) is a workspace-administration command restricted to Owner/Admin —
+  the SAME "Manage members" set as inviting and removing a member — so an administrator can correct a member's
+  generic `MembershipRole` without the previous remove-and-reinvite workaround (the workspace surface had only
+  invite and remove). It reuses the member-removal flow exactly (fail-closed, resolve-tenant, load-then-authorize,
+  hidden-404) over the existing `WorkspaceMember` aggregate and authorization, differing only in the mutation: it
+  transitions the role IN PLACE (the membership's tenant, workspace and subject are immutable, so a re-role never
+  moves the membership to another organization, workspace or subject — threat T5). The same last-Owner invariant
+  the removal enforces applies on DEMOTION: demoting the sole remaining workspace Owner is refused (`409`), so a
+  workspace can never be left ownerless (an invariant conflict, not an authorization failure). The change honors
+  `If-Match` optimistic concurrency (a stale ETag is `412`, CORE-DX-002) and is recorded as a `MemberRoleChanged`
+  audit fact (actor + membership + before/after role, by id only). It is tenant- and workspace-scoped and
+  fail-closed: a foreign-tenant or unknown member or workspace is hidden as `404`, and a non-administration tenant
+  member is denied `403`. The role check is exact and non-linear (Owner or Admin, never an ordering comparison),
+  and the new role must be a DEFINED generic role, never an undefined value a cast could smuggle in (threat T6 role
+  limitation). A same-role change is an idempotent no-op (`200`, no audit).
+- Enumerating a workspace's HOST assets (`GET /api/v1/workspaces/{workspaceId}/assets`, CORE-ALC-003, the
+  "Enumerate workspace assets" row above) is a host-authoring read restricted to the host-content roles that
+  create the upload intent (Owner/Admin/Host/CoHost — the SAME set as "Send private content"), so an authoring
+  surface can enumerate a workspace's uploaded assets to re-attach, reveal or delete them across page loads. It
+  returns a tenant- and workspace-scoped, bounded host `AssetResponse` projection — the assetId, the
+  `AssetStatus`, the content type, the recorded size and checksum (both `null` while still `Pending`) and the
+  server timestamps — for EVERY lifecycle status, and it carries NO storage coordinate and no authorization
+  rationale (threats T4/T7); the asset stays private and is still reached only through the authorized signed
+  download route (`GET /api/v1/assets/{assetId}/download-url`, CORE-AST-004). This is the HOST projection (full
+  asset metadata for an authoring role) and is DISTINCT from the audience-safe attachments projection on the
+  participant visible feed (CORE-ALC-002), which carries only an `assetId`, an audience-safe `name` and a
+  `contentType` of an `Available` asset linked to a REVEALED resource. Assets are host-only content, so — UNLIKE
+  the scene/entity workspace-scoped lists, which return an audience-stripped projection to ANY workspace member —
+  the host asset list's very existence is hidden from a non-host: just like the member-roster read, a non-member,
+  a known member who lacks a host-content role (Participant/Observer/Auditor), and a foreign-tenant or unknown
+  workspace are ALL an indistinguishable `404`, never `403`, and a foreign tenant's or foreign workspace's assets
+  never appear (threats T1/T5). The page is bounded (CORE-DX-003) in a deterministic time-ordered id order, and
+  the role check is exact and non-linear (an EXACT host-content set membership, never an ordering comparison).
+- Listing a resource's attachments (`GET /api/v1/assets/by-target/{targetType}/{targetId}`, CORE-ALC-004, the
+  "List a resource's attachments" row above) is the per-resource companion to the workspace enumeration: it
+  returns the SAME bounded host `AssetResponse` projection for every asset LINKED to ONE target (a content block
+  or entity), in EVERY lifecycle status, so a host authoring surface focused on one resource can see and manage
+  its attachments without scanning the whole workspace. It is restricted to the SAME host-content roles
+  (Owner/Admin/Host/CoHost) and is the HOST counterpart of the audience-safe per-resource attachments projection
+  on the participant visible feed (CORE-ALC-002), which it complements, never replaces. A content block / entity
+  cannot be resolved by its id alone (the Content/Entities repositories expose no by-id-alone lookup, by design),
+  so the caller names the target's workspace in a required `workspaceId` query parameter alongside
+  `organizationSlug`; the read is tenant- and workspace-scoped to the target's workspace through the SAME
+  per-target link read the audience projection uses (`IAssetLinkRepository.ListByTargetAsync`), and carries no
+  storage coordinate (threats T4/T7). It is fail-closed: a missing `organizationSlug`/`workspaceId` is `400`; a
+  malformed/empty workspace id, a malformed/unknown target type, a malformed/empty target id, a denied tenant, a
+  non-member of the named workspace, and a target OUTSIDE the caller's tenant/workspace are ALL an
+  indistinguishable hidden `404` (so an empty page unambiguously means "no attachments", never "unknown target");
+  a known member who lacks a host-content role is denied `403` — UNLIKE the workspace enumeration's hidden `404`,
+  because the target resource's existence is not host-only (a member may see the content block / entity). The role
+  check is exact and non-linear (an EXACT host-content set membership, never an ordering comparison).
 - Role checks are not enough; object-level authorization is required.
 - Organization boundary must be checked before workspace boundary.
 - Workspace boundary must be checked before resource-level visibility.

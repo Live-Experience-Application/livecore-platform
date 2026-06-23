@@ -4,6 +4,7 @@
 using System.Security.Claims;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -36,10 +37,14 @@ namespace LiveCore.Api.Entities;
 ///   referenced entity type is resolved within the route's workspace (the same-workspace coupling the
 ///   database foreign key cannot enforce), the entity is created with a SERVER-MINTED surrogate id, and the
 ///   creation is appended to the append-only audit log (<see cref="Audit.AuditAction.EntityCreated"/>) — the
-///   insert and the audit committing together in one transaction. Returns <c>201 Created</c> with the full
-///   host <see cref="EntityResponse"/> (the create role is always a host-content role). A body-supplied type
-///   id that does not resolve in the workspace is a <c>400</c>; an archived (read-only) workspace rejects the
-///   create with a <c>409</c> (CORE-LIFE-009).</item>
+///   insert and the audit committing together in one transaction. It honors an OPTIONAL client
+///   <c>Idempotency-Key</c> (CORE-DX-009) through the shared <see cref="SystemModule.IdempotentResourceCreator"/>
+///   under the per-tenant scope <c>entity-create:{organizationId}</c>, so a retry under a reused key returns the
+///   ORIGINAL entity (<c>200 OK</c>) and creates exactly one; a malformed key is a <c>400</c> rejected AFTER
+///   authorization that creates nothing. Returns <c>201 Created</c> with the full host
+///   <see cref="EntityResponse"/> on a fresh create (the create role is always a host-content role). A
+///   body-supplied type id that does not resolve in the workspace is a <c>400</c>; an archived (read-only)
+///   workspace rejects the create with a <c>409</c> (CORE-LIFE-009).</item>
 ///   <item><c>GET  /api/v1/workspaces/{workspaceId}/entities/{entityId}</c> — module Entities, roles
 ///   "workspace members". Reads ONE entity within the route's workspace via
 ///   <see cref="IEntityRepository.FindByIdAsync"/> (tenant- AND workspace-scoped), then PROJECTS it BY ROLE
@@ -396,30 +401,63 @@ internal static class EntityEndpoints
             return ArchivedReadOnly();
         }
 
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-009, mirroring CORE-DX-004's five create routes): a
+        // create/network retry under the same key returns the ORIGINAL entity and creates exactly one. A
+        // malformed key is a 400, checked AFTER authorization so an unauthorized caller never receives
+        // request-shape feedback (the reveal rule).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
         // Authorized: create the entity (resolving its type within the workspace, persisting it and appending
-        // the EntityCreated audit record) atomically. The service resolves the type through the tenant- AND
+        // the EntityCreated audit record) atomically. The entity insert, the audit record AND — when a key is
+        // supplied — the idempotency-key record commit together in ONE transaction the IdempotentResourceCreator
+        // owns (scope per tenant and operation). The service resolves the type through the tenant- AND
         // workspace-scoped FindByIdAsync, so a type in another workspace/tenant — or an unknown type — is never
-        // borrowed; that unresolved-type outcome is a 400 (the body-supplied reference does not resolve in the
-        // caller's authorized workspace; the same response for unknown and foreign types leaks nothing).
+        // borrowed; that unresolved-type outcome produces no recordable resource, so the key is NOT recorded
+        // (its result-id selector returns null) and a corrected retry under the same key can still succeed —
+        // the endpoint maps it to a 400 (the body-supplied reference does not resolve in the caller's authorized
+        // workspace; the same response for unknown and foreign types leaks nothing).
         var now = timeProvider.GetUtcNow();
-        var result = await deps.EntityCreation
+        var creation = await deps.Idempotency
             .CreateAsync(
-                context.OrganizationId,
-                workspaceGuid,
-                entityTypeGuid,
-                name!,
-                attributeValues,
-                context.UserProfileId,
+                idempotencyKey,
+                $"entity-create:{context.OrganizationId}",
                 now,
+                create: createCancellationToken => deps.EntityCreation.CreateAsync(
+                    context.OrganizationId,
+                    workspaceGuid,
+                    entityTypeGuid,
+                    name!,
+                    attributeValues,
+                    context.UserProfileId,
+                    now,
+                    createCancellationToken),
+                resultIdSelector: result => result.Entity?.Id,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (result.Status == EntityCreationStatus.UnknownEntityType)
+        if (creation.Replayed)
+        {
+            // A prior request with this key already created the entity; return the original (200), creating
+            // nothing and appending no second audit fact. The entity is re-loaded through the tenant- AND
+            // workspace-scoped FindByIdAsync, so a key reused against a different workspace resolves to nothing
+            // and is a hidden 404 (threats T1/T5).
+            var original = await deps.Entities
+                .FindByIdAsync(context.OrganizationId, workspaceGuid, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenEntity()
+                : Results.Ok(EntityResponse.From(original));
+        }
+
+        if (creation.Result.Status == EntityCreationStatus.UnknownEntityType)
         {
             return ValidationError("A valid entity type is required.");
         }
 
-        var entity = result.Entity!;
+        var entity = creation.Result.Entity!;
         var response = EntityResponse.From(entity);
         return Results.Created($"/api/v1/workspaces/{workspaceGuid}/entities/{entity.Id}", response);
     }
@@ -565,6 +603,7 @@ internal static class EntityEndpoints
         var entityDeletion = services.GetService<EntityDeletionService>();
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || entities is null
@@ -572,14 +611,15 @@ internal static class EntityEndpoints
             || entityCreation is null
             || entityDeletion is null
             || workspaces is null
-            || workspaceMembers is null)
+            || workspaceMembers is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new EntityEndpointDependencies(
-            resolver, entities, entityTypes, entityCreation, entityDeletion, workspaces, workspaceMembers);
+            resolver, entities, entityTypes, entityCreation, entityDeletion, workspaces, workspaceMembers, idempotency);
         return true;
     }
 
@@ -660,5 +700,6 @@ internal static class EntityEndpoints
         EntityCreationService EntityCreation,
         EntityDeletionService EntityDeletion,
         IWorkspaceRepository Workspaces,
-        IWorkspaceMemberRepository WorkspaceMembers);
+        IWorkspaceMemberRepository WorkspaceMembers,
+        IdempotentResourceCreator Idempotency);
 }

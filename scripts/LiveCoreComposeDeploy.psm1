@@ -121,6 +121,7 @@ function Get-LiveCoreComposeServiceModel {
 
     $image = ''
     $dockerfile = ''
+    $hasBuild = $false
     $hasHealthcheck = $false
     $dependsOn = @{}
     $environmentKeys = New-Object System.Collections.Generic.List[string]
@@ -135,6 +136,13 @@ function Get-LiveCoreComposeServiceModel {
 
         if ($indent -eq 4 -and $trimmed -match '^image:\s*(.+?)\s*$') {
             $image = $Matches[1]
+            continue
+        }
+        # A `build:` stanza at the service level (the long-form mapping `build:` opening
+        # a context/dockerfile block, or the short form `build: <context>`). Captured so
+        # the image-only override (CORE-OPS-016) can assert it carries NO build: stanza.
+        if ($indent -eq 4 -and $trimmed -match '^build:\s*(.*)$') {
+            $hasBuild = $true
             continue
         }
         if ($trimmed -match '^dockerfile:\s*(.+?)\s*$') {
@@ -178,6 +186,7 @@ function Get-LiveCoreComposeServiceModel {
         Name             = $Name
         Image            = $image
         Dockerfile       = $dockerfile
+        HasBuild         = $hasBuild
         HasHealthcheck   = $hasHealthcheck
         DependsOn        = $dependsOn
         EnvironmentKeys  = $environmentKeys.ToArray()
@@ -513,6 +522,70 @@ function Test-LiveCoreComposeProdOverlay {
     }
 }
 
+function Test-LiveCoreComposeImagesOverride {
+    <#
+    .SYNOPSIS
+        Asserts the image-only overlay pulls the pinned, published Core images and
+        carries NO build: stanza (CORE-OPS-016).
+    .DESCRIPTION
+        The base manifest builds the migrate/api/worker images from the in-repo
+        Dockerfiles. A downstream e2e harness (and any deployment) instead wants to PULL
+        a pinned, pull-only Core - building the migrate image from source would cross the
+        no-vendor boundary (ARC-GAP-109). The opt-in overlay
+        (deploy/compose/docker-compose.images.yml) points the three Core runtime services
+        at the PUBLISHED, version-pinned GHCR coordinates (CORE-OPS-009 / CORE-OPS-015) and
+        carries no build: stanza, so when merged on top of the base each service runs the
+        pulled image. This statically validates exactly that: migrate (the new coordinate
+        this story documents) and api reference the published livecore-migrations /
+        livecore-api images, and NO service in the overlay declares a build: stanza. It is
+        the pull-only sibling of Test-LiveCoreComposeProdOverlay / Test-LiveCoreComposeFullStack.
+    .OUTPUTS
+        A PSCustomObject with IsValid (bool) and Findings (string[]). Findings is
+        empty exactly when every invariant holds.
+    #>
+    [CmdletBinding()]
+    [OutputType([psobject])]
+    param([Parameter(Mandatory = $true)][psobject]$Model)
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $services = $Model.Services
+
+    # The overlay must point each Core runtime service at its published image coordinate.
+    # The acceptance criterion names api + migrations explicitly; the worker is part of the
+    # same pinned Core, so it is required too when present in the overlay.
+    $expectedImage = @{
+        migrate = 'livecore-migrations'
+        api     = 'livecore-api'
+        worker  = 'livecore-worker'
+    }
+    foreach ($name in @('migrate', 'api')) {
+        if (-not $services.ContainsKey($name)) {
+            $findings.Add("IMAGE OVERLAY: the image-only overlay must define the '$name' service so it pulls the published image instead of building from source (CORE-OPS-016)")
+            continue
+        }
+        $image = $services[$name].Image
+        if ([string]::IsNullOrWhiteSpace($image)) {
+            $findings.Add("IMAGE OVERLAY: the '$name' service must set an 'image:' referencing the published $($expectedImage[$name]) coordinate (CORE-OPS-016)")
+        }
+        elseif ($image -notmatch [regex]::Escape($expectedImage[$name])) {
+            $findings.Add("IMAGE OVERLAY: the '$name' service image ('$image') must reference the published $($expectedImage[$name]) coordinate (CORE-OPS-016)")
+        }
+    }
+
+    # NO service in the overlay may carry a build: stanza - the whole point is a pull-only
+    # Core that never builds from source (the no-vendor boundary, ARC-GAP-109).
+    foreach ($name in ($services.Keys | Sort-Object)) {
+        if ($services[$name].HasBuild) {
+            $findings.Add("IMAGE OVERLAY: the '$name' service declares a 'build:' stanza; the image-only overlay must pull a pinned published image and contain no build: stanza (CORE-OPS-016)")
+        }
+    }
+
+    return [pscustomobject]@{
+        IsValid  = ($findings.Count -eq 0)
+        Findings = $findings.ToArray()
+    }
+}
+
 Export-ModuleMember -Function `
     Get-LiveCoreComposeModel, `
     Get-LiveCoreComposeServiceModel, `
@@ -521,4 +594,5 @@ Export-ModuleMember -Function `
     Test-LiveCoreComposeDeployment, `
     Test-LiveCoreComposeFullStack, `
     Test-LiveCoreComposeProdOverlay, `
+    Test-LiveCoreComposeImagesOverride, `
     Get-LiveCoreComposeIndent

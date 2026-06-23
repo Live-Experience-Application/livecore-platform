@@ -429,6 +429,96 @@ AssertTrue ($realProdModel.Services['api'].Environment['ASPNETCORE_ENVIRONMENT']
 AssertTrue ($realProdModel.Services['worker'].Environment['ASPNETCORE_ENVIRONMENT'] -eq 'Production') `
     'the real production overlay sets the worker to ASPNETCORE_ENVIRONMENT=Production'
 
+# =============================================================================
+# Image-only overlay (docker-compose.images.yml, CORE-OPS-016)
+# =============================================================================
+# The base manifest BUILDS migrate/api/worker from the in-repo Dockerfiles. A
+# downstream e2e harness (and any deployment) instead wants to PULL a pinned,
+# pull-only Core - building the migrate image from source would cross the no-vendor
+# boundary (ARC-GAP-109). The opt-in image-only overlay points the three Core runtime
+# services at the published, version-pinned GHCR coordinates (CORE-OPS-015) and carries
+# NO build: stanza. Test-LiveCoreComposeImagesOverride statically validates that
+# migrate + api reference the published livecore-migrations/livecore-api images and that
+# no service in the overlay declares a build: stanza.
+
+# A minimal, well-formed image-only overlay fixture; each switch perturbs exactly one
+# invariant (a missing migrations image, or a leftover build: stanza).
+function Get-FixtureImagesOverlay {
+    param(
+        [switch]$OmitMigrateImage,
+        [switch]$KeepBuildStanza
+    )
+
+    $migrateImage = if ($OmitMigrateImage) { '' } else {
+        '    image: ${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-migrations:${LIVECORE_VERSION:?set LIVECORE_VERSION}'
+    }
+    $migrateBuild = if ($KeepBuildStanza) { @'
+    build:
+      context: ../..
+      dockerfile: apps/api/Migrations.Dockerfile
+'@ } else { '' }
+
+    return @"
+name: livecore
+services:
+  migrate:
+$migrateImage
+$migrateBuild
+  api:
+    image: `${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/`${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-api:`${LIVECORE_VERSION:?set LIVECORE_VERSION}
+  worker:
+    image: `${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/`${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-worker:`${LIVECORE_VERSION:?set LIVECORE_VERSION}
+"@
+}
+
+# --- Parser + validator: the well-formed image-only overlay fixture is valid. ---
+$imagesModel = Get-LiveCoreComposeModel -Content (Get-FixtureImagesOverlay)
+AssertTrue ($imagesModel.Services['migrate'].Image -match 'livecore-migrations') `
+    'the parser reads the migrate service published image coordinate from the image-only overlay'
+AssertTrue (-not $imagesModel.Services['migrate'].HasBuild) `
+    'the parser reads that the image-only overlay migrate service carries no build: stanza'
+AssertTrue ((Test-LiveCoreComposeImagesOverride -Model $imagesModel).IsValid) `
+    'a well-formed image-only overlay passes validation (migrate + api pull the published coordinate, no build: stanza)'
+
+# --- Negative: dropping the migrations image reference is rejected. ---
+$noMigrateImage = Get-LiveCoreComposeModel -Content (Get-FixtureImagesOverlay -OmitMigrateImage)
+$noMigrateImageResult = Test-LiveCoreComposeImagesOverride -Model $noMigrateImage
+AssertTrue (-not $noMigrateImageResult.IsValid) 'an image-only overlay whose migrate service has no published image is rejected'
+AssertTrue (($noMigrateImageResult.Findings -join "`n") -match 'livecore-migrations') `
+    'the rejection names the missing published migrations coordinate'
+
+# --- Negative: a leftover build: stanza is rejected. ---
+$keepBuild = Get-LiveCoreComposeModel -Content (Get-FixtureImagesOverlay -KeepBuildStanza)
+$keepBuildResult = Test-LiveCoreComposeImagesOverride -Model $keepBuild
+AssertTrue (-not $keepBuildResult.IsValid) 'an image-only overlay that still declares a build: stanza is rejected'
+AssertTrue (($keepBuildResult.Findings -join "`n") -match 'build:') `
+    'the rejection flags the leftover build: stanza'
+
+# --- Guard the real checked-in image-only overlay. ---
+$imagesComposePath = Join-Path $repoRoot 'deploy/compose/docker-compose.images.yml'
+AssertTrue (Test-Path -LiteralPath $imagesComposePath) 'the deploy/compose/docker-compose.images.yml overlay exists'
+$realImagesModel = Get-LiveCoreComposeModel -Path $imagesComposePath
+$realImagesResult = Test-LiveCoreComposeImagesOverride -Model $realImagesModel
+
+if (-not $realImagesResult.IsValid) {
+    foreach ($finding in $realImagesResult.Findings) {
+        $failures.Add("FAIL (real image-only overlay): $finding")
+    }
+}
+else {
+    Write-Host 'PASS: the real deploy/compose/docker-compose.images.yml pulls the published api + migrations coordinates and carries no build: stanza'
+}
+
+# Spot-check the exact published coordinates and the no-build invariant on the real overlay
+# (the acceptance criterion: it references the migrations coordinate and contains no build: stanza).
+AssertTrue ($realImagesModel.Services['migrate'].Image -match 'ghcr\.io' -and $realImagesModel.Services['migrate'].Image -match 'livecore-migrations') `
+    'the real image-only overlay migrate service pulls the published ghcr.io/<owner>/livecore-migrations coordinate (CORE-OPS-016)'
+AssertTrue ($realImagesModel.Services['api'].Image -match 'livecore-api') `
+    'the real image-only overlay api service pulls the published livecore-api coordinate (CORE-OPS-016)'
+$realImagesBuilders = @($realImagesModel.Services.Values | Where-Object { $_.HasBuild })
+AssertTrue ($realImagesBuilders.Count -eq 0) `
+    'the real image-only overlay contains no build: stanza on any service (pull-only Core, CORE-OPS-016)'
+
 if ($failures.Count -gt 0) {
     Write-Host ''
     Write-Host "Compose deployment manifest tests FAILED: $($failures.Count) assertion(s)." -ForegroundColor Red
@@ -439,5 +529,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck, the documented probes and a container resource limit on every service (CORE-DEP-007), the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them, and the production overlay forces ASPNETCORE_ENVIRONMENT=Production on the api and worker.' -ForegroundColor Green
+Write-Host 'Compose deployment manifest tests passed: the minimal stack wires the migrate-before-API gate, the postgres healthcheck, the documented probes and a container resource limit on every service (CORE-DEP-007), the full local stack overlay wires the OIDC/storage/backplane services with the api/worker referencing them, the production overlay forces ASPNETCORE_ENVIRONMENT=Production on the api and worker, and the image-only overlay pulls the published api + migrations coordinates with no build: stanza (CORE-OPS-016).' -ForegroundColor Green
 exit 0

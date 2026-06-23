@@ -48,6 +48,38 @@ internal interface IVisibleResourceAudienceProjector
         VisibilityResourceType resourceType,
         Guid resourceId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolves the AUDIENCE-SAFE SCENE projection (id, title, order) of the scene of the given id IN exactly
+    /// the given (organization, workspace), through the Scenes module's existing AUDIENCE projection
+    /// (<c>ParticipantSceneResponse</c>) — so the participant-visible feed can carry the participant's CURRENT
+    /// scene (CORE-APROJ-005), letting a consumer render "where we are now" from the feed alone, with no host
+    /// read. Unlike <see cref="ProjectAudienceSafeAsync"/> (which yields only the generic label/body shared by
+    /// every resource kind), this returns the scene's ordering position too, the third field the audience-safe
+    /// <c>ParticipantSceneResponse</c> carries.
+    ///
+    /// AUDIENCE-SAFE BY CONSTRUCTION — it goes ONLY through the scene's existing audience projection, never the
+    /// raw host scene, so no host-only scene field (the tenant/workspace boundary ids or the host preparation
+    /// timestamps) can leak (threats T2/T7 in docs/07_SECURITY_THREAT_MODEL.md). Visibility is NOT recomputed
+    /// here: the caller resolves a scene the central <see cref="VisibilityPolicy"/> has ALREADY decided the
+    /// participant may see (the most-recently-revealed visible scene of their session-scoped visible set); this
+    /// port only renders an audience-safe projection of it.
+    ///
+    /// The lookup is tenant- AND workspace-scoped (the Scenes repository leads its predicate with
+    /// <c>organization_id</c> then <c>workspace_id</c>), so a scene in another tenant or workspace is never read
+    /// (threats T1/T5). Returns <see langword="null"/> when the scene does not resolve — an unknown id, an empty
+    /// id, or a dangling rule whose scene was deleted — so the feed's current scene degrades to <c>null</c>
+    /// WITHOUT error.
+    /// </summary>
+    /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
+    /// <param name="workspaceId">The workspace the scene belongs to.</param>
+    /// <param name="sceneId">The surrogate id of the scene to project.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task<VisibleSceneAudienceProjection?> ProjectAudienceSafeSceneAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        Guid sceneId,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -63,3 +95,17 @@ internal interface IVisibleResourceAudienceProjector
 /// <param name="Title">The resource's audience-safe label, or <see langword="null"/> when it has none.</param>
 /// <param name="Body">The resource's audience-safe short body, or <see langword="null"/> when it has none.</param>
 internal readonly record struct VisibleResourceAudienceProjection(string? Title, string? Body);
+
+/// <summary>
+/// The AUDIENCE-SAFE projection of a scene (CORE-APROJ-005), resolved by
+/// <see cref="IVisibleResourceAudienceProjector.ProjectAudienceSafeSceneAsync"/> through the Scenes module's
+/// existing AUDIENCE projection (<c>ParticipantSceneResponse</c>). It carries exactly the audience-safe scene
+/// fields — the surrogate <see cref="Id"/>, the audience-safe <see cref="Title"/> and the ordering
+/// <see cref="Order"/> — and NEVER a host-only scene field (the tenant/workspace boundary ids or the host
+/// preparation timestamps the host <c>SceneResponse</c> carries), so projecting the feed's current scene can
+/// never leak host-only content (threats T2/T7 in docs/07_SECURITY_THREAT_MODEL.md).
+/// </summary>
+/// <param name="Id">The scene's surrogate id — a non-sensitive correlation handle.</param>
+/// <param name="Title">The scene's audience-safe display title.</param>
+/// <param name="Order">The scene's ordering position within its workspace.</param>
+internal readonly record struct VisibleSceneAudienceProjection(Guid Id, string Title, int Order);

@@ -174,10 +174,28 @@ export interface AcceptWorkspaceInvitationRequest {
 }
 
 /**
+ * Request body for `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}`
+ * (CORE-WSM-002): change a workspace member's generic role. Authorized to the
+ * workspace-administration roles (Owner/Admin). The new {@link role} must be a
+ * defined generic `MembershipRole` (never a vertical term). The last remaining
+ * Owner cannot be demoted (a `409`). The change honors `If-Match` optimistic
+ * concurrency (a stale ETag is `412`, CORE-DX-002).
+ */
+export interface UpdateWorkspaceMemberRoleRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /** The generic role to assign to the member. */
+  role: MembershipRole;
+}
+
+/**
  * Response projection of a workspace membership, returned when an invitation is
- * redeemed (CORE-SDK-006). Generic and product-neutral: identifiers, the granted
- * generic role and server timestamps only. It carries no invited email, no token
- * and no internal authorization rationale (data minimization; threats T6/T7).
+ * redeemed (CORE-SDK-006) and when a member's role is changed (CORE-WSM-002).
+ * Generic and product-neutral: identifiers, the granted generic role and server
+ * timestamps only. It carries no invited email, no token and no internal
+ * authorization rationale (data minimization; threats T6/T7). On a role change the
+ * resource's optimistic-concurrency token rides on the response `ETag` header
+ * (CORE-DX-002), not the body.
  */
 export interface WorkspaceMemberResponse {
   /** Surrogate id of the membership. */
@@ -190,6 +208,44 @@ export interface WorkspaceMemberResponse {
   userProfileId: Uuid;
   /** Generic role the membership grants. */
   role: MembershipRole;
+  /** When the membership was created (UTC). */
+  createdAt: IsoDateTimeString;
+  /** When the membership was last updated (UTC). */
+  updatedAt: IsoDateTimeString;
+}
+
+/**
+ * Audience-safe response projection of one workspace-membership ROSTER entry, returned
+ * by the administration member-roster read `GET /api/v1/workspaces/{workspaceId}/members`
+ * (CORE-WSM-001). It is the read DTO of the members screen, returned to an Owner/Admin so
+ * they can render the workspace's members and obtain the membership {@link id} the
+ * member-removal command (`removeMember`) requires.
+ *
+ * It is the administration sibling of {@link WorkspaceMemberResponse} (the
+ * invitation-redemption projection returned only to the accepting caller): it adds the
+ * audience-safe {@link displayName} so a host can put a name to each id. The projection is
+ * data-minimized — only generic identifiers, the generic role, the explicitly allow-listed
+ * audience-safe display name and the server timestamps. It NEVER carries the subject's
+ * invited/login email, any token or token hash, or any internal authorization rationale
+ * (threats T6/T7).
+ */
+export interface WorkspaceMemberRosterEntryResponse {
+  /** Surrogate id of the membership (the id `removeMember` addresses). */
+  id: Uuid;
+  /** Tenant the membership belongs to. */
+  organizationId: Uuid;
+  /** Workspace the membership grants standing in. */
+  workspaceId: Uuid;
+  /** Subject (the member's user-profile id). */
+  userProfileId: Uuid;
+  /** Generic role the subject holds in the workspace. */
+  role: MembershipRole;
+  /**
+   * The subject's optional, audience-safe display name, mirrored read-only from the
+   * profile; `null` when the profile asserts none. It is NEVER the subject's email
+   * (data minimization).
+   */
+  displayName: string | null;
   /** When the membership was created (UTC). */
   createdAt: IsoDateTimeString;
   /** When the membership was last updated (UTC). */

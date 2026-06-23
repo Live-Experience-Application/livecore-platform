@@ -8,6 +8,48 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+## [0.4.0] - 2026-06-23
+
+### Added
+
+- The host workspace member-roster entry `WorkspaceMemberRosterEntryResponse`
+  (CORE-WSM-001), the per-item shape of the administration member-roster read
+  `GET /api/v1/workspaces/{workspaceId}/members`: the membership `id` (the id
+  `removeMember`/`updateMemberRole` address), `organizationId`, `workspaceId`,
+  `userProfileId`, the generic `role`, the audience-safe `displayName` (mirrored
+  read-only from the profile, `null` when none — never the subject's email) and the
+  server timestamps. It is the administration sibling of `WorkspaceMemberResponse`
+  (the invitation-redemption projection returned only to the accepting caller) and is
+  data-minimized: it carries no invited/login email, no token and no authorization
+  rationale (threats T6/T7). An additive type (a MINOR change).
+- The member role-change request `UpdateWorkspaceMemberRoleRequest` (CORE-WSM-002) for
+  `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}`: the `organizationSlug`
+  and the new generic `role` to assign. The new role must be a defined `MembershipRole`
+  (never a vertical term); the last remaining Owner cannot be demoted (a `409`); and the
+  change honors `If-Match` optimistic concurrency (a stale ETag is `412`, CORE-DX-002),
+  the resource's new version riding on the response `ETag` header rather than the
+  `WorkspaceMemberResponse` body. An additive type (a MINOR change).
+- The host-facing asset projection `AssetResponse` (CORE-ALC-003): the full,
+  product-neutral asset metadata an authoring role enumerates a workspace's uploaded
+  assets with — `assetId`, lifecycle `status`, `contentType`, `sizeBytes` and `checksum`
+  (both `null` while the asset is still `Pending`, set once `Available`) and the server
+  timestamps. It is the per-item shape of the host workspace-asset enumeration read
+  `GET /api/v1/workspaces/{workspaceId}/assets` (CORE-ALC-003) and the host per-resource
+  attachments read `GET /api/v1/assets/by-target/{targetType}/{targetId}` (CORE-ALC-004).
+  It is the host projection — distinct from the audience-safe feed attachments
+  (`ParticipantVisibleFeedAttachment`, CORE-ALC-002) — and carries no storage coordinate,
+  so listing is never access to the bytes (threat T4). An additive type (a MINOR change).
+- The audience-safe current-scene projection on the participant visible feed
+  (CORE-APROJ-005): `ParticipantVisibleFeedResponse.currentScene` carries the audience-safe
+  `ParticipantSceneResponse` (id/title/order) of the participant's most-recently-revealed
+  visible scene — the same visible set `items` is built from, by the reveal time — or
+  `null` when no scene is currently visible, so a consumer can render where-we-are-now from
+  the feed alone with no host read. It is produced only through the audience-safe scene
+  projection, never the raw host scene, so no host-only scene field leaks (threats T2/T7).
+  An additive optional field (a MINOR change).
+
 ## [0.3.0] - 2026-06-21
 
 ### Added

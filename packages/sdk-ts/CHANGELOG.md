@@ -8,6 +8,41 @@ The Core SDK and UI packages are released together (lockstep), so every
 `@livecore/*` package shares this version. See
 `docs/23_PACKAGE_VERSIONING.md` for the versioning and changelog process.
 
+## [Unreleased]
+
+## [0.4.0] - 2026-06-23
+
+### Added
+
+- The workspace member-roster read `client.workspaces.listMembers` (CORE-WSM-001): the
+  bounded page of `WorkspaceMemberRosterEntryResponse` an Owner/Admin renders a members
+  screen from, returning the membership `id` that `client.workspaces.removeMember` and
+  `updateMemberRole` require (otherwise unobtainable). A non-administration caller (and a
+  foreign/unknown workspace) is hidden as `404`. A new resource-client method (a MINOR
+  change).
+- The workspace member role-change command `client.workspaces.updateMemberRole`
+  (CORE-WSM-002): the SDK's first `PATCH` route, changing a member's generic role so an
+  administrator can correct it without remove-and-reinvite. The last remaining Owner cannot
+  be demoted (a `409`); it accepts the optional `ConditionalWriteOptions.ifMatch` to make
+  the change conditional on the version last read (a stale value is refused with `412`,
+  CORE-DX-002) and returns the updated `WorkspaceMemberResponse` (its new version on the
+  response `ETag`). A new resource-client method (a MINOR change).
+- The host asset reads `client.assets.list` (CORE-ALC-003) — a workspace's host
+  `AssetResponse` assets as a bounded page — and `client.assets.listForResource`
+  (CORE-ALC-004) — the host assets linked to one target resource (a content block or
+  entity), the target's `workspaceId` named alongside `organizationSlug`. Both are the host
+  projection, distinct from the audience-safe participant feed attachments. Two new
+  resource-client methods (a MINOR change).
+- A shared optional idempotency-key option for the retry-safe resource-create commands,
+  exported as `IdempotentCreateOptions` (CORE-DX-008). `client.workspaces.create`,
+  `client.sessions.create`, `client.scenes.create`, `client.content.createBlock` and
+  `client.assets.createLink` (CORE-DX-008), and `client.entities.create` (CORE-DX-009), now
+  accept an optional trailing options argument carrying an optional `idempotencyKey`,
+  forwarded as the `Idempotency-Key` request header so a retry under the SAME key replays
+  the original resource the server already deduped (CORE-DX-004) instead of creating a
+  duplicate. The option is optional, so omitting it preserves the prior unconditional
+  create — an additive (a MINOR change); no route or wire-contract change.
+
 ## [0.3.0] - 2026-06-21
 
 ### Added

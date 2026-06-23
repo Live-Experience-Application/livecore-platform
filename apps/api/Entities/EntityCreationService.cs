@@ -2,7 +2,6 @@
 // Copyright (c) 2026 The LiveCore Platform contributors
 
 using LiveCore.Api.Audit;
-using LiveCore.Api.Persistence;
 
 namespace LiveCore.Api.Entities;
 
@@ -22,10 +21,10 @@ namespace LiveCore.Api.Entities;
 /// responsible for enforcing that coupling, so this service resolves the type through the tenant- AND
 /// workspace-scoped <see cref="IEntityTypeRepository.FindByIdAsync"/> FIRST: a type in another workspace or
 /// tenant, or an unknown type, resolves to <see langword="null"/> and yields
-/// <see cref="EntityCreationResult.UnknownEntityType"/> — no entity is created and no transaction is opened
-/// (mirroring how <see cref="EntityDeletionService"/> returns NotFound without opening a transaction). The
-/// surrogate id alone never authorizes anything; every lookup is scoped by (organization, workspace), so the
-/// type reference can never reach across a workspace or tenant boundary (threats T1/T5 in
+/// <see cref="EntityCreationResult.UnknownEntityType"/> — no entity is created (and, because the unresolved
+/// type produces no recordable resource, the caller's idempotency key is NOT recorded, so a corrected retry can
+/// still succeed). The surrogate id alone never authorizes anything; every lookup is scoped by (organization,
+/// workspace), so the type reference can never reach across a workspace or tenant boundary (threats T1/T5 in
 /// docs/07_SECURITY_THREAT_MODEL.md).
 ///
 /// SCOPE / ISOLATION. The service takes the already-resolved tenant and workspace (the endpoint performed the
@@ -40,31 +39,31 @@ namespace LiveCore.Api.Entities;
 /// vocabulary, never branched on, and never written to logs or the audit record (threat T7); the audit fact
 /// records only identifiers and the generic <c>Entity</c> kind name.
 ///
-/// ATOMICITY. The entity insert and the audit append run inside a single explicit
-/// <see cref="Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction"/> over the shared
-/// <see cref="LiveCoreDbContext"/> (the same scoped context every injected repository writes through), so
-/// either the entity and its audit record commit together or a failure rolls both back leaving nothing
-/// behind. The transaction is opened inside the EF execution strategy's <c>ExecuteAsync</c>, so it stays
-/// correct under the CORE-CONC-003 retrying strategy.
+/// ATOMICITY. The entity insert and the audit append run inside the CALLER'S unit of work, NOT a transaction
+/// this service opens itself: <see cref="EntityEndpoints"/> composes the create through the shared
+/// <see cref="SystemModule.IdempotentResourceCreator"/> (CORE-DX-009), so the entity row, its audit record AND —
+/// when a client supplies an <c>Idempotency-Key</c> — the idempotency-key record all commit in ONE transaction
+/// (the same <see cref="Persistence.TransactionalUnitOfWork"/> shape the other resource creates use), or a
+/// part-way failure rolls them ALL back leaving nothing behind. Both injected repositories write through the
+/// same scoped <c>LiveCoreDbContext</c> the unit of work begins the transaction on, so each
+/// <c>SaveChanges</c> enrols in that transaction. Because the work runs inside the creator's
+/// execution-strategy delegate it stays correct (and re-runnable from scratch — the type read happens inside
+/// the delegate) under the CORE-CONC-003 retrying strategy.
 /// </summary>
 internal sealed class EntityCreationService
 {
-    private readonly TransactionalUnitOfWork _unitOfWork;
     private readonly IEntityTypeRepository _entityTypes;
     private readonly IEntityRepository _entities;
     private readonly IAuditLogRepository _audit;
 
     public EntityCreationService(
-        TransactionalUnitOfWork unitOfWork,
         IEntityTypeRepository entityTypes,
         IEntityRepository entities,
         IAuditLogRepository audit)
     {
-        ArgumentNullException.ThrowIfNull(unitOfWork);
         ArgumentNullException.ThrowIfNull(entityTypes);
         ArgumentNullException.ThrowIfNull(entities);
         ArgumentNullException.ThrowIfNull(audit);
-        _unitOfWork = unitOfWork;
         _entityTypes = entityTypes;
         _entities = entities;
         _audit = audit;
@@ -73,10 +72,17 @@ internal sealed class EntityCreationService
     /// <summary>
     /// Creates a new entity in the given tenant and workspace as an instance of
     /// <paramref name="entityTypeId"/>, with the given name and attribute values, and appends an
-    /// append-only <see cref="AuditAction.EntityCreated"/> record — atomically. Returns
+    /// append-only <see cref="AuditAction.EntityCreated"/> record. Returns
     /// <see cref="EntityCreationResult.Created"/> carrying the created entity when the type resolved within
     /// the (organization, workspace), or <see cref="EntityCreationResult.UnknownEntityType"/> when no such
     /// type exists there (an unknown id, or one belonging to another workspace/tenant — nothing is created).
+    ///
+    /// <para>
+    /// This method runs INSIDE the caller's unit of work (the <see cref="SystemModule.IdempotentResourceCreator"/>'s
+    /// transaction); it does NOT open its own. The entity insert, the audit append and the optional
+    /// idempotency-key record therefore commit together or roll back together (CORE-DX-009). The type
+    /// resolution (a read) runs inside the same delegate so a retry re-reads fresh state (CORE-CONC-005).
+    /// </para>
     /// </summary>
     /// <param name="organizationId">The tenant that owns the workspace (checked before the workspace).</param>
     /// <param name="workspaceId">The workspace the entity is authored into.</param>
@@ -127,8 +133,8 @@ internal sealed class EntityCreationService
         // SAME-WORKSPACE-TYPE coupling: resolve the entity type WITHIN the resolved tenant AND workspace.
         // FindByIdAsync leads with organization_id then workspace_id then the type id, so a type in another
         // workspace or tenant is never returned even when the surrogate id matches; an unknown id is simply
-        // null. An unresolved type creates nothing and opens no transaction — the create is rejected as
-        // UnknownEntityType (threats T1/T5).
+        // null. An unresolved type creates nothing — the create is rejected as UnknownEntityType (threats
+        // T1/T5), and the caller's idempotency key is left unrecorded so a corrected retry can still succeed.
         var entityType = await _entityTypes
             .FindByIdAsync(organizationId, workspaceId, entityTypeId, cancellationToken)
             .ConfigureAwait(false);
@@ -137,35 +143,31 @@ internal sealed class EntityCreationService
             return EntityCreationResult.UnknownEntityType;
         }
 
-        // ONE unit of work (CORE-CONC-002): the entity insert and the audit append commit together or roll
-        // back together, so a creation is applied whole or not at all. Both repositories write through the
-        // same scoped DbContext the TransactionalUnitOfWork begins the transaction on, so each SaveChanges
-        // enrols in this transaction. The transaction is opened inside the EF execution strategy's
-        // ExecuteAsync, so it stays correct under the CORE-CONC-003 retrying strategy.
-        return await _unitOfWork.ExecuteAsync(
-            async transactionCancellationToken =>
-            {
-                // The aggregate mints the server-side surrogate id (UUIDv7) and fixes the tenant, workspace
-                // and type immutably; the name and attribute values are stored as DATA (the template
-                // boundary, docs/04). The endpoint validated the name/values, so Create does not throw here.
-                var entity = Entity.Create(organizationId, workspaceId, entityTypeId, name, attributeValues, now);
-                await _entities.AddAsync(entity, transactionCancellationToken).ConfigureAwait(false);
+        // Run inside the CALLER'S unit of work (the IdempotentResourceCreator's transaction): the entity
+        // insert, the audit append and the optional idempotency-key record commit together or roll back
+        // together (CORE-DX-009/CORE-CONC-002), so a creation is applied whole or not at all. Both
+        // repositories write through the same scoped DbContext the unit of work begins the transaction on, so
+        // each SaveChanges enrols in it.
+        //
+        // The aggregate mints the server-side surrogate id (UUIDv7) and fixes the tenant, workspace and type
+        // immutably; the name and attribute values are stored as DATA (the template boundary, docs/04). The
+        // endpoint validated the name/values, so Create does not throw here.
+        var entity = Entity.Create(organizationId, workspaceId, entityTypeId, name, attributeValues, now);
+        await _entities.AddAsync(entity, cancellationToken).ConfigureAwait(false);
 
-                // AUDIT (the story's "audited" criterion): a creation is security-relevant, so append an
-                // append-only record capturing the actor (the authoring role who created the entity), the
-                // created entity and the tenant/workspace. The entity's name and attribute values are NEVER
-                // recorded — only identifiers and the generic Entity kind name (threat T7).
-                var entry = AuditLogEntry.ForEntityCreation(
-                    organizationId,
-                    workspaceId,
-                    actorUserProfileId,
-                    nameof(Entity),
-                    entity.Id,
-                    now);
-                await _audit.AppendAsync(entry, transactionCancellationToken).ConfigureAwait(false);
+        // AUDIT (the story's "audited" criterion): a creation is security-relevant, so append an append-only
+        // record capturing the actor (the authoring role who created the entity), the created entity and the
+        // tenant/workspace. The entity's name and attribute values are NEVER recorded — only identifiers and
+        // the generic Entity kind name (threat T7).
+        var entry = AuditLogEntry.ForEntityCreation(
+            organizationId,
+            workspaceId,
+            actorUserProfileId,
+            nameof(Entity),
+            entity.Id,
+            now);
+        await _audit.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
 
-                return EntityCreationResult.Created(entity);
-            },
-            cancellationToken).ConfigureAwait(false);
+        return EntityCreationResult.Created(entity);
     }
 }

@@ -43,6 +43,17 @@ namespace LiveCore.Api.Workspaces;
 ///   single-use invite token and returns the plaintext token exactly once; only
 ///   its hash is stored (threats T6/T7). The matching acceptance/redeem route is
 ///   CORE-WS-006 below; email delivery and UI remain out of scope.</item>
+///   <item><c>GET /api/v1/workspaces/{workspaceId}/members</c> — list a
+///   workspace's MEMBER ROSTER (CORE-WSM-001), the administration members read, so a
+///   host can render the members screen and obtain the membership id that
+///   <c>removeMember</c> requires. Returns an audience-safe, data-minimized paged
+///   projection (membership id, userProfileId, generic role, allow-listed display
+///   name, server timestamps) and NEVER an invited/login email, a token or any auth
+///   rationale (threats T6/T7). Authorized to the same Owner/Admin set as
+///   listInvitations, but the roster discloses the membership list, so a
+///   non-administration caller is hidden as 404 (not 403): a non-member, a
+///   non-administration tenant member and a foreign/unknown workspace are all an
+///   indistinguishable hidden 404.</item>
 ///   <item><c>GET /api/v1/workspaces/{workspaceId}/invitations</c> — list a
 ///   workspace's PENDING invitations (CORE-WS-008), "Manage members" (Owner or
 ///   Admin), so the manage-members surface can see its outstanding invites. Returns
@@ -74,6 +85,18 @@ namespace LiveCore.Api.Workspaces;
 ///   a 409 that changes nothing (placed AFTER the role check so a non-Owner/Admin
 ///   still gets a 403 and never learns the invitation state). Fail-closed and hidden
 ///   as 404 for a cross-tenant/unknown workspace or invitation.</item>
+///   <item><c>PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
+///   change a workspace member's generic role (CORE-WSM-002), "Manage members"
+///   (Owner or Admin), so an administrator can correct a member's role without
+///   remove-and-reinvite. Reuses the member-removal flow (fail-closed,
+///   load-then-authorize, hidden-404) and the same Owner/Admin set. Enforces the
+///   last-Owner invariant on DEMOTION: demoting the sole remaining workspace Owner
+///   is refused (409), mirroring the last-Owner-cannot-be-removed rule. Honors
+///   <c>If-Match</c> optimistic concurrency (a stale ETag is 412, CORE-DX-002) and
+///   appends a <see cref="AuditAction.MemberRoleChanged"/> audit record capturing
+///   the before/after role. A same-role change is an idempotent no-op (200, no
+///   audit). Fail-closed and hidden as 404 for a cross-tenant/unknown workspace or
+///   member.</item>
 ///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
 ///   remove a workspace member (CORE-LIFE-001), "Manage members" (Owner or
 ///   Admin). Hard-deletes the membership, revoking the subject's access on their
@@ -131,9 +154,11 @@ internal static class WorkspaceEndpoints
         group.MapPut("/{workspaceId}", UpdateWorkspaceAsync);
         group.MapPost("/{workspaceId}/archive", ArchiveWorkspaceAsync);
         group.MapPost("/{workspaceId}/members", InviteWorkspaceMemberAsync);
+        group.MapGet("/{workspaceId}/members", ListWorkspaceMembersAsync);
         group.MapGet("/{workspaceId}/invitations", ListPendingWorkspaceInvitationsAsync);
         group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/invitations/{invitationId}", RevokeWorkspaceInvitationAsync);
+        group.MapPatch("/{workspaceId}/members/{memberId}", ChangeWorkspaceMemberRoleAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
         return endpoints;
@@ -865,6 +890,118 @@ internal static class WorkspaceEndpoints
         return Results.Created($"/api/v1/workspaces/{workspace.Id}/members/{invitation.Id}", response);
     }
 
+    // GET /api/v1/workspaces/{workspaceId}/members?organizationSlug={slug}
+    //
+    // Lists a workspace's MEMBER ROSTER (CORE-WSM-001), so an administration surface can render the members
+    // screen and obtain the membership id that removeMember requires (the membership id was otherwise
+    // unobtainable: the redemption projection is returned only to the accepting caller). It returns an
+    // audience-safe, data-minimized projection — the membership id, the userProfileId, the generic role, the
+    // allow-listed audience-safe display name and the server timestamps — and NEVER an invited/login email, a
+    // token or any auth rationale (threats T6/T7); the roster query joins only the audience-safe display column
+    // of the subject's profile, never its email.
+    //
+    // It reuses the listInvitations flow (fail-closed, resolve-tenant, load-then-authorize) and the SAME
+    // administration role set (the "Manage members" matrix row, Owner/Admin), with ONE deliberate difference: a
+    // caller who is NOT an Owner/Admin is hidden as 404, not 403. The roster discloses who is in the workspace,
+    // so its very existence is hidden from a non-administrator (a stronger T1/T5 posture than the invitations
+    // list, which reveals existence with a 403). So a non-administration tenant member, a non-member of the
+    // tenant, and a cross-tenant/unknown workspace are all an indistinguishable hidden 404. The read takes no
+    // clock and is bounded (CORE-DX-003).
+    private static async Task<IResult> ListWorkspaceMembersAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = Page.LimitQuery)] string? limit,
+        [FromQuery(Name = Page.OffsetQuery)] string? offset,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the other workspace by-id routes.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404), never echoing
+        // back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is indistinguishable
+            // from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant or
+        // unknown workspace is never revealed; threats T1/T5). The lookup is tenant-scoped by organization id.
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite/list-invitations
+        // siblings on this same module. The roster discloses the membership list, so unlike those siblings a
+        // non-Owner/Admin is hidden as 404 rather than 403: the workspace's existence is never revealed to a
+        // non-administrator (threats T1/T5; the story's "non-administration caller hidden-404"). Exact,
+        // non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return HiddenWorkspace();
+        }
+
+        // Authorized. Only now validate the optional paging parameters, so a hidden caller (404 above) never
+        // receives request-shape feedback (mirrors the invitations/audit reads): a present-but-malformed
+        // limit/offset is a 400, an absent value uses the default page.
+        if (!Page.TryResolveLimit(limit, out var pageLimit, out var limitError))
+        {
+            return ValidationError(limitError);
+        }
+
+        if (!Page.TryResolveOffset(offset, out var pageOffset, out var offsetError))
+        {
+            return ValidationError(offsetError);
+        }
+
+        // Read ONE BOUNDED PAGE of the membership roster WITHIN this tenant and workspace; a membership in
+        // another workspace or tenant is never returned (threats T1/T5). Fetch ONE extra row so HasMore is set
+        // without a second COUNT. The read-model carries only the audience-safe fields, and the response is the
+        // data-minimized projection, which never emits an email or token (threats T6/T7). Bounded so a list never
+        // returns an unbounded array (threat T9; CORE-DX-003).
+        var rows = await deps.WorkspaceMembers
+            .ListByWorkspaceAsync(context.OrganizationId, workspaceGuid, pageOffset, pageLimit + 1, cancellationToken)
+            .ConfigureAwait(false);
+
+        var hasMore = rows.Count > pageLimit;
+        var pageRows = hasMore ? rows.Take(pageLimit) : rows;
+
+        var response = PageResponse.From(
+            pageRows.Select(WorkspaceMemberRosterEntryResponse.From).ToArray(), pageOffset, pageLimit, hasMore);
+        return Results.Ok(response);
+    }
+
     // GET /api/v1/workspaces/{workspaceId}/invitations?organizationSlug={slug}
     //
     // Lists a workspace's PENDING invitations (CORE-WS-008), so the manage-members surface can see its
@@ -1271,6 +1408,173 @@ internal static class WorkspaceEndpoints
         return Results.NoContent();
     }
 
+    // PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
+    //
+    // Changes a workspace member's generic role (CORE-WSM-002), so an administrator can correct a member's role
+    // without remove-and-reinvite (the surface previously had only invite and remove). It reuses the member-removal
+    // sibling's flow exactly (fail-closed, resolve-tenant, load-then-authorize, hidden-404) and the SAME
+    // administration role set (the "Manage members" matrix row, Owner/Admin), differing only in the mutation: where
+    // remove hard-deletes the membership, this transitions its role in place over the existing WorkspaceMember
+    // aggregate (WorkspaceMember.ChangeRole). The last-Owner invariant is enforced on DEMOTION (demoting the sole
+    // remaining Owner is a 409, mirroring the last-Owner-cannot-be-removed rule); the change honors If-Match
+    // optimistic concurrency (a stale ETag is 412, CORE-DX-002) and is audited (MemberRoleChanged). A same-role
+    // change is an idempotent no-op (200, no audit, no write). A cross-tenant/unknown workspace or member is an
+    // indistinguishable hidden 404; a known tenant member without Owner/Admin is a 403.
+    private static async Task<IResult> ChangeWorkspaceMemberRoleAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string memberId,
+        [FromBody] UpdateWorkspaceMemberRoleRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // Validate the new role before touching the tenant, so a broken body is a 400 regardless of authorization
+        // (mirrors the member-invite role validation). The role must be a DEFINED generic role, never an undefined
+        // value a cast could smuggle in (threat T6 role limitation); MembershipRole is non-linear, so this is a
+        // parse + defined check, never an ordering comparison.
+        if (!TryParseRole(request.Role, out var newRole))
+        {
+            return ValidationError("A valid membership role is required.");
+        }
+
+        // A malformed workspace or member id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is
+            // indistinguishable from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant
+        // or unknown workspace is never revealed; threats T1/T5).
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the invite/remove siblings on
+        // this same path. The caller is a known member of the tenant and the workspace exists, so an insufficient
+        // role is a 403. Exact, non-linear role check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return Forbidden();
+        }
+
+        // Find the target membership WITHIN this tenant and workspace; a member id that belongs to another
+        // workspace or tenant (or no membership at all) is hidden as 404, never 403, so a member outside the
+        // caller's resolved workspace can never be probed for (threats T1/T5).
+        var target = await deps.WorkspaceMembers
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Honor the If-Match precondition (CORE-DX-002): a supplied stale token is refused with 412 before any
+        // write, so a role change cannot act on a version the caller has not actually seen; an absent If-Match
+        // preserves the unconditional behavior. Placed AFTER authorization so a 412 is only ever observable by an
+        // authorized caller and never leaks workspace/member existence (threats T1/T5/T7).
+        if (EntityTag.EvaluateIfMatch(
+                httpContext.Request,
+                EntityConcurrencyToken.TryRead(deps.DbContext, target)) == IfMatchEvaluation.Stale)
+        {
+            return PreconditionFailed();
+        }
+
+        // Idempotent no-op: assigning the role the member already holds changes nothing, so return the membership
+        // unchanged (200) WITHOUT a write or a duplicate audit fact — the role-change audit records a real
+        // transition only (mirrors how the visibility producer audits only an actual state change). Placed AFTER
+        // the If-Match check so a stale ETag is still a 412 even for a same-role request (fail-closed).
+        if (target.HasRole(newRole))
+        {
+            SetETag(httpContext, EntityConcurrencyToken.TryRead(deps.DbContext, target));
+            return Results.Ok(WorkspaceMemberResponse.From(target));
+        }
+
+        // Last-Owner invariant on DEMOTION: the sole Owner of the workspace cannot be demoted away from Owner (a
+        // workspace must not be left without an Owner), mirroring the last-Owner-cannot-be-removed rule. Only
+        // relevant when the target is currently an Owner and the new role is NOT Owner; the count is tenant- and
+        // workspace-scoped. This is an invariant conflict (409), not an authorization failure.
+        if (target.HasRole(MembershipRole.Owner) && newRole != MembershipRole.Owner)
+        {
+            var ownerCount = await deps.WorkspaceMembers
+                .CountByRoleAsync(context.OrganizationId, workspaceGuid, MembershipRole.Owner, cancellationToken)
+                .ConfigureAwait(false);
+            if (ownerCount <= 1)
+            {
+                return LastOwnerDemotionConflict();
+            }
+        }
+
+        // Capture the previous role BEFORE the transition for the audit record (the in-memory object survives the
+        // change, but capturing first keeps the audited "before" state independent of the mutation below).
+        var previousRole = target.Role;
+
+        var now = timeProvider.GetUtcNow();
+        target.ChangeRole(newRole, now);
+        await deps.WorkspaceMembers.UpdateAsync(target, cancellationToken).ConfigureAwait(false);
+
+        // AUDIT: a role change is a security-relevant authorization change, so append an append-only audit record
+        // capturing the actor (the admin who changed the role), the re-roled membership and the before/after role
+        // (threats T1/T7). The audit row outlives any later change to the membership (recorded fact, not FK).
+        var entry = AuditLogEntry.ForMemberRoleChanged(
+            context.OrganizationId,
+            workspaceGuid,
+            context.UserProfileId,
+            nameof(WorkspaceMember),
+            target.Id,
+            previousRole.ToString(),
+            target.Role.ToString(),
+            now);
+        await deps.AuditLog.AppendAsync(entry, cancellationToken).ConfigureAwait(false);
+
+        // The change committed, so the token has advanced; return the updated membership with its new weak ETag
+        // (CORE-DX-002) so a consumer can chain another conditional role change without re-reading.
+        SetETag(httpContext, EntityConcurrencyToken.TryRead(deps.DbContext, target));
+        return Results.Ok(WorkspaceMemberResponse.From(target));
+    }
+
     // DELETE /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
     private static async Task<IResult> RemoveWorkspaceMemberAsync(
         HttpContext httpContext,
@@ -1521,6 +1825,17 @@ internal static class WorkspaceEndpoints
             code: ProblemCodes.Conflict,
             title: "Conflict",
             detail: "The last Owner of the workspace cannot be removed.");
+
+    // The last Owner of a workspace cannot be demoted away from Owner: a workspace must not be left without an
+    // Owner (CORE-WSM-002), mirroring the last-Owner-cannot-be-removed rule. The caller is authorized; the
+    // invariant, not the caller, is the reason, so this is a 409 Conflict (docs/08_API_CONTRACTS.md). The detail
+    // names only the generic invariant and leaks no tenant data (threat T7).
+    private static IResult LastOwnerDemotionConflict()
+        => CoreProblem.Create(
+            statusCode: StatusCodes.Status409Conflict,
+            code: ProblemCodes.Conflict,
+            title: "Conflict",
+            detail: "The last Owner of the workspace cannot be demoted.");
 
     // The caller is already a member of the workspace, so redeeming an invitation grants nothing new and does
     // NOT consume the token. The caller is authorized (they hold a valid token for their own workspace); the

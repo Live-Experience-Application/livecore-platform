@@ -1,0 +1,53 @@
+# LiveCore IMAGE-ONLY overlay — Docker Compose (CORE-OPS-016).
+#
+# The base manifest (docker-compose.yml) BUILDS the migrate/api/worker images from
+# the in-repo Dockerfiles, which is the right default for a from-source self-hoster.
+# But a downstream end-to-end harness (and any deployment) wants to PULL a PINNED,
+# pull-only Core instead of building it from Core source — building the migrate image
+# from source would cross the no-vendor boundary (ARC-GAP-109).
+#
+# This OVERLAY points the three Core runtime services at the PUBLISHED, version-pinned
+# GHCR coordinates (CORE-OPS-009 / CORE-OPS-015) and carries NO `build:` stanza of its
+# own, so when merged on top of the base manifest each service runs the pulled image:
+#
+#   ghcr.io/<owner>/livecore-migrations:<version>
+#   ghcr.io/<owner>/livecore-api:<version>
+#   ghcr.io/<owner>/livecore-worker:<version>
+#
+# All three images are published from the SAME release tag (so they are a coherent,
+# version-locked Core), immutable, signed and SBOM-attested — see
+# docs/13_SELF_HOSTING_REQUIREMENTS.md ("Release container images") and
+# docs/23_PACKAGE_VERSIONING.md.
+#
+# PIN THE VERSION. LIVECORE_VERSION is REQUIRED (no default): pulling a pinned Core
+# means naming the exact release, never a moving tag. Set the registry/owner too if you
+# mirror the images. Bring the stack up pull-only — merge this overlay LAST and skip the
+# build:
+#
+#   LIVECORE_VERSION=0.3.0 \
+#     docker compose -f docker-compose.yml -f docker-compose.images.yml pull
+#   LIVECORE_VERSION=0.3.0 \
+#     docker compose -f docker-compose.yml -f docker-compose.images.yml up -d --no-build
+#
+# The base file still carries `build:` for the from-source path; `--no-build` (and the
+# explicit `pull`) keep this path image-only. Combine with the production overlay for a
+# pinned, Production-posture Core:
+#
+#   LIVECORE_VERSION=0.3.0 docker compose \
+#     -f docker-compose.yml -f docker-compose.images.yml -f docker-compose.prod.yml \
+#     up -d --no-build
+#
+# The migrate-before-API gate, the probes and the resource ceilings are inherited from
+# the base manifest unchanged — this overlay only swaps "build from source" for "pull a
+# pinned, published image".
+name: livecore
+
+services:
+  migrate:
+    image: ${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-migrations:${LIVECORE_VERSION:?set LIVECORE_VERSION to the pinned Core release, e.g. 0.3.0}
+
+  api:
+    image: ${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-api:${LIVECORE_VERSION:?set LIVECORE_VERSION to the pinned Core release, e.g. 0.3.0}
+
+  worker:
+    image: ${LIVECORE_IMAGE_REGISTRY:-ghcr.io}/${LIVECORE_IMAGE_OWNER:-live-experience-application}/livecore-worker:${LIVECORE_VERSION:?set LIVECORE_VERSION to the pinned Core release, e.g. 0.3.0}

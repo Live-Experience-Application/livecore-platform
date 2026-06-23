@@ -102,6 +102,35 @@ public interface IAssetRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists ONE BOUNDED PAGE of the given workspace's assets (owned by the given organization), in the same
+    /// deterministic order as <see cref="ListByWorkspaceAsync"/> — sorted by the surrogate id, which is
+    /// time-ordered (UUIDv7), so the page sequence is stable and repeatable across page loads. The page is
+    /// tenant- AND workspace-scoped: the predicate leads with <c>organization_id</c> and then matches
+    /// <c>workspace_id</c>, so a foreign tenant's or a foreign workspace's assets are NEVER returned even when
+    /// their ids would otherwise be addressable (threat T5/T1; the organization boundary is checked before the
+    /// workspace boundary). It backs the host workspace-asset enumeration read
+    /// (<c>GET /api/v1/workspaces/{workspaceId}/assets</c>, CORE-ALC-003) and over-fetches by one row so the
+    /// caller can set <c>hasMore</c> without a second COUNT; bounded by <paramref name="skip"/>/
+    /// <paramref name="take"/> so a single read can never materialize the whole table (threat T9; CORE-DX-003).
+    /// Returning the metadata rows is NOT the same as granting access to the stored objects: each object is
+    /// still reached only through an authorized signed download URL (CORE-AST-004; threat T4 "Asset leak").
+    /// This is NOT a list-everything method — it never crosses the tenant or workspace boundary.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// The organization id or workspace id is empty. An empty id can never address a stored workspace's
+    /// assets, so the lookup is rejected instead of silently returning nothing.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="skip"/> is negative or <paramref name="take"/> is less than one.
+    /// </exception>
+    Task<IReadOnlyList<Asset>> ListPageByWorkspaceAsync(
+        Guid organizationId,
+        Guid workspaceId,
+        int skip,
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Persists a new asset. An asset has no natural key in this story (it is identified only by its
     /// surrogate id), so there is no uniqueness outcome to report; the result is always
     /// <see cref="AssetAddResult.Added"/> on success. Foreign-key violations (a non-existent workspace,

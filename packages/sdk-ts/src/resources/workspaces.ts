@@ -14,14 +14,17 @@ import type {
   InviteWorkspaceMemberRequest,
   PageResponse,
   PendingWorkspaceInvitationResponse,
+  UpdateWorkspaceMemberRoleRequest,
   UpdateWorkspaceRequest,
   Uuid,
   WorkspaceInvitationResponse,
   WorkspaceMemberResponse,
+  WorkspaceMemberRosterEntryResponse,
   WorkspaceResponse,
 } from "@livecore/contracts";
 
 import type { HttpClient, SdkResponse } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 import { pageQuery, type PageParams } from "./pagination.js";
 
 /** Options for a conditional workspace write (CORE-DX-002). */
@@ -56,12 +59,22 @@ export class WorkspacesClient {
     });
   }
 
-  /** `POST /api/v1/workspaces` — create a workspace (organization Owner/Admin). */
-  create(request: CreateWorkspaceRequest): Promise<WorkspaceResponse> {
+  /**
+   * `POST /api/v1/workspaces` — create a workspace (organization Owner/Admin).
+   * Pass {@link IdempotentCreateOptions.idempotencyKey} to make the create
+   * retry-safe (CORE-DX-008): a retry under the SAME key replays the original
+   * workspace the server already dedupes (CORE-DX-004) instead of creating a
+   * duplicate; omit it to create unconditionally (the prior behavior).
+   */
+  create(
+    request: CreateWorkspaceRequest,
+    options?: IdempotentCreateOptions,
+  ): Promise<WorkspaceResponse> {
     return this.http.send<WorkspaceResponse>({
       method: "POST",
       path: "/workspaces",
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 
@@ -151,6 +164,29 @@ export class WorkspacesClient {
   }
 
   /**
+   * `GET /api/v1/workspaces/{workspaceId}/members` — the workspace's member ROSTER,
+   * as a bounded page (Owner/Admin). Each entry carries the membership `id` (the id
+   * {@link removeMember} requires), the `userProfileId`, the generic `role` and the
+   * audience-safe `displayName`; the projection never carries an email, token or auth
+   * rationale (threats T6/T7). The roster discloses the membership list, so a caller
+   * who is not an Owner/Admin (and a foreign/unknown workspace) is hidden as `404`,
+   * never `403`. Pass optional `limit`/`offset` to page.
+   */
+  listMembers(
+    workspaceId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<WorkspaceMemberRosterEntryResponse>> {
+    return this.http.send<PageResponse<WorkspaceMemberRosterEntryResponse>>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
    * `GET /api/v1/workspaces/{workspaceId}/invitations` — the workspace's PENDING
    * invitations, as a bounded page (Owner/Admin). The projection is PII-safe (the
    * invited email is the only personal datum) and never the token hash (threats
@@ -203,6 +239,30 @@ export class WorkspacesClient {
       method: "DELETE",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`,
       query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}` — change a member's
+   * generic role (Owner/Admin), so an administrator can correct a role without
+   * remove-and-reinvite. The last remaining Owner cannot be DEMOTED (a `409`). Pass
+   * {@link ConditionalWriteOptions.ifMatch} to make the change conditional on the
+   * version last read (a stale value is refused with `412`); omit it to change
+   * unconditionally. Audited. Returns the updated membership; its new version rides on
+   * the response `ETag` header (CORE-DX-002). A cross-tenant/unknown workspace or
+   * member is hidden as `404`, a non-administration caller is `403`.
+   */
+  updateMemberRole(
+    workspaceId: Uuid,
+    memberId: Uuid,
+    request: UpdateWorkspaceMemberRoleRequest,
+    options?: ConditionalWriteOptions,
+  ): Promise<WorkspaceMemberResponse> {
+    return this.http.send<WorkspaceMemberResponse>({
+      method: "PATCH",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(memberId)}`,
+      body: request,
+      ifMatch: options?.ifMatch,
     });
   }
 

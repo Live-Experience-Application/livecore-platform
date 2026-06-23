@@ -5,7 +5,7 @@
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4.svg)](https://dotnet.microsoft.com/)
 [![Node.js](https://img.shields.io/badge/Node.js-22-339933.svg)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10-F69220.svg)](https://pnpm.io/)
-[![Packages](https://img.shields.io/badge/packages-0.3.0-blue.svg)](CHANGELOG.md)
+[![Packages](https://img.shields.io/badge/packages-0.4.0-blue.svg)](CHANGELOG.md)
 
 Generic Core Platform for live, role-aware, scene-based interactive sessions.
 
@@ -2960,6 +2960,14 @@ the resource, so the feed's reveal metadata never diverges from the visibility d
 recomputed for the projection (the feed stays already-filtered and fail-closed). Because the central security
 module may not reference the Scenes/Content/Entities modules (CORE-ARCH-001), the label/body is resolved
 through a Visibility-owned port whose adapter lives in the composition root.
+
+Beyond the items, the feed **response** also carries an optional `currentScene` (CORE-APROJ-005) — the
+audience-safe projection (`id`/`title`/`order`) of the participant's **most-recently-revealed** visible scene,
+derived from the same visible set the items are built from (by the reveal time) — so a consumer can render
+**where-we-are-now** from the feed alone, without enumerating workspace scenes or a host read. It is produced
+**only** through the existing audience scene projection (never the raw host scene, so no host-only scene field
+leaks; threats T2/T7) through the same Visibility-owned port, and is `null` (never an error) when no scene is
+currently visible. Revealing a newer scene flips it.
 
 Broad external/anonymous participant feed delivery over the realtime hub remains a Realtime-epic follow-up.
 

@@ -49,6 +49,8 @@ Owns:
 Provides:
 
 - workspace access checks
+- workspace member roster (an Owner/Admin administration read over the existing membership aggregate,
+  joining audience-safe profile display metadata read-only; CORE-WSM-001)
 
 ## Participants
 

@@ -269,6 +269,9 @@ public class ExpiredPendingAssetCleanupServiceTests
         public Task<IReadOnlyList<Asset>> ListByWorkspaceAsync(Guid organizationId, Guid workspaceId, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        public Task<IReadOnlyList<Asset>> ListPageByWorkspaceAsync(Guid organizationId, Guid workspaceId, int skip, int take, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         public Task<AssetAddResult> AddAsync(Asset asset, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

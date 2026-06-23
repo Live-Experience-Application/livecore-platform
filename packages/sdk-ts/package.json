@@ -1,6 +1,6 @@
 {
   "name": "@livecore/sdk-ts",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Typed TypeScript client for vertical apps consuming the LiveCore Core API. Wraps the implemented /api/v1 routes with methods returning @livecore/contracts types over an authenticated transport.",
   "license": "AGPL-3.0-or-later",
   "repository": {

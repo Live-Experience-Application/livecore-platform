@@ -10,19 +10,79 @@
  */
 import type {
   AssetLinkResponse,
+  AssetLinkTargetType,
+  AssetResponse,
   ConfirmUploadRequest,
   ConfirmUploadResponse,
   CreateAssetLinkRequest,
   CreateUploadIntentRequest,
   DownloadUrlResponse,
+  PageResponse,
   UploadIntentResponse,
   Uuid,
 } from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
+import { pageQuery, type PageParams } from "./pagination.js";
 
 export class AssetsClient {
   constructor(private readonly http: HttpClient) {}
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/assets` — the workspace's HOST assets, as
+   * a bounded page (CORE-ALC-003). The full host {@link AssetResponse} metadata of
+   * every asset in the workspace (all lifecycle statuses), so an authoring surface can
+   * enumerate a workspace's uploaded assets to re-attach, reveal or delete them across
+   * page loads. This is the HOST projection — distinct from the audience-safe
+   * attachments on the participant visible feed (CORE-ALC-002). Assets are host-only,
+   * so a caller who is not a host-content role (and a foreign/unknown workspace) is
+   * hidden as `404`, never `403`. Pass optional `limit`/`offset` to page.
+   */
+  list(
+    workspaceId: Uuid,
+    params: { organizationSlug: string } & PageParams,
+  ): Promise<PageResponse<AssetResponse>> {
+    return this.http.send<PageResponse<AssetResponse>>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/assets`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
+   * `GET /api/v1/assets/by-target/{targetType}/{targetId}` — the HOST assets
+   * attached to ONE target resource (a content block or entity), as a bounded page
+   * (CORE-ALC-004). It returns the same full host {@link AssetResponse} projection as
+   * {@link list} for every asset LINKED to the target, in every lifecycle status, so
+   * a host authoring surface focused on one resource can see and manage its
+   * attachments without enumerating the whole workspace. A content block / entity
+   * cannot be addressed by id alone, so the target's `workspaceId` is required
+   * alongside `organizationSlug`. This is the HOST counterpart of the audience-safe
+   * per-resource attachments on the participant visible feed (CORE-ALC-002) and
+   * complements, never replaces, it. Authorized to the host-content roles
+   * (Owner/Admin/Host/CoHost): a non-host member is denied `403`, a target outside
+   * the caller's tenant/workspace is hidden as `404`, and a target with no links is
+   * an empty page (never an error). Pass optional `limit`/`offset` to page.
+   */
+  listForResource(
+    targetType: AssetLinkTargetType,
+    targetId: Uuid,
+    params: { organizationSlug: string; workspaceId: Uuid } & PageParams,
+  ): Promise<PageResponse<AssetResponse>> {
+    return this.http.send<PageResponse<AssetResponse>>({
+      method: "GET",
+      path: `/assets/by-target/${encodeURIComponent(targetType)}/${encodeURIComponent(targetId)}`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        workspaceId: params.workspaceId,
+        ...pageQuery(params),
+      },
+    });
+  }
 
   /**
    * `POST /api/v1/assets/upload-intent` — register a pending asset and return a
@@ -75,16 +135,22 @@ export class AssetsClient {
    * `POST /api/v1/assets/{assetId}/links` — link an asset to a content block or
    * entity in its own workspace. Linking never makes an asset public; it only
    * records the attachment whose audience visibility the server governs. The
-   * organization slug travels in the body.
+   * organization slug travels in the body. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the create retry-safe
+   * (CORE-DX-008): a retry under the SAME key replays the original asset link the
+   * server already dedupes (CORE-DX-004) instead of creating a duplicate; omit it
+   * to create unconditionally (the prior behavior).
    */
   createLink(
     assetId: Uuid,
     request: CreateAssetLinkRequest,
+    options?: IdempotentCreateOptions,
   ): Promise<AssetLinkResponse> {
     return this.http.send<AssetLinkResponse>({
       method: "POST",
       path: `/assets/${encodeURIComponent(assetId)}/links`,
       body: request,
+      idempotencyKey: options?.idempotencyKey,
     });
   }
 

@@ -359,11 +359,39 @@ public sealed record MyPendingWorkspaceInvitationResponse(
 public sealed record AcceptWorkspaceInvitationRequest(string? OrganizationSlug, string? Token);
 
 /// <summary>
+/// Request body for changing a workspace member's generic role (CORE-WSM-002,
+/// <c>PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}</c>, csv/api_routes.csv
+/// "Change workspace member role", roles Owner,Admin).
+///
+/// The target organization is supplied as <see cref="OrganizationSlug"/> (the route carries
+/// no organization in its path), matched against the caller's token organization claim and a
+/// persisted organization membership by the tenant context resolver (CORE-ID-005); the change
+/// is then authorized by the caller's organization role (Owner or Admin), exactly like the
+/// member-invite/remove siblings on this same path. The workspace and the membership are taken
+/// from the route. The DTO is generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): it
+/// names only the generic <see cref="Role"/> to grant — never a vertical role term, and never
+/// the tenant, workspace, subject or membership id (those are immutable on the aggregate, so a
+/// re-role never moves the membership; threat T5). The role must be a DEFINED generic role,
+/// never an undefined value a cast could smuggle in (threat T6 role limitation; the matrix is
+/// non-linear, so it is parsed and defined-checked, never ordered).
+/// </summary>
+/// <param name="OrganizationSlug">
+/// Canonical slug of the organization that owns the target workspace, used to resolve the
+/// tenant context.
+/// </param>
+/// <param name="Role">The generic role to assign to the member.</param>
+public sealed record UpdateWorkspaceMemberRoleRequest(string? OrganizationSlug, string? Role);
+
+/// <summary>
 /// Response projection of a workspace membership (CORE-WS-006). Returned when an
-/// invitation is redeemed into a new <see cref="WorkspaceMember"/>. Generic and
+/// invitation is redeemed into a new <see cref="WorkspaceMember"/>, and when an
+/// Owner/Admin changes a member's role (CORE-WSM-002). Generic and
 /// product-neutral (docs/04_PRODUCT_BOUNDARIES.md, docs/08_API_CONTRACTS.md): identifiers,
 /// the granted generic role and server timestamps only. It carries no invited email, no
-/// token and no internal authorization rationale (data minimization; threats T6/T7).
+/// token and no internal authorization rationale (data minimization; threats T6/T7). The
+/// resource's optimistic-concurrency token rides on the response's weak <c>ETag</c> header
+/// (CORE-DX-002), not on the body — a caller echoes it back as <c>If-Match</c> on a later
+/// conditional role change.
 /// </summary>
 /// <param name="Id">Surrogate id of the membership (UUIDv7).</param>
 /// <param name="OrganizationId">Tenant the membership belongs to.</param>
@@ -397,5 +425,65 @@ public sealed record WorkspaceMemberResponse(
             member.Role.ToString(),
             member.CreatedAt,
             member.UpdatedAt);
+    }
+}
+
+/// <summary>
+/// Audience-safe response projection of one workspace-membership ROSTER entry (CORE-WSM-001,
+/// <c>GET /api/v1/workspaces/{workspaceId}/members</c>). It is the read DTO of the administration members
+/// screen, returned to an Owner/Admin so they can render the workspace's members and obtain the membership
+/// <see cref="Id"/> the member-removal command (<c>client.workspaces.removeMember</c>) requires.
+///
+/// It is DISTINCT from <see cref="WorkspaceMemberResponse"/> (the invitation-redemption projection returned only
+/// to the accepting caller): it adds the audience-safe <see cref="DisplayName"/> so a host can put a name to each
+/// id, and it is the projection an ADMINISTRATOR roster returns rather than a single redeemed membership.
+///
+/// Data minimization and the allow-listed shape (docs/08_API_CONTRACTS.md DTO rules; threats T6/T7 in
+/// docs/07_SECURITY_THREAT_MODEL.md): the projection carries ONLY generic identifiers, the generic role, the
+/// EXPLICITLY allow-listed audience-safe display metadata (the display name) and the server timestamps. It NEVER
+/// carries the subject's invited/login email, any token or token hash, or any internal authorization rationale —
+/// the roster query joins only the audience-safe display column of the profile, never its email. The shape is
+/// generic and product-neutral (docs/04_PRODUCT_BOUNDARIES.md): generic identifiers + the generic
+/// <c>MembershipRole</c>, no vertical vocabulary.
+/// </summary>
+/// <param name="Id">Surrogate id of the membership (the id <c>removeMember</c> addresses).</param>
+/// <param name="OrganizationId">Tenant the membership belongs to.</param>
+/// <param name="WorkspaceId">Workspace the membership grants standing in.</param>
+/// <param name="UserProfileId">Subject (the member's user-profile id).</param>
+/// <param name="Role">Generic role the subject holds in the workspace.</param>
+/// <param name="DisplayName">
+/// The subject's optional, audience-safe display name, mirrored read-only from the profile. <see langword="null"/>
+/// when the profile asserts none; it is NEVER the subject's email (data minimization).
+/// </param>
+/// <param name="CreatedAt">When the membership was created (UTC).</param>
+/// <param name="UpdatedAt">When the membership was last updated (UTC).</param>
+public sealed record WorkspaceMemberRosterEntryResponse(
+    Guid Id,
+    Guid OrganizationId,
+    Guid WorkspaceId,
+    Guid UserProfileId,
+    string Role,
+    string? DisplayName,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// Projects an audience-safe <see cref="WorkspaceMemberRosterEntry"/> read-model into its response DTO. Only
+    /// the generic, allow-listed fields are copied (the role is emitted by its stable name); the read-model
+    /// carries no email/token, so none can be projected (threats T6/T7).
+    /// </summary>
+    public static WorkspaceMemberRosterEntryResponse From(WorkspaceMemberRosterEntry entry)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+
+        return new WorkspaceMemberRosterEntryResponse(
+            entry.Id,
+            entry.OrganizationId,
+            entry.WorkspaceId,
+            entry.UserProfileId,
+            entry.Role.ToString(),
+            entry.DisplayName,
+            entry.CreatedAt,
+            entry.UpdatedAt);
     }
 }

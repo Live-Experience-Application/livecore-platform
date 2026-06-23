@@ -6,6 +6,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using LiveCore.Api.Assets;
 using LiveCore.Api.Content;
+using LiveCore.Api.Entities;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Persistence;
 using LiveCore.Api.Sessions;
@@ -19,14 +20,15 @@ namespace LiveCore.Api.IntegrationTests;
 
 /// <summary>
 /// HTTP integration tests for honoring an OPTIONAL client <c>Idempotency-Key</c> on the create and
-/// purchase-verification routes (CORE-DX-004). They drive the real application over real HTTP through
-/// <see cref="WorkspaceApiFactory"/> (test authentication scheme + EF Core SQLite, foreign keys ON), so the
-/// retry-safe replay behavior is exercised end-to-end.
+/// purchase-verification routes (CORE-DX-004, extended to entity create by CORE-DX-009). They drive the real
+/// application over real HTTP through <see cref="WorkspaceApiFactory"/> (test authentication scheme + EF Core
+/// SQLite, foreign keys ON), so the retry-safe replay behavior is exercised end-to-end.
 ///
 /// Coverage, per the story's required tests:
 /// <list type="bullet">
 ///   <item>CREATE REPLAY: a repeated create with the SAME key returns the ORIGINAL resource and creates
-///   exactly one (session create, and workspace create — whose quota/slug path is the most involved).</item>
+///   exactly one (session create; workspace create — whose quota/slug path is the most involved; and entity
+///   create — whose insert + audit append + key record commit atomically, CORE-DX-009).</item>
 ///   <item>DIFFERENT KEY: a create with a different key creates a NEW resource.</item>
 ///   <item>PURCHASE REPLAY: a retried Apple/Google verify under the same key does NOT re-run the external
 ///   verifier and does NOT re-append the audit facts — it returns the originally recorded transaction.</item>
@@ -40,6 +42,7 @@ public sealed class IdempotencyKeyEndpointTests
     private const string _issuer = "https://issuer.test";
     private const string _orgA = "northwind-labs";
     private const string _header = "Idempotency-Key";
+    private const string _attributeValues = "{\"glow\":\"warm\"}";
 
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
@@ -246,6 +249,109 @@ public sealed class IdempotencyKeyEndpointTests
     }
 
     // =====================================================================
+    // CREATE — entity create replay / different key / malformed key (CORE-DX-009).
+    // =====================================================================
+
+    [Fact]
+    public async Task Entity_create_replayed_with_the_same_key_returns_the_original_and_creates_one()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid workspaceId = Guid.Empty;
+        Guid entityTypeId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var type = await db.AddEntityTypeAsync(org.Id, workspace.Id, "type-alpha");
+            workspaceId = workspace.Id;
+            entityTypeId = type.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var url = $"/api/v1/workspaces/{workspaceId}/entities";
+        var body = new CreateEntityRequest(_orgA, entityTypeId.ToString(), "Lantern", _attributeValues);
+
+        var first = await PostWithKeyAsync(client, url, body, "ent-key-1");
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        var firstId = (await ReadIdAsync(first)).Id;
+
+        // The retry under the SAME key returns the original entity (200, same id), not a second 201.
+        var replay = await PostWithKeyAsync(client, url, body, "ent-key-1");
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        Assert.Equal(firstId, (await ReadIdAsync(replay)).Id);
+
+        Assert.Equal(1, await CountEntitiesAsync(factory, workspaceId));
+    }
+
+    [Fact]
+    public async Task Entity_create_with_a_different_key_creates_a_new_resource()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid workspaceId = Guid.Empty;
+        Guid entityTypeId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var type = await db.AddEntityTypeAsync(org.Id, workspace.Id, "type-alpha");
+            workspaceId = workspace.Id;
+            entityTypeId = type.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        var url = $"/api/v1/workspaces/{workspaceId}/entities";
+        var body = new CreateEntityRequest(_orgA, entityTypeId.ToString(), "Lantern", _attributeValues);
+
+        var first = await PostWithKeyAsync(client, url, body, "ent-key-1");
+        var second = await PostWithKeyAsync(client, url, body, "ent-key-2");
+
+        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, second.StatusCode);
+        Assert.NotEqual((await ReadIdAsync(first)).Id, (await ReadIdAsync(second)).Id);
+        Assert.Equal(2, await CountEntitiesAsync(factory, workspaceId));
+    }
+
+    [Fact]
+    public async Task Entity_create_with_a_malformed_key_is_400_after_auth_and_creates_nothing()
+    {
+        await using var factory = new WorkspaceApiFactory();
+        const string subject = "host-a";
+        Guid workspaceId = Guid.Empty;
+        Guid entityTypeId = Guid.Empty;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, subject);
+            var org = await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceMemberAsync(org.Id, workspace.Id, user.Id, MembershipRole.Host);
+            var type = await db.AddEntityTypeAsync(org.Id, workspace.Id, "type-alpha");
+            workspaceId = workspace.Id;
+            entityTypeId = type.Id;
+        });
+
+        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        // An over-long key (> 256) violates the key invariants -> 400, returned after authorization.
+        var malformedKey = new string('k', 300);
+        var response = await PostWithKeyAsync(
+            client,
+            $"/api/v1/workspaces/{workspaceId}/entities",
+            new CreateEntityRequest(_orgA, entityTypeId.ToString(), "Lantern", _attributeValues),
+            malformedKey);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, await CountEntitiesAsync(factory, workspaceId));
+    }
+
+    // =====================================================================
     // PURCHASE — replay does not re-run the verifier or re-append audit facts.
     // =====================================================================
 
@@ -361,6 +467,13 @@ public sealed class IdempotencyKeyEndpointTests
         using var scope = factory.Services.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
         return await context.AssetLinks.AsNoTracking().CountAsync(l => l.AssetId == assetId);
+    }
+
+    private static async Task<int> CountEntitiesAsync(WorkspaceApiFactory factory, Guid workspaceId)
+    {
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        return await context.Entities.AsNoTracking().CountAsync(e => e.WorkspaceId == workspaceId);
     }
 
     private static async Task<int> CountTransactionsAsync(WorkspaceApiFactory factory)
