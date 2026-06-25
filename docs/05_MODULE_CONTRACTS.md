@@ -25,6 +25,22 @@ NEVER an authorization input — it only lets later features safely key on the
 email (the invitation self-discovery in CORE-INV-002). The flag is available
 server-side on the mapped principal; the `/me` principal read is unchanged.
 
+First-login tenant provisioning (CORE-ID-007): on the first `GET /api/v1/me`, if
+a verified token organization claim names an organization that does NOT yet
+exist, IdentityAccess provisions that organization and the caller's founding
+`OrganizationMember` (role `Owner`) so org-scoped reads resolve without an
+out-of-band `POST /api/v1/organizations` (the gap ARC-GAP-115). IdentityAccess
+does NOT write the `organizations`/`organization_members` tables directly: it
+calls the Organizations-owned `IOrganizationRepository.AddWithOwnerAsync` — the
+SAME atomic founding-owner path `POST /api/v1/organizations` uses — through the
+Organizations module's `ClaimedOrganizationProvisioningService`. It is idempotent
+on the unique slug index and fail-closed: a claim naming an ALREADY-EXISTING
+organization provisions NOTHING (the caller is never auto-enrolled — an existing
+tenant can never be joined or hijacked from a claim, so the caller resolves
+through the normal claim-AND-persisted-membership gate and is hidden if not a
+member), and a principal with no claim, an unverified claim or a service account
+provisions nothing and gets the same non-leaking response (threats T5/T1).
+
 ## Organizations
 
 Owns:
@@ -37,6 +53,14 @@ Provides:
 
 - organization context
 - tenant isolation checks
+- first-login founding-owner provisioning of an organization named by a verified
+  token claim (CORE-ID-007, `ClaimedOrganizationProvisioningService`): the
+  founding-owner counterpart of the tenant context resolver. It creates a
+  not-yet-existing claimed organization and the caller's `Owner` membership
+  ATOMICALLY through `IOrganizationRepository.AddWithOwnerAsync`, idempotent on
+  the unique slug index and fail-closed (an already-existing tenant is never
+  auto-joined). It is consumed by the IdentityAccess `GET /api/v1/me` first-login
+  path so that module never writes the organization tables directly.
 
 ## Workspaces
 

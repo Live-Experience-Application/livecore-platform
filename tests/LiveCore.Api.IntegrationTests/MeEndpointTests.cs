@@ -120,14 +120,14 @@ public sealed class MeEndpointTests
     [Fact]
     public async Task Me_provisions_the_profile_on_first_sight_with_no_memberships()
     {
-        // A brand-new user with no seeded profile and no membership: /me provisions
+        // A brand-new user whose token asserts NO organization claim: /me provisions
         // the profile reference (idempotent first sight) and returns it with an
-        // EMPTY membership list. A token claim alone is never fabricated into a
-        // membership.
+        // EMPTY membership list. With no claim there is nothing to provision a tenant
+        // from (CORE-ID-007) and nothing to intersect a membership against.
         await using var factory = new WorkspaceApiFactory();
         const string subject = "first-timer";
 
-        using var client = factory.CreateClientFor(subject, _issuer, _orgA);
+        using var client = factory.CreateClientFor(subject, _issuer);
         var response = await client.GetAsync("/api/v1/me");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -137,10 +137,13 @@ public sealed class MeEndpointTests
         Assert.NotEqual(Guid.Empty, me.User.Id);
         Assert.Empty(me.Memberships);
 
-        // The profile was actually persisted (provisioned on first sight).
+        // The profile was actually persisted (provisioned on first sight), and no
+        // tenant was fabricated from the absence of a claim.
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
         Assert.True(await db.UserProfiles.AnyAsync(u => u.Issuer == _issuer && u.SubjectId == subject));
+        Assert.False(await db.Organizations.AnyAsync());
+        Assert.False(await db.OrganizationMembers.AnyAsync());
     }
 
     // ---- T5: do not expose other tenants ------------------------------------
@@ -178,13 +181,15 @@ public sealed class MeEndpointTests
     }
 
     [Fact]
-    public async Task Me_is_empty_membership_for_a_claim_without_a_persisted_membership()
+    public async Task Me_is_empty_membership_for_a_claim_to_an_existing_org_without_a_persisted_membership()
     {
         // The mirror of the above: the caller is a member of B only, but the token
-        // claims A and C (neither of which the caller belongs to). There is no
-        // organization the caller both belongs to and the token claims, so the
-        // membership list is empty — a claim never leaks a membership the caller
-        // does not hold, and a membership the token does not claim never leaks.
+        // claims A and C — both of which ALREADY EXIST and neither of which the
+        // caller belongs to. There is no organization the caller both belongs to and
+        // the token claims, so the membership list is empty. Crucially the caller is
+        // NOT auto-enrolled in the existing A or C from the claim (CORE-ID-007): an
+        // existing tenant can never be joined or hijacked from a claim (threats
+        // T5/T1).
         await using var factory = new WorkspaceApiFactory();
         const string subject = "member-b-only";
         await factory.SeedAsync(async db =>
@@ -192,6 +197,11 @@ public sealed class MeEndpointTests
             var user = await db.AddUserAsync(_issuer, subject);
             var b = await db.AddOrganizationAsync(_orgB);
             await db.AddOrganizationMemberAsync(b.Id, user.Id, MembershipRole.Owner);
+
+            // A and C exist already, so the claim names existing tenants the caller
+            // is not a member of (it must not provision or auto-join them).
+            await db.AddOrganizationAsync(_orgA);
+            await db.AddOrganizationAsync(_orgC);
         });
 
         using var client = factory.CreateClientFor(subject, _issuer, _orgA, _orgC);
@@ -200,6 +210,12 @@ public sealed class MeEndpointTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var me = await ReadMeAsync(response);
         Assert.Empty(me.Memberships);
+
+        // The caller gained no membership in the existing A or C (not auto-joined).
+        using var scope = factory.Services.CreateScope();
+        var db2 = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+        var profile = await db2.UserProfiles.SingleAsync(u => u.Issuer == _issuer && u.SubjectId == subject);
+        Assert.Equal(1, await db2.OrganizationMembers.CountAsync(m => m.UserProfileId == profile.Id));
     }
 
     // ---- T7: no token/secret in the response --------------------------------
