@@ -10,6 +10,19 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ## [Unreleased]
 
+### Added
+
+- The entity-relationship contracts `CreateEntityRelationshipRequest` and
+  `EntityRelationshipResponse` (CORE-ENT-008), for the new
+  `POST /api/v1/workspaces/{workspaceId}/entity-relationships` create and
+  `GET /api/v1/workspaces/{workspaceId}/entity-relationships` list routes. They make
+  the entity-relationship graph authorable and readable (a directed edge from a
+  `sourceEntityId` to a `targetEntityId` carrying a generic `relationshipKind` slug,
+  with a server-assigned id and server timestamps), not only deletable. Both endpoints
+  must resolve in the same workspace (an unknown/foreign endpoint or a self-loop is a
+  `400`); a duplicate of the same directed edge of the same kind is a `409`. Additive
+  types (a MINOR change).
+
 ## [0.4.0] - 2026-06-23
 
 ### Added

@@ -14,6 +14,16 @@ hosts are not published packages and are not versioned here. See
 
 ## [Unreleased]
 
+### Added
+
+- `@livecore/contracts`: the entity-relationship shapes `CreateEntityRelationshipRequest`
+  and `EntityRelationshipResponse` (CORE-ENT-008), for the new entity-relationship create
+  and list routes.
+- `@livecore/sdk-ts`: the `client.entities.createRelationship` and
+  `client.entities.listRelationships` methods (CORE-ENT-008), making the entity-relationship
+  graph authorable and readable (a directed edge between two entities), not only deletable.
+  A MINOR change.
+
 ## [0.4.0] - 2026-06-23
 
 This release adds the workspace member-administration reads and command, the

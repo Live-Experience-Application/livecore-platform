@@ -19,6 +19,7 @@ import type {
   ContentBlockType,
   CreateAssetLinkRequest,
   CreateContentBlockRequest,
+  CreateEntityRelationshipRequest,
   CreateEntityRequest,
   CreateEntityTypeRequest,
   CreateOrganizationRequest,
@@ -28,6 +29,7 @@ import type {
   CreateUploadIntentRequest,
   CreateVisibilityRuleRequest,
   CreateWorkspaceRequest,
+  EntityRelationshipResponse,
   EntityResponse,
   FeedRevealScope,
   GoogleTokenVerificationRequest,
@@ -342,6 +344,27 @@ export type EntityResponseKeepsHostOnlyFields = Assert<
   >
 >;
 
+// --- The entity relationship edge is a single, authoring-only projection. -------
+// (CORE-ENT-008.) An edge is a structural/graph artifact (no free-form content), so the
+// relationship reads are restricted to the authoring roles and there is ONE projection (no
+// host-vs-participant split). It mirrors the server DTO (apps/api/Entities/EntityRelationshipDtos.cs
+// `EntityRelationshipResponse(Guid Id, Guid OrganizationId, Guid WorkspaceId, Guid SourceEntityId,
+// Guid TargetEntityId, string RelationshipKind, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)`).
+// Pinning the property set keeps the published contract from silently growing or dropping a field.
+export type EntityRelationshipResponseKeysAreExact = Assert<
+  Equal<
+    keyof EntityRelationshipResponse,
+    | "id"
+    | "organizationId"
+    | "workspaceId"
+    | "sourceEntityId"
+    | "targetEntityId"
+    | "relationshipKind"
+    | "createdAt"
+    | "updatedAt"
+  >
+>;
+
 // --- The visibility-rule projection carries the audience-safe resource label. --
 // (CORE-APROJ-004.) The rule response names its governed resource by `resourceType` +
 // `resourceId` AND a denormalized, audience-safe `resourceLabel`, so a host rendering a
@@ -493,6 +516,12 @@ export type CreateContentBlockRequestMatchesSchema = Assert<
 export type CreateEntityRequestMatchesSchema = Assert<
   SameKeys<CreateEntityRequest, Schemas["CreateEntityRequest"]>
 >;
+export type CreateEntityRelationshipRequestMatchesSchema = Assert<
+  SameKeys<
+    CreateEntityRelationshipRequest,
+    Schemas["CreateEntityRelationshipRequest"]
+  >
+>;
 export type CreateEntityTypeRequestMatchesSchema = Assert<
   SameKeys<CreateEntityTypeRequest, Schemas["CreateEntityTypeRequest"]>
 >;
@@ -581,6 +610,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "ConfirmUploadRequest"
     | "CreateAssetLinkRequest"
     | "CreateContentBlockRequest"
+    | "CreateEntityRelationshipRequest"
     | "CreateEntityRequest"
     | "CreateEntityTypeRequest"
     | "CreateOrganizationRequest"

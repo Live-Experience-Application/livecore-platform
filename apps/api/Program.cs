@@ -1212,6 +1212,17 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // (CORE-CONC-002). Consumed by POST /api/v1/workspaces/{workspaceId}/entities.
     builder.Services.AddScoped<EntityCreationService>();
 
+    // Entity-relationship create command (CORE-ENT-008, the "Entity Graph and Search Completeness" epic): the
+    // Entities module's "an authoring role can author a directed graph edge between two entities" command.
+    // Registered here, inside the persistence conditional, because it composes the entity and
+    // entity-relationship repositories. It resolves BOTH endpoint entities through the tenant- AND
+    // workspace-scoped IEntityRepository.FindByIdAsync FIRST (the same-workspace coupling the database foreign
+    // keys cannot enforce; an unknown/foreign endpoint is never borrowed), then creates the edge with a
+    // server-minted id; a duplicate of the same directed edge of the same kind is reported as Duplicate. It
+    // adds no audit/event (an edge carries no visibility surface), so it needs no transaction. Consumed by
+    // POST /api/v1/workspaces/{workspaceId}/entity-relationships.
+    builder.Services.AddScoped<EntityRelationshipCreationService>();
+
     // Entity-type create command (CORE-ENT-007, the "Vertical Authoring and Read API Completeness" epic): the
     // Entities module's "an authoring role can define a generic entity type" command. Registered here, inside
     // the persistence conditional, because it composes the entity-type and audit repositories plus the shared
