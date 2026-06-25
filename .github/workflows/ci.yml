@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
@@ -155,7 +155,7 @@ jobs:
           --health-retries 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
@@ -212,7 +212,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -283,7 +283,7 @@ jobs:
     # not, and a non-git tree fails closed), then guards the real tree.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the boundary scan logic
         run: pwsh -NoProfile -File scripts/test-boundary-scan.ps1
@@ -328,7 +328,7 @@ jobs:
             build-mode: none
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the CodeQL severity-gate logic (a seeded high/critical finding fails closed)
         shell: pwsh
@@ -398,7 +398,7 @@ jobs:
     #      dependency fails the build. The two reports are uploaded as an artifact.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the dependency-audit gate logic (a seeded vulnerable package fails closed)
         shell: pwsh
@@ -465,7 +465,7 @@ jobs:
     # check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the spec consistency check logic
         run: pwsh -NoProfile -File scripts/test-spec-consistency.ps1
@@ -499,7 +499,7 @@ jobs:
     #      CycloneDX SBOM in the publish-dry-run/publish jobs.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the license-compliance gate logic (a seeded disallowed license fails)
         shell: pwsh
@@ -533,7 +533,7 @@ jobs:
     #      commits - hence fetch-depth: 0, so the base..head range is available.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Full history so the DCO lint can resolve the base..head commit range.
           fetch-depth: 0
@@ -575,7 +575,7 @@ jobs:
     # <lastTag>..HEAD range and the tags available.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Full history + tags so the last-release-tag..HEAD range resolves.
           fetch-depth: 0
@@ -600,7 +600,7 @@ jobs:
     # docs/scripts check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the destructive-Down lint logic
         run: pwsh -NoProfile -File scripts/test-migration-down-lint.ps1
@@ -620,7 +620,7 @@ jobs:
     # docs. Pure docs/scripts check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the storage-docs RustFS backstop logic
         run: pwsh -NoProfile -File scripts/test-storage-docs-rustfs.ps1
@@ -645,7 +645,7 @@ jobs:
     # needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the action-pin lint logic (a seeded floating-tag ref fails closed)
         run: pwsh -NoProfile -File scripts/test-action-pin-lint.ps1
@@ -668,7 +668,7 @@ jobs:
     # tree, then the scan itself guards the tree. Pure source check, no build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the log-redaction guardrail logic
         run: pwsh -NoProfile -File scripts/test-log-redaction.ps1
@@ -686,7 +686,7 @@ jobs:
     # object store needed (scripts/test-backup-restore-drill.ps1).
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run the backup/restore drill
         run: pwsh -NoProfile -File scripts/test-backup-restore-drill.ps1
@@ -728,7 +728,7 @@ jobs:
       Backup__Encryption__Passphrase: "ci-backup-restore-roundtrip-passphrase"
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install the PostgreSQL 17 client (matching pg_dump/pg_restore/psql)
         # The runner's bundled client may be older than the postgres:17 service, and
@@ -765,7 +765,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Build API image
         run: docker build --file apps/api/Dockerfile --build-arg SOURCE_REVISION=${{ github.sha }} --tag livecore-api:ci .
@@ -844,7 +844,7 @@ jobs:
     #      endpoints answer 200.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Validate the compose manifest (gate + probes, no Docker)
         shell: pwsh
@@ -940,7 +940,7 @@ jobs:
     #      green readiness proves the full stack is wired together end-to-end.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Render the merged full-stack overlay
         working-directory: deploy/compose
@@ -1054,7 +1054,7 @@ jobs:
       KUBECONFORM_VERSION: v0.6.7
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Validate the chart logic and guard the real chart (no tooling)
         shell: pwsh
@@ -1427,7 +1427,7 @@ jobs:
     # Pure docs/deploy assets, no application build needed.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Test the observability-assets gate logic and guard the real files
         shell: pwsh
@@ -1476,7 +1476,7 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Verify image tags are immutable and versioned
         shell: pwsh
@@ -1691,7 +1691,7 @@ jobs:
     # publish-packages job runs the same gate against the actual release tag.
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1733,7 +1733,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Run PSScriptAnalyzer on scripts/
         shell: pwsh
@@ -1810,7 +1810,7 @@ jobs:
       MIGRATIONS_CONNECTION_STRING: "Host=localhost;Port=5432;Database=livecore_migrations_ci;Username=postgres;Password=postgres"
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Build migrations runner image
         run: docker build --file apps/api/Migrations.Dockerfile --tag livecore-migrations:ci .
@@ -1882,7 +1882,7 @@ jobs:
       LIVECORE_TEST_REDIS: "localhost:6379"
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
@@ -1946,7 +1946,7 @@ jobs:
       LIVECORE_TEST_POSTGRES: "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres"
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
@@ -2008,7 +2008,7 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Assert the release tag matches the packages' shared version (drift cannot ship)
         # CORE-CMP-003: fail the publish before building or pushing any image when
@@ -2298,7 +2298,7 @@ jobs:
       id-token: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
