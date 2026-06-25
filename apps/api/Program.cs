@@ -553,6 +553,18 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // persistence conditional alongside the repositories it composes (organization and audit-log).
     builder.Services.AddScoped<OrganizationDeletionService>();
 
+    // First-login tenant provisioning (CORE-ID-007): the Organizations module's founding-owner counterpart of the
+    // TenantContextResolver. On the first GET /api/v1/me, if a verified token organization claim names an
+    // organization that does NOT yet exist, this provisions it and the caller's founding Owner membership through
+    // the Organizations-owned atomic founding-owner path (IOrganizationRepository.AddWithOwnerAsync) — so the
+    // caller's org-scoped reads resolve without an out-of-band POST /api/v1/organizations, idempotent on the unique
+    // slug index and fail-closed (an already-existing tenant is never auto-joined; threats T5/T1). Registered here
+    // inside the persistence conditional alongside the organization repository it composes; the IdentityAccess /me
+    // endpoint (MapMeEndpoints) drives it but never writes the organizations/organization_members tables directly.
+    builder.Services.AddScoped(serviceProvider => new ClaimedOrganizationProvisioningService(
+        serviceProvider.GetRequiredService<IOrganizationRepository>(),
+        serviceProvider.GetRequiredService<TimeProvider>()));
+
     // Workspace persistence (CORE-WS-001): the Workspaces module owns the
     // tenant-scoped workspaces table (docs/05_MODULE_CONTRACTS.md). Registered
     // here, inside the persistence conditional, exactly like the organization

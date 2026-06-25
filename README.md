@@ -1913,6 +1913,23 @@ The response is a safe DTO of identifiers and the caller's own display metadata
 only: it carries no access token, no raw organization-claim payload and no
 authorization rationale (threat T7).
 
+On the **first** `/me`, if a **verified** token organization claim names an
+organization that does **not yet exist**, that organization and the caller's
+founding `OrganizationMember` (role **Owner**) are provisioned (CORE-ID-007), so
+the caller's org-scoped reads resolve **without** an out-of-band
+`POST /api/v1/organizations` — the unambiguous first-login onboarding path (the
+gap ARC-GAP-115). IdentityAccess does **not** write the
+`organizations`/`organization_members` tables directly: it calls the
+Organizations-owned `IOrganizationRepository.AddWithOwnerAsync` — the **same**
+atomic founding-owner path `POST /api/v1/organizations` uses — through the
+`ClaimedOrganizationProvisioningService`. It is **idempotent** on the unique slug
+index and **fail-closed**: a claim naming an **already-existing** organization
+provisions **nothing** (the caller is never auto-enrolled — an existing tenant can
+never be joined or hijacked from a claim; the caller resolves through the normal
+claim-AND-persisted-membership gate and is hidden if not a member), and a
+principal with no claim, an unverified claim or a service account provisions
+nothing and gets the same non-leaking response (threats T5/T1).
+
 `GET /api/v1/me` is the global, profile-level "who am I". The **session-scoped**
 self-resolution `GET /api/v1/sessions/{sessionId}/me` (module Realtime,
 CORE-PSELF-001) is its in-session counterpart: it returns the caller's OWN

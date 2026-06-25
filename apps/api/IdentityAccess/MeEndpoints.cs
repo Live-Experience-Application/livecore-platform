@@ -45,6 +45,19 @@ namespace LiveCore.Api.IdentityAccess;
 ///   token does not assert — a foreign tenant from the token's point of view — is
 ///   never returned, so the principal context never exposes another tenant
 ///   (threat T5; the story note "do not expose other tenants").</item>
+///   <item>First-login tenant provisioning (CORE-ID-007): BEFORE the membership
+///   read, if a verified token organization claim names an organization that does
+///   NOT yet exist, the caller's founding <see cref="MembershipRole.Owner"/>
+///   membership and that organization are provisioned through the
+///   Organizations-owned <see cref="ClaimedOrganizationProvisioningService"/>
+///   (which writes only via <see cref="IOrganizationRepository.AddWithOwnerAsync"/>,
+///   so IdentityAccess never writes the organizations/organization_members tables
+///   directly), so the caller's org-scoped reads resolve without an out-of-band
+///   <c>POST /api/v1/organizations</c>. It is idempotent on the unique slug index
+///   and fail-closed: a claim naming an ALREADY-EXISTING organization provisions
+///   NOTHING (the caller is never auto-enrolled — an existing tenant can never be
+///   joined or hijacked from a claim), and a principal with no/unverified claim
+///   provisions nothing and gets the same non-leaking response (threats T5/T1).</item>
 /// </list>
 ///
 /// The response is a safe DTO of identifiers and the caller's own display
@@ -99,11 +112,26 @@ internal static class MeEndpoints
 
         // Resolve the current user's profile (the canonical "current user"
         // resolution; idempotent on first sight, mirroring changed display
-        // metadata), then list the memberships and roles for the subject.
+        // metadata).
         var profile = await deps.UserProfiles
             .EnsureUserProfileAsync(principal, cancellationToken)
             .ConfigureAwait(false);
 
+        // First-login tenant provisioning (CORE-ID-007): if a verified token
+        // organization claim names an organization that does NOT yet exist,
+        // provision it and the caller's founding Owner membership through the
+        // Organizations-owned atomic founding-owner path, so the caller's
+        // org-scoped reads resolve on first sight without an out-of-band
+        // POST /api/v1/organizations. Idempotent on the unique slug index and
+        // fail-closed: an ALREADY-EXISTING tenant is never auto-joined, and a
+        // principal with no/unverified claim provisions nothing. The membership
+        // read below then reflects any tenant just provisioned.
+        await deps.TenantProvisioning
+            .ProvisionClaimedTenantsAsync(principal, profile.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        // List the memberships and roles for the subject (now including any tenant
+        // just provisioned above).
         var memberships = await deps.Organizations
             .ListMembershipsByMemberAsync(profile.Id, cancellationToken)
             .ConfigureAwait(false);
@@ -132,14 +160,15 @@ internal static class MeEndpoints
         var services = httpContext.RequestServices;
         var userProfiles = services.GetService<UserProfileReferenceService>();
         var organizations = services.GetService<IOrganizationRepository>();
+        var tenantProvisioning = services.GetService<ClaimedOrganizationProvisioningService>();
 
-        if (userProfiles is null || organizations is null)
+        if (userProfiles is null || organizations is null || tenantProvisioning is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new MeEndpointDependencies(userProfiles, organizations);
+        dependencies = new MeEndpointDependencies(userProfiles, organizations, tenantProvisioning);
         return true;
     }
 
@@ -184,5 +213,6 @@ internal static class MeEndpoints
 
     private readonly record struct MeEndpointDependencies(
         UserProfileReferenceService UserProfiles,
-        IOrganizationRepository Organizations);
+        IOrganizationRepository Organizations,
+        ClaimedOrganizationProvisioningService TenantProvisioning);
 }
