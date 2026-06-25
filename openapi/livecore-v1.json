@@ -1925,6 +1925,78 @@
         }
       }
     },
+    "/api/v1/workspaces/{workspaceId}/entity-relationships": {
+      "get": {
+        "tags": [
+          "EntityRelationshipEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "organizationSlug",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entityId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "EntityRelationshipEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateEntityRelationshipRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspaceId}/entity-relationships/{relationshipId}": {
       "delete": {
         "tags": [
@@ -2760,6 +2832,33 @@
             "nullable": true
           },
           "body": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CreateEntityRelationshipRequest": {
+        "required": [
+          "organizationSlug",
+          "sourceEntityId",
+          "targetEntityId",
+          "relationshipKind"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "sourceEntityId": {
+            "type": "string",
+            "nullable": true
+          },
+          "targetEntityId": {
+            "type": "string",
+            "nullable": true
+          },
+          "relationshipKind": {
             "type": "string",
             "nullable": true
           }

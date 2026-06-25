@@ -89,3 +89,63 @@ export interface ParticipantEntityResponse {
    */
   entityTypeKey: string;
 }
+
+/**
+ * Request body for `POST /api/v1/workspaces/{workspaceId}/entity-relationships`
+ * (CORE-ENT-008): create a directed entity relationship edge between two entities
+ * in the route's workspace.
+ *
+ * Both endpoint ids must address entities IN THE SAME WORKSPACE (resolved
+ * server-side — the same-workspace coupling the database foreign keys cannot
+ * enforce); an endpoint that does not resolve there is a `400`, a self-loop
+ * (source equals target) is a `400`, and a duplicate of the same directed edge of
+ * the same kind is a `409`. The edge's surrogate id is assigned server-side.
+ */
+export interface CreateEntityRelationshipRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /** Surrogate id of the entity the directed edge points FROM. */
+  sourceEntityId: Uuid;
+  /**
+   * Surrogate id of the entity the directed edge points TO. Must be distinct from
+   * `sourceEntityId` (no self-loop).
+   */
+  targetEntityId: Uuid;
+  /**
+   * Generic, canonical kind/label of the edge (template-/host-supplied data): a
+   * lower-case dash-separated slug, stored verbatim and never inspected for
+   * vocabulary (the template boundary).
+   */
+  relationshipKind: string;
+}
+
+/**
+ * Response projection of a directed entity relationship edge (CORE-ENT-008),
+ * returned by the create route (`POST .../entity-relationships`) and the list read
+ * (`GET .../entity-relationships`).
+ *
+ * An edge is a structural/authoring graph artifact (no free-form content), so —
+ * like the entity-type reads — the relationship reads are restricted to the
+ * authoring roles (Owner/Admin/Host/CoHost) and there is a SINGLE projection (no
+ * host-vs-participant split). The shape carries identifiers, the tenant/workspace
+ * boundaries, the directed endpoints, the generic kind and the server timestamps;
+ * it carries no authorization rationale (docs/08_API_CONTRACTS.md).
+ */
+export interface EntityRelationshipResponse {
+  /** Surrogate id of the relationship (assigned server-side). */
+  id: Uuid;
+  /** Tenant the relationship belongs to. */
+  organizationId: Uuid;
+  /** Workspace the relationship belongs to. */
+  workspaceId: Uuid;
+  /** The entity the directed edge points FROM. */
+  sourceEntityId: Uuid;
+  /** The entity the directed edge points TO. */
+  targetEntityId: Uuid;
+  /** The generic, canonical kind/label of the edge. */
+  relationshipKind: string;
+  /** When the relationship was created (UTC). */
+  createdAt: IsoDateTimeString;
+  /** When the relationship was last updated (UTC). */
+  updatedAt: IsoDateTimeString;
+}

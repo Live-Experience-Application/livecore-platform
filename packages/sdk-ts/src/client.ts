@@ -60,7 +60,7 @@ export class LiveCoreClient {
   readonly scenes: ScenesClient;
   /** Content block list, read, create and delete routes. */
   readonly content: ContentClient;
-  /** Generic entity create, list, read, delete and relationship-delete routes. */
+  /** Generic entity create/list/read/delete and relationship create/list/delete routes. */
   readonly entities: EntitiesClient;
   /** Generic entity-type define, list and by-id read routes. */
   readonly entityTypes: EntityTypesClient;

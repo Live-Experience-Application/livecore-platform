@@ -12,7 +12,9 @@
  * is hidden as `404` (a `LiveCoreApiError`), never `403`.
  */
 import type {
+  CreateEntityRelationshipRequest,
   CreateEntityRequest,
+  EntityRelationshipResponse,
   EntityResponse,
   PageResponse,
   ParticipantEntityResponse,
@@ -103,6 +105,47 @@ export class EntitiesClient {
       method: "DELETE",
       path: `/workspaces/${encodeURIComponent(workspaceId)}/entities/${encodeURIComponent(entityId)}`,
       query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
+   * `POST /api/v1/workspaces/{workspaceId}/entity-relationships` — create a
+   * directed entity relationship edge between two entities (CORE-ENT-008). Both
+   * endpoints must address entities in the same workspace (resolved server-side);
+   * an endpoint that does not resolve there, a self-loop or a malformed id/kind is
+   * a `400`, and a duplicate of the same directed edge of the same kind is a `409`
+   * (each a `LiveCoreApiError`). The edge's surrogate id is assigned server-side.
+   */
+  createRelationship(
+    workspaceId: Uuid,
+    request: CreateEntityRelationshipRequest,
+  ): Promise<EntityRelationshipResponse> {
+    return this.http.send<EntityRelationshipResponse>({
+      method: "POST",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/entity-relationships`,
+      body: request,
+    });
+  }
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/entity-relationships` — list the
+   * workspace's directed relationship edges (CORE-ENT-008). Pass an optional
+   * `entityId` to restrict the result to the edges TOUCHING that entity (source or
+   * target); omit it to list every edge in the workspace. The reads are restricted
+   * to the authoring roles; a non-authoring caller (and a foreign/unknown
+   * workspace) is denied (a `LiveCoreApiError`).
+   */
+  listRelationships(
+    workspaceId: Uuid,
+    params: { organizationSlug: string; entityId?: Uuid },
+  ): Promise<EntityRelationshipResponse[]> {
+    return this.http.send<EntityRelationshipResponse[]>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/entity-relationships`,
+      query: {
+        organizationSlug: params.organizationSlug,
+        entityId: params.entityId,
+      },
     });
   }
 

@@ -10,6 +10,17 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ## [Unreleased]
 
+### Added
+
+- The entity-relationship authoring and read methods `client.entities.createRelationship`
+  and `client.entities.listRelationships` (CORE-ENT-008): create a directed graph edge
+  between two entities, and list a workspace's edges (with an optional `entityId` filter
+  for the edges touching one entity). They complete the relationship surface alongside the
+  existing `client.entities.deleteRelationship`, so the entity graph is now authorable and
+  readable, not only deletable. Both reads/writes are restricted to the authoring roles; an
+  endpoint that does not resolve in the workspace, a self-loop or a duplicate edge surfaces
+  as a `LiveCoreApiError`. Two new resource-client methods (a MINOR change).
+
 ## [0.4.0] - 2026-06-23
 
 ### Added
