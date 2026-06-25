@@ -316,14 +316,19 @@ public sealed class MeInvitationsEndpointTests
     }
 
     [Fact]
-    public async Task List_excludes_an_invitation_in_a_claimed_tenant_without_a_membership()
+    public async Task List_returns_an_invitation_in_a_claimed_tenant_without_a_membership()
     {
-        // The token claims BOTH A and B, but the caller is only a MEMBER of A; the invitation is in B. A token
-        // claim without a persisted membership must not surface the invitation (threat T5): the discovery uses the
-        // same claim-AND-membership intersection the tenant resolver and the accept route require.
+        // CORE-INV-003: the token claims BOTH A and B; the caller is a MEMBER of A only, and a pending invitation
+        // addressed to their verified email exists in B. Scoping is now the TOKEN CLAIM ALONE (no pre-existing
+        // membership required), the same claim-only scope the accept route resolves against — so the invitation in
+        // B (a tenant the caller can resolve and accept against) IS surfaced. This is the cross-org onboarding the
+        // earlier membership-AND-claim intersection made impossible (the dead-persona gap ARC-GAP-117). Matching is
+        // still ONLY the verified email, so no other person's invitation is ever returned.
         await using var factory = new WorkspaceApiFactory();
         const string callerSubject = "alice";
         const string callerEmail = "alice@example.test";
+        Guid workspaceInBId = Guid.Empty;
+        Guid invitationInBId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
             var caller = await db.AddUserAsync(_issuer, callerSubject, email: callerEmail);
@@ -331,17 +336,23 @@ public sealed class MeInvitationsEndpointTests
             var orgB = await db.AddOrganizationAsync(_orgB);
             await db.AddOrganizationMemberAsync(orgA.Id, caller.Id, MembershipRole.Participant);
             var workspaceInB = await db.AddWorkspaceAsync(orgB.Id, "b-show", "B Show");
-            await db.AddWorkspaceInvitationAsync(orgB.Id, workspaceInB.Id, MembershipRole.Host, callerEmail);
+            workspaceInBId = workspaceInB.Id;
+            var (invitationInB, _) = await db.AddWorkspaceInvitationAsync(
+                orgB.Id, workspaceInB.Id, MembershipRole.Host, callerEmail);
+            invitationInBId = invitationInB.Id;
         });
 
-        // Token claims A and B; membership only in A.
+        // Token claims A and B; membership only in A. The invitation in B is now discoverable.
         using var client = factory.CreateClientForWithEmail(callerSubject, _issuer, callerEmail, emailVerified: true, _orgA, _orgB);
         var response = await client.GetAsync(_route);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var page = await response.Content.ReadFromJsonAsync<PageDto<MyPendingWorkspaceInvitationResponse>>();
         Assert.NotNull(page);
-        Assert.Empty(page.Items);
+        var item = Assert.Single(page.Items);
+        Assert.Equal(invitationInBId, item.Id);
+        Assert.Equal(_orgB, item.OrganizationSlug);
+        Assert.Equal(workspaceInBId, item.WorkspaceId);
     }
 
     [Fact]
@@ -371,14 +382,25 @@ public sealed class MeInvitationsEndpointTests
         Assert.Empty(page.Items);
     }
 
-    // ---- 200: a brand-new caller with no membership gets an empty list -------
+    // ---- 200: a brand-new caller with no membership and no addressed invitation gets an empty list ----
 
     [Fact]
-    public async Task List_is_empty_for_a_caller_with_no_membership()
+    public async Task List_is_empty_for_a_caller_with_no_membership_and_no_addressed_invitation()
     {
+        // CORE-INV-003: a brand-new caller (no membership anywhere) who claims a real tenant gets an empty list
+        // when no invitation is addressed to THEIR verified email — even though an invitation to someone else
+        // exists in that tenant. The claim-only scope surfaces the tenant, but the verified-email match still
+        // gates which invitations are returned, so a no-membership caller never sees another person's invite.
         await using var factory = new WorkspaceApiFactory();
         const string callerSubject = "first-timer";
         const string callerEmail = "first-timer@example.test";
+        await factory.SeedAsync(async db =>
+        {
+            // The tenant exists and the caller claims it, but the caller holds NO membership and is NOT the invitee.
+            var org = await db.AddOrganizationAsync(_orgA);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            await db.AddWorkspaceInvitationAsync(org.Id, workspace.Id, MembershipRole.Host, "someone-else@example.test");
+        });
 
         using var client = factory.CreateClientForWithEmail(callerSubject, _issuer, callerEmail, emailVerified: true, _orgA);
         var response = await client.GetAsync(_route);

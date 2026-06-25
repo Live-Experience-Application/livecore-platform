@@ -374,6 +374,105 @@ public sealed class TenantContextResolverTests
             () => _resolver.ResolveAsync(null!, _slugA, CancellationToken.None));
     }
 
+    // ---- Claim-only resolution path (CORE-INV-003) ---------------------------
+
+    [Fact]
+    public async Task Claim_scoped_resolution_succeeds_on_claim_and_existence_without_a_membership()
+    {
+        // CORE-INV-003: the distinct claim-only path resolves the tenant from the token org claim plus an existing
+        // organization, WITHOUT a persisted membership — exactly the brand-new / cross-org invitee the full
+        // resolver denies. A profile is seeded (so the full resolver reaches its membership check) but NO
+        // membership is.
+        var organization = SeedOrganization(_slugA);
+        SeedUser();
+        var principal = CreateUserPrincipal(organizationClaims: _slugA);
+
+        var result = await _resolver.ResolveClaimScopedAsync(principal, _slugA, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(TenantContextResolutionError.None, result.Error);
+        Assert.NotNull(result.Organization);
+        Assert.Equal(organization.Id, result.Organization.Id);
+        Assert.Equal(_slugA, result.Organization.Slug);
+
+        // The full membership-requiring resolver denies the SAME caller (no membership), proving the claim-only
+        // path is genuinely distinct and is what lets a new invitee through.
+        var fullResult = await _resolver.ResolveAsync(principal, _slugA, CancellationToken.None);
+        Assert.False(fullResult.Succeeded);
+        Assert.Equal(TenantContextResolutionError.NoMembership, fullResult.Error);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_accepts_a_non_canonical_slug()
+    {
+        var organization = SeedOrganization(_slugA);
+        var principal = CreateUserPrincipal(organizationClaims: _slugA);
+
+        var result = await _resolver.ResolveClaimScopedAsync(principal, "  NorthWind-Labs  ", CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(organization.Id, result.Organization!.Id);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_denies_a_service_account()
+    {
+        SeedOrganization(_slugA);
+        var serviceAccount = new OidcPrincipal(
+            PrincipalType.ServiceAccount, _issuer, _subject, organizationClaims: [_slugA]);
+
+        var result = await _resolver.ResolveClaimScopedAsync(serviceAccount, _slugA, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Organization);
+        Assert.Equal(TenantContextResolutionError.NotAUser, result.Error);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_denies_when_the_token_does_not_claim_the_target()
+    {
+        // Mandatory negative (threat T5): the organization exists, but the token does not assert it. The claim is
+        // checked BEFORE any database access, so a caller whose token is not scoped to the tenant is denied without
+        // the org lookup ever running.
+        SeedOrganization(_slugA);
+        var principal = CreateUserPrincipal(organizationClaims: _slugB);
+
+        var result = await _resolver.ResolveClaimScopedAsync(principal, _slugA, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(TenantContextResolutionError.ClaimMismatch, result.Error);
+        Assert.Equal(0, _organizations.FindBySlugCallCount);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_denies_an_unknown_organization()
+    {
+        var principal = CreateUserPrincipal(organizationClaims: _slugA);
+
+        var result = await _resolver.ResolveClaimScopedAsync(principal, _slugA, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(TenantContextResolutionError.OrganizationNotFound, result.Error);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_denies_a_malformed_slug_without_throwing()
+    {
+        var principal = CreateUserPrincipal(organizationClaims: "not a slug!");
+
+        var result = await _resolver.ResolveClaimScopedAsync(principal, "not a slug!", CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(TenantContextResolutionError.OrganizationNotFound, result.Error);
+    }
+
+    [Fact]
+    public async Task Claim_scoped_resolution_of_a_null_principal_throws()
+    {
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => _resolver.ResolveClaimScopedAsync(null!, _slugA, CancellationToken.None));
+    }
+
     private sealed class FakeOrganizationRepository : IOrganizationRepository
     {
         public List<Organization> Organizations { get; } = [];

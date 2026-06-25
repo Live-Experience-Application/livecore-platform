@@ -176,4 +176,73 @@ public sealed class TenantContextResolver
 
         return TenantContextResolutionResult.Success(context);
     }
+
+    /// <summary>
+    /// Resolves the target organization from the principal's token organization CLAIM ALONE — the distinct
+    /// CLAIM-ONLY path (CORE-INV-003) the workspace invitation-accept route uses, NOT the membership-requiring
+    /// <see cref="ResolveAsync"/>. It checks, in order and denying at the first failure: the principal is a human
+    /// user; the slug is a valid slug shape; the token asserts the organization claim (checked before any database
+    /// access, threat T5); and an organization exists for the slug. It deliberately does NOT consult a persisted
+    /// organization membership, so a genuinely new or cross-org invitee — who has no membership yet, and for whom
+    /// <see cref="ResolveAsync"/> returns <see cref="TenantContextResolutionError.NoMembership"/> — can still
+    /// resolve the tenant and accept an invitation addressed to them.
+    ///
+    /// <para>
+    /// Because no membership is consulted, the result carries no role and is never a trusted
+    /// <see cref="TenantContext"/>: the accept route still proves entitlement to act by redeeming a valid
+    /// invitation BEARER token matched by hash within exactly this organization and the route's workspace. The
+    /// token org claim is the identity provider's assertion that the caller's token is scoped to the tenant; the
+    /// invitation token is the platform's own one-time grant. Requiring BOTH means neither a broad token claim
+    /// without a valid invitation, nor an invitation token presented under a tenant the token is not scoped to,
+    /// can cross the tenant boundary (threats T5/T6). It is fail-closed: a service account, a missing/foreign
+    /// claim, a malformed slug or a non-existent tenant are all a typed denial, never a partial result. The
+    /// per-request log context is deliberately NOT enriched here (that is reserved for the fully-entitled
+    /// <see cref="ResolveAsync"/> path).
+    /// </para>
+    /// </summary>
+    /// <exception cref="ArgumentNullException">The principal is null.</exception>
+    public async Task<ClaimScopedTenantResolutionResult> ResolveClaimScopedAsync(
+        OidcPrincipal principal,
+        string targetOrganizationSlug,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(principal);
+
+        // Only human users hold an organization membership and onboard through an invitation; a service account
+        // is a machine client (CORE-ID-002) and is never resolved into a user tenant here.
+        if (principal.Type != PrincipalType.User)
+        {
+            return ClaimScopedTenantResolutionResult.Denied(TenantContextResolutionError.NotAUser);
+        }
+
+        // A value that is not even a valid slug shape can name no tenant: deny as "not found" instead of throwing.
+        string canonicalSlug;
+        try
+        {
+            canonicalSlug = Organization.CanonicalizeSlug(targetOrganizationSlug);
+        }
+        catch (ArgumentException)
+        {
+            return ClaimScopedTenantResolutionResult.Denied(TenantContextResolutionError.OrganizationNotFound);
+        }
+
+        // Defence in depth (threat T5): the token must already assert this tenant. The organization claim is
+        // matched exactly (ordinal, case-sensitive) against the canonical slug, before any database access, so a
+        // caller whose token is not scoped to the tenant is denied without touching the tenant's data.
+        if (!principal.HasOrganizationClaim(canonicalSlug))
+        {
+            return ClaimScopedTenantResolutionResult.Denied(TenantContextResolutionError.ClaimMismatch);
+        }
+
+        // The target must resolve to a real organization; a missing tenant denies.
+        var organization = await _organizations
+            .FindBySlugAsync(canonicalSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (organization is null)
+        {
+            return ClaimScopedTenantResolutionResult.Denied(TenantContextResolutionError.OrganizationNotFound);
+        }
+
+        return ClaimScopedTenantResolutionResult.Success(organization);
+    }
 }
