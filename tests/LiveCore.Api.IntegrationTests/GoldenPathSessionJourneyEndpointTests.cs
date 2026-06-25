@@ -341,10 +341,12 @@ public sealed class GoldenPathSessionJourneyEndpointTests
         var workspaceId = await CreateWorkspaceAsync(hostClient, _orgSlug, "summer-show", "Summer Show");
 
         // --- Minimal bootstrap that has NO public write route ---------------------------------------------
-        // The host's WORKSPACE membership (workspace create does not grant one and there is no redeem route),
-        // the participants' ORGANIZATION memberships (the only add-org-member path is the org-create
-        // founding-Owner grant), and the PARTICIPANT records (there is no participant-create endpoint, only
-        // join/leave over an existing participant). Everything else is built through the API above and below.
+        // The participants' ORGANIZATION memberships (the only add-org-member path is the org-create
+        // founding-Owner grant) and the PARTICIPANT records (there is no participant-create endpoint, only
+        // join/leave over an existing participant). The host's WORKSPACE membership is NOT seeded here: the
+        // workspace-create endpoint above already enrolled the host as the workspace's founding Owner
+        // (CORE-WS-009), so the host can host sessions through the API below. Everything else is built through
+        // the API above and below.
         Guid hostUserProfileId = Guid.Empty;
         Guid participantAId = Guid.Empty;
         Guid participantBId = Guid.Empty;
@@ -352,11 +354,9 @@ public sealed class GoldenPathSessionJourneyEndpointTests
         await factory.SeedAsync(async db =>
         {
             // The org-create endpoint already provisioned the host's user profile (idempotent on first
-            // sight); look it up so its id can anchor the host's workspace membership and the audit-actor
-            // assertions.
+            // sight); look it up so its id can anchor the audit-actor assertions.
             var hostProfile = await db.UserProfiles.SingleAsync(u => u.Issuer == _issuer && u.SubjectId == _hostSubject);
             hostUserProfileId = hostProfile.Id;
-            await db.AddWorkspaceMemberAsync(organization.Id, workspaceId, hostProfile.Id, MembershipRole.Host);
 
             var participantAUser = await db.AddUserAsync(_issuer, _participantASubject);
             var participantBUser = await db.AddUserAsync(_issuer, _participantBSubject);

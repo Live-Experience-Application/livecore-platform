@@ -366,11 +366,12 @@ public sealed class FullHouseManyParticipantSessionEndpointTests
         var participantIds = new Guid[_participantCount];
         await factory.SeedAsync(async db =>
         {
-            // The org-create endpoint already provisioned the host's user profile (founding Owner); look it up
-            // so its id can anchor the host's workspace Host membership.
+            // The org-create endpoint already provisioned the host's user profile, and the workspace-create
+            // endpoint already enrolled the host as the workspace's founding Owner (CORE-WS-009), so the host's
+            // workspace membership is not seeded here; look the profile up so its id can anchor the audit-actor
+            // assertions.
             var hostProfile = await db.UserProfiles.SingleAsync(u => u.Issuer == _issuer && u.SubjectId == _hostSubject);
             hostUserProfileId = hostProfile.Id;
-            await db.AddWorkspaceMemberAsync(organization.Id, workspaceId, hostProfile.Id, MembershipRole.Host);
 
             // The co-host and observer are workspace members (so the realtime resolver classifies them); the
             // auditor needs only an organization Auditor role (the audit log is org-scoped) and deliberately

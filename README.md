@@ -1981,6 +1981,18 @@ The workspace routes implemented so far:
 returns the `items + hasMore` envelope rather than an unbounded array — like every Core
 list endpoint (`docs/08_API_CONTRACTS.md` "Pagination").
 
+`POST /api/v1/workspaces` enrolls the creating principal as the new workspace's
+**founding `Owner` member**, atomically in the same unit of work as the workspace
+insert (CORE-WS-009) — mirroring how org create makes the caller the tenant's
+founding `Owner`. So a workspace is never created memberless: immediately after the
+`201`, the creator sees it through the membership-scoped list
+(`GET /api/v1/workspaces`), can read it by id (`GET /api/v1/workspaces/{workspaceId}`)
+and appears as the `Owner` on the member roster
+(`GET /api/v1/workspaces/{workspaceId}/members`). The enrollment is idempotent on the
+unique `workspace_members(workspace_id, user_id)` index, so a retried create under an
+`Idempotency-Key` never writes a duplicate member, and authorization is unchanged: a
+non-creating principal still sees nothing until invited.
+
 ### Workspace member invites (scoped tokens)
 
 `POST /api/v1/workspaces/{workspaceId}/members` creates a workspace invitation
