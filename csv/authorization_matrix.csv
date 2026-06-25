@@ -11,6 +11,7 @@ Execute reveal,yes,yes,yes,yes,no,no,no
 Seal or unseal visibility rule,yes,yes,yes,yes,no,no,no
 View own visible feed,no,no,preview,preview,yes,no,no
 Resolve own session participant context,own,own,own,own,own,own,own
+Record own session presence (join/leave),own,own,own,own,own,own,own
 Discover own pending invitations,own,own,own,own,own,own,own
 Manage own push subscriptions,own,own,own,own,own,own,own
 View audit log,yes,yes,optional,no,no,no,yes
