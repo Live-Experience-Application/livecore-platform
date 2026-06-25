@@ -1974,18 +1974,18 @@ boundary the `TenantContextResolver` enforces:
 
 The workspace routes implemented so far:
 
-| Method   | Route                                                         | Authorized callers                                                        |
-| -------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `GET`    | `/api/v1/workspaces`                                          | any workspace member (results filtered to the caller's memberships)       |
-| `POST`   | `/api/v1/workspaces`                                          | organization `Owner` or `Admin`                                           |
-| `GET`    | `/api/v1/workspaces/{workspaceId}`                            | members of that workspace                                                 |
-| `PUT`    | `/api/v1/workspaces/{workspaceId}`                            | organization `Owner` or `Admin` (rename)                                  |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`                    | organization `Owner` (archive — see below)                                |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/members`                    | organization `Owner` or `Admin` (create invite)                           |
-| `GET`    | `/api/v1/workspaces/{workspaceId}/invitations`                | organization `Owner` or `Admin` (list pending invites — see below)        |
-| `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept`         | any authenticated org member who holds a valid token (redeem — see below) |
-| `DELETE` | `/api/v1/workspaces/{workspaceId}/invitations/{invitationId}` | organization `Owner` or `Admin` (revoke invite — see below)               |
-| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` (remove member — see below)               |
+| Method   | Route                                                         | Authorized callers                                                                                             |
+| -------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/v1/workspaces`                                          | any workspace member (results filtered to the caller's memberships)                                            |
+| `POST`   | `/api/v1/workspaces`                                          | organization `Owner` or `Admin`                                                                                |
+| `GET`    | `/api/v1/workspaces/{workspaceId}`                            | members of that workspace                                                                                      |
+| `PUT`    | `/api/v1/workspaces/{workspaceId}`                            | organization `Owner` or `Admin` (rename)                                                                       |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/archive`                    | organization `Owner` (archive — see below)                                                                     |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/members`                    | organization `Owner` or `Admin` (create invite)                                                                |
+| `GET`    | `/api/v1/workspaces/{workspaceId}/invitations`                | organization `Owner` or `Admin` (list pending invites — see below)                                             |
+| `POST`   | `/api/v1/workspaces/{workspaceId}/invitations/accept`         | any authenticated caller whose token claims the org and who holds a valid token (redeem & onboard — see below) |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/invitations/{invitationId}` | organization `Owner` or `Admin` (revoke invite — see below)                                                    |
+| `DELETE` | `/api/v1/workspaces/{workspaceId}/members/{memberId}`         | organization `Owner` or `Admin` (remove member — see below)                                                    |
 
 `GET /api/v1/workspaces` (the caller's active workspace memberships) is **bounded**
 (CORE-DX-003): optional `?limit=` (default 50, max 200) and `?offset=` page it, and it
@@ -2067,6 +2067,30 @@ an **indistinguishable hidden `404`**. A caller who is already a member of the
 workspace gets a `409` and does **not** consume the token. On PostgreSQL the
 invitation carries the `xmin` concurrency token, so two concurrent redemptions of one
 token cannot both grant a membership (the second conflicts with a `409`).
+
+**Cross-org onboarding (CORE-INV-003).** Acceptance authorizes on the **token
+organization claim** plus the valid invitation token — **never a pre-existing
+`OrganizationMember`** and never an email match — so a **brand-new or cross-org
+invitee** can onboard. Because the tenant context resolver requires a persisted
+membership (it returns "no membership" for a new invitee), the accept route uses a
+**distinct claim-only resolution path** (`TenantContextResolver.ResolveClaimScopedAsync`:
+the present token org claim plus an existing organization), not the unchanged resolver.
+Inside the **same transaction** that creates the `WorkspaceMember`, the route
+atomically provisions an `OrganizationMember` for the invitee through the
+Organizations-owned `IOrganizationMemberRepository.AddAsync` (never a direct
+`organization_members` write), mirroring org-create founding-owner enrollment — so the
+invitee gains both memberships in one step and can immediately read the workspace. The
+org membership is provisioned at the **minimal `Participant` role** — enough to resolve
+the tenant and reach the granted workspace, but never an org-administration role
+(`Owner`/`Admin`), so a workspace-scoped invitation can never escalate to
+organization-wide control (threat T6 role limitation); the invitee's workspace
+capabilities come from their `WorkspaceMember` role (the invitation's role). The
+provision is **idempotent**: an existing tenant member accepting a new workspace invite
+keeps their existing standing and role. A caller whose token is **not scoped to the
+inviting org** is the same indistinguishable hidden `404`, and a failed accept
+provisions no membership (fail-closed). This is what flips the documented
+`MyPendingWorkspaceInvitationResponse` discovery (CORE-INV-002) from a dead persona for
+a new invitee into a working discover→accept→read flow.
 
 ### Workspace invitation revoke (CORE-WS-007)
 

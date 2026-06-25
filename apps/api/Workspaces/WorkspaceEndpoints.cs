@@ -66,18 +66,26 @@ namespace LiveCore.Api.Workspaces;
 ///   indistinguishable hidden 404, a known tenant member without Owner/Admin is a
 ///   403.</item>
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/invitations/accept</c> —
-///   redeem a workspace invitation (CORE-WS-006). The scoped token is a BEARER
-///   grant (threat T6): the AUTHENTICATED CALLER who presents a valid token in the
-///   request BODY (never the URL, threat T7) becomes the workspace member with the
-///   invitation's role; the invited email is data, never an identity check. The
-///   redeem is single-use, expiry- and revocation-aware and tenant/workspace-scoped,
-///   and it is ATOMIC (CORE-CONC-002): the invitation is marked Accepted, the
-///   <see cref="WorkspaceMember"/> is created and the join is audited
-///   (<see cref="AuditAction.MemberJoined"/>) in one transaction. An invalid,
-///   expired, revoked, already-redeemed or foreign token grants nothing and is an
-///   indistinguishable hidden 404 (fail-closed). Open to any authenticated org
-///   member (the token, not a role, is the grant); a caller already a member of the
-///   workspace is a 409 that does not consume the token.</item>
+///   redeem a workspace invitation (CORE-WS-006; cross-org onboarding CORE-INV-003).
+///   The scoped token is a BEARER grant (threat T6): the AUTHENTICATED CALLER who
+///   presents a valid token in the request BODY (never the URL, threat T7) becomes
+///   the workspace member with the invitation's role; the invited email is data,
+///   never an identity check. It authorizes on the token organization CLAIM plus the
+///   valid invitation token — NEVER a pre-existing <see cref="OrganizationMember"/>
+///   and never an email match — through a DISTINCT claim-only resolution path
+///   (<see cref="TenantContextResolver.ResolveClaimScopedAsync"/>), not the
+///   membership-requiring resolver, so a genuinely new or cross-org invitee can
+///   onboard. The redeem is single-use, expiry- and revocation-aware and
+///   tenant/workspace-scoped, and it is ATOMIC (CORE-CONC-002): in ONE transaction
+///   the <see cref="WorkspaceMember"/> is created, the invitee's
+///   <see cref="OrganizationMember"/> is provisioned (CORE-INV-003, via the
+///   Organizations-owned <see cref="IOrganizationMemberRepository"/> — never a
+///   direct write — at the minimal Participant role, idempotent for an existing
+///   member; mirroring org-create founding-owner enrollment), the invitation is
+///   marked Accepted and the join is audited (<see cref="AuditAction.MemberJoined"/>).
+///   An invalid, expired, revoked, already-redeemed or foreign token grants nothing
+///   and is an indistinguishable hidden 404 (fail-closed); a caller already a member
+///   of the workspace is a 409 that does not consume the token.</item>
 ///   <item><c>DELETE /api/v1/workspaces/{workspaceId}/invitations/{invitationId}</c> —
 ///   revoke a pending workspace invitation (CORE-WS-007), "Manage members" (Owner
 ///   or Admin), mirroring the member-invite authorization. Transitions the
@@ -1192,17 +1200,30 @@ internal static class WorkspaceEndpoints
             return HiddenWorkspace();
         }
 
+        // CLAIM-ONLY resolution (CORE-INV-003): the accept route authorizes on the token org claim AND the valid
+        // invitation token below — NEVER a pre-existing OrganizationMember and never an email match — so a
+        // genuinely new or cross-org invitee (who has no membership yet) can onboard. This is the DISTINCT
+        // claim-only path, not the membership-requiring resolver (which returns NoMembership for a new invitee and
+        // would hide a redeemable invitation as 404). A service account, a foreign/unscoped tenant claim or an
+        // unknown tenant is an indistinguishable hidden 404 (threat T5).
         var resolution = await deps.Resolver
-            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ResolveClaimScopedAsync(principal, request.OrganizationSlug, cancellationToken)
             .ConfigureAwait(false);
         if (!resolution.Succeeded)
         {
-            // Not entitled to the tenant: hide as 404 so a foreign or non-existent tenant is indistinguishable
-            // from a missing invitation (threat T5).
             return HiddenWorkspace();
         }
 
-        var context = resolution.Context;
+        var organization = resolution.Organization;
+
+        // Provision (or resolve) the caller's user-profile reference — the subject who is granted membership. The
+        // profile is the caller's identity record, not the atomic membership grant, so it is ensured BEFORE the
+        // unit of work (idempotent on first sight, the canonical "current user" resolution, mirroring org-create
+        // founding-owner enrollment and the /me reads). The OrganizationMember + WorkspaceMember grant is the
+        // atomic part, committed together in the transaction below.
+        var profile = await deps.UserProfiles
+            .EnsureUserProfileAsync(principal, cancellationToken)
+            .ConfigureAwait(false);
 
         // Reduce the presented plaintext to its stored hash for the scoped lookup. Hashing is pure, so it runs
         // before the transaction; the plaintext is never persisted, compared in SQL or logged (threats T6/T7).
@@ -1226,7 +1247,7 @@ internal static class WorkspaceEndpoints
                     // workspace, so a token minted for another workspace or tenant resolves to nothing here: a
                     // foreign token is an indistinguishable rejection (threats T5/T6).
                     var invitation = await deps.WorkspaceInvitations
-                        .FindByTokenHashAsync(context.OrganizationId, workspaceGuid, tokenHash, transactionCancellationToken)
+                        .FindByTokenHashAsync(organization.Id, workspaceGuid, tokenHash, transactionCancellationToken)
                         .ConfigureAwait(false);
 
                     // Fail closed: an unknown, expired, revoked or already-redeemed token grants nothing and is
@@ -1237,25 +1258,25 @@ internal static class WorkspaceEndpoints
                         return AcceptInvitationOutcome.Rejected();
                     }
 
-                    // BEARER grant: the AUTHENTICATED CALLER (context.UserProfileId), never the invited email,
-                    // becomes the member. A caller who already holds a membership in this workspace does not
-                    // consume the token — nothing is mutated, so the (empty) transaction commits cleanly and the
-                    // command is a 409 whose reason is the existing standing, not the token.
+                    // BEARER grant: the AUTHENTICATED CALLER (profile.Id), never the invited email, becomes the
+                    // member. A caller who already holds a membership in this workspace does not consume the
+                    // token — nothing is mutated, so the (empty) transaction commits cleanly and the command is a
+                    // 409 whose reason is the existing standing, not the token.
                     var alreadyMember = await deps.WorkspaceMembers
-                        .IsMemberAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, transactionCancellationToken)
+                        .IsMemberAsync(organization.Id, workspaceGuid, profile.Id, transactionCancellationToken)
                         .ConfigureAwait(false);
                     if (alreadyMember)
                     {
                         return AcceptInvitationOutcome.AlreadyMember();
                     }
 
-                    // Create the membership for the caller's subject FIRST, before consuming the token: the
-                    // invitation grants exactly its own role and no other (threat T6 role limitation). Adding
+                    // Create the workspace membership for the caller's subject FIRST, before consuming the token:
+                    // the invitation grants exactly its own role and no other (threat T6 role limitation). Adding
                     // before redeeming means a lost create race (a concurrent first-time create that won) returns
                     // DuplicateMembership here and is handled as a 409 WITHOUT the token having been consumed —
                     // no rollback gymnastics, the invitation is simply left Pending.
                     var member = WorkspaceMember.Create(
-                        context.OrganizationId, workspaceGuid, context.UserProfileId, invitation.Role, now);
+                        organization.Id, workspaceGuid, profile.Id, invitation.Role, now);
                     var addResult = await deps.WorkspaceMembers
                         .AddAsync(member, transactionCancellationToken)
                         .ConfigureAwait(false);
@@ -1263,6 +1284,24 @@ internal static class WorkspaceEndpoints
                     {
                         return AcceptInvitationOutcome.AlreadyMember();
                     }
+
+                    // ORG-MEMBERSHIP PROVISION (CORE-INV-003): in the SAME transaction that created the workspace
+                    // member, ensure the invitee holds an OrganizationMember so a brand-new or cross-org invitee
+                    // onboards in one step, mirroring org-create founding-owner enrollment. It is created through
+                    // the Organizations-owned repository (NEVER a direct organization_members write). The org
+                    // membership is provisioned at the minimal Participant role: it grants tenant standing so the
+                    // invitee can resolve the tenant and reach their granted workspace, but never an
+                    // org-administration role (Owner/Admin), so a workspace-scoped invitation can never escalate to
+                    // organization-wide control (threat T6 role limitation) — the invitee's workspace capabilities
+                    // come from their WorkspaceMember role above. It is IDEMPOTENT: an existing org member (an
+                    // existing-tenant member accepting a new workspace invite) yields DuplicateMembership, which
+                    // leaves their existing standing and role untouched (a duplicate insert rolls back to the
+                    // SaveChanges savepoint, so the redeem below still commits).
+                    var organizationMember = OrganizationMember.Create(
+                        organization.Id, profile.Id, MembershipRole.Participant, now);
+                    await deps.OrganizationMembers
+                        .AddAsync(organizationMember, transactionCancellationToken)
+                        .ConfigureAwait(false);
 
                     // Mark the single-use token redeemed (Pending -> Accepted). IsRedeemable was just checked, so
                     // this never throws; persisting it through the shared context enrols it in this transaction.
@@ -1277,9 +1316,9 @@ internal static class WorkspaceEndpoints
                     await deps.AuditLog
                         .AppendAsync(
                             AuditLogEntry.ForMemberJoined(
-                                context.OrganizationId,
+                                organization.Id,
                                 workspaceGuid,
-                                context.UserProfileId,
+                                profile.Id,
                                 nameof(WorkspaceMember),
                                 member.Id,
                                 invitation.Role.ToString(),
@@ -1766,6 +1805,8 @@ internal static class WorkspaceEndpoints
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var workspaceInvitations = services.GetService<IWorkspaceInvitationRepository>();
+        var organizationMembers = services.GetService<IOrganizationMemberRepository>();
+        var userProfiles = services.GetService<UserProfileReferenceService>();
         var quotaEnforcement = services.GetService<QuotaEnforcementService>();
         var auditLog = services.GetService<IAuditLogRepository>();
         var unitOfWork = services.GetService<TransactionalUnitOfWork>();
@@ -1781,6 +1822,8 @@ internal static class WorkspaceEndpoints
             || workspaces is null
             || workspaceMembers is null
             || workspaceInvitations is null
+            || organizationMembers is null
+            || userProfiles is null
             || quotaEnforcement is null
             || auditLog is null
             || unitOfWork is null
@@ -1792,7 +1835,8 @@ internal static class WorkspaceEndpoints
         }
 
         dependencies = new WorkspaceEndpointDependencies(
-            resolver, workspaces, workspaceMembers, workspaceInvitations, quotaEnforcement, auditLog, unitOfWork, idempotency, dbContext);
+            resolver, workspaces, workspaceMembers, workspaceInvitations, organizationMembers, userProfiles,
+            quotaEnforcement, auditLog, unitOfWork, idempotency, dbContext);
         return true;
     }
 
@@ -1965,6 +2009,8 @@ internal static class WorkspaceEndpoints
         IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers,
         IWorkspaceInvitationRepository WorkspaceInvitations,
+        IOrganizationMemberRepository OrganizationMembers,
+        UserProfileReferenceService UserProfiles,
         QuotaEnforcementService QuotaEnforcement,
         IAuditLogRepository AuditLog,
         TransactionalUnitOfWork UnitOfWork,

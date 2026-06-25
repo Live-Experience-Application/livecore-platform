@@ -119,6 +119,54 @@ public sealed class WorkspaceInvitationAcceptEndpointTests
         Assert.Equal("Host", audit[0].NewState);
     }
 
+    // ---- existing org member: the idempotent org-membership provision keeps their existing role (CORE-INV-003)
+
+    [Fact]
+    public async Task Accept_by_an_existing_org_member_keeps_their_existing_org_role_and_adds_only_the_workspace_member()
+    {
+        // CORE-INV-003 provisions an OrganizationMember on accept, but for an EXISTING tenant member the provision
+        // is idempotent: it must NOT overwrite their existing org standing. Here the redeemer is already an org
+        // OWNER; after accepting a Host workspace invite they stay org Owner (never downgraded to the minimal
+        // Participant role) and gain only the new workspace membership.
+        await using var factory = new WorkspaceApiFactory();
+        const string redeemer = "existing-owner";
+        Guid orgId = Guid.Empty;
+        Guid workspaceId = Guid.Empty;
+        Guid redeemerProfileId = Guid.Empty;
+        string token = null!;
+        await factory.SeedAsync(async db =>
+        {
+            var user = await db.AddUserAsync(_issuer, redeemer);
+            redeemerProfileId = user.Id;
+            var org = await db.AddOrganizationAsync(_orgA);
+            orgId = org.Id;
+            await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Owner);
+            var workspace = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
+            workspaceId = workspace.Id;
+            (_, token) = await db.AddWorkspaceInvitationAsync(org.Id, workspace.Id, MembershipRole.Host, _inviteEmail);
+        });
+
+        using var client = factory.CreateClientFor(redeemer, _issuer, _orgA);
+        var response = await client.PostAsJsonAsync(
+            AcceptRoute(workspaceId), new AcceptWorkspaceInvitationRequest(_orgA, token));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<LiveCoreDbContext>();
+
+        // Still exactly ONE org membership for the redeemer, and its role is UNCHANGED (Owner, not downgraded).
+        var orgMembers = await context.OrganizationMembers
+            .Where(m => m.OrganizationId == orgId && m.UserProfileId == redeemerProfileId)
+            .ToListAsync();
+        Assert.Single(orgMembers);
+        Assert.Equal(MembershipRole.Owner, orgMembers[0].Role);
+
+        // The new workspace membership carries the invited Host role.
+        var workspaceMember = await context.WorkspaceMembers.SingleAsync(m => m.WorkspaceId == workspaceId);
+        Assert.Equal(MembershipRole.Host, workspaceMember.Role);
+    }
+
     // ---- 404 single-use: a second redemption of the same token is rejected ---
 
     [Fact]

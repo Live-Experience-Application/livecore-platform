@@ -196,11 +196,12 @@ public interface IWorkspaceInvitationRepository
     /// Lists ONE BOUNDED PAGE of the PENDING invitations addressed to the given email ACROSS the given set of
     /// organizations (tenants), oldest first, limited to <paramref name="take"/> rows starting at
     /// <paramref name="skip"/>. This is the user-scoped invitation self-discovery read backing
-    /// <c>GET /api/v1/me/invitations</c> (CORE-INV-002): it generalizes
+    /// <c>GET /api/v1/me/invitations</c> (CORE-INV-002, cross-org onboarding CORE-INV-003): it generalizes
     /// <see cref="ListByInvitedEmailInOrganizationAsync"/> from one tenant to the caller's CLAIMED tenants (the
-    /// organizations the caller both holds a token claim for AND is a member of — the same intersection
-    /// <c>GET /api/v1/me</c> exposes), so an onboarding flow can discover an invitation addressed to it without the
-    /// host handing over a workspace id and without enumerating workspaces.
+    /// organizations the caller's token asserts an organization claim for that exist — the SAME token-claim scope
+    /// the accept route resolves against through its distinct claim-only path, NOT a pre-existing membership), so a
+    /// brand-new or cross-org invitee can discover an invitation addressed to them — and then accept it — without
+    /// the host handing over a workspace id and without enumerating workspaces.
     ///
     /// <para>
     /// SAFE SERVER-SIDE KEY (threats T5/T6 in docs/07_SECURITY_THREAT_MODEL.md): the only key is the invited

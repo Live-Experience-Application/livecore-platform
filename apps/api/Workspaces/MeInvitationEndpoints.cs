@@ -38,22 +38,23 @@ namespace LiveCore.Api.Workspaces;
 ///   principal mapping is 401.</item>
 ///   <item><c>/me/invitations</c> is a USER concept: a service-account principal holds no profile, no membership
 ///   and no verified email, so it is denied 403 — the same rule the sibling <c>/me</c> routes apply.</item>
-///   <item>The result is scoped to the caller's CLAIMED tenants: the organizations the caller both holds a
-///   persisted membership in AND the token asserts a claim for (the exact intersection
-///   <c>GET /api/v1/me</c> exposes and <see cref="TenantContextResolver"/> — and so the accept route —
-///   requires). An invitation is therefore only ever discoverable in a tenant the caller can actually resolve
-///   and accept against, so the returned fields always drive the accept flow, and an invitation in a foreign
-///   tenant is never returned (threat T5).</item>
+///   <item>The result is scoped to the caller's CLAIMED tenants: the organizations the token asserts an
+///   organization claim for that exist — the SAME token-claim scope the accept route resolves against through
+///   its distinct claim-only path (<see cref="TenantContextResolver.ResolveClaimScopedAsync"/>), NOT a
+///   pre-existing membership (CORE-INV-003). An invitation is therefore discoverable in any tenant the caller
+///   can actually resolve and accept against, so a brand-new or cross-org invitee — who has no membership yet —
+///   discovers and accepts their invitation; an invitation in a tenant the token does not claim is never
+///   returned (threat T5). Matching within that scope is still ONLY ever the caller's verified email, so a token
+///   claim never surfaces another person's invitation.</item>
 ///   <item>The projection (<see cref="MyPendingWorkspaceInvitationResponse"/>) carries the organization slug,
 ///   workspace id, role, status and expiry — the fields the accept flow needs — and NEVER the token hash, the
 ///   one-time token (which does not exist on a stored invitation) nor any person's data, not even the caller's
 ///   own invited email (threats T6/T7).</item>
 /// </list>
 ///
-/// Persistence dependency: like the sibling <c>/me</c> reads, the handler uses the user-profile reference
-/// service, the organization repository and the workspace-invitation repository, registered only when a database
-/// connection string is configured (see <c>Program.cs</c>); when persistence is off the endpoint fails closed
-/// with 503.
+/// Persistence dependency: like the sibling <c>/me</c> reads, the handler uses the organization repository and
+/// the workspace-invitation repository, registered only when a database connection string is configured (see
+/// <c>Program.cs</c>); when persistence is off the endpoint fails closed with 503.
 /// </summary>
 internal static class MeInvitationEndpoints
 {
@@ -119,25 +120,40 @@ internal static class MeInvitationEndpoints
             return Results.Ok(EmptyPage(pageOffset, pageLimit));
         }
 
-        // The caller's CLAIMED tenants: the organizations the caller both holds a persisted membership in AND the
-        // token asserts a claim for — the exact intersection GET /api/v1/me exposes and the tenant resolver (and
-        // so the accept route) requires (threat T5). Resolving the profile is the canonical "current user"
-        // resolution (idempotent on first sight), mirroring the sibling /me reads.
-        var profile = await deps.UserProfiles
-            .EnsureUserProfileAsync(principal, cancellationToken)
-            .ConfigureAwait(false);
+        // The caller's CLAIMED tenants (CORE-INV-003): the organizations the token asserts an organization claim
+        // for that exist — NO persisted membership required. This is the SAME token-claim scope the accept route
+        // resolves against (the distinct claim-only path), so a brand-new or cross-org invitee — who has no
+        // membership yet, and who the previous membership-AND-claim intersection left with a dead, empty list —
+        // discovers an invitation addressed to them and can then accept it. The match below is still ONLY ever the
+        // caller's VERIFIED email, so a token claim never surfaces another person's invitation. A claim value that
+        // is not even slug-shaped, or that names no organization, is simply skipped (never an error); matching the
+        // organization is exact (canonical, ordinal) so a near-match claim never crosses the tenant boundary
+        // (threat T5).
+        var claimedTenantsById = new Dictionary<Guid, Organization>();
+        foreach (var organizationClaim in principal.OrganizationClaims)
+        {
+            string canonicalSlug;
+            try
+            {
+                canonicalSlug = Organization.CanonicalizeSlug(organizationClaim);
+            }
+            catch (ArgumentException)
+            {
+                // A claim value that is not even a valid slug shape can name no tenant; skip it.
+                continue;
+            }
 
-        var memberships = await deps.Organizations
-            .ListMembershipsByMemberAsync(profile.Id, cancellationToken)
-            .ConfigureAwait(false);
+            var organization = await deps.Organizations
+                .FindBySlugAsync(canonicalSlug, cancellationToken)
+                .ConfigureAwait(false);
+            if (organization is not null)
+            {
+                claimedTenantsById[organization.Id] = organization;
+            }
+        }
 
-        var claimedTenantsById = memberships
-            .Where(membership => principal.HasOrganizationClaim(membership.Organization.Slug))
-            .Select(membership => membership.Organization)
-            .GroupBy(organization => organization.Id)
-            .ToDictionary(group => group.Key, group => group.First());
-
-        // No claimed tenant means nothing the caller can be invited into and accept against: an empty page.
+        // No claimed tenant resolves to a real organization: nothing the caller can be invited into and accept
+        // against, so an empty page.
         if (claimedTenantsById.Count == 0)
         {
             return Results.Ok(EmptyPage(pageOffset, pageLimit));
@@ -183,17 +199,16 @@ internal static class MeInvitationEndpoints
     private static bool TryGetDependencies(HttpContext httpContext, out MeInvitationEndpointDependencies dependencies)
     {
         var services = httpContext.RequestServices;
-        var userProfiles = services.GetService<UserProfileReferenceService>();
         var organizations = services.GetService<IOrganizationRepository>();
         var invitations = services.GetService<IWorkspaceInvitationRepository>();
 
-        if (userProfiles is null || organizations is null || invitations is null)
+        if (organizations is null || invitations is null)
         {
             dependencies = default;
             return false;
         }
 
-        dependencies = new MeInvitationEndpointDependencies(userProfiles, organizations, invitations);
+        dependencies = new MeInvitationEndpointDependencies(organizations, invitations);
         return true;
     }
 
@@ -243,7 +258,6 @@ internal static class MeInvitationEndpoints
             detail: detail);
 
     private readonly record struct MeInvitationEndpointDependencies(
-        UserProfileReferenceService UserProfiles,
         IOrganizationRepository Organizations,
         IWorkspaceInvitationRepository WorkspaceInvitations);
 }
