@@ -24,7 +24,7 @@
          justified new dependency: implementing S3 SigV4 pre-signing by hand would be security-sensitive
          crypto we should not reimplement. Endpoint and credentials are supplied at runtime via configuration
          only (Assets:Storage:*); none live in source (threat T7). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.25.1" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.25.3" />
     <!-- Official Microsoft package that implements the documented OIDC-first
          request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
          validation against the external OIDC provider. Patch-aligned to the other
@@ -132,8 +132,8 @@
          span never captures SQL text or parameters (SetDbStatementForText defaults off) and no span carries a
          token, tenant identifier or content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md). Version-aligned to
          the latest stable instrumentation releases compatible with the 1.16.0 OpenTelemetry SDK above. -->
-    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.16.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.16.0" />
     <!-- Prerelease justification (CORE-CMP-002; AGENTS.md "no new dependencies without explicit justification"
          applies equally to keeping a -beta in a release build), mirroring the Prometheus exporter above. The EF
          Core trace instrumentation is pinned to 1.15.1-beta.1 — a -beta alongside the stable AspNetCore/Http
