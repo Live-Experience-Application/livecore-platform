@@ -324,9 +324,10 @@ public sealed class WorkerInclusiveJourneyEndpointTests
         var organization = await CreateOrganizationAsync(hostClient, _orgSlug, "Northwind Labs");
         var workspaceId = await CreateWorkspaceAsync(hostClient, _orgSlug, "summer-show", "Summer Show");
 
-        // Minimal bootstrap with NO public write route: the host's WORKSPACE membership, the participants'
-        // ORGANIZATION memberships and the PARTICIPANT records (there is no participant-create endpoint, only
-        // join/leave over an existing participant). The host's org Owner membership was produced by org-create.
+        // Minimal bootstrap with NO public write route: the participants' ORGANIZATION memberships and the
+        // PARTICIPANT records (there is no participant-create endpoint, only join/leave over an existing
+        // participant). The host's org Owner membership was produced by org-create and the host's WORKSPACE
+        // founding-Owner membership by workspace-create (CORE-WS-009), so neither is seeded here.
         Guid hostUserProfileId = Guid.Empty;
         Guid participantAId = Guid.Empty;
         Guid participantBId = Guid.Empty;
@@ -334,7 +335,6 @@ public sealed class WorkerInclusiveJourneyEndpointTests
         {
             var hostProfile = await db.UserProfiles.SingleAsync(u => u.Issuer == _issuer && u.SubjectId == _hostSubject);
             hostUserProfileId = hostProfile.Id;
-            await db.AddWorkspaceMemberAsync(organization.Id, workspaceId, hostProfile.Id, MembershipRole.Host);
 
             var participantAUser = await db.AddUserAsync(_issuer, _participantASubject);
             var participantBUser = await db.AddUserAsync(_issuer, _participantBSubject);

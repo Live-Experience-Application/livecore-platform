@@ -25,7 +25,10 @@ namespace LiveCore.Api.Workspaces;
 ///   <item><c>GET  /api/v1/workspaces</c> — list, filtered to the caller's
 ///   memberships within the target organization (all membership roles).</item>
 ///   <item><c>POST /api/v1/workspaces</c> — create a generic workspace,
-///   authorized by the caller's organization role (Owner or Admin).</item>
+///   authorized by the caller's organization role (Owner or Admin). The creating
+///   principal is atomically enrolled as the workspace's founding Owner member in
+///   the same unit of work (CORE-WS-009), so the new workspace is immediately
+///   visible to its creator through the membership-scoped list and read.</item>
 ///   <item><c>GET  /api/v1/workspaces/{workspaceId}</c> — read, workspace
 ///   members only; non-member or cross-tenant is hidden as 404.</item>
 ///   <item><c>PUT  /api/v1/workspaces/{workspaceId}</c> — rename (the update
@@ -371,16 +374,46 @@ internal static class WorkspaceEndpoints
         var now = timeProvider.GetUtcNow();
         var workspace = Workspace.Create(context.OrganizationId, canonicalSlug, request.Name!.Trim(), now);
 
-        // The workspace insert + the idempotency-key record commit atomically (CORE-DX-004). A duplicate slug
-        // produces no recordable resource, so the key is not recorded (its result selector returns null) and a
-        // corrected retry under the same key can still succeed. A concurrent first request that won the unique
-        // (scope, key) race makes this one a replay (Replayed) instead of a second create.
+        // FOUNDING MEMBERSHIP (CORE-WS-009): the creating principal is enrolled as the new workspace's founding
+        // Owner member, mirroring how org create atomically adds the founding owner (OrganizationRepository
+        // .AddWithOwnerAsync) so a workspace is never left without a member. Without this row the membership-scoped
+        // list and read return nothing — the creator could not see the workspace they just made. The membership is
+        // minted here (a stable UUIDv7 + timestamp) and inserted INSIDE the create delegate below so it shares the
+        // workspace insert's transaction.
+        var founder = WorkspaceMember.Create(
+            context.OrganizationId, workspace.Id, context.UserProfileId, MembershipRole.Owner, now);
+
+        // The workspace insert + the founding-owner membership + the idempotency-key record commit atomically
+        // (CORE-DX-004; the create delegate runs inside the CORE-CONC-002 unit of work). A duplicate slug produces
+        // no recordable resource, so the founding member is not added, the key is not recorded (its result selector
+        // returns null) and a corrected retry under the same key can still succeed. A concurrent first request that
+        // won the unique (scope, key) race makes this one a replay (Replayed) — its membership insert is rolled back
+        // with the abandoned workspace — instead of a second create.
         var creation = await deps.Idempotency
             .CreateAsync(
                 idempotencyKey,
                 idempotencyScope,
                 now,
-                create: createCancellationToken => deps.Workspaces.AddAsync(workspace, createCancellationToken),
+                create: async createCancellationToken =>
+                {
+                    var addResult = await deps.Workspaces
+                        .AddAsync(workspace, createCancellationToken)
+                        .ConfigureAwait(false);
+
+                    // Enroll the founding Owner in the SAME transaction, but ONLY when the workspace row was
+                    // actually inserted: a duplicate slug created no workspace, so it gets no member. The workspace
+                    // is brand new (a fresh UUIDv7), so its (workspace_id, user_id) pair cannot pre-exist; the
+                    // unique index is the idempotency backstop (a retried create under an Idempotency-Key replays
+                    // the original workspace above and never reaches here, so no duplicate member is written).
+                    if (addResult == WorkspaceAddResult.Added)
+                    {
+                        await deps.WorkspaceMembers
+                            .AddAsync(founder, createCancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    return addResult;
+                },
                 resultIdSelector: addResult => addResult == WorkspaceAddResult.Added ? workspace.Id : (Guid?)null,
                 cancellationToken)
             .ConfigureAwait(false);
