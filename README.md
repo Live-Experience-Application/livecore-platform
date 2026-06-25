@@ -2505,20 +2505,32 @@ above were DI-registered but had **no production caller**, so the catalog's
 `ParticipantJoined`/`ParticipantLeft` were dead code at go-live. The join/leave HTTP routes
 now drive them (reusing the services — no parallel join/leave logic):
 
-| Method | Route                                                             | Authorized callers                             |
-| ------ | ----------------------------------------------------------------- | ---------------------------------------------- |
-| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/join`  | workspace `Owner`, `Admin`, `Host` or `CoHost` |
-| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/leave` | workspace `Owner`, `Admin`, `Host` or `CoHost` |
+| Method | Route                                                             | Authorized callers                                                                     |
+| ------ | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/join`  | workspace `Owner`, `Admin`, `Host` or `CoHost`, **or the participant's own principal** |
+| `POST` | `/api/v1/sessions/{sessionId}/participants/{participantId}/leave` | workspace `Owner`, `Admin`, `Host` or `CoHost`, **or the participant's own principal** |
 
 Like the lifecycle routes the target organization is a required `organizationSlug` **query**
 parameter (the path carries no organization), turned into a trusted `TenantContext` by the
 `TenantContextResolver` (token claim **and** persisted membership, threat T5); the session is
 then loaded within that tenant, its workspace discovered from the loaded row, and the command
-authorized by the caller's role in the **session's own workspace**. Managing presence is a
-session-control action, so the authorized roles are exactly the `Owner`/`Admin`/`Host`/`CoHost`
-set the start/end/cancel commands use — a non-member is hidden as `404` (never learns the
-session exists), a known member without a control role is `403`, and a foreign-tenant session
-is hidden as `404` (threats T1/T5). Object-level participant decisions stay inside the reused
+authorized by the caller's standing in the **session's own workspace**. Two principals may
+record a participant's presence (CORE-PSELF-003): a **session-control role**
+(`Owner`/`Admin`/`Host`/`CoHost`, exactly the set the start/end/cancel commands use) may admit
+or remove **any** participant (host-driven presence, unchanged), **and** the principal that
+**owns** the target participant may record its **own** presence even without a control role —
+ownership is decided server-side by matching the caller's resolved user-profile id to the
+participant's `user_id` (`Participant.BelongsToSubject`), never a client-supplied id, so a
+caller can only ever self-join/leave **as itself**. Combined with the CORE-PSELF-002
+self-provision, a single authenticated audience member can both obtain its participant and join
+with **no host step**; self-join and self-leave route through the **same**
+`JoinAsync`/`LeaveAsync` services, so the catalogued `ParticipantJoined`/`ParticipantLeft`
+events are appended and delivered exactly as for host admission (no new event type). Authorization
+is **not** loosened: a non-member is hidden as `404` (never learns the session exists), a
+foreign-tenant session is hidden as `404`, a participant outside the session's workspace/tenant
+is a hidden `404`, and a known workspace member who is **neither** a control role **nor** the
+participant's owner is an unrelated caller denied `403` (threats T1/T5). Object-level participant
+decisions stay inside the reused
 services: a participant outside the session's tenant/workspace is a hidden `404`, a removed
 participant or an ended session is `409`, and a join that would exceed the
 `session.participant.max` cap is `409` (the limit, not the caller, is the reason) — so the

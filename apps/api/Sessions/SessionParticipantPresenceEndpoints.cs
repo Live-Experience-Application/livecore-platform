@@ -6,6 +6,7 @@ using LiveCore.Api.Audit;
 using LiveCore.Api.Entitlements;
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.Participants;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -38,12 +39,22 @@ namespace LiveCore.Api.Sessions;
 ///   second event.</item>
 /// </list>
 ///
-/// Authorization model — HOST-DRIVEN presence (object-level, server-side; docs/06_AUTHORIZATION_MATRIX.md;
-/// threats T1/T5), load-then-authorize, fail-closed at every step and never leaking why. Managing who is present
-/// in a session is a session-control action, so the routes are authorized to exactly the session-control roles
-/// the start/end/cancel commands use — <c>Owner</c>, <c>Admin</c>, <c>Host</c>, <c>CoHost</c> — in the SESSION'S
-/// OWN workspace (the recipients of the presence events are "Host/CoHost and configured audience",
-/// docs/09_EVENT_CATALOG.md). The pipeline is identical to the lifecycle commands:
+/// Authorization model — HOST admission OR self-service presence (object-level, server-side;
+/// docs/06_AUTHORIZATION_MATRIX.md; threats T1/T5), load-then-authorize, fail-closed at every step and never
+/// leaking why. Two principals may record a participant's presence:
+/// <list type="bullet">
+///   <item>HOST admission — a session-control role (<c>Owner</c>, <c>Admin</c>, <c>Host</c>, <c>CoHost</c>) in
+///   the SESSION'S OWN workspace may admit or remove ANY participant, exactly the role set the start/end/cancel
+///   commands use (the recipients of the presence events are "Host/CoHost and configured audience",
+///   docs/09_EVENT_CATALOG.md). This is the original, unchanged path.</item>
+///   <item>SELF-SERVICE presence (CORE-PSELF-003, the "Participant Self-Service Lifecycle" epic) — the principal
+///   that OWNS the target participant may record its OWN presence even without a control role, so a self-provisioned
+///   audience member (CORE-PSELF-002) can join and leave with no host step. The owning principal is decided
+///   server-side by matching the caller's resolved user profile to the target participant's <c>user_id</c>
+///   (<see cref="Participant.BelongsToSubject"/>), never a client-supplied claim, so a caller can only ever record
+///   its OWN presence and never another participant's.</item>
+/// </list>
+/// The pipeline is identical to the lifecycle commands, branching only on the authorization test:
 /// <list type="bullet">
 ///   <item>The principal is mapped fail-closed from the request's <see cref="ClaimsPrincipal"/>; a failed mapping
 ///   is 401 (the route group also challenges an anonymous caller before any handler runs).</item>
@@ -52,10 +63,14 @@ namespace LiveCore.Api.Sessions;
 ///   exists; threat T5).</item>
 ///   <item>A session not present in the resolved tenant is hidden as 404; a caller who is not a member of the
 ///   session's workspace is ALSO hidden as 404 (a non-member must not learn the session exists; threats T1/T5),
-///   never 403.</item>
-///   <item>A known workspace member who lacks the session-control role is 403. <see cref="MembershipRole"/> is
+///   never 403 — so a foreign-tenant or non-member caller stays a fail-closed 404 even on the self-service path.</item>
+///   <item>A workspace member with a session-control role is authorized as a HOST. <see cref="MembershipRole"/> is
 ///   non-linear, so the role check is EXACT (role == Owner || == Admin || == Host || == CoHost), never an
 ///   ordering comparison.</item>
+///   <item>A workspace member WITHOUT a control role is authorized for SELF-SERVICE only: the target participant
+///   is loaded WITHIN the session's (organization, workspace) boundary, a participant outside that boundary is
+///   hidden as 404 (indistinguishable from a missing one; threats T1/T5), and a member targeting a participant it
+///   does NOT own is an unrelated caller denied 403.</item>
 /// </list>
 ///
 /// Object-level participant decisions stay inside the reused services, so a participant outside the session's
@@ -203,12 +218,12 @@ internal static class SessionParticipantPresenceEndpoints
     /// <summary>
     /// Runs the shared fail-closed authorization pipeline for both presence verbs — dependencies, principal,
     /// organization, session/participant ids, tenant resolution, session load (to discover the session's
-    /// workspace inside the tenant boundary) and the exact non-linear workspace-role check. Returns the resolved
+    /// workspace inside the tenant boundary) and the host-OR-self authorization test. Returns the resolved
     /// <see cref="AuthorizedPresenceCommand"/> when the caller is allowed, or a fail-closed
     /// <see cref="PresenceAuthorization.Failure"/> response (503/401/400/404/403) otherwise, so a verb handler
     /// only ever reaches the join/leave service for an authorized command. The pipeline is identical for join and
-    /// leave because managing presence is a session-control action authorized to the same roles, exactly like the
-    /// start/end/cancel commands.
+    /// leave: a session-control role may manage ANY participant (host admission), while the participant's OWN
+    /// principal may record only its own presence (self-service, CORE-PSELF-003).
     /// </summary>
     private static async Task<PresenceAuthorization> AuthorizeAsync(
         HttpContext httpContext,
@@ -269,6 +284,8 @@ internal static class SessionParticipantPresenceEndpoints
         // Object-level authorization: the caller must be a member of the SESSION'S workspace. A caller who is a
         // member of the tenant but NOT of the session's workspace must not learn the session exists, so a missing
         // membership is hidden as 404 (not 403) — the same rule as the session start/end routes (threats T1/T5).
+        // This is enforced for BOTH the host and the self-service paths, so a foreign-tenant or non-member caller
+        // stays a fail-closed 404 even when it claims to own the participant.
         var member = await deps.WorkspaceMembers
             .FindAsync(context.OrganizationId, session.WorkspaceId, context.UserProfileId, cancellationToken)
             .ConfigureAwait(false);
@@ -277,20 +294,47 @@ internal static class SessionParticipantPresenceEndpoints
             return PresenceAuthorization.Denied(HiddenSession());
         }
 
-        // The caller is a known member of the session's workspace, so an insufficient role is a 403 (authorized
-        // to know the session exists, but not to manage its participants). Managing presence is a session-control
-        // action, so the roles are exactly the start/end/cancel set "Owner,Admin,Host,CoHost". MembershipRole is
-        // non-linear, so this is an EXACT set membership check, never a >/< ordering comparison.
-        if (!(member.HasRole(MembershipRole.Owner)
+        // HOST admission: a session-control role may manage ANY participant's presence. Managing presence is a
+        // session-control action, so the roles are exactly the start/end/cancel set "Owner,Admin,Host,CoHost".
+        // MembershipRole is non-linear, so this is an EXACT set membership check, never a >/< ordering comparison.
+        var isSessionController = member.HasRole(MembershipRole.Owner)
             || member.HasRole(MembershipRole.Admin)
             || member.HasRole(MembershipRole.Host)
-            || member.HasRole(MembershipRole.CoHost)))
+            || member.HasRole(MembershipRole.CoHost);
+
+        if (!isSessionController)
         {
-            return PresenceAuthorization.Denied(Forbidden());
+            // SELF-SERVICE presence (CORE-PSELF-003): a workspace member WITHOUT a control role may still record
+            // its OWN presence, but only for the participant it owns. Load the target participant WITHIN the
+            // session's (organization, workspace) boundary so the ownership test is tenant/workspace-safe; the
+            // lookup leads with the organization id, so a participant in another tenant or workspace is never
+            // returned (threats T1/T5). The reused JoinAsync/LeaveAsync service re-loads and re-validates the
+            // participant, so this load decides ONLY authorization, never the object-level command itself.
+            var participant = await deps.Participants
+                .FindByIdAsync(context.OrganizationId, session.WorkspaceId, participantGuid, cancellationToken)
+                .ConfigureAwait(false);
+            if (participant is null)
+            {
+                // The participant does not exist in the session's workspace/tenant: hidden as 404,
+                // indistinguishable from a missing one, never echoing why (threats T1/T5).
+                return PresenceAuthorization.Denied(HiddenSession());
+            }
+
+            // The caller is a known member of the session's workspace (so it may learn the session and its
+            // participants exist — the roster already lists them), but it neither holds a control role nor owns the
+            // target participant. It is an unrelated caller trying to control another participant's presence, so it
+            // is denied 403 (authorized to know they exist, not to act on another's behalf). The ownership match is
+            // server-resolved from the caller's own user profile, never a client-supplied claim, so a caller can
+            // only ever record ITS OWN presence (threats T1/T5).
+            if (!participant.BelongsToSubject(context.UserProfileId))
+            {
+                return PresenceAuthorization.Denied(Forbidden());
+            }
         }
 
-        // Authorized: carry the validated, tenant- and workspace-scoped ids and the reused services to the verb
-        // handler, so it can never act on unauthorized or cross-tenant ids.
+        // Authorized — as a host (any participant) or as the participant's own principal (self-service). Carry the
+        // validated, tenant- and workspace-scoped ids and the reused services to the verb handler, so it can never
+        // act on unauthorized or cross-tenant ids.
         return PresenceAuthorization.Allowed(new AuthorizedPresenceCommand(
             context.OrganizationId,
             session.WorkspaceId,
@@ -314,6 +358,7 @@ internal static class SessionParticipantPresenceEndpoints
         var resolver = services.GetService<TenantContextResolver>();
         var sessions = services.GetService<ISessionRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
+        var participants = services.GetService<IParticipantRepository>();
         var join = services.GetService<SessionParticipantJoinService>();
         var leave = services.GetService<SessionParticipantLeaveService>();
         var auditLog = services.GetService<IAuditLogRepository>();
@@ -322,6 +367,7 @@ internal static class SessionParticipantPresenceEndpoints
         if (resolver is null
             || sessions is null
             || workspaceMembers is null
+            || participants is null
             || join is null
             || leave is null
             || auditLog is null
@@ -332,7 +378,7 @@ internal static class SessionParticipantPresenceEndpoints
         }
 
         dependencies = new PresenceEndpointDependencies(
-            resolver, sessions, workspaceMembers, join, leave, auditLog, clock);
+            resolver, sessions, workspaceMembers, participants, join, leave, auditLog, clock);
         return true;
     }
 
@@ -436,6 +482,7 @@ internal static class SessionParticipantPresenceEndpoints
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
         IWorkspaceMemberRepository WorkspaceMembers,
+        IParticipantRepository Participants,
         SessionParticipantJoinService Join,
         SessionParticipantLeaveService Leave,
         IAuditLogRepository AuditLog,
