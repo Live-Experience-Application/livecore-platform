@@ -1923,12 +1923,23 @@ surrogate `participantId` out of band. The caller's participant is resolved
 entirely server-side from the authenticated principal
 (`IParticipantRepository.FindByUserAsync`), never a client-supplied id, so a caller
 can only ever resolve itself; the response carries only the caller's own identity
-(no other participant, no host-only user link), and a caller who is not a
-participant of the session, a removed participant, a foreign tenant and an unknown
-session are all hidden as `404`, fail-closed. The audience roster projection
-(`GET /api/v1/sessions/{sessionId}/roster`) additionally carries a server-computed
-`isSelf` marker, true only for the caller's own entry, leaking no other
-participant's user id.
+(no other participant, no host-only user link).
+
+On the **first** session-self read by a caller who has no participant yet, this
+route **self-provisions** one (CORE-PSELF-002) — but **only** when the caller is a
+member of the session's own workspace (`IWorkspaceMemberRepository.IsMemberAsync`):
+the participant is created via `Participant.Create` linked to the caller's own
+resolved user profile (never a client-supplied id) with the token subject as the
+initial display name, idempotent on the unique `(workspace_id, user_id)` index, so
+a re-call returns the same stable `participantId` and never a second participant.
+This makes the whole audience surface (the visible feed and the roster) reachable
+for any authenticated workspace member without a host pre-creating a participant.
+Authorization is **not** loosened: a tenant member who is not a member of the
+session's workspace (so it cannot self-provision), a removed participant, a foreign
+tenant and an unknown session are all hidden as `404`, never `403`, fail-closed.
+The audience roster projection (`GET /api/v1/sessions/{sessionId}/roster`)
+additionally carries a server-computed `isSelf` marker, true only for the caller's
+own entry, leaking no other participant's user id.
 
 ### Organization create and read
 

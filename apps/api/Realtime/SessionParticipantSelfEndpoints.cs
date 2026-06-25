@@ -5,6 +5,7 @@ using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
 using LiveCore.Api.Participants;
 using LiveCore.Api.Sessions;
+using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LiveCore.Api.Realtime;
@@ -48,18 +49,27 @@ namespace LiveCore.Api.Realtime;
 ///   leading with the organization id), so a session in another tenant is never returned even when the surrogate
 ///   id matches; a cross-tenant or unknown session is hidden as 404 (threats T1/T5). The session's own workspace
 ///   id is discovered from the loaded row AFTER the tenant boundary is enforced.</item>
-///   <item>The caller's own participant is then resolved within that tenant and the session's workspace. A caller
-///   who is NOT a participant of the session — including a tenant member who never joined as a participant — is
-///   hidden as 404 (never 403), so a non-participant cannot probe for the session's existence (threats T1/T5).
+///   <item>The caller's own participant is then resolved within that tenant and the session's workspace. When no
+///   participant exists yet, this read SELF-PROVISIONS one on the FIRST session-self read (CORE-PSELF-002) —
+///   but ONLY when the caller is a member of the session's OWN workspace
+///   (<see cref="IWorkspaceMemberRepository.IsMemberAsync"/>): the participant is created via
+///   <see cref="Participant.Create"/> linked to the caller's own resolved user profile (never a client-supplied
+///   id) with the token subject as the initial display name, through the Participants-owned
+///   <see cref="IParticipantRepository.AddAsync"/>, idempotent on the unique (workspace_id, user_id) index, so a
+///   re-call returns the SAME stable participant id and never a second participant. Authorization is NOT
+///   loosened: a tenant member who is NOT a member of that workspace, and a foreign/unknown caller, both stay a
+///   fail-closed 404 (never 403), so a non-member cannot probe for the session's existence (threats T1/T5).
 ///   A REMOVED participant holds no standing (it has left the audience, exactly as the roster excludes it and the
-///   visible-feed hides it) and is likewise hidden as 404.</item>
+///   visible-feed hides it): one already exists for the caller, so it is not re-provisioned and is likewise
+///   hidden as 404.</item>
 /// </list>
 ///
 /// Persistence dependency: like the roster/recap/replay endpoints, this uses the tenant context resolver and the
-/// session and participant repositories, registered only when a database connection string is configured (see
-/// <c>Program.cs</c>); when persistence is off the endpoint fails closed with 503. The
+/// session, workspace-member and participant repositories, registered only when a database connection string is
+/// configured (see <c>Program.cs</c>); when persistence is off the endpoint fails closed with 503. The
 /// <see cref="RealtimeConnectionRegistry"/> it reads presence from is registered unconditionally (no database
-/// dependency).
+/// dependency). The <see cref="TimeProvider"/> that stamps a self-provisioned participant is registered
+/// unconditionally too.
 /// </summary>
 internal static class SessionParticipantSelfEndpoints
 {
@@ -86,6 +96,7 @@ internal static class SessionParticipantSelfEndpoints
         HttpContext httpContext,
         string sessionId,
         [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         if (!TryGetDependencies(httpContext, out var deps))
@@ -139,15 +150,25 @@ internal static class SessionParticipantSelfEndpoints
 
         // Resolve the CALLER'S OWN participant — server-side, from the authenticated principal via the existing
         // principal-to-participant mapping, scoped by the resolved tenant and the session's own workspace. Never a
-        // client-supplied id, so the caller can only ever resolve itself. A caller who is not a participant of the
-        // session (no participant record for this user in the session's workspace) is hidden as 404, never 403, so
-        // a non-participant cannot probe for the session's existence (threats T1/T5).
+        // client-supplied id, so the caller can only ever resolve itself.
         var participant = await deps.Participants
             .FindByUserAsync(context.OrganizationId, session.WorkspaceId, context.UserProfileId, cancellationToken)
             .ConfigureAwait(false);
         if (participant is null)
         {
-            return HiddenParticipant();
+            // FIRST session-self read by a caller who has no participant yet: SELF-PROVISION one (CORE-PSELF-002)
+            // when — and ONLY when — the caller is a member of the session's OWN workspace. A tenant member who is
+            // not a member of that workspace, and a foreign/unknown caller, both stay a fail-closed 404 (never 403),
+            // so a non-member cannot probe for the session's existence and authorization is NOT loosened (threats
+            // T1/T5). The created participant is linked to the caller's own resolved user profile, so the caller can
+            // only ever provision ITSELF.
+            participant = await SelfProvisionParticipantAsync(
+                    deps, principal, context, session.WorkspaceId, timeProvider, cancellationToken)
+                .ConfigureAwait(false);
+            if (participant is null)
+            {
+                return HiddenParticipant();
+            }
         }
 
         // A removed participant holds no standing — it has left the session audience, exactly as the roster
@@ -171,20 +192,23 @@ internal static class SessionParticipantSelfEndpoints
 
     /// <summary>
     /// Resolves the persistence-backed dependencies from the request scope. The tenant resolver and the
-    /// session/participant repositories exist only when a database connection string is configured; when absent,
-    /// the endpoint fails closed with 503 instead of throwing. The <see cref="RealtimeConnectionRegistry"/> is
-    /// registered unconditionally (no database dependency), so it is always present.
+    /// session/workspace-member/participant repositories exist only when a database connection string is
+    /// configured; when absent, the endpoint fails closed with 503 instead of throwing. The
+    /// <see cref="RealtimeConnectionRegistry"/> is registered unconditionally (no database dependency), so it is
+    /// always present.
     /// </summary>
     private static bool TryGetDependencies(HttpContext httpContext, out SelfEndpointDependencies dependencies)
     {
         var services = httpContext.RequestServices;
         var resolver = services.GetService<TenantContextResolver>();
         var sessions = services.GetService<ISessionRepository>();
+        var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var participants = services.GetService<IParticipantRepository>();
         var connections = services.GetService<RealtimeConnectionRegistry>();
 
         if (resolver is null
             || sessions is null
+            || workspaceMembers is null
             || participants is null
             || connections is null)
         {
@@ -192,7 +216,7 @@ internal static class SessionParticipantSelfEndpoints
             return false;
         }
 
-        dependencies = new SelfEndpointDependencies(resolver, sessions, participants, connections);
+        dependencies = new SelfEndpointDependencies(resolver, sessions, workspaceMembers, participants, connections);
         return true;
     }
 
@@ -212,6 +236,60 @@ internal static class SessionParticipantSelfEndpoints
 
         principal = result.Principal;
         return true;
+    }
+
+    /// <summary>
+    /// Self-provisions the caller's OWN participant in the session's workspace on the first session-self read
+    /// (CORE-PSELF-002), or returns <see langword="null"/> when the caller is not entitled to one (the caller
+    /// then returns a fail-closed hidden 404). A participant is created ONLY when the caller is a member of the
+    /// session's OWN workspace (<see cref="IWorkspaceMemberRepository.IsMemberAsync"/>, the SAME object-level
+    /// membership check the roster read uses): a tenant member who is not a member of that workspace, and a
+    /// foreign/unknown caller, both yield <see langword="null"/>, so authorization is NOT loosened (threats
+    /// T1/T5). The participant is created via <see cref="Participant.Create"/> linked to the caller's own
+    /// resolved user profile — never a client-supplied id, so the caller can only ever provision itself — with
+    /// the token subject as the initial display name (a stable, always-present, control-character-free value;
+    /// the participant may be renamed later), and persisted through the Participants-owned
+    /// <see cref="IParticipantRepository.AddAsync"/>. The create is IDEMPOTENT on the filtered unique
+    /// (workspace_id, user_id) index: a concurrent first read that won the create race makes this one a
+    /// <see cref="ParticipantAddResult.DuplicateUserParticipant"/>, which re-resolves the existing participant so
+    /// every caller returns the SAME stable participant id and no second participant is ever written.
+    /// </summary>
+    private static async Task<Participant?> SelfProvisionParticipantAsync(
+        SelfEndpointDependencies deps,
+        OidcPrincipal principal,
+        TenantContext context,
+        Guid workspaceId,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        // Object-level authorization is unchanged: only a member of the session's OWN workspace may self-provision.
+        // The membership read leads with the organization id then the session's workspace id, so a control role
+        // held in a DIFFERENT workspace never confers standing here (threat T5).
+        var isMember = await deps.WorkspaceMembers
+            .IsMemberAsync(context.OrganizationId, workspaceId, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (!isMember)
+        {
+            return null;
+        }
+
+        // Create the caller's participant, LINKED to its own resolved user profile (never a client-supplied id),
+        // with the token subject as the initial display name. Active by the aggregate factory.
+        var participant = Participant.Create(
+            context.OrganizationId, workspaceId, context.UserProfileId, principal.SubjectId, timeProvider.GetUtcNow());
+
+        var addResult = await deps.Participants.AddAsync(participant, cancellationToken).ConfigureAwait(false);
+        if (addResult == ParticipantAddResult.DuplicateUserParticipant)
+        {
+            // A concurrent first read created the participant first; the filtered unique (workspace_id, user_id)
+            // index rejected this second insert. Re-resolve the existing one so this caller returns the SAME stable
+            // id (idempotent) instead of a second participant.
+            return await deps.Participants
+                .FindByUserAsync(context.OrganizationId, workspaceId, context.UserProfileId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return participant;
     }
 
     private static IResult ServiceUnavailable()
@@ -236,8 +314,9 @@ internal static class SessionParticipantSelfEndpoints
             detail: $"The '{_organizationSlugQuery}' value is required.");
 
     // Self-resolution is hidden: a malformed session id, a session in a foreign or non-entitled tenant, an
-    // unknown session, a caller who is not a participant of the session and a removed participant are ALL reported
-    // as 404, never distinguishable from each other and never echoing the reason (docs/08; threats T1/T5).
+    // unknown session, a caller who is not a member of the session's workspace (so it cannot self-provision) and a
+    // removed participant are ALL reported as 404, never distinguishable from each other and never echoing the
+    // reason (docs/08; threats T1/T5).
     private static IResult HiddenParticipant()
         => CoreProblem.Create(
             statusCode: StatusCodes.Status404NotFound,
@@ -248,6 +327,7 @@ internal static class SessionParticipantSelfEndpoints
     private readonly record struct SelfEndpointDependencies(
         TenantContextResolver Resolver,
         ISessionRepository Sessions,
+        IWorkspaceMemberRepository WorkspaceMembers,
         IParticipantRepository Participants,
         RealtimeConnectionRegistry Connections);
 }

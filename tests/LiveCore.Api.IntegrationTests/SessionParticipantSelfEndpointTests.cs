@@ -30,8 +30,10 @@ namespace LiveCore.Api.IntegrationTests;
 ///   <item>SELF-ONLY / NO LEAK (threats T2/T7): the response carries ONLY the caller's own identity — no
 ///   host-only participant user link, and not a single OTHER participant's user id.</item>
 ///   <item>AUTHORIZATION (fail-closed): 401 unauthenticated; 400 missing organizationSlug; a malformed session id
-///   is 404; a member who is NOT a participant of the session, a REMOVED participant, a foreign tenant (token
-///   claim mismatch), and an unknown session are ALL hidden as 404, never 403.</item>
+///   is 404; a tenant member who is NOT a member of the session's workspace (so it cannot self-provision under
+///   CORE-PSELF-002), a REMOVED participant, a foreign tenant (token claim mismatch), and an unknown session are
+///   ALL hidden as 404, never 403. The first-read self-provisioning itself (CORE-PSELF-002) is covered by
+///   <see cref="SessionParticipantSelfProvisionEndpointTests"/>.</item>
 ///   <item>ISOLATION (threat T5): one tenant's session is never resolved through another tenant's slug.</item>
 /// </list>
 /// All fixtures are generic Core vocabulary (AGENTS.md).
@@ -176,12 +178,14 @@ public sealed class SessionParticipantSelfEndpointTests
     // ---- 404 hidden: non-participant / removed / foreign tenant / unknown ----
 
     [Fact]
-    public async Task Resolve_is_404_for_a_member_who_is_not_a_participant_of_the_session()
+    public async Task Resolve_is_404_for_a_tenant_member_who_is_not_a_member_of_the_sessions_workspace()
     {
-        // The caller is an org AND workspace member (a Host) of the session's workspace but holds NO participant
-        // record, so it has nothing to resolve — hidden as 404, never 403 (threats T1/T5).
+        // The caller is an org member (so tenant resolution succeeds) but is NOT a member of the session's OWN
+        // workspace and holds no participant record, so it cannot self-provision (CORE-PSELF-002) — hidden as 404,
+        // never 403, so authorization is not loosened (threats T1/T5). A workspace member in the same position
+        // would instead self-provision (see SessionParticipantSelfProvisionEndpointTests).
         await using var factory = new WorkspaceApiFactory();
-        const string subject = "host-not-participant";
+        const string subject = "tenant-member-not-in-workspace";
         Guid sessionId = Guid.Empty;
         await factory.SeedAsync(async db =>
         {
@@ -189,7 +193,7 @@ public sealed class SessionParticipantSelfEndpointTests
             var org = await db.AddOrganizationAsync(_orgA);
             await db.AddOrganizationMemberAsync(org.Id, user.Id, MembershipRole.Host);
             var ws = await db.AddWorkspaceAsync(org.Id, "summer-show", "Summer Show");
-            await db.AddWorkspaceMemberAsync(org.Id, ws.Id, user.Id, MembershipRole.Host);
+            // The caller is deliberately NOT enrolled as a member of this workspace.
             var session = await db.AddSessionAsync(org.Id, ws.Id, "Opening Night", SessionStatus.Live);
             sessionId = session.Id;
             // A different participant exists, but none linked to the caller.
