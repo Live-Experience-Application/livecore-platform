@@ -15,6 +15,8 @@ import type {
   AuditLogPageResponse,
   ContentBlockResponse,
   CurrentPrincipalResponse,
+  DownloadUrlRequest,
+  DownloadUrlResponse,
   EntityResponse,
   EntityTypeResponse,
   ExportArtifactResponse,
@@ -633,6 +635,20 @@ export type HideRequiresKey = Assert<
 >;
 export type HideKeyIsRequired = Assert<
   Equal<HideOptions, { idempotencyKey: string }>
+>;
+
+// Assets: getDownloadUrl takes the contract download request (the required org slug
+// plus the OPTIONAL session-scoped audience selector, CORE-DX-010) and returns the
+// download response. Passing only `{ organizationSlug }` stays valid (sessionId is
+// optional), so the prior host-path call is preserved.
+export type GetDownloadUrlParamsIsDownloadUrlRequest = Assert<
+  Equal<Parameters<AssetsClient["getDownloadUrl"]>[1], DownloadUrlRequest>
+>;
+export type GetDownloadUrlReturn = Assert<
+  Equal<
+    Awaited<ReturnType<AssetsClient["getDownloadUrl"]>>,
+    DownloadUrlResponse
+  >
 >;
 
 // Assets: the link delete and the asset delete are `204` voids.

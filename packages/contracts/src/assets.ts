@@ -73,6 +73,30 @@ export interface ConfirmUploadResponse {
   updatedAt: IsoDateTimeString;
 }
 
+/**
+ * Request (query) shape for `GET /api/v1/assets/{assetId}/download-url` (CORE-DX-010).
+ *
+ * The organization slug is always required. The optional `sessionId` selects the
+ * SESSION-scoped audience authorization path (CORE-SVIS-003/004): a reveal is
+ * session-scoped, so an audience (Participant/Observer) caller obtains a download URL
+ * for an asset revealed to them in a session by naming that session; it is forwarded
+ * as the `?sessionId=` query parameter. Omitting it preserves the prior host-path
+ * behaviour (a host-content role downloads session-agnostically); an audience caller
+ * that omits it is refused server-side (`400`), so the parameter is what unblocks an
+ * audience download.
+ */
+export interface DownloadUrlRequest {
+  /** Canonical slug of the organization that owns the asset's workspace. */
+  organizationSlug: string;
+  /**
+   * Optional session the audience download is scoped to, forwarded as the
+   * `?sessionId=` query parameter. A reveal is session-scoped, so an audience caller
+   * supplies the session an asset was revealed to them in; a host-content role needs
+   * none. Omitting it preserves the prior host-path behaviour.
+   */
+  sessionId?: Uuid;
+}
+
 /** Response body of `GET /api/v1/assets/{assetId}/download-url`. */
 export interface DownloadUrlResponse {
   /** Surrogate id of the asset whose object the URL downloads. */

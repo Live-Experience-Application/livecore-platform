@@ -36,6 +36,14 @@ The Core SDK and UI packages are released together (lockstep), so every
   role-projected entities (an audience caller only ever receives the entities the server
   reveals to them in the named session — a participant search never returns an unrevealed
   entity). An additive type (a MINOR change).
+- The asset download request shape `DownloadUrlRequest` (CORE-DX-010), for
+  `GET /api/v1/assets/{assetId}/download-url`. It carries the required `organizationSlug`
+  plus an OPTIONAL `sessionId` forwarded as the `?sessionId=` query parameter: a reveal is
+  session-scoped, so naming the session takes the session-scoped audience authorization
+  path (CORE-SVIS-003/004) and lets an audience (Participant/Observer) caller obtain a
+  download URL for an asset revealed to them, which was otherwise a permanent `400`.
+  Omitting it preserves the prior host-path behaviour. An additive type (a MINOR change);
+  no wire-contract change (the route already honoured the parameter).
 
 ## [0.4.0] - 2026-06-23
 

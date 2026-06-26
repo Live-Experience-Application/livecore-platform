@@ -1206,6 +1206,108 @@ test("assets: link delete and asset delete are 204 DELETEs", async () => {
   );
 });
 
+test("getDownloadUrl forwards the sessionId query when provided and omits it otherwise (CORE-DX-010)", async () => {
+  const { client, calls } = makeClient({
+    handler: () =>
+      jsonResponse(200, {
+        assetId: "a-1",
+        status: "Available",
+        contentType: "application/pdf",
+        downloadUrl: "https://storage.example.test/a-1?sig=x",
+        expiresAt: "2026-06-26T00:15:00+00:00",
+      }),
+  });
+
+  // An audience caller forwards the session an asset was revealed to them in, as the
+  // ?sessionId= query parameter (the session-scoped audience download path).
+  await client.assets.getDownloadUrl("a-1", {
+    organizationSlug: "acme",
+    sessionId: "sess-1",
+  });
+  assert.equal(
+    calls[0].url,
+    "https://core.example.test/api/v1/assets/a-1/download-url?organizationSlug=acme&sessionId=sess-1",
+  );
+  assert.equal(calls[0].init.method, "GET");
+
+  // Omitting sessionId preserves the prior host-path URL — no sessionId parameter.
+  await client.assets.getDownloadUrl("a-1", { organizationSlug: "acme" });
+  assert.equal(
+    calls[1].url,
+    "https://core.example.test/api/v1/assets/a-1/download-url?organizationSlug=acme",
+  );
+});
+
+test("an audience caller downloads a revealed asset by passing sessionId, is 400 without it, and is refused an asset not revealed to them (CORE-DX-010, server-gated)", async () => {
+  // A fake Core that gates the audience download exactly as the server does
+  // (CORE-SVIS-003/004): an audience caller MUST name the session, and may obtain a
+  // URL only for an asset revealed to them IN THAT session. "revealed-asset" is
+  // revealed to the caller in "sess-revealed"; "secret-asset" is not revealed to them.
+  const { client } = makeClient({
+    handler: (url) => {
+      const query = new URL(url).searchParams;
+      const assetId = url.split("/assets/")[1].split("/")[0];
+      const sessionId = query.get("sessionId");
+      if (sessionId === null) {
+        // The audience download is session-scoped; omitting the session is the
+        // request-shape 400 this story fixes (the SDK previously could not send one).
+        return jsonResponse(400, {
+          title: "Bad Request",
+          status: 400,
+          code: "validation_error",
+        });
+      }
+      if (assetId === "revealed-asset" && sessionId === "sess-revealed") {
+        return jsonResponse(200, {
+          assetId,
+          status: "Available",
+          contentType: "application/pdf",
+          downloadUrl: "https://storage.example.test/revealed?sig=x",
+          expiresAt: "2026-06-26T00:15:00+00:00",
+        });
+      }
+      // Linked but NOT revealed to this caller in this session: a server-gated denial.
+      return jsonResponse(403, { title: "Forbidden", status: 403 });
+    },
+  });
+
+  // POSITIVE: naming the revealed session yields the signed download URL — the fix.
+  const ok = await client.assets.getDownloadUrl("revealed-asset", {
+    organizationSlug: "acme",
+    sessionId: "sess-revealed",
+  });
+  assert.equal(ok.status, "Available");
+  assert.ok(ok.downloadUrl.startsWith("https://"));
+
+  // REGRESSION the story fixes: an audience download with no sessionId stays a 400.
+  await assert.rejects(
+    () =>
+      client.assets.getDownloadUrl("revealed-asset", {
+        organizationSlug: "acme",
+      }),
+    (error) => {
+      assert.ok(isLiveCoreApiError(error));
+      assert.equal(error.status, 400);
+      return true;
+    },
+  );
+
+  // NEGATIVE (server-gated): an asset NOT revealed to this caller is refused even
+  // with a valid session — the SDK never turns the denial into a success value.
+  await assert.rejects(
+    () =>
+      client.assets.getDownloadUrl("secret-asset", {
+        organizationSlug: "acme",
+        sessionId: "sess-revealed",
+      }),
+    (error) => {
+      assert.ok(isLiveCoreApiError(error));
+      assert.equal(error.status, 403);
+      return true;
+    },
+  );
+});
+
 test("each dedupe-capable create forwards a supplied Idempotency-Key header (CORE-DX-008)", async () => {
   const { client, calls } = makeClient({
     handler: () => jsonResponse(201, { id: "r-1" }),

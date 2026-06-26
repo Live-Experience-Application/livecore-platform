@@ -16,6 +16,7 @@ import type {
   ConfirmUploadResponse,
   CreateAssetLinkRequest,
   CreateUploadIntentRequest,
+  DownloadUrlRequest,
   DownloadUrlResponse,
   PageResponse,
   UploadIntentResponse,
@@ -119,15 +120,26 @@ export class AssetsClient {
    * `GET /api/v1/assets/{assetId}/download-url` — a short-lived signed download
    * URL for an `Available` asset, after the server's permission check. A still
    * `Pending` asset is `409`.
+   *
+   * Pass an optional {@link DownloadUrlRequest.sessionId} to take the SESSION-scoped
+   * audience authorization path (CORE-DX-010): a reveal is session-scoped, so an
+   * audience (Participant/Observer) caller obtains a download URL for an asset
+   * revealed to them in a session by naming that session — forwarded as the
+   * `?sessionId=` query parameter. Omitting it preserves the prior host-path
+   * behaviour (a host-content role downloads session-agnostically); an audience
+   * caller that omits it is refused server-side (`400`).
    */
   getDownloadUrl(
     assetId: Uuid,
-    params: { organizationSlug: string },
+    params: DownloadUrlRequest,
   ): Promise<DownloadUrlResponse> {
     return this.http.send<DownloadUrlResponse>({
       method: "GET",
       path: `/assets/${encodeURIComponent(assetId)}/download-url`,
-      query: { organizationSlug: params.organizationSlug },
+      query: {
+        organizationSlug: params.organizationSlug,
+        sessionId: params.sessionId,
+      },
     });
   }
 
