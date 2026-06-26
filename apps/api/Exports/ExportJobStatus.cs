@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
+using System.Text.Json.Serialization;
+
 namespace LiveCore.Api.Exports;
 
 /// <summary>
@@ -23,7 +25,15 @@ namespace LiveCore.Api.Exports;
 /// The status is persisted by its stable NAME (not its numeric value), so the integers below are only
 /// in-memory storage discriminators (persisted by name, like <c>AssetStatus</c>, <c>SessionStatus</c> and
 /// every other enum in the model), carry no ordering meaning and must not be compared with &gt;/&lt;.
+///
+/// Serialized over HTTP by its stable NAME too (the export-request endpoint, CORE-EXP-003, surfaces it
+/// directly on <see cref="ExportJobView"/>), so the wire contract uses the name exactly as the other Core
+/// enums do (docs/08_API_CONTRACTS.md "enums as stable string names"). The converter is attached to the enum
+/// itself because it is surfaced directly (rather than pre-mapped to a string in its DTO), mirroring
+/// <see cref="ExportScope"/>; the EF string conversion is configured separately, so this attribute affects
+/// JSON only.
 /// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExportJobStatus
 {
     /// <summary>

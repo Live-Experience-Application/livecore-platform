@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The async export-request method `client.exports.createExport` (CORE-EXP-003): request a workspace
+  export (`POST /api/v1/workspaces/{workspaceId}/exports`), returning the new export job (its `id` is
+  the `exportId` that `client.exports.getExport` then reads) so a vertical can drive the whole
+  request-then-read export lifecycle. It accepts an optional trailing `idempotencyKey` option forwarded
+  as the `Idempotency-Key` header, mirroring the other create methods — a retry under the same key
+  replays the original export job instead of minting a second. A MINOR change.
 - The entity-relationship authoring and read methods `client.entities.createRelationship`
   and `client.entities.listRelationships` (CORE-ENT-008): create a directed graph edge
   between two entities, and list a workspace's edges (with an optional `entityId` filter

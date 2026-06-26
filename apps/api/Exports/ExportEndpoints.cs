@@ -3,6 +3,7 @@
 
 using LiveCore.Api.IdentityAccess;
 using LiveCore.Api.Organizations;
+using LiveCore.Api.SystemModule;
 using LiveCore.Api.Workspaces;
 using Microsoft.AspNetCore.Mvc;
 
@@ -19,13 +20,28 @@ namespace LiveCore.Api.Exports;
 /// could not retrieve a completed export. This story adds that route ON TOP of the existing repositories +
 /// projection, without a parallel export engine.
 ///
-/// Route owned by this story (csv/api_routes.csv):
+/// Routes owned by this module (csv/api_routes.csv):
 /// <list type="bullet">
 ///   <item><c>GET /api/v1/exports/{exportId}</c> — module <b>Exports</b>, roles "Owner,Admin,Host", a
 ///   tenant/workspace-scoped read of a completed workspace export's artifact (its produced manifest),
-///   role-projected. The route path carries only the <c>{exportId}</c> (the export JOB id), so the target tenant
-///   is the required <c>?organizationSlug=</c> query parameter exactly like the asset signed-download and recap
-///   read routes.</item>
+///   role-projected (CORE-EXP-001). The route path carries only the <c>{exportId}</c> (the export JOB id), so the
+///   target tenant is the required <c>?organizationSlug=</c> query parameter exactly like the asset
+///   signed-download and recap read routes.</item>
+///   <item><c>POST /api/v1/workspaces/{workspaceId}/exports</c> — module <b>Exports</b>, roles
+///   "Owner,Admin,Host" (CORE-EXP-003, the "Async Export Request Lifecycle" epic). REQUESTS an async workspace
+///   export — <see cref="ExportJob.Create"/> + <see cref="IExportJobRepository.AddAsync"/> mint a Pending
+///   <see cref="ExportScope.Workspace"/> job and return <c>201</c> with the export id — so the worker export
+///   PRODUCER (CORE-EXP-002) finally has a queue to drain and the read route above can be given a REAL id (it
+///   could mint none before, the gap ARC-GAP-119). The request reuses the existing <c>export_jobs</c> table (no
+///   schema change), emits NO session event (an export carries no session id) and adds NO event-catalog row. It
+///   honors an OPTIONAL client <c>Idempotency-Key</c> (CORE-DX-004) through the shared
+///   <see cref="IdempotentResourceCreator"/> under the per-tenant scope
+///   <c>workspace-export-create:{organizationId}</c>: the FIRST request records the key against the minted
+///   export id and returns <c>201</c>; a RETRY under the SAME key returns <c>200</c> with the ORIGINAL export id
+///   and creates no second job; a malformed key is a <c>400</c> rejected AFTER authorization that creates
+///   nothing. Object-level authorization is the SAME fail-closed rule as the read: a non-member of the route's
+///   workspace is hidden as <c>404</c>; a known member who is not an authoring downloader (the "Export workspace"
+///   set, <see cref="ExportAccessPolicy.CanRequestExport"/>) is <c>403</c>.</item>
 /// </list>
 ///
 /// THE ARTIFACT AND ITS DELIVERY (acceptance criterion "delivered by a short-lived signed URL or an authorized
@@ -93,6 +109,15 @@ internal static class ExportEndpoints
             .RequireAuthorization();
 
         group.MapGet("/{exportId}", ReadExportAsync);
+
+        // The async export-REQUEST route (CORE-EXP-003) is WORKSPACE-scoped (its path roots at the workspaces
+        // collection), so it lives under a second authenticated group — mirroring how the workspace-scoped
+        // scene/entity create routes are mounted — rather than under the by-export-id group above.
+        var workspaceScopedGroup = endpoints
+            .MapGroup("/api/v1/workspaces")
+            .RequireAuthorization();
+
+        workspaceScopedGroup.MapPost("/{workspaceId}/exports", RequestWorkspaceExportAsync);
 
         return endpoints;
     }
@@ -232,6 +257,162 @@ internal static class ExportEndpoints
     }
 
     /// <summary>
+    /// Requests an async WORKSPACE export (CORE-EXP-003, the "Async Export Request Lifecycle" epic): mints a
+    /// Pending <see cref="ExportScope.Workspace"/> <see cref="ExportJob"/> in the route's workspace so the worker
+    /// export producer (CORE-EXP-002) has a queue to drain and the read route can be given a real export id. It is
+    /// the WRITE half of the export lifecycle, sitting on the SAME tenant/workspace resolution, authorization and
+    /// repositories as the read — no parallel export engine.
+    ///
+    /// <para>
+    /// AUTHORIZATION (object-level, server-side, fail-closed; docs/06_AUTHORIZATION_MATRIX.md "Export workspace";
+    /// threats T1/T5), load-then-authorize and never leaking why — the SAME shape as the read's workspace path:
+    /// a failed principal mapping is 401; a missing body or blank <c>organizationSlug</c> is 400; a malformed
+    /// workspace id and a denied tenant resolution are hidden as 404; a caller who is not a member of the route's
+    /// workspace is ALSO hidden as 404 (a non-member must not learn the workspace exists), never 403; and a known
+    /// member who is not an authoring requester (the "Export workspace" set {Owner, Admin, Host},
+    /// <see cref="ExportAccessPolicy.CanRequestExport"/> — an EXACT non-linear set membership) is 403. The
+    /// requester recorded on the job is the authenticated caller's own resolved profile, never a client-supplied
+    /// id (threats T1/T5).
+    /// </para>
+    ///
+    /// <para>
+    /// IDEMPOTENCY (CORE-DX-004). After authorization an OPTIONAL client <c>Idempotency-Key</c> is honored through
+    /// the shared <see cref="IdempotentResourceCreator"/> under the per-tenant scope
+    /// <c>workspace-export-create:{organizationId}</c>: the create (the aggregate factory + the tenant-scoped
+    /// <see cref="IExportJobRepository.AddAsync"/>) and the key record commit in ONE transaction, so the unique
+    /// <c>idempotency_keys(scope, key)</c> index closes the concurrent-first-request race. The FIRST request
+    /// returns 201 with the minted export id; a RETRY under the SAME key replays the ORIGINAL job (re-loaded
+    /// tenant- AND workspace-scoped) and returns 200, creating no second job. A key reused against a DIFFERENT
+    /// workspace re-loads to nothing and is a hidden 404 (threats T1/T5). A malformed key is a 400, rejected only
+    /// AFTER authorization so an unauthorized caller never receives request-shape feedback (the reveal rule). An
+    /// export carries no session id, so NO session event is emitted and NO event-catalog row is added.
+    /// </para>
+    /// </summary>
+    // POST /api/v1/workspaces/{workspaceId}/exports
+    private static async Task<IResult> RequestWorkspaceExportAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromBody] CreateExportRequest? request,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (request is null)
+        {
+            return ValidationError("A request body is required.");
+        }
+
+        // The target organization is required and supplied by the request body, mirroring the scene/entity
+        // create routes (the route path carries only the workspace, not the organization).
+        if (string.IsNullOrWhiteSpace(request.OrganizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed/empty workspace id can never address a stored workspace; hidden as 404, never echoing why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenExport();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, request.OrganizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide the workspace as 404 so a foreign or non-existent tenant is
+            // indistinguishable from a missing workspace (threat T5).
+            return HiddenExport();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace. A caller who is a member of
+        // the tenant but NOT of the workspace must not learn the workspace exists, so a missing membership is
+        // hidden as 404 (not 403) — the SAME rule as the export read and the scene/entity create routes (threats
+        // T1/T5). The member's workspace role then drives the role check below.
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenExport();
+        }
+
+        // The caller is a known member of the workspace, so an insufficient role is 403. Requesting a workspace
+        // export is the "Export workspace" permission, the SAME {Owner, Admin, Host} set as downloading it
+        // (ExportAccessPolicy.CanRequestExport); CoHost, the audience roles Participant/Observer and the
+        // deployment-optional Auditor all fail closed. MembershipRole is non-linear, so this is an EXACT set
+        // membership check, never an ordering comparison.
+        if (!ExportAccessPolicy.CanRequestExport(member.Role))
+        {
+            return Forbidden();
+        }
+
+        // Honor an OPTIONAL client Idempotency-Key (CORE-DX-004): a create/network retry under the same key
+        // returns the ORIGINAL export job and creates exactly one. A malformed key is a 400, checked AFTER
+        // authorization so an unauthorized caller never receives request-shape feedback (the reveal rule).
+        if (IdempotencyKeyHeader.Read(httpContext, out var idempotencyKey) == IdempotencyKeyHeaderResult.Invalid)
+        {
+            return ValidationError($"The '{IdempotencyKeyHeader.HeaderName}' header is malformed.");
+        }
+
+        // Authorized: mint the Pending workspace export job through the existing aggregate factory and the
+        // tenant-scoped repository. When a key is supplied, the job insert AND the idempotency-key record commit
+        // together in ONE transaction the IdempotentResourceCreator owns (scope per tenant and operation). The job
+        // always has a server-minted id, so its result-id selector never returns null and the key is always
+        // recorded on a fresh create (an export request never becomes a no-op business conflict).
+        var now = timeProvider.GetUtcNow();
+        var creation = await deps.Idempotency
+            .CreateAsync(
+                idempotencyKey,
+                $"workspace-export-create:{context.OrganizationId}",
+                now,
+                create: async createCancellationToken =>
+                {
+                    var job = ExportJob.Create(
+                        context.OrganizationId,
+                        workspaceGuid,
+                        context.UserProfileId,
+                        ExportScope.Workspace,
+                        now);
+                    await deps.ExportJobs.AddAsync(job, createCancellationToken).ConfigureAwait(false);
+                    return job;
+                },
+                resultIdSelector: job => job.Id,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (creation.Replayed)
+        {
+            // A prior request with this key already minted the export job; return the ORIGINAL (200), creating no
+            // second job. The job is re-loaded through the tenant- AND workspace-scoped FindByIdAsync, so a key
+            // reused against a different workspace resolves to nothing and is a hidden 404 (threats T1/T5). The
+            // requester role here is always a full-view authoring role, so the full ExportJobView is returned.
+            var original = await deps.ExportJobs
+                .FindByIdAsync(context.OrganizationId, workspaceGuid, creation.ReplayResultId, cancellationToken)
+                .ConfigureAwait(false);
+            return original is null
+                ? HiddenExport()
+                : Results.Ok(ExportJobView.From(original));
+        }
+
+        // A fresh request: 201 Created with the minted export job. The Location points at the by-export-id read
+        // route, so a client can immediately poll the export it just requested.
+        var created = creation.Result;
+        return Results.Created($"/api/v1/exports/{created.Id}", ExportJobView.From(created));
+    }
+
+    /// <summary>
     /// Serves a USER-DATA export (CORE-EXP-002, GDPR Art.15 access / Art.20 portability): the disclosure half of
     /// the producer that this story adds. The export job has already been loaded WITHIN the resolved tenant
     /// (so a foreign-tenant/unknown export is already hidden 404); this method authorizes the disclosure, gates
@@ -333,19 +514,21 @@ internal static class ExportEndpoints
         var exportJobs = services.GetService<IExportJobRepository>();
         var exportManifests = services.GetService<IExportManifestRepository>();
         var personalDataExport = services.GetService<PersonalDataExportService>();
+        var idempotency = services.GetService<IdempotentResourceCreator>();
 
         if (resolver is null
             || workspaceMembers is null
             || exportJobs is null
             || exportManifests is null
-            || personalDataExport is null)
+            || personalDataExport is null
+            || idempotency is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new ExportEndpointDependencies(
-            resolver, workspaceMembers, exportJobs, exportManifests, personalDataExport);
+            resolver, workspaceMembers, exportJobs, exportManifests, personalDataExport, idempotency);
         return true;
     }
 
@@ -382,11 +565,14 @@ internal static class ExportEndpoints
             detail: "Valid authentication is required.");
 
     private static IResult MissingOrganization()
+        => ValidationError($"The '{_organizationSlugQuery}' value is required.");
+
+    private static IResult ValidationError(string detail)
         => CoreProblem.Create(
             statusCode: StatusCodes.Status400BadRequest,
             code: ProblemCodes.ValidationError,
             title: "Bad Request",
-            detail: $"The '{_organizationSlugQuery}' value is required.");
+            detail: detail);
 
     private static IResult Forbidden()
         => CoreProblem.Create(
@@ -432,5 +618,6 @@ internal static class ExportEndpoints
         IWorkspaceMemberRepository WorkspaceMembers,
         IExportJobRepository ExportJobs,
         IExportManifestRepository ExportManifests,
-        PersonalDataExportService PersonalDataExport);
+        PersonalDataExportService PersonalDataExport,
+        IdempotentResourceCreator Idempotency);
 }

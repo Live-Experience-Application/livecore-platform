@@ -16,6 +16,12 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- `@livecore/contracts`: the async export-request shapes `CreateExportRequest` and
+  `ExportJobResponse` and the `ExportJobStatus` enum (CORE-EXP-003), for the new
+  `POST /api/v1/workspaces/{workspaceId}/exports` route that mints a workspace export job.
+- `@livecore/sdk-ts`: the `client.exports.createExport` method (CORE-EXP-003), which requests an
+  async workspace export (with an optional idempotency key) so a vertical can drive the
+  request-then-read export lifecycle end to end. A MINOR change.
 - `@livecore/contracts`: the entity-relationship shapes `CreateEntityRelationshipRequest`
   and `EntityRelationshipResponse` (CORE-ENT-008), for the new entity-relationship create
   and list routes.
