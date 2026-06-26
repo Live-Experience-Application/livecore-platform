@@ -197,6 +197,39 @@ $allSigned = @(
 $cleanReport = Get-LiveCoreSignOffReport -Commits $allSigned
 AssertTrue ($cleanReport.IsClean) 'a set whose every non-merge commit is signed off is clean (passes when present)'
 
+# --- DCO sign-off: automated GitHub App bot commits are exempt (CORE-LIC-004). ---
+AssertTrue (Test-LiveCoreBotAuthor -AuthorEmail '49699333+dependabot[bot]@users.noreply.github.com') `
+    'a dependabot[bot] noreply author is recognized as a bot'
+AssertTrue (Test-LiveCoreBotAuthor -AuthorEmail 'dependabot[bot]@users.noreply.github.com') `
+    'a bare dependabot[bot] noreply author is recognized as a bot'
+AssertTrue (-not (Test-LiveCoreBotAuthor -AuthorEmail $author)) `
+    'a human author email is not a bot'
+AssertTrue (-not (Test-LiveCoreBotAuthor -AuthorEmail 'noreply@github.com')) `
+    'a plain web-flow noreply author (a human via the UI) is not a bot'
+
+# A bot commit whose sign-off email does not match its author (the App signs with its
+# own support address) is EXEMPT - skipped, not flagged.
+$botMessage = @"
+deps: bump the npm group
+
+Signed-off-by: dependabot[bot] <support@github.com>
+"@
+$botCommits = @(
+    [pscustomobject]@{ Sha = 'bot1'; AuthorEmail = '49699333+dependabot[bot]@users.noreply.github.com'; Message = $botMessage; IsMerge = $false }
+)
+$botReport = Get-LiveCoreSignOffReport -Commits $botCommits
+AssertTrue ($botReport.Checked -eq 0) 'a bot-authored commit is skipped (exempt), not checked'
+AssertTrue ($botReport.IsClean) 'a set of only bot commits is clean (bots are exempt from the author-email match)'
+
+# The exemption is for bots ONLY: a human unsigned commit alongside an exempt bot still fails.
+$mixedBot = @(
+    [pscustomobject]@{ Sha = 'bot2'; AuthorEmail = '49699333+dependabot[bot]@users.noreply.github.com'; Message = $botMessage; IsMerge = $false },
+    [pscustomobject]@{ Sha = 'human'; AuthorEmail = $author; Message = $unsigned; IsMerge = $false }
+)
+$mixedBotReport = Get-LiveCoreSignOffReport -Commits $mixedBot
+AssertTrue ($mixedBotReport.Checked -eq 1) 'only the human commit is checked when a bot commit is present'
+AssertTrue (-not $mixedBotReport.IsClean) 'a human unsigned commit still fails even alongside an exempt bot commit'
+
 # --- Guard the real repository: every in-scope source file carries the header. ---
 $real = Get-LiveCoreLicenseHeaderReport -RepoRoot $repoRoot
 AssertTrue ($real.Checked -gt 0) 'the scope enumerates real shipped source files'

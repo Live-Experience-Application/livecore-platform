@@ -15,7 +15,11 @@
          email matches the commit author, certifying the contributor has the right
          to submit the work under the project license and grants the dual-license
          right (CONTRIBUTING.md). This module decides, for a commit, whether a
-         valid sign-off is present.
+         valid sign-off is present. Merge commits and automated GitHub App bot
+         commits (e.g. dependabot[bot], whose noreply author email carries the
+         "[bot]" marker and whose sign-off is the App's own support address) are
+         exempt, exactly as the common DCO check exempts them: they are not human
+         contributions and certify provenance through the App, not a person.
 
       2. SPDX source headers. Every first-party, hand-authored source file that
          ships in the distribution artifacts - the C# that builds the container
@@ -311,6 +315,33 @@ function Test-LiveCoreCommitSignOff {
     return ($signOffs -contains $author)
 }
 
+function Test-LiveCoreBotAuthor {
+    <#
+    .SYNOPSIS
+        True when an author email is an automated GitHub App / bot identity.
+
+    .DESCRIPTION
+        GitHub App bot accounts (e.g. dependabot[bot]) commit under a noreply email
+        of the form "<id>+<name>[bot]@users.noreply.github.com" - the "[bot]@"
+        marker is unique to App identities. Such commits are automated dependency or
+        maintenance updates, not human contributions, and carry the App's own
+        sign-off (e.g. "Signed-off-by: dependabot[bot] <support@github.com>") whose
+        email need not equal the author. They are exempt from the DCO author-email
+        match, exactly as merge commits are. A plain "noreply@github.com" web-flow
+        author (a human committing through the GitHub UI) is NOT a bot.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$AuthorEmail
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AuthorEmail)) { return $false }
+    return ($AuthorEmail -match '(?i)\[bot\]@')
+}
+
 function Get-LiveCoreSignOffReport {
     <#
     .SYNOPSIS
@@ -318,9 +349,10 @@ function Get-LiveCoreSignOffReport {
 
     .DESCRIPTION
         $Commits is an array of objects with Sha, AuthorEmail, Message and IsMerge.
-        Merge commits are skipped (they introduce no contributed change and the
-        common DCO check exempts them). Returns the checked count, the unsigned
-        commits and an IsClean verdict.
+        Merge commits and automated GitHub App bot commits (Test-LiveCoreBotAuthor)
+        are skipped - they introduce no human-contributed change and the common DCO
+        check exempts them. Returns the checked count, the unsigned commits and an
+        IsClean verdict.
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -334,6 +366,7 @@ function Get-LiveCoreSignOffReport {
     $unsigned = New-Object System.Collections.Generic.List[object]
     foreach ($commit in $Commits) {
         if ($commit.IsMerge) { continue }
+        if (Test-LiveCoreBotAuthor -AuthorEmail $commit.AuthorEmail) { continue }
         $checked++
         if (-not (Test-LiveCoreCommitSignOff -AuthorEmail $commit.AuthorEmail -Message $commit.Message)) {
             $unsigned.Add($commit)
@@ -356,4 +389,5 @@ Export-ModuleMember -Function `
     Get-LiveCoreLicenseHeaderReport, `
     Get-LiveCoreSignOffEmail, `
     Test-LiveCoreCommitSignOff, `
+    Test-LiveCoreBotAuthor, `
     Get-LiveCoreSignOffReport
