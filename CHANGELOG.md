@@ -29,6 +29,12 @@ hosts are not published packages and are not versioned here. See
   `client.entities.listRelationships` methods (CORE-ENT-008), making the entity-relationship
   graph authorable and readable (a directed edge between two entities), not only deletable.
   A MINOR change.
+- `@livecore/contracts`: the `EntitySearchCriteria` shape (CORE-ENT-009), for the new
+  `GET /api/v1/workspaces/{workspaceId}/entities/search` route.
+- `@livecore/sdk-ts`: the `client.entities.search` method (CORE-ENT-009), which performs
+  server-side filtered entity search with server visibility filtering, so a vertical can filter
+  entities server-side instead of list-then-filter client-side (an audience caller only ever
+  receives the entities revealed to them). A MINOR change.
 
 ## [0.4.0] - 2026-06-23
 

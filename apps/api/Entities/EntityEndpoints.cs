@@ -14,10 +14,12 @@ namespace LiveCore.Api.Entities;
 /// HTTP endpoints of the Entities module's generic ENTITY routes. The entity CREATE, LIST and by-id READ
 /// routes are CORE-ENT-006 ("Add the entity create list and read endpoints", the "Vertical Authoring and
 /// Read API Completeness" epic); the entity DELETE route is CORE-LIFE-003 ("Implement entity deletion", the
-/// "Resource Lifecycle and Deletion" epic). They make the platform usable for a vertical to author its world
-/// through generic entities over the API, and they realize the documented request flow end-to-end:
-/// "authentication middleware -> tenant/workspace context resolver -> endpoint -> authorization policy"
-/// (docs/02_ARCHITECTURE.md), mirroring <see cref="Scenes.SceneEndpoints"/>'s workspace-scoped routes exactly.
+/// "Resource Lifecycle and Deletion" epic); the entity SEARCH route is CORE-ENT-009 ("Route the implemented
+/// entity search service", the "Entity Graph and Search Completeness" epic). They make the platform usable for a
+/// vertical to author its world through generic entities over the API, and they realize the documented request
+/// flow end-to-end: "authentication middleware -> tenant/workspace context resolver -> endpoint -> authorization
+/// policy" (docs/02_ARCHITECTURE.md), mirroring <see cref="Scenes.SceneEndpoints"/>'s workspace-scoped routes
+/// exactly.
 ///
 /// Routes owned here, all under <c>/api/v1/workspaces/{workspaceId}/entities</c> (csv/api_routes.csv):
 /// <list type="bullet">
@@ -32,6 +34,20 @@ namespace LiveCore.Api.Entities;
 ///   per-entity SHAPE changes by role — every member still receives ALL of the workspace's entities; deciding
 ///   WHICH entities an audience may actually see (visibility filtering) is the entity-search read
 ///   (CORE-ENT-005) and the Visibility module's concern, not this projection.</item>
+///   <item><c>GET  /api/v1/workspaces/{workspaceId}/entities/search</c> — module Entities, roles
+///   "workspace members" (CORE-ENT-009). Server-side filtered entity search WITH visibility filtering: it drives
+///   the already-implemented, DI-registered <see cref="EntitySearchService"/> with optional <c>name</c> (an
+///   ordinal, case-insensitive substring), <c>entityTypeId</c> and <c>sessionId</c> criteria, so a vertical can
+///   filter server-side instead of list-then-filter client-side. The result is PROJECTED BY ROLE exactly like
+///   the list/read (<see cref="EntityProjection"/>; host-content roles get the full host shape, every other role
+///   the stripped audience-safe shape), and the host-vs-audience VIEW is decided inside the service: a
+///   host-capable role gets every matching entity, an AUDIENCE participant (Participant/Observer, with a
+///   server-resolved OWN participant AND an identified session) gets only the entities REVEALED to them in that
+///   session, and every other caller (the audit role, any undefined role, an audience role with no participant or
+///   session) gets the fail-closed empty view. The calling participant is resolved server-side from the principal
+///   through the Entities-owned <see cref="IWorkspaceParticipantLocator"/> port (its adapter lives in the
+///   composition root, since Entities may not reference the Participants module; CORE-ARCH-001), NEVER a
+///   client-supplied id, so no host-only entity ever leaks to a participant caller (threats T1/T5/T2).</item>
 ///   <item><c>POST /api/v1/workspaces/{workspaceId}/entities</c> — module Entities, roles
 ///   "Host,CoHost,Owner,Admin". Creates a generic entity via <see cref="EntityCreationService"/>: the
 ///   referenced entity type is resolved within the route's workspace (the same-workspace coupling the
@@ -93,6 +109,18 @@ internal static class EntityEndpoints
     /// <summary>Required value naming the target organization.</summary>
     private const string _organizationSlugQuery = "organizationSlug";
 
+    /// <summary>Optional case-insensitive name substring filter for the entity search (CORE-ENT-009).</summary>
+    private const string _nameQuery = "name";
+
+    /// <summary>Optional entity-type filter for the entity search (CORE-ENT-009).</summary>
+    private const string _entityTypeIdQuery = "entityTypeId";
+
+    /// <summary>
+    /// Optional session the audience visibility filter is bounded by for the entity search (CORE-ENT-009); a
+    /// reveal is session-scoped (ADR 0013).
+    /// </summary>
+    private const string _sessionIdQuery = "sessionId";
+
     /// <summary>
     /// The empty entity-type-key map passed to the projection for a host-content caller: the host shape carries
     /// the surrogate <see cref="EntityResponse.EntityTypeId"/> and needs no audience-safe key, so its key
@@ -110,6 +138,9 @@ internal static class EntityEndpoints
             .RequireAuthorization();
 
         workspaceScopedGroup.MapGet("/{workspaceId}/entities", ListEntitiesAsync);
+        // The literal "/entities/search" segment takes route precedence over the "/entities/{entityId}"
+        // parameter route, so a search request is never captured by the by-id read (CORE-ENT-009).
+        workspaceScopedGroup.MapGet("/{workspaceId}/entities/search", SearchEntitiesAsync);
         workspaceScopedGroup.MapPost("/{workspaceId}/entities", CreateEntityAsync);
         workspaceScopedGroup.MapGet("/{workspaceId}/entities/{entityId}", GetEntityByIdAsync);
         workspaceScopedGroup.MapDelete("/{workspaceId}/entities/{entityId}", DeleteEntityAsync);
@@ -207,6 +238,142 @@ internal static class EntityEndpoints
 
         return Results.Ok(
             EntityProjection.ProjectPage(pageRows, member.Role, entityTypeKeys, pageOffset, pageLimit, hasMore));
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/entities/search?organizationSlug={slug}&name={substr}&entityTypeId={guid}&sessionId={guid}
+    private static async Task<IResult> SearchEntitiesAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        [FromQuery(Name = _nameQuery)] string? name,
+        [FromQuery(Name = _entityTypeIdQuery)] string? entityTypeId,
+        [FromQuery(Name = _sessionIdQuery)] string? sessionId,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace id can never address a stored workspace; treat it as hidden (404).
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenEntity();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (threat T5).
+            return HiddenEntity();
+        }
+
+        var context = resolution.Context;
+
+        // Object-level authorization: the caller must be a member of THIS workspace. The search is allowed to
+        // ANY membership role ("workspace members", like the list/read), so any membership suffices; a non-member
+        // is hidden as 404 (not 403) so resource existence is not leaked (threats T1/T5). The member's actual
+        // workspace ROLE then drives the host-vs-audience visibility split inside EntitySearchService below (and
+        // the matching role projection of the result).
+        var member = await deps.WorkspaceMembers
+            .FindAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+            .ConfigureAwait(false);
+        if (member is null)
+        {
+            return HiddenEntity();
+        }
+
+        // Authorized. Only now validate the optional search criteria, so a non-member never receives
+        // request-shape feedback (mirrors the list's paging-parameter validation): a present-but-malformed
+        // entityTypeId/sessionId is a 400, and an over-long name term is a 400; an absent value means "no filter".
+        Guid? entityTypeFilter = null;
+        if (!string.IsNullOrWhiteSpace(entityTypeId))
+        {
+            if (!Guid.TryParse(entityTypeId, out var entityTypeGuid) || entityTypeGuid == Guid.Empty)
+            {
+                return ValidationError($"The '{_entityTypeIdQuery}' value must be a valid entity type id.");
+            }
+
+            entityTypeFilter = entityTypeGuid;
+        }
+
+        Guid? sessionFilter = null;
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            if (!Guid.TryParse(sessionId, out var sessionGuid) || sessionGuid == Guid.Empty)
+            {
+                return ValidationError($"The '{_sessionIdQuery}' value must be a valid session id.");
+            }
+
+            sessionFilter = sessionGuid;
+        }
+
+        // The name term is opaque caller-supplied DATA matched as a plain substring (the template boundary,
+        // docs/04); a term longer than the longest possible entity name can never be a substring of any name, so
+        // it is rejected as a clean 400 BEFORE EntitySearchCriteria.Create would throw, and the rejected term is
+        // never echoed back (threat T7).
+        if (name is not null && name.Trim().Length > EntitySearchCriteria.MaxNameContainsLength)
+        {
+            return ValidationError($"The '{_nameQuery}' search term is too long.");
+        }
+
+        var criteria = EntitySearchCriteria.Create(name, entityTypeFilter);
+
+        // For the AUDIENCE path only, resolve the CALLER'S OWN participant server-side (never a client-supplied
+        // id), so the per-participant visibility filter can be computed. The role classification delegates to the
+        // central Visibility module (via EntitySearchVisibility), so the host-content role set is never
+        // duplicated here: a host-capable role ignores the participant (it sees every matching entity) and so the
+        // lookup is skipped; a non-host non-audience role (Auditor, any undefined value) fails closed to the
+        // empty view inside the search service whether or not a participant is supplied, so the lookup is skipped
+        // for it too. A removed/absent participant resolves to null, so the audience caller then takes the
+        // fail-closed empty view (threats T1/T5).
+        Guid? participantId = null;
+        if (!EntitySearchVisibility.ViewsHostOnlyContent(member.Role)
+            && EntitySearchVisibility.ViewsAudienceFilteredContent(member.Role))
+        {
+            participantId = await deps.ParticipantLocator
+                .FindActiveParticipantIdAsync(context.OrganizationId, workspaceGuid, context.UserProfileId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        // Drive the already-implemented, DI-registered EntitySearchService (CORE-ENT-005): host-capable roles get
+        // every matching entity, an audience participant gets exactly the entities revealed to them IN THE NAMED
+        // SESSION, and every other caller gets the fail-closed empty view. The visibility decision is the central
+        // Visibility module's, computed inside the service from a single workspace-rule load — never re-derived
+        // here (docs/05_MODULE_CONTRACTS.md "Do not duplicate visibility logic elsewhere").
+        var result = await deps.Search
+            .SearchAsync(
+                context.OrganizationId,
+                workspaceGuid,
+                sessionFilter,
+                member.Role,
+                participantId,
+                criteria,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // Project the matching entities BY ROLE through the SAME projector the list/read use: the host-content
+        // roles receive the full host shape and every other role the stripped, audience-safe shape. The search
+        // VIEW and this projection both delegate to the central VisibilityRoles.ViewsHostOnlyContent
+        // classification, so they always agree (an audience caller can never receive the host shape). The
+        // audience-safe entity-type discriminator keys are resolved only for the participant shape (CORE-APROJ-003).
+        var entityTypeKeys = await ResolveParticipantEntityTypeKeysAsync(
+                deps, context.OrganizationId, workspaceGuid, member.Role, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Results.Ok(EntityProjection.Project(result.Items, member.Role, entityTypeKeys));
     }
 
     // GET /api/v1/workspaces/{workspaceId}/entities/{entityId}?organizationSlug={slug}
@@ -604,6 +771,8 @@ internal static class EntityEndpoints
         var workspaces = services.GetService<IWorkspaceRepository>();
         var workspaceMembers = services.GetService<IWorkspaceMemberRepository>();
         var idempotency = services.GetService<IdempotentResourceCreator>();
+        var search = services.GetService<EntitySearchService>();
+        var participantLocator = services.GetService<IWorkspaceParticipantLocator>();
 
         if (resolver is null
             || entities is null
@@ -612,14 +781,25 @@ internal static class EntityEndpoints
             || entityDeletion is null
             || workspaces is null
             || workspaceMembers is null
-            || idempotency is null)
+            || idempotency is null
+            || search is null
+            || participantLocator is null)
         {
             dependencies = default;
             return false;
         }
 
         dependencies = new EntityEndpointDependencies(
-            resolver, entities, entityTypes, entityCreation, entityDeletion, workspaces, workspaceMembers, idempotency);
+            resolver,
+            entities,
+            entityTypes,
+            entityCreation,
+            entityDeletion,
+            workspaces,
+            workspaceMembers,
+            idempotency,
+            search,
+            participantLocator);
         return true;
     }
 
@@ -701,5 +881,7 @@ internal static class EntityEndpoints
         EntityDeletionService EntityDeletion,
         IWorkspaceRepository Workspaces,
         IWorkspaceMemberRepository WorkspaceMembers,
-        IdempotentResourceCreator Idempotency);
+        IdempotentResourceCreator Idempotency,
+        EntitySearchService Search,
+        IWorkspaceParticipantLocator ParticipantLocator);
 }

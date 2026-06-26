@@ -20,6 +20,39 @@ import type { IsoDateTimeString, Uuid } from "./scalars.js";
  * data, never inspected for vocabulary (the template boundary).
  */
 
+/**
+ * Query criteria for `GET /api/v1/workspaces/{workspaceId}/entities/search`
+ * (CORE-ENT-009): server-side filtered entity search WITH visibility filtering,
+ * so a vertical can filter server-side instead of list-then-filter client-side.
+ *
+ * Every filter is OPTIONAL and combines with AND. The result is projected by the
+ * caller's role exactly like the entity list — host-content roles get the full
+ * {@link EntityResponse}; an audience caller gets the stripped
+ * {@link ParticipantEntityResponse} for only the entities the server reveals to
+ * them in the named `sessionId` (a participant search never returns an unrevealed
+ * entity). The calling participant is resolved server-side from the principal,
+ * never supplied here. The `name` term is opaque data matched as a plain substring
+ * (the template boundary), never inspected for vocabulary.
+ */
+export interface EntitySearchCriteria {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+  /**
+   * Optional case-insensitive name substring to match; omit (or pass an empty
+   * string) for no name filter.
+   */
+  name?: string;
+  /** Optional entity type to restrict the search to; omit for all types. */
+  entityTypeId?: Uuid;
+  /**
+   * Optional session the audience visibility filter is bounded by (a reveal is
+   * session-scoped). It is consulted only for an audience caller: a host sees every
+   * matching entity regardless, and an audience caller without an identified
+   * session gets the fail-closed empty result.
+   */
+  sessionId?: Uuid;
+}
+
 /** Request body for `POST /api/v1/workspaces/{workspaceId}/entities`. */
 export interface CreateEntityRequest {
   /** Canonical slug of the organization that owns the target workspace. */

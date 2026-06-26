@@ -16,6 +16,7 @@ import type {
   CreateEntityRequest,
   EntityRelationshipResponse,
   EntityResponse,
+  EntitySearchCriteria,
   PageResponse,
   ParticipantEntityResponse,
   Uuid,
@@ -48,6 +49,33 @@ export class EntitiesClient {
       query: {
         organizationSlug: params.organizationSlug,
         ...pageQuery(params),
+      },
+    });
+  }
+
+  /**
+   * `GET /api/v1/workspaces/{workspaceId}/entities/search` — server-side filtered
+   * entity search WITH visibility filtering (CORE-ENT-009), so a vertical can filter
+   * server-side instead of list-then-filter client-side. Pass optional
+   * `name`/`entityTypeId`/`sessionId` criteria; the result is projected by the
+   * caller's role (the union of both shapes), and an audience caller receives only
+   * the entities the server reveals to them in the named session — a participant
+   * search never returns an unrevealed entity. The calling participant is resolved
+   * server-side; the server authorizes every call (a non-member or foreign/unknown
+   * workspace is hidden as `404`, a `LiveCoreApiError`).
+   */
+  search(
+    workspaceId: Uuid,
+    criteria: EntitySearchCriteria,
+  ): Promise<EntityResponse[] | ParticipantEntityResponse[]> {
+    return this.http.send<EntityResponse[] | ParticipantEntityResponse[]>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/entities/search`,
+      query: {
+        organizationSlug: criteria.organizationSlug,
+        name: criteria.name,
+        entityTypeId: criteria.entityTypeId,
+        sessionId: criteria.sessionId,
       },
     });
   }

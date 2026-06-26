@@ -26,6 +26,13 @@ The Core SDK and UI packages are released together (lockstep), so every
   readable, not only deletable. Both reads/writes are restricted to the authoring roles; an
   endpoint that does not resolve in the workspace, a self-loop or a duplicate edge surfaces
   as a `LiveCoreApiError`. Two new resource-client methods (a MINOR change).
+- The entity-search method `client.entities.search` (CORE-ENT-009): perform server-side
+  filtered entity search (`GET /api/v1/workspaces/{workspaceId}/entities/search`) with optional
+  `name`/`entityTypeId`/`sessionId` criteria, so a vertical can filter entities server-side
+  instead of list-then-filter client-side. The result is projected by the caller's role (the
+  union of the host and audience shapes), and the server visibility-filters it: an audience
+  caller only ever receives the entities revealed to them in the named session — a participant
+  search never returns an unrevealed entity. A new resource-client method (a MINOR change).
 
 ## [0.4.0] - 2026-06-23
 

@@ -974,10 +974,22 @@ if (!string.IsNullOrWhiteSpace(databaseConnectionString))
     // fan-out) and entity search can never diverge from the feed, per-resource access or the realtime
     // recipient gate — visibility is decided in ONE place (docs/02_ARCHITECTURE.md,
     // docs/05_MODULE_CONTRACTS.md); every other caller (the audit role, any undefined role, an audience
-    // role with no participant or no session) fails closed to the empty view before any query. There is NO
-    // HTTP endpoint (csv/api_routes.csv defines no entity route) and NO parallel visibility engine in this
-    // story.
+    // role with no participant or no session) fails closed to the empty view before any query. The service
+    // carries NO parallel visibility engine; it is exposed over HTTP by the
+    // GET /api/v1/workspaces/{workspaceId}/entities/search route (CORE-ENT-009, EntityEndpoints), which
+    // resolves the audience caller's own participant through the IWorkspaceParticipantLocator port below.
     builder.Services.AddScoped<EntitySearchService>();
+
+    // Entity-search audience-participant locator (CORE-ENT-009): the entity-search route's AUDIENCE path must
+    // resolve the CALLER'S OWN participant server-side (never a client-supplied id) to drive
+    // EntitySearchService.SearchAsync. The Entities module — by the enforced module dependency graph
+    // (CORE-ARCH-001) — is NOT allowed to reference the Participants module, so the route depends on the
+    // Entities-owned IWorkspaceParticipantLocator PORT, whose adapter (WorkspaceParticipantLocator) lives in
+    // this composition root (the shared-kernel Hosting namespace) and consults the Participants-owned
+    // IParticipantRepository.FindByUserAsync. Registered here, inside the persistence conditional, because it
+    // depends on the participant repository above; it is the participant-resolution counterpart of the
+    // VisibilityResourceWorkspaceLocator port-and-adapter.
+    builder.Services.AddScoped<IWorkspaceParticipantLocator, WorkspaceParticipantLocator>();
 
     // Tenant context resolver (CORE-ID-005): turns an authenticated principal
     // plus a target organization into a trusted TenantContext or a fail-closed
