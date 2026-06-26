@@ -10,6 +10,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-26
+
+Released in lockstep with the other `@livecore/*` packages, which always share one
+version. There are no changes to the `@livecore/ui-core` typed surface in this
+release.
+
 ## [0.4.0] - 2026-06-23
 
 Released in lockstep with the other `@livecore/*` packages, which always share one
