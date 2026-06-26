@@ -139,6 +139,22 @@ export type UpdateAcceptsIfMatch = Assert<
   >
 >;
 
+// CORE-WSM-003: the single-member read returns the membership body PLUS its per-member
+// weak ETag, so a vertical can read the token then make updateMemberRole conditional.
+export type GetMemberWithETagReturn = Assert<
+  Equal<
+    Awaited<ReturnType<WorkspacesClient["getMemberWithETag"]>>,
+    SdkResponse<WorkspaceMemberResponse>
+  >
+>;
+
+export type UpdateMemberRoleAcceptsIfMatch = Assert<
+  Equal<
+    Parameters<WorkspacesClient["updateMemberRole"]>[3],
+    ConditionalWriteOptions | undefined
+  >
+>;
+
 export type ConditionalWriteOptionsShape = Assert<
   Equal<ConditionalWriteOptions, { ifMatch?: string }>
 >;

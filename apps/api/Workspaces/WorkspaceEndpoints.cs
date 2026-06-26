@@ -96,6 +96,19 @@ namespace LiveCore.Api.Workspaces;
 ///   a 409 that changes nothing (placed AFTER the role check so a non-Owner/Admin
 ///   still gets a 403 and never learns the invitation state). Fail-closed and hidden
 ///   as 404 for a cross-tenant/unknown workspace or invitation.</item>
+///   <item><c>GET /api/v1/workspaces/{workspaceId}/members/{memberId}</c> — read a
+///   SINGLE workspace member together with its per-member weak <c>ETag</c>
+///   (CORE-WSM-003), the read-with-ETag counterpart of the member-roster list, so a
+///   vertical can obtain the member's optimistic-concurrency token BEFORE a role
+///   change and make that PATCH a true before-the-write conditional write (it could
+///   previously catch a raced 409 but not a stale-read 412, because no per-member
+///   token was obtainable — the roster keeps its no-per-item-ETag collection
+///   contract, CORE-DX-002/003). It returns the same generic
+///   <see cref="WorkspaceMemberResponse"/> the role change emits, with the token on
+///   the response <c>ETag</c> header (not the body). It reuses the roster's flow and
+///   the SAME Owner/Admin set, and — like the roster, which discloses the membership
+///   list — a non-administration caller is hidden as 404 (not 403). Fail-closed and
+///   hidden as 404 for a cross-tenant/unknown workspace or member.</item>
 ///   <item><c>PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}</c> —
 ///   change a workspace member's generic role (CORE-WSM-002), "Manage members"
 ///   (Owner or Admin), so an administrator can correct a member's role without
@@ -169,6 +182,7 @@ internal static class WorkspaceEndpoints
         group.MapGet("/{workspaceId}/invitations", ListPendingWorkspaceInvitationsAsync);
         group.MapPost("/{workspaceId}/invitations/accept", AcceptWorkspaceInvitationAsync);
         group.MapDelete("/{workspaceId}/invitations/{invitationId}", RevokeWorkspaceInvitationAsync);
+        group.MapGet("/{workspaceId}/members/{memberId}", GetWorkspaceMemberAsync);
         group.MapPatch("/{workspaceId}/members/{memberId}", ChangeWorkspaceMemberRoleAsync);
         group.MapDelete("/{workspaceId}/members/{memberId}", RemoveWorkspaceMemberAsync);
 
@@ -1478,6 +1492,112 @@ internal static class WorkspaceEndpoints
         // The invitation's redeemability IS what the revoke takes away, and that is now persisted as the
         // Revoked status; nothing is returned (204 No Content), mirroring the member-removal sibling.
         return Results.NoContent();
+    }
+
+    // GET /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}
+    //
+    // Reads a SINGLE workspace member together with its per-member weak ETag (CORE-WSM-003), the read-with-ETag
+    // counterpart of the member-roster list (CORE-WSM-001). The role-change route (the PATCH sibling below)
+    // already honors If-Match and already emits the per-member ETag, but the only way to OBTAIN a member's token
+    // was a write: the roster keeps its no-per-item-ETag collection contract (docs/08 CORE-DX-002/003), so a
+    // vertical could catch a raced 409 on the PATCH but not turn it into a true before-the-write conditional
+    // write (a stale-read 412). This read closes that gap: it returns the member's current token so a vertical can
+    // read-then-conditionally-PATCH, exactly as GetWorkspaceAsync feeds the workspace rename/archive.
+    //
+    // It reuses the roster's flow (fail-closed, resolve-tenant, load-then-authorize, hidden-404) and the SAME
+    // administration role set (the "Manage members" matrix row, Owner/Admin). Like the roster — and unlike the
+    // PATCH/invite siblings, which reveal existence with a 403 — a non-administration caller is hidden as 404, not
+    // 403: this read discloses a member's standing, so the workspace's existence is never revealed to a
+    // non-administrator (threats T1/T5). So a non-administration tenant member, a non-member of the tenant, and a
+    // cross-tenant/unknown workspace or member are all an indistinguishable hidden 404. The read takes no clock and
+    // is a single-resource read, so it carries the optimistic-concurrency token on the response ETag header
+    // (CORE-DX-002), never on the body, and never an email/token (threats T6/T7).
+    private static async Task<IResult> GetWorkspaceMemberAsync(
+        HttpContext httpContext,
+        string workspaceId,
+        string memberId,
+        [FromQuery(Name = _organizationSlugQuery)] string? organizationSlug,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDependencies(httpContext, out var deps))
+        {
+            return ServiceUnavailable();
+        }
+
+        if (!TryMapPrincipal(httpContext, out var principal))
+        {
+            return Unauthorized();
+        }
+
+        // The target organization is required and supplied by the request; the route path carries no
+        // organization, so it is a query parameter exactly like the other workspace by-id reads.
+        if (string.IsNullOrWhiteSpace(organizationSlug))
+        {
+            return MissingOrganization();
+        }
+
+        // A malformed workspace or member id can never address a stored row; treat each as hidden (404),
+        // never echoing back why.
+        if (!Guid.TryParse(workspaceId, out var workspaceGuid) || workspaceGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        if (!Guid.TryParse(memberId, out var memberGuid) || memberGuid == Guid.Empty)
+        {
+            return HiddenWorkspace();
+        }
+
+        var resolution = await deps.Resolver
+            .ResolveAsync(principal, organizationSlug, cancellationToken)
+            .ConfigureAwait(false);
+        if (!resolution.Succeeded)
+        {
+            // Not entitled to the tenant: hide as 404 (a foreign or non-existent tenant is
+            // indistinguishable from a missing workspace; threat T5).
+            return HiddenWorkspace();
+        }
+
+        var context = resolution.Context;
+
+        // The target workspace must exist within the resolved tenant; otherwise hide as 404 (a cross-tenant
+        // or unknown workspace is never revealed; threats T1/T5).
+        var workspace = await deps.Workspaces
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // "Manage members" is Owner/Admin only (docs/06_AUTHORIZATION_MATRIX.md; csv/api_routes.csv roles
+        // "Owner,Admin"), authorized by the caller's ORGANIZATION role exactly like the roster sibling. The
+        // single-member read discloses a member's standing, so — like the roster (and unlike the PATCH/invite
+        // siblings, which reveal existence with a 403) — a non-Owner/Admin is hidden as 404 rather than 403: the
+        // workspace's existence is never revealed to a non-administrator (threats T1/T5). Exact, non-linear role
+        // check (no >/<).
+        if (!(context.HasRole(MembershipRole.Owner) || context.HasRole(MembershipRole.Admin)))
+        {
+            return HiddenWorkspace();
+        }
+
+        // Find the target membership WITHIN this tenant and workspace; a member id that belongs to another
+        // workspace or tenant (or no membership at all) is hidden as 404, so a member outside the caller's
+        // resolved workspace can never be probed for (threats T1/T5).
+        var target = await deps.WorkspaceMembers
+            .FindByIdAsync(context.OrganizationId, workspaceGuid, memberGuid, cancellationToken)
+            .ConfigureAwait(false);
+        if (target is null)
+        {
+            return HiddenWorkspace();
+        }
+
+        // Surface the per-member optimistic-concurrency token as a weak ETag header (CORE-DX-002), so a consumer
+        // can echo it back as If-Match on the role-change PATCH and make that a true before-the-write conditional
+        // write. The token is read from the tracked entity; it is null on the tokenless SQLite test provider (no
+        // ETag emitted). The body stays the data-minimized membership projection — no email, no token (T6/T7).
+        SetETag(httpContext, EntityConcurrencyToken.TryRead(deps.DbContext, target));
+        return Results.Ok(WorkspaceMemberResponse.From(target));
     }
 
     // PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}?organizationSlug={slug}

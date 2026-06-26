@@ -12,6 +12,12 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The generated OpenAPI types now describe the new single-member read route
+  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}` (CORE-WSM-003), the read-with-ETag
+  counterpart of the member roster that lets a vertical obtain a member's optimistic-concurrency
+  token before a role change. The hand-written `WorkspaceMemberResponse` contract is unchanged — the
+  per-member token rides on the response `ETag` header, not the body — so this is an additive
+  surface-only change (a MINOR change).
 - The async export-request contracts `CreateExportRequest` and `ExportJobResponse`, plus the
   `ExportJobStatus` enum (`Pending`/`Running`/`Completed`/`Failed`) (CORE-EXP-003), for the new
   `POST /api/v1/workspaces/{workspaceId}/exports` route. It mints a `Pending` workspace export job
