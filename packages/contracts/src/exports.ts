@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 The LiveCore Platform contributors
 
-import type { ExportResourceKind, ExportScope } from "./enums.js";
+import type {
+  ExportJobStatus,
+  ExportResourceKind,
+  ExportScope,
+} from "./enums.js";
 import type { IsoDateTimeString, Uuid } from "./scalars.js";
 
 /**
@@ -14,6 +18,51 @@ import type { IsoDateTimeString, Uuid } from "./scalars.js";
  * (docs/12_STORAGE_ASSETS.md; threats T4/T8). Access is authorized server-side
  * before the artifact is produced; a non-authoring role is denied.
  */
+
+/**
+ * Request body for `POST /api/v1/workspaces/{workspaceId}/exports` (CORE-EXP-003):
+ * request an async WORKSPACE export. The target workspace is the route path and the
+ * export scope is fixed to `Workspace` by the route, so the body carries only the
+ * tenant slug. Authorized to the "Export workspace" roles (Owner/Admin/Host).
+ */
+export interface CreateExportRequest {
+  /** Canonical slug of the organization that owns the target workspace. */
+  organizationSlug: string;
+}
+
+/**
+ * The async export job minted by `POST /api/v1/workspaces/{workspaceId}/exports`
+ * (CORE-EXP-003): the `201` body on a fresh request and the `200` body on an
+ * idempotent retry (the ORIGINAL job, never a second one). It is the job's generic,
+ * product-neutral identity and lifecycle — the `id` (the `exportId` that
+ * {@link ExportArtifactResponse}'s read route then addresses), the tenant/workspace
+ * boundaries, the requester, the explicit `scope`, the lifecycle `status` (a fresh
+ * request is `Pending` until the worker producer drains it) and the server
+ * timestamps. It carries no exported content (threats T7/T8).
+ */
+export interface ExportJobResponse {
+  /** Surrogate id of the export job — the `exportId` the read/download route addresses. */
+  id: Uuid;
+  /** Tenant the job belongs to. */
+  organizationId: Uuid;
+  /** Workspace the job belongs to. */
+  workspaceId: Uuid;
+  /**
+   * The user that requested the export, or `null` when anonymized (the requester
+   * was later erased).
+   */
+  requestedByUserProfileId: Uuid | null;
+  /** The explicit export scope the job was authorized for (always `Workspace` for this route). */
+  scope: ExportScope;
+  /** The lifecycle status of the job (a freshly requested job is `Pending`). */
+  status: ExportJobStatus;
+  /** The generic failure reason when the job failed, otherwise `null`. */
+  failureReason: string | null;
+  /** When the job was requested (UTC). */
+  createdAt: IsoDateTimeString;
+  /** When the job's status last changed (UTC). */
+  updatedAt: IsoDateTimeString;
+}
 
 /** One inventory line of a full export manifest view: a count per resource kind. */
 export interface ExportManifestEntryView {

@@ -1241,12 +1241,25 @@ test("each dedupe-capable create forwards a supplied Idempotency-Key header (COR
     { organizationSlug: "acme", entityTypeId: "et-1", name: "Lantern" },
     { idempotencyKey: "entity-key" },
   );
+  await client.exports.createExport(
+    "ws-1",
+    { organizationSlug: "acme" },
+    { idempotencyKey: "export-key" },
+  );
 
   // The supplied key rides as the Idempotency-Key header on each covered create,
   // through the same RequestSpec.idempotencyKey transport seam reveal/hide use.
   assert.deepEqual(
     calls.map((c) => c.init.headers["Idempotency-Key"]),
-    ["ws-key", "sess-key", "scene-key", "cb-key", "link-key", "entity-key"],
+    [
+      "ws-key",
+      "sess-key",
+      "scene-key",
+      "cb-key",
+      "link-key",
+      "entity-key",
+      "export-key",
+    ],
   );
   assert.ok(calls.every((c) => c.init.method === "POST"));
 });
@@ -1285,6 +1298,7 @@ test("an omitted idempotency option sends no Idempotency-Key header on a create 
     entityTypeId: "et-1",
     name: "Lantern",
   });
+  await client.exports.createExport("ws-1", { organizationSlug: "acme" });
 
   assert.ok(
     calls.every((c) => c.init.headers["Idempotency-Key"] === undefined),

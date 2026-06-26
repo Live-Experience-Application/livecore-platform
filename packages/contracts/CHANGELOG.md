@@ -12,6 +12,13 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The async export-request contracts `CreateExportRequest` and `ExportJobResponse`, plus the
+  `ExportJobStatus` enum (`Pending`/`Running`/`Completed`/`Failed`) (CORE-EXP-003), for the new
+  `POST /api/v1/workspaces/{workspaceId}/exports` route. It mints a `Pending` workspace export job
+  (returning its `id` — the `exportId` that `GET /api/v1/exports/{exportId}` reads), so the worker
+  export producer finally has a queue to drain and the read route can be given a real id. The request
+  honors an optional `Idempotency-Key` (a retry replays the original job, never a second one). Additive
+  types (a MINOR change).
 - The entity-relationship contracts `CreateEntityRelationshipRequest` and
   `EntityRelationshipResponse` (CORE-ENT-008), for the new
   `POST /api/v1/workspaces/{workspaceId}/entity-relationships` create and

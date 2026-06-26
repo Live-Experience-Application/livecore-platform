@@ -22,6 +22,7 @@ import type {
   CreateEntityRelationshipRequest,
   CreateEntityRequest,
   CreateEntityTypeRequest,
+  CreateExportRequest,
   CreateOrganizationRequest,
   CreateSceneRequest,
   CreateSessionRequest,
@@ -576,6 +577,11 @@ export type CreateVisibilityRuleRequestMatchesSchema = Assert<
 export type ReorderSceneRequestMatchesSchema = Assert<
   SameKeys<ReorderSceneRequest, Schemas["ReorderSceneRequest"]>
 >;
+// The async export-request body (CORE-EXP-003): its property names must match the
+// generated schema exactly, same as the request DTOs above.
+export type CreateExportRequestMatchesSchema = Assert<
+  SameKeys<CreateExportRequest, Schemas["CreateExportRequest"]>
+>;
 // The closed-app Web Push registration request (CORE-PUSH-001): its property names
 // must match the generated schema exactly, same as the request DTOs above.
 export type RegisterPushSubscriptionRequestMatchesSchema = Assert<
@@ -613,6 +619,7 @@ export type GeneratedSchemaSetIsExact = Assert<
     | "CreateEntityRelationshipRequest"
     | "CreateEntityRequest"
     | "CreateEntityTypeRequest"
+    | "CreateExportRequest"
     | "CreateOrganizationRequest"
     | "CreateSceneRequest"
     | "CreateSessionRequest"

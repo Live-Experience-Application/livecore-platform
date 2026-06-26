@@ -10,12 +10,43 @@
  * public/static URL (docs/12_STORAGE_ASSETS.md; threats T4/T8). Access is the
  * "Export workspace" roles (Owner/Admin/Host); a non-authoring role is denied.
  */
-import type { ExportArtifactResponse, Uuid } from "@livecore/contracts";
+import type {
+  CreateExportRequest,
+  ExportArtifactResponse,
+  ExportJobResponse,
+  Uuid,
+} from "@livecore/contracts";
 
 import type { HttpClient } from "../http.js";
+import type { IdempotentCreateOptions } from "./idempotency.js";
 
 export class ExportsClient {
   constructor(private readonly http: HttpClient) {}
+
+  /**
+   * `POST /api/v1/workspaces/{workspaceId}/exports` — request an async WORKSPACE
+   * export (CORE-EXP-003). Mints a `Pending` export job (returning its `id`, the
+   * `exportId` {@link getExport} then reads) that the worker export producer drains
+   * into a manifest; the export scope is fixed to `Workspace` by the route, so the
+   * request body carries only the tenant slug. Authorized to the "Export workspace"
+   * roles (Owner/Admin/Host); a non-authoring role is denied. Pass
+   * {@link IdempotentCreateOptions.idempotencyKey} to make the request retry-safe
+   * (CORE-DX-004): a retry under the SAME key replays the original export job the
+   * server already recorded (`200`) instead of minting a second one; omit it to
+   * request unconditionally.
+   */
+  createExport(
+    workspaceId: Uuid,
+    request: CreateExportRequest,
+    options?: IdempotentCreateOptions,
+  ): Promise<ExportJobResponse> {
+    return this.http.send<ExportJobResponse>({
+      method: "POST",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/exports`,
+      body: request,
+      idempotencyKey: options?.idempotencyKey,
+    });
+  }
 
   /**
    * `GET /api/v1/exports/{exportId}` — retrieve a completed workspace export's

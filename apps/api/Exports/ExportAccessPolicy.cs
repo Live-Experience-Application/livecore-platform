@@ -61,4 +61,17 @@ internal static class ExportAccessPolicy
         => role is MembershipRole.Owner
             or MembershipRole.Admin
             or MembershipRole.Host;
+
+    /// <summary>
+    /// Whether the given workspace role may REQUEST (create) a workspace export — the SAME "Export workspace"
+    /// capability of docs/06_AUTHORIZATION_MATRIX.md as <see cref="CanDownloadExport"/> (CORE-EXP-003, "Add the
+    /// export request route"). Requesting an export and downloading the produced artifact are the one matrix
+    /// permission, so the authorized set is identically {Owner, Admin, Host}; this delegates to
+    /// <see cref="CanDownloadExport"/> so the role set stays defined in ONE place and the request gate can never
+    /// drift from the download gate. CoHost (matrix <c>no</c>), the audience roles Participant/Observer, the
+    /// deployment-<c>optional</c> Auditor and any undefined value all fail CLOSED (deny-by-default; threats
+    /// T1/T5/T8). <see cref="MembershipRole"/> is non-linear, so this is an EXACT set membership check inherited
+    /// from <see cref="CanDownloadExport"/>, never an ordering comparison.
+    /// </summary>
+    public static bool CanRequestExport(MembershipRole role) => CanDownloadExport(role);
 }

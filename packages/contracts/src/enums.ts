@@ -177,6 +177,23 @@ export const ExportScopes = ["Workspace", "UserData"] as const;
 export type ExportScope = (typeof ExportScopes)[number];
 
 /**
+ * Lifecycle status of an async export job (CORE-EXP-003): a job is created
+ * `Pending` (queued), a worker `Running`s it, and it settles into exactly one
+ * terminal state — `Completed` on success or `Failed`. A terminal job never
+ * transitions again. The status is a coarse, product-neutral state name, never any
+ * exported content (threats T7/T8).
+ */
+export const ExportJobStatuses = [
+  "Pending",
+  "Running",
+  "Completed",
+  "Failed",
+] as const;
+
+/** An export job lifecycle status name. */
+export type ExportJobStatus = (typeof ExportJobStatuses)[number];
+
+/**
  * The generic, product-neutral kind of Core resource a workspace export manifest
  * inventories. The manifest carries a count per kind, never the content itself,
  * so it reveals only the shape of an export (threats T7/T8).

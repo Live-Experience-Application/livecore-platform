@@ -1099,6 +1099,44 @@
         }
       }
     },
+    "/api/v1/workspaces/{workspaceId}/exports": {
+      "post": {
+        "tags": [
+          "ExportEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "nullable": true
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreateExportRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/sessions/{sessionId}/participants/{participantId}/join": {
       "post": {
         "tags": [
@@ -2913,6 +2951,18 @@
             "nullable": true
           },
           "attributeSchema": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CreateExportRequest": {
+        "required": [
+          "organizationSlug"
+        ],
+        "type": "object",
+        "properties": {
+          "organizationSlug": {
             "type": "string",
             "nullable": true
           }

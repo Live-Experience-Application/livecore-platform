@@ -18,6 +18,7 @@ import type {
   EntityResponse,
   EntityTypeResponse,
   ExportArtifactResponse,
+  ExportJobResponse,
   HideResponse,
   LiveSessionEvent,
   MeEntitlementsResponse,
@@ -166,6 +167,12 @@ export type GetExportReturn = Assert<
   Equal<Awaited<ReturnType<ExportsClient["getExport"]>>, ExportArtifactResponse>
 >;
 
+// The async export REQUEST mints the export job (CORE-EXP-003); its `id` is the
+// exportId the read above then addresses.
+export type CreateExportReturn = Assert<
+  Equal<Awaited<ReturnType<ExportsClient["createExport"]>>, ExportJobResponse>
+>;
+
 export type ReplayReturn = Assert<
   Equal<
     Awaited<ReturnType<RealtimeClient["getSessionEvents"]>>,
@@ -306,6 +313,13 @@ export type CreateAssetLinkAcceptsOptionalKey = Assert<
 export type CreateEntityAcceptsOptionalKey = Assert<
   Equal<
     Parameters<EntitiesClient["create"]>[2],
+    IdempotentCreateOptions | undefined
+  >
+>;
+
+export type CreateExportAcceptsOptionalKey = Assert<
+  Equal<
+    Parameters<ExportsClient["createExport"]>[2],
     IdempotentCreateOptions | undefined
   >
 >;
