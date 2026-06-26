@@ -16,6 +16,16 @@ hosts are not published packages and are not versioned here. See
 
 ### Added
 
+- `@livecore/sdk-ts`: the `client.workspaces.getMemberWithETag` method (CORE-WSM-003), a
+  single-member read returning `SdkResponse<WorkspaceMemberResponse>` so a vertical can read a
+  member's per-member optimistic-concurrency token (the `etag`) BEFORE a role change and make the
+  `updateMemberRole` PATCH a true before-the-write conditional write (a stale token is `412`, not
+  just a raced `409`). Backed by the new read route
+  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}`; the roster keeps its no-per-item-ETag
+  collection contract. A MINOR change.
+- `@livecore/contracts`: the generated OpenAPI types now describe the new
+  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}` read route (CORE-WSM-003); the
+  `WorkspaceMemberResponse` contract is unchanged (the token rides on the response `ETag` header).
 - `@livecore/contracts`: the async export-request shapes `CreateExportRequest` and
   `ExportJobResponse` and the `ExportJobStatus` enum (CORE-EXP-003), for the new
   `POST /api/v1/workspaces/{workspaceId}/exports` route that mints a workspace export job.

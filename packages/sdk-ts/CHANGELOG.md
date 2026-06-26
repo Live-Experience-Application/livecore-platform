@@ -12,6 +12,17 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ### Added
 
+- The single-member read-with-ETag method `client.workspaces.getMemberWithETag` (CORE-WSM-003): read a
+  single workspace member (`GET /api/v1/workspaces/{workspaceId}/members/{memberId}`) together with its
+  per-member weak `ETag`, returning `SdkResponse<WorkspaceMemberResponse>`. It is the read-with-ETag
+  counterpart of `client.workspaces.listMembers` (whose roster keeps its no-per-item-ETag collection
+  contract), so a vertical can finally obtain a member's optimistic-concurrency token BEFORE a role change
+  and pass it as `ifMatch` to `client.workspaces.updateMemberRole` — making that change a true
+  before-the-write conditional write (a stale token is refused with `412`, not merely a raced `409`,
+  addressing ARC-GAP-110). The token rides on the response `ETag` header; the membership body carries no
+  email or token. Like the roster, the read discloses membership, so a caller who may not administer the
+  workspace — and a foreign/unknown workspace or member — is hidden as `404` (a `LiveCoreApiError`), never
+  `403`. A new resource-client method (a MINOR change).
 - The async export-request method `client.exports.createExport` (CORE-EXP-003): request a workspace
   export (`POST /api/v1/workspaces/{workspaceId}/exports`), returning the new export job (its `id` is
   the `exportId` that `client.exports.getExport` then reads) so a vertical can drive the whole

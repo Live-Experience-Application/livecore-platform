@@ -243,11 +243,39 @@ export class WorkspacesClient {
   }
 
   /**
+   * `GET /api/v1/workspaces/{workspaceId}/members/{memberId}` — read a SINGLE
+   * workspace member together with its per-member weak `ETag` (CORE-WSM-003), the
+   * read-with-ETag counterpart of {@link listMembers}. The roster keeps its
+   * no-per-item-ETag collection contract (CORE-DX-002/003), so this is how a vertical
+   * obtains a member's optimistic-concurrency token BEFORE a role change: pass the
+   * returned `etag` as {@link ConditionalWriteOptions.ifMatch} to {@link updateMemberRole}
+   * to make that change a true before-the-write conditional write (a stale token is
+   * refused with `412`, not just a raced `409`). The body is the same generic
+   * {@link WorkspaceMemberResponse} the role change returns; the token rides on the
+   * response `ETag` header (`data` carries no email or token). Like the roster, this
+   * read discloses membership, so a caller who may not administer the workspace — and a
+   * foreign/unknown workspace or member — is hidden as `404` (a `LiveCoreApiError`),
+   * never `403`.
+   */
+  getMemberWithETag(
+    workspaceId: Uuid,
+    memberId: Uuid,
+    params: { organizationSlug: string },
+  ): Promise<SdkResponse<WorkspaceMemberResponse>> {
+    return this.http.sendWithETag<WorkspaceMemberResponse>({
+      method: "GET",
+      path: `/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(memberId)}`,
+      query: { organizationSlug: params.organizationSlug },
+    });
+  }
+
+  /**
    * `PATCH /api/v1/workspaces/{workspaceId}/members/{memberId}` — change a member's
    * generic role (Owner/Admin), so an administrator can correct a role without
    * remove-and-reinvite. The last remaining Owner cannot be DEMOTED (a `409`). Pass
-   * {@link ConditionalWriteOptions.ifMatch} to make the change conditional on the
-   * version last read (a stale value is refused with `412`); omit it to change
+   * {@link ConditionalWriteOptions.ifMatch} — typically the `etag` from
+   * {@link getMemberWithETag} — to make the change conditional on the version last read
+   * (a stale value is refused with `412` BEFORE the write); omit it to change
    * unconditionally. Audited. Returns the updated membership; its new version rides on
    * the response `ETag` header (CORE-DX-002). A cross-tenant/unknown workspace or
    * member is hidden as `404`, a non-administration caller is `403`.
