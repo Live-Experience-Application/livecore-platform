@@ -29,6 +29,13 @@ The Core SDK and UI packages are released together (lockstep), so every
   must resolve in the same workspace (an unknown/foreign endpoint or a self-loop is a
   `400`); a duplicate of the same directed edge of the same kind is a `409`. Additive
   types (a MINOR change).
+- The entity-search query shape `EntitySearchCriteria` (CORE-ENT-009), for the new
+  `GET /api/v1/workspaces/{workspaceId}/entities/search` route. It carries the required
+  `organizationSlug` plus the optional `name` (a case-insensitive substring), `entityTypeId`
+  and `sessionId` filters that drive server-side filtered entity search, returning the
+  role-projected entities (an audience caller only ever receives the entities the server
+  reveals to them in the named session — a participant search never returns an unrevealed
+  entity). An additive type (a MINOR change).
 
 ## [0.4.0] - 2026-06-23
 
