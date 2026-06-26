@@ -14,24 +14,22 @@ hosts are not published packages and are not versioned here. See
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-26
+
+This release adds the entity-relationship authoring and read surface, server-side
+entity search, the async workspace-export request route, an optional session scope
+on the asset-download SDK call and a single-member read-with-ETag — all built since
+`0.4.0` and bumped in lockstep across all four `@livecore/*` packages. Everything is
+additive — new contract types and an enum, new SDK resource methods and new optional
+parameters — so it ships as a MINOR bump (`docs/23_PACKAGE_VERSIONING.md`).
+`@livecore/design-tokens` and `@livecore/ui-core` carry no surface change this
+release and are bumped only to keep the four packages on one version. The operator
+publishes it by pushing the matching `v0.5.0` git tag, which triggers the tag-gated
+CI publish pipeline (`publish` and `publish-packages`); the gates assert the tag
+equals this shared package version before anything ships.
+
 ### Added
 
-- `@livecore/sdk-ts`: the `client.workspaces.getMemberWithETag` method (CORE-WSM-003), a
-  single-member read returning `SdkResponse<WorkspaceMemberResponse>` so a vertical can read a
-  member's per-member optimistic-concurrency token (the `etag`) BEFORE a role change and make the
-  `updateMemberRole` PATCH a true before-the-write conditional write (a stale token is `412`, not
-  just a raced `409`). Backed by the new read route
-  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}`; the roster keeps its no-per-item-ETag
-  collection contract. A MINOR change.
-- `@livecore/contracts`: the generated OpenAPI types now describe the new
-  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}` read route (CORE-WSM-003); the
-  `WorkspaceMemberResponse` contract is unchanged (the token rides on the response `ETag` header).
-- `@livecore/contracts`: the async export-request shapes `CreateExportRequest` and
-  `ExportJobResponse` and the `ExportJobStatus` enum (CORE-EXP-003), for the new
-  `POST /api/v1/workspaces/{workspaceId}/exports` route that mints a workspace export job.
-- `@livecore/sdk-ts`: the `client.exports.createExport` method (CORE-EXP-003), which requests an
-  async workspace export (with an optional idempotency key) so a vertical can drive the
-  request-then-read export lifecycle end to end. A MINOR change.
 - `@livecore/contracts`: the entity-relationship shapes `CreateEntityRelationshipRequest`
   and `EntityRelationshipResponse` (CORE-ENT-008), for the new entity-relationship create
   and list routes.
@@ -45,6 +43,29 @@ hosts are not published packages and are not versioned here. See
   server-side filtered entity search with server visibility filtering, so a vertical can filter
   entities server-side instead of list-then-filter client-side (an audience caller only ever
   receives the entities revealed to them). A MINOR change.
+- `@livecore/contracts`: the async export-request shapes `CreateExportRequest` and
+  `ExportJobResponse` and the `ExportJobStatus` enum (CORE-EXP-003), for the new
+  `POST /api/v1/workspaces/{workspaceId}/exports` route that mints a workspace export job.
+- `@livecore/sdk-ts`: the `client.exports.createExport` method (CORE-EXP-003), which requests an
+  async workspace export (with an optional idempotency key) so a vertical can drive the
+  request-then-read export lifecycle end to end. A MINOR change.
+- `@livecore/contracts`: the asset download request shape `DownloadUrlRequest` (CORE-DX-010),
+  for `GET /api/v1/assets/{assetId}/download-url`, carrying the required `organizationSlug`
+  plus an optional `sessionId` that takes the session-scoped audience authorization path.
+- `@livecore/sdk-ts`: an optional `sessionId` on `client.assets.getDownloadUrl` (CORE-DX-010),
+  forwarded as the `?sessionId=` query parameter so an audience (Participant/Observer) caller
+  can obtain a download URL for an asset revealed to them in a session. Omitting it preserves
+  the prior host-path behaviour. A MINOR change.
+- `@livecore/sdk-ts`: the `client.workspaces.getMemberWithETag` method (CORE-WSM-003), a
+  single-member read returning `SdkResponse<WorkspaceMemberResponse>` so a vertical can read a
+  member's per-member optimistic-concurrency token (the `etag`) BEFORE a role change and make the
+  `updateMemberRole` PATCH a true before-the-write conditional write (a stale token is `412`, not
+  just a raced `409`). Backed by the new read route
+  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}`; the roster keeps its no-per-item-ETag
+  collection contract. A MINOR change.
+- `@livecore/contracts`: the generated OpenAPI types now describe the new
+  `GET /api/v1/workspaces/{workspaceId}/members/{memberId}` read route (CORE-WSM-003); the
+  `WorkspaceMemberResponse` contract is unchanged (the token rides on the response `ETag` header).
 
 ## [0.4.0] - 2026-06-23
 

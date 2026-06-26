@@ -10,6 +10,8 @@ The Core SDK and UI packages are released together (lockstep), so every
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-26
+
 ### Added
 
 - The generated OpenAPI types now describe the new single-member read route
