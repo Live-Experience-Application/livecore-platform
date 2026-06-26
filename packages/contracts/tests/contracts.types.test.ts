@@ -30,6 +30,7 @@ import type {
   CreateUploadIntentRequest,
   CreateVisibilityRuleRequest,
   CreateWorkspaceRequest,
+  DownloadUrlRequest,
   EntityRelationshipResponse,
   EntityResponse,
   FeedRevealScope,
@@ -171,6 +172,18 @@ export type SessionStartedAtIsNullable = Assert<
 
 export type RevealParticipantIsOptional = Assert<
   Equal<RevealRequest["participantId"], string | undefined>
+>;
+
+// The asset download request carries the required org slug and the OPTIONAL
+// session-scoped audience-download selector (CORE-DX-010): omitting `sessionId` is
+// the prior host path; passing it forwards `?sessionId=` to take the session-scoped
+// audience authorization path that unblocks a Participant/Observer download.
+export type DownloadUrlRequestKeysAreExact = Assert<
+  Equal<keyof DownloadUrlRequest, "organizationSlug" | "sessionId">
+>;
+
+export type DownloadUrlRequestSessionIdIsOptional = Assert<
+  Equal<DownloadUrlRequest["sessionId"], string | undefined>
 >;
 
 // --- The participant visible-feed item is the AUDIENCE-SAFE projected shape. ---

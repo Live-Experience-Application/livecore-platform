@@ -33,6 +33,12 @@ The Core SDK and UI packages are released together (lockstep), so every
   union of the host and audience shapes), and the server visibility-filters it: an audience
   caller only ever receives the entities revealed to them in the named session — a participant
   search never returns an unrevealed entity. A new resource-client method (a MINOR change).
+- An optional `sessionId` on `client.assets.getDownloadUrl` params (CORE-DX-010), forwarded as
+  the `?sessionId=` query parameter. The asset download endpoint already accepted a `sessionId`
+  for the session-scoped audience authorization path, but the SDK never sent one, so an audience
+  (Participant/Observer) download was permanently `400`; passing the session an asset was revealed
+  to them in now obtains the download URL. Omitting it preserves the prior host-path behaviour, so
+  it is additive (a MINOR change); no route change (the route already honoured the parameter).
 
 ## [0.4.0] - 2026-06-23
 
