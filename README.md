@@ -475,6 +475,40 @@ package-build tests; packages without a `test` script are skipped):
 pnpm --recursive run test
 ```
 
+Pack the four packages locally for a downstream vertical (`pack:local`,
+CORE-DXL-002) — the published-package mirror of the `images:local` container
+convenience (CORE-DXL-001). A vertical that wants to run an **unreleased** Core
+through its **own** end-to-end test harness — before any release is cut and
+**without a registry publish** — needs the four packages as installable tarballs.
+This one step builds and packs them:
+
+```bash
+pnpm run pack:local
+```
+
+It runs `pnpm --recursive run build`, then `pnpm pack` for each of the four
+packages, and writes the four `.tgz` tarballs into `dist/` (already gitignored):
+
+```text
+dist/livecore-contracts-<version>.tgz
+dist/livecore-sdk-ts-<version>.tgz
+dist/livecore-design-tokens-<version>.tgz
+dist/livecore-ui-core-<version>.tgz
+```
+
+Each tarball is exactly the surface a registry consumer would resolve — the same
+`pnpm pack` the publish path uses, so the public entry points, the exported
+`VERSION` and `PACKAGE_NAME` and the declared `files` are intact — at the
+**current** package version, **unchanged**. The version is deliberately not bumped
+in this inner loop, so a consumer pinning that version keeps its lockstep guard
+green; a real version bump is the normal lockstep release-adoption flow
+([`docs/23_PACKAGE_VERSIONING.md`](docs/23_PACKAGE_VERSIONING.md)), not part of
+`pack:local`. The pack is **additive** and read-only: it writes only into the
+gitignored `dist/`, commits no file and adds no publish step, so the npm publish
+path below is unchanged. A vertical installs the tarballs from `dist/` (for
+example via an env-gated `.pnpmfile.cjs` that rewrites `@livecore/*` to the
+tarball paths) without touching its committed `package.json`/lockfile.
+
 ### TypeScript contract package
 
 `@livecore/contracts` (`packages/contracts`) is the stable, product-neutral

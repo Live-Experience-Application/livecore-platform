@@ -13,6 +13,8 @@
     "format:check": "prettier --check .",
     "images:local": "docker compose -f deploy/compose/docker-compose.yml build migrate api worker",
     "lint": "eslint . --max-warnings 0",
+    "pack:local": "node scripts/pack-local.mjs",
+    "test:pack-local": "node --test tests/pack-local/pack-local.test.mjs",
     "test:versions": "pnpm --recursive run build && node --test tests/version-lockstep/version-lockstep.test.mjs"
   },
   "packageManager": "pnpm@10.34.2+sha512.9ae7e3fe477c52bbce1ddc8aa196ff243ed4b48f1ceaa7455820adfa7a48b5f57e817ed2d20e5f3c2c3646dfedba360567693e534572dccd252fb2eb8b7c044c",
