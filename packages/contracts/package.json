@@ -1,6 +1,6 @@
 {
   "name": "@livecore/contracts",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Stable, product-neutral TypeScript contract types (DTOs, enums, events) for the LiveCore Core API, consumed by vertical apps.",
   "license": "AGPL-3.0-or-later",
   "repository": {

@@ -14,6 +14,23 @@ hosts are not published packages and are not versioned here. See
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-28
+
+This release changes **no published package surface**: none of the four
+`@livecore/*` packages' `src/` was touched since `0.5.0`, so it is a lockstep
+version bump only. The work merged this cycle is repository tooling and
+developer-experience plumbing that consumes the Core locally without a version
+bump — the `pnpm run images:local` and `pnpm run pack:local` local-consume
+scripts and their documented two-coordinate contract (CORE-DXL-001/002/003) — plus
+a DCO sign-off exemption for automated bot commits and routine dependency bumps,
+none of which alters `@livecore/contracts`, `@livecore/sdk-ts`,
+`@livecore/design-tokens` or `@livecore/ui-core`. All four packages are bumped to
+`0.6.0` only to keep them on one shared version (`docs/23_PACKAGE_VERSIONING.md`,
+"Lockstep releases"). The operator publishes it by pushing the matching `v0.6.0`
+git tag, which triggers the tag-gated CI publish pipeline (`publish` and
+`publish-packages`); the gates assert the tag equals this shared package version
+before anything ships.
+
 ## [0.5.0] - 2026-06-26
 
 This release adds the entity-relationship authoring and read surface, server-side

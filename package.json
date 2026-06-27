@@ -1,6 +1,6 @@
 {
   "name": "livecore-platform",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "LiveCore Platform workspace root for TypeScript packages (contracts, sdk-ts, ui-core, design-tokens).",
   "license": "AGPL-3.0-or-later",
