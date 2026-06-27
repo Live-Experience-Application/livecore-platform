@@ -31,7 +31,7 @@ export const PACKAGE_NAME = "@livecore/design-tokens";
  * fails if they drift) and with the top entry of this package's `CHANGELOG.md`.
  * See the versioning and changelog process in `docs/23_PACKAGE_VERSIONING.md`.
  */
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 
 export * from "./scales.js";
 export * from "./tokens.js";
