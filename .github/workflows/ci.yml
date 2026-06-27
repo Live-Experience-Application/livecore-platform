@@ -919,6 +919,93 @@ jobs:
         working-directory: deploy/compose
         run: docker compose down -v --remove-orphans || true
 
+  images-local-smoke:
+    name: Local image build smoke (CORE-DXL-001)
+    runs-on: ubuntu-latest
+    # CORE-DXL-001: `pnpm run images:local` is a thin, ADDITIVE convenience over the
+    # base manifest's existing build stanzas that builds the three Core runtime images
+    # from source to the stable local tags (livecore-{api,worker,migrations}:local), so
+    # a downstream vertical can run an UNRELEASED Core through its own end-to-end test
+    # harness WITHOUT a registry publish. The static half - the script is well-formed
+    # and additive, the manifest still tags the three :local images, and the README
+    # documents the contract - is asserted no-Docker by scripts/test-images-local.ps1.
+    # This job proves the real half:
+    #   1. the script PRODUCES the three :local images (docker image inspect),
+    #   2. a re-run REBUILDS IDEMPOTENTLY (same tags, exit 0), and
+    #   3. the api answers GET /health/ready when run from the :local image (the base
+    #      manifest brought up with --no-build, i.e. on the images the script built).
+    # It adds no publish/release step, so the released ghcr image-publish path is unchanged.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Enable Corepack (pinned pnpm)
+        run: corepack enable pnpm
+
+      - name: Validate the images:local script + contract (no Docker)
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test-images-local.ps1
+
+      - name: Build the three Core images from source to :local (pnpm run images:local)
+        run: pnpm run images:local
+
+      - name: The three :local image tags exist (docker image inspect)
+        run: |
+          set -euo pipefail
+          for tag in livecore-api:local livecore-worker:local livecore-migrations:local; do
+            docker image inspect --format '{{ .Id }}' "$tag" > /dev/null
+            echo "OK: $tag exists."
+          done
+
+      - name: A re-run rebuilds idempotently (same :local tags, exit 0)
+        run: |
+          set -euo pipefail
+          pnpm run images:local
+          for tag in livecore-api:local livecore-worker:local livecore-migrations:local; do
+            docker image inspect --format '{{ .Id }}' "$tag" > /dev/null
+            echo "OK: $tag still exists after the idempotent re-run."
+          done
+
+      - name: Run the :local images and assert the api answers /health/ready
+        working-directory: deploy/compose
+        # --no-build: do NOT rebuild; run on exactly the :local images the script built
+        # (postgres is pulled). The migrate gate applies the schema, then the api comes
+        # up and /health/ready turns green once the schema is current.
+        run: docker compose up -d --no-build
+
+      - name: The documented health probes answer 200 from the :local image
+        run: |
+          set -euo pipefail
+          probe() {
+            local url="$1"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --output /dev/null "$url"; then
+                echo "OK: $url answered after $attempt attempt(s)."
+                return 0
+              fi
+              sleep 1
+            done
+            echo "FAILED: $url did not answer 200 in time."
+            return 1
+          }
+          probe http://localhost:8080/health/ready    # API readiness, from livecore-api:local
+          probe http://localhost:8080/health/live     # API liveness, from livecore-api:local
+
+      - name: Dump container logs on failure
+        if: failure()
+        working-directory: deploy/compose
+        run: docker compose logs
+
+      - name: Tear down the stack
+        if: always()
+        working-directory: deploy/compose
+        run: docker compose down -v --remove-orphans || true
+
   compose-full-smoke:
     name: Full local stack smoke (CORE-DEP-006)
     runs-on: ubuntu-latest
