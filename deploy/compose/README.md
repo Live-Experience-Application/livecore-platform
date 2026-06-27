@@ -203,6 +203,52 @@ pinned, published image".
 references the published api + migrations coordinates and contains no `build:` stanza
 (no Docker needed).
 
+## Build the images locally for a downstream vertical (`images:local`, CORE-DXL-001)
+
+The image-only overlay above pulls a **released, pinned** Core from GHCR. The
+mirror-image need is a downstream vertical that wants to run an **unreleased** Core —
+the Core revision it is developing against — through its **own end-to-end test
+harness**, before any release is cut and **without a registry publish**. The base
+manifest already builds exactly the images that harness needs, so the root
+convenience script makes that one step, with no need to know the compose internals:
+
+```bash
+pnpm run images:local
+```
+
+It is a thin, **additive** wrapper over the base manifest's existing `build:` stanzas
+— `docker compose -f deploy/compose/docker-compose.yml build migrate api worker` — and
+changes no existing build, publish or release flow. It builds the three Core runtime
+images from source to stable **local** tags:
+
+```text
+livecore-api:local
+livecore-worker:local
+livecore-migrations:local
+```
+
+These are the **same tags** the base manifest runs, so after building them a vertical's
+harness can bring an unreleased Core up with the image-only overlay's `--no-build`
+posture (the images already exist locally), or reference the tags directly from its own
+Compose/Kubernetes manifests, or boot a single image to probe it — for example the API
+answers `GET /health/ready` once its database schema is current (the migrate gate
+above). The script is **idempotent**: a re-run rebuilds the same `:local` tags (Docker
+reuses unchanged layers), so a harness can call it before every test run.
+
+The two coordinates a vertical pins are the **stable tag string** (these `:local`
+tags) and the **Core revision** its working tree is checked out at — there is no
+version number and no registry round-trip in this loop, which is exactly what keeps it
+fast for local coupled development. When the Core change is ready to ship, cut a real
+release and consume the published, version-pinned `ghcr.io/<owner>/livecore-*:<version>`
+images via the image-only overlay instead (the normal release path).
+
+**Tested.** `scripts/test-images-local.ps1` statically validates (no Docker) that the
+`images:local` script builds the three Core services from source via the base manifest
+and stays additive, that the manifest still tags the three `:local` images, and that
+this section documents the contract; the `images-local-smoke` CI job adds the real half
+— the script produces the three `:local` images, a re-run is idempotent, and the API
+answers `/health/ready` when run from the `:local` image.
+
 ## The migrate-before-API gate
 
 The API host **never** applies migrations implicitly on startup — that is unsafe

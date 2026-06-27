@@ -11,6 +11,7 @@
     "build": "pnpm --recursive run build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "images:local": "docker compose -f deploy/compose/docker-compose.yml build migrate api worker",
     "lint": "eslint . --max-warnings 0",
     "test:versions": "pnpm --recursive run build && node --test tests/version-lockstep/version-lockstep.test.mjs"
   },
