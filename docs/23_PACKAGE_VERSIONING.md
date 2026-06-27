@@ -262,6 +262,36 @@ is running against. The exported `VERSION` literal is the single source of truth
 inside the bundle and is kept in lockstep with the package manifest and the
 changelog (see below).
 
+## Consuming an unreleased Core locally (CORE-DXL-003)
+
+A vertical that needs to run an **unreleased** Core — the revision it is developing
+against, before any release is cut — consumes it locally through two additive
+convenience scripts rather than a registry, and the rule that keeps that loop
+compatible with the **lockstep** discipline above is *keep the version number
+unchanged*:
+
+- `pnpm run images:local` builds the three `livecore-{api,worker,migrations}:local`
+  runtime image tags from source (CORE-DXL-001), and
+- `pnpm run pack:local` packs the four `@livecore/*` packages to `dist/*.tgz`
+  tarballs (CORE-DXL-002).
+
+In that inner loop the shared package **version number stays unchanged** (today
+`0.5.0`): the packed tarballs carry the current version, so a consumer pinning it
+keeps the cross-package **lockstep guard** (above) and its own pinned-version check
+green, and the only thing that moves between iterations is the Core working-tree
+revision. A **real version bump is the normal release path** — when the change ships
+you bump the four packages in lockstep and cut a release ("How to cut a release"
+below); the vertical then consumes the published, version-pinned `@livecore/*`
+packages and `ghcr.io/<owner>/livecore-*:<version>` images instead of the
+`:local`/`dist` pair. Bumping the version inside the inner loop is what this rule
+avoids, because it would break a pinned consumer's lockstep for no shipping benefit.
+
+The full two-coordinate contract — the image tags and the dist tarballs together — is
+documented in [`deploy/compose/README.md`](../deploy/compose/README.md) ("The
+local-consume contract for a downstream vertical"). This is documentation only:
+`images:local` and `pack:local` are additive and change no published package or API
+contract.
+
 ## Changelog
 
 Every published package keeps a `CHANGELOG.md` in

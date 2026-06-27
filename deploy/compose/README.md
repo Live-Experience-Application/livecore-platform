@@ -249,6 +249,80 @@ this section documents the contract; the `images-local-smoke` CI job adds the re
 — the script produces the three `:local` images, a re-run is idempotent, and the API
 answers `/health/ready` when run from the `:local` image.
 
+## The local-consume contract for a downstream vertical (CORE-DXL-003)
+
+The two convenience scripts each hand a vertical **one half** of an unreleased
+Core: `images:local` (above, CORE-DXL-001) builds the **runtime** to local image
+tags, and `pack:local` ([root `README.md`](../../README.md), CORE-DXL-002) packs
+the **published TypeScript surface** to `dist/` tarballs. A vertical running an
+unreleased Core — the Core revision it is developing against, before any release is
+cut and **without a registry publish** — through its **own** end-to-end test harness
+needs **both**, plus one rule that keeps its version lockstep green. This is that
+contract in one place.
+
+**The two coordinates.** To run an unreleased Core locally a vertical pins exactly
+two coordinates, each produced by an additive, read-only root script that needs no
+registry:
+
+| Coordinate                                                                                                                         | Produced by                            | What it is                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| the three runtime image tags `livecore-api:local`, `livecore-worker:local`, `livecore-migrations:local`                            | `pnpm run images:local` (CORE-DXL-001) | the API, worker and one-shot migrations runner built from source — the deployable runtime the harness brings up |
+| the four `dist/*.tgz` package tarballs (`@livecore/contracts`, `@livecore/sdk-ts`, `@livecore/design-tokens`, `@livecore/ui-core`) | `pnpm run pack:local` (CORE-DXL-002)   | the published TypeScript surface the vertical's app compiles and links against                                  |
+
+Build both from the repository root (each is additive and read-only — neither
+pushes, publishes nor commits anything):
+
+```bash
+pnpm run images:local   # -> livecore-{api,worker,migrations}:local image tags
+pnpm run pack:local     # -> dist/livecore-{contracts,sdk-ts,design-tokens,ui-core}-<version>.tgz
+```
+
+The harness then runs the runtime from the `:local` images (the image-only
+`--no-build` posture above — the images already exist locally) and installs the four
+tarballs into the vertical's app (for example via an env-gated `.pnpmfile.cjs` that
+rewrites `@livecore/*` to the `dist/` tarball paths, so the vertical's committed
+`package.json`/lockfile stay unchanged).
+
+**Keep the version number unchanged in the inner loop.** This is the rule that keeps
+the loop fast and the consumer's pinned-version lockstep green. In the local coupled
+loop you change **only code**, never the package version number:
+
+- the four packed tarballs carry the **current** shared package version
+  **unchanged** (today `0.5.0`), so a consumer that pins that version keeps its
+  cross-package **lockstep guard green** — the tarball it installs still reports the
+  version it expects; and
+- the `:local` image tags carry **no version at all** — the only thing that moves
+  between iterations is the Core working-tree revision the images and tarballs were
+  built from.
+
+So the two coordinates a vertical actually pins are a **stable tag string** plus the
+**package version it already expects** — there is no version bump and no registry
+round-trip in the inner loop, which is exactly what keeps local coupled development
+fast.
+
+**A real version bump is the normal release path.** When the Core change is ready to
+ship, the version number _does_ move — but through a real release, never the inner
+loop: bump the four packages in lockstep and cut a release
+([`docs/23_PACKAGE_VERSIONING.md`](../../docs/23_PACKAGE_VERSIONING.md), "How to cut
+a release"), which publishes the version-pinned `@livecore/*` packages to npm and the
+`ghcr.io/<owner>/livecore-*:<version>` images to GHCR. The vertical then consumes
+those **released, version-pinned** coordinates — the published packages by their new
+version and the published images via the image-only overlay above — instead of the
+`:local` / `dist` pair. Bumping the version inside the inner loop is exactly what the
+keep-version rule avoids: it would break a pinned consumer's lockstep for no shipping
+benefit.
+
+This section documents the two existing additive scripts as one contract; it makes
+**no source or contract change**.
+
+**Tested.** `scripts/test-local-consume-docs.ps1` statically validates (no Docker, no
+build) that this section names both the `images:local` and `pack:local` coordinates,
+the three `:local` image tags and the four `dist/*.tgz` tarballs, the
+keep-the-version-unchanged lockstep rule and the real-version-bump release path, and
+that [`docs/23_PACKAGE_VERSIONING.md`](../../docs/23_PACKAGE_VERSIONING.md) points
+back here — so a future edit that drops half the contract fails the build. The
+forbidden-core-terms boundary scan and the docs gates stay green.
+
 ## The migrate-before-API gate
 
 The API host **never** applies migrations implicitly on startup — that is unsafe

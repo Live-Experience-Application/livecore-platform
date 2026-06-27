@@ -13,6 +13,7 @@
 #   changelog-completeness - fail when a published package src/ changed since the last release tag with no CHANGELOG entry newer than the tag, gate-logic tested (CORE-REL-004)
 #   migration-down-lint  - flag a destructive migration Down() (DropColumn/DropTable) for review (CORE-DR-004)
 #   storage-docs         - grep backstop: keep RustFS the default example S3-compatible backend in the storage/self-hosting docs, no leftover MinIO setup guidance, any-S3-compatible contract stated (CORE-STOR-002)
+#   local-consume-docs   - docs lint / link check that the local-consume contract stays documented: deploy/compose/README.md names both coordinates (images:local image tags + pack:local dist tarballs), the keep-version lockstep rule and the release path, and docs/23 points back at it (CORE-DXL-003)
 #   action-pin-lint      - fail the build on any workflow uses: ref not pinned to a full 40-char commit SHA (CORE-DEP-008)
 #   log-redaction        - enforce ID-only structured logging: fail the build on a content/PII/secret or interpolated log template (CORE-OBS-006, threat T7)
 #   backup-restore-drill - runnable restore drill over the systems of record (CORE-OPS-010)
@@ -639,6 +640,27 @@ jobs:
 
       - name: Fail on any remaining MinIO setup guidance in the storage docs
         run: pwsh -NoProfile -File scripts/lint-storage-docs-rustfs.ps1
+
+  local-consume-docs:
+    name: Local-consume contract docs (CORE-DXL-003)
+    runs-on: ubuntu-latest
+    # CORE-DXL-003: a downstream vertical runs an UNRELEASED Core locally by pinning
+    # two coordinates - the livecore-{api,worker,migrations}:local image tags
+    # (images:local, CORE-DXL-001) and the four dist/*.tgz package tarballs
+    # (pack:local, CORE-DXL-002) - while keeping the package version number UNCHANGED
+    # so its pinned-version lockstep stays green (a real version bump is the normal
+    # release path). This gate is the docs lint / link check that the contract stays
+    # documented: deploy/compose/README.md names both coordinates, the tags/tarballs,
+    # the keep-version lockstep rule and the release path, and docs/23 points back at
+    # it. The test step proves the lint logic over fixtures (a section missing a
+    # coordinate, the keep-version rule or the back-link is rejected) and then guards
+    # the real docs. Documentation-only, pure docs/scripts check, no build needed.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate the local-consume contract docs (no Docker, no build)
+        run: pwsh -NoProfile -File scripts/test-local-consume-docs.ps1
 
   action-pin-lint:
     name: GitHub Actions commit-SHA pinning (CORE-DEP-008)
@@ -2078,6 +2100,7 @@ jobs:
       - changelog-completeness
       - migration-down-lint
       - storage-docs
+      - local-consume-docs
       - action-pin-lint
       - log-redaction
       - backup-restore-drill
@@ -2370,6 +2393,7 @@ jobs:
       - changelog-completeness
       - migration-down-lint
       - storage-docs
+      - local-consume-docs
       - action-pin-lint
       - log-redaction
       - backup-restore-drill
