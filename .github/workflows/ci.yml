@@ -3,7 +3,7 @@
 # Runs the commands documented in README.md verbatim. Independent jobs:
 #   dotnet               - locked-mode restore verification, build, the whole test suite on SQLite, format/code-style verification
 #   coverage             - collect code coverage (the SQLite leg plus a real Postgres/Valkey leg, so the provider-divergent xmin/advisory-lock/backplane branches are coverage-counted, CORE-TST-010), report it, run the threshold gate (BLOCKING below the line-coverage floor, CORE-TST-001/CORE-TST-009)
-#   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003)
+#   typescript           - pnpm install, lint, format check, package builds/tests, cross-package version lockstep (CORE-CMP-003), local pack convenience (pack:local emits the four @livecore tarballs to dist/, CORE-DXL-002)
 #   boundary-scan        - forbidden vertical term scan (pwsh on Linux)
 #   codeql               - CodeQL SAST over the first-party C# and TypeScript sources; fails the build on a high/critical security finding, gate-logic tested (CORE-SEC-006)
 #   dependency-audit     - audit the project's OWN dependency graph for known-vulnerable packages: dotnet list --vulnerable (transitive included) + pnpm audit, fail closed on high/critical, gate-logic tested (CORE-DEP-005)
@@ -271,6 +271,18 @@ jobs:
         # the exported VERSION and every changelog (incl. the root CHANGELOG), so
         # bumping one package out of lockstep fails CI (docs/23_PACKAGE_VERSIONING.md).
         run: pnpm run test:versions
+
+      - name: Local pack convenience test (CORE-DXL-002)
+        # `pnpm run pack:local` is a thin, ADDITIVE convenience that builds and packs
+        # the four @livecore packages to the gitignored dist/ as .tgz tarballs, so a
+        # downstream vertical can consume an UNRELEASED Core through its own test
+        # harness without a registry publish. This runs the real pack into dist/ and
+        # asserts it emits the four tarballs at the current, unchanged version with the
+        # public entry (VERSION + PACKAGE_NAME) intact, that a throwaway consumer
+        # resolves @livecore/* to the packed content, and that the pack modifies no
+        # tracked file. It adds no publish/release step, so the npm publish path is
+        # unchanged (docs/23_PACKAGE_VERSIONING.md).
+        run: pnpm run test:pack-local
 
   boundary-scan:
     name: Boundary scan (forbidden vertical terms)
