@@ -28,7 +28,7 @@
          the patched 3.50.3 (SQLitePCLRaw realigned the native-lib package to the bundled SQLite
          version; the 2.1.x managed P/Invoke layer stays ABI-compatible). Test-only (IsPackable=false):
          the in-memory SQLite test database; no runtime/product dependency and not in any shipped image. -->
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     <!-- Same PostgreSQL provider the API host depends on (apps/api, 10.0.2), pinned to
          the version the integration suite already uses. It lets a provider-divergent
          unit/repository test run against a real PostgreSQL database in CI (the

@@ -24,7 +24,7 @@
          justified new dependency: implementing S3 SigV4 pre-signing by hand would be security-sensitive
          crypto we should not reimplement. Endpoint and credentials are supplied at runtime via configuration
          only (Assets:Storage:*); none live in source (threat T7). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.25.3" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.100.3" />
     <!-- Official Microsoft package that implements the documented OIDC-first
          request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
          validation against the external OIDC provider. Patch-aligned to the other
