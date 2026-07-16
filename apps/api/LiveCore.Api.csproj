@@ -24,12 +24,12 @@
          justified new dependency: implementing S3 SigV4 pre-signing by hand would be security-sensitive
          crypto we should not reimplement. Endpoint and credentials are supplied at runtime via configuration
          only (Assets:Storage:*); none live in source (threat T7). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.25.3" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.101.1" />
     <!-- Official Microsoft package that implements the documented OIDC-first
          request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
          validation against the external OIDC provider. Patch-aligned to the other
          Microsoft.* packages here (10.0.9). -->
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <!-- OpenAPI document generation for the v1 API (CORE-OAS-001). docs/02_ARCHITECTURE.md describes the
          TypeScript contracts as OpenAPI-derived, but the API shipped NO OpenAPI package and NO spec, so the
          hand-written @livecore/contracts could silently drift from the server. This is the official Microsoft
@@ -45,7 +45,7 @@
          the explorer endpoint is mapped ONLY outside Production (keep any explorer non-production only).
          Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). Foundation for CORE-OAS-002
          (generating the TypeScript contracts from this document). -->
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <!-- Official ASP.NET Core SignalR backplane over a Redis/Valkey-compatible server (CORE-OPS-007). It
          makes the SignalR HubLifetimeManager that backs IHubContext<SessionHub> publish each group send over
          Redis pub/sub, so a group delivery reaches the connections held by EVERY API instance, not just the
@@ -56,13 +56,13 @@
          connection string is configured (Realtime:Backplane:ConnectionString); unconfigured the host stays on the
          in-process default. The connection string is supplied at runtime via configuration only; none lives in
          source (threat T7). Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). -->
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.9" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.9" />
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.10" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- OpenTelemetry metrics (CORE-OBS-001; extended with the CORE-OBS-007 SLIs on the same meter).
          docs/15_OBSERVABILITY.md mandates eight operational metrics and names OpenTelemetry; none existed (no
          meter, no scrape/OTLP surface). LiveCoreMetrics defines the
