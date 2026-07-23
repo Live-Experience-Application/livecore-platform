@@ -24,12 +24,12 @@
          justified new dependency: implementing S3 SigV4 pre-signing by hand would be security-sensitive
          crypto we should not reimplement. Endpoint and credentials are supplied at runtime via configuration
          only (Assets:Storage:*); none live in source (threat T7). -->
-    <PackageReference Include="AWSSDK.S3" Version="4.0.25.3" />
+    <PackageReference Include="AWSSDK.S3" Version="4.0.101.4" />
     <!-- Official Microsoft package that implements the documented OIDC-first
          request flow (docs/02_ARCHITECTURE.md; docs/adr/0005): JWT bearer token
          validation against the external OIDC provider. Patch-aligned to the other
          Microsoft.* packages here (10.0.9). -->
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
     <!-- OpenAPI document generation for the v1 API (CORE-OAS-001). docs/02_ARCHITECTURE.md describes the
          TypeScript contracts as OpenAPI-derived, but the API shipped NO OpenAPI package and NO spec, so the
          hand-written @livecore/contracts could silently drift from the server. This is the official Microsoft
@@ -45,7 +45,7 @@
          the explorer endpoint is mapped ONLY outside Production (keep any explorer non-production only).
          Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). Foundation for CORE-OAS-002
          (generating the TypeScript contracts from this document). -->
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <!-- Official ASP.NET Core SignalR backplane over a Redis/Valkey-compatible server (CORE-OPS-007). It
          makes the SignalR HubLifetimeManager that backs IHubContext<SessionHub> publish each group send over
          Redis pub/sub, so a group delivery reaches the connections held by EVERY API instance, not just the
@@ -56,13 +56,13 @@
          connection string is configured (Realtime:Backplane:ConnectionString); unconfigured the host stays on the
          in-process default. The connection string is supplied at runtime via configuration only; none lives in
          source (threat T7). Patch-aligned to the other Microsoft.AspNetCore.* packages here (10.0.9). -->
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.9" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9">
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.StackExchangeRedis" Version="10.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.9" />
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.10" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- OpenTelemetry metrics (CORE-OBS-001; extended with the CORE-OBS-007 SLIs on the same meter).
          docs/15_OBSERVABILITY.md mandates eight operational metrics and names OpenTelemetry; none existed (no
          meter, no scrape/OTLP surface). LiveCoreMetrics defines the
@@ -74,7 +74,7 @@
          OpenTelemetry.Exporter.Prometheus.AspNetCore serves the pull-based /metrics scrape endpoint (its
          prerelease pin is justified below). No telemetry backend, endpoint or credential is read from source;
          the scrape surface carries only low-cardinality aggregates, never content (threat T7). -->
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
     <!-- Prerelease justification (CORE-CMP-002; AGENTS.md "no new dependencies without explicit
          justification" applies equally to keeping a -beta in a release build). The Prometheus exporter is
          pinned to 1.16.0-beta.1 - a -beta alongside its stable 1.16.0 OpenTelemetry siblings - and that is
@@ -114,7 +114,7 @@
          but ships none, so it never reaches a non-existent collector. The endpoint is supplied at runtime via
          configuration only; none lives in source, and the spans carry only low-cardinality, non-sensitive
          attributes, never content (threat T7). Version-aligned to the OpenTelemetry SDK above (1.16.0). -->
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.16.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
     <!-- OpenTelemetry auto-instrumentation for the framework, outbound HTTP and EF Core (CORE-OBS-005).
          docs/15_OBSERVABILITY.md requires that a consumer can correlate a failed call with server traces, but
          CORE-OBS-003 only AddSource'd the hand-rolled LiveCore source, so a request trace held just the three
@@ -132,8 +132,8 @@
          span never captures SQL text or parameters (SetDbStatementForText defaults off) and no span carries a
          token, tenant identifier or content (threat T7 in docs/07_SECURITY_THREAT_MODEL.md). Version-aligned to
          the latest stable instrumentation releases compatible with the 1.16.0 OpenTelemetry SDK above. -->
-    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.16.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.16.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
     <!-- Prerelease justification (CORE-CMP-002; AGENTS.md "no new dependencies without explicit justification"
          applies equally to keeping a -beta in a release build), mirroring the Prometheus exporter above. The EF
          Core trace instrumentation is pinned to 1.15.1-beta.1 — a -beta alongside the stable AspNetCore/Http
