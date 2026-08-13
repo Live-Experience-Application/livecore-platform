@@ -9,14 +9,14 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="10.0.1" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
     <!-- Test-only: a real SignalR client so the CORE-RTC-002 eviction tests verify behavior "on the open
          socket" — a live hub connection is opened against the in-memory test server, then a participant
          removal / member role change must tear it down. An official Microsoft ASP.NET Core package (same
          family as the framework), pinned to the host's framework version; it adds no runtime dependency to
          the product. -->
-    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.9" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.11" />
     <!-- Security pin (GHSA-2m69-gcr7-jv3q, CORE-DEP-005): EntityFrameworkCore.Sqlite 10.0.9
          transitively resolves the native SQLitePCLRaw.lib.e_sqlite3 2.1.11, which now carries a
          known high-severity advisory, so a locked-mode restore fails NU1903 (warnings-as-errors).
@@ -24,14 +24,14 @@
          the patched 3.50.3 (SQLitePCLRaw realigned the native-lib package to the bundled SQLite
          version; the 2.1.x managed P/Invoke layer stays ABI-compatible). Test-only (IsPackable=false):
          the in-memory SQLite test database; no runtime/product dependency and not in any shipped image. -->
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     <!-- Same PostgreSQL provider the API host depends on (apps/api, 10.0.2): lets
          the integration suite run against a real PostgreSQL database in CI,
          applying the real checked-in migrations rather than only the SQLite
          EnsureCreated() schema (CORE-OPS-002). The default local run still uses
          the in-memory SQLite provider and needs no database server. -->
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <!-- Test-only: dynamic skip-with-reason for the provider-gated integration tests
          (CORE-TST-011). xunit v2 (the line this suite pins) has no Assert.Skip - that
