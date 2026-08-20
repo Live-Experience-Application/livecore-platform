@@ -20,7 +20,7 @@
          referenced only by this unit-test project), and it adds no product dependency. It is restored in locked
          mode against the committed packages.lock.json like every other package (CORE-DEP-003). -->
     <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.11" />
     <!-- Security pin (GHSA-2m69-gcr7-jv3q, CORE-DEP-005): EntityFrameworkCore.Sqlite 10.0.9
          transitively resolves the native SQLitePCLRaw.lib.e_sqlite3 2.1.11, which now carries a
          known high-severity advisory, so a locked-mode restore fails NU1903 (warnings-as-errors).
@@ -28,7 +28,7 @@
          the patched 3.50.3 (SQLitePCLRaw realigned the native-lib package to the bundled SQLite
          version; the 2.1.x managed P/Invoke layer stays ABI-compatible). Test-only (IsPackable=false):
          the in-memory SQLite test database; no runtime/product dependency and not in any shipped image. -->
-    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     <!-- Same PostgreSQL provider the API host depends on (apps/api, 10.0.2), pinned to
          the version the integration suite already uses. It lets a provider-divergent
          unit/repository test run against a real PostgreSQL database in CI (the
@@ -37,10 +37,10 @@
          and not only on SQLite. The default local run still uses the in-memory SQLite
          provider and needs no database server. This is a test-only reference; it adds
          no runtime dependency to the product. -->
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0" />
   </ItemGroup>
 
   <ItemGroup>
